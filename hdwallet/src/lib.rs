@@ -1,12 +1,18 @@
+#![no_std]
+extern crate alloc;
+
+use alloc::vec;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use bip39::{Language, Mnemonic};
 use nam_tiny_hderive::{bip32::ExtendedPrivKey, Error};
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
-use rand::{rngs::OsRng, RngCore};
 use rand_chacha::{
 	rand_core::{RngCore as ChaChaCore, SeedableRng},
 	ChaCha20Rng,
 };
-use std::str::FromStr;
+use core::str::FromStr;
 
 #[cfg(test)]
 mod test_vectors;
@@ -120,7 +126,7 @@ impl HDLattice {
 }
 
 /// Generate a new random mnemonic of the specified word count
-pub fn generate_mnemonic(word_count: usize) -> Result<String, HDLatticeError> {
+pub fn generate_mnemonic(word_count: usize, seed: [u8; 32]) -> Result<String, HDLatticeError> {
 	// Calculate entropy bytes needed (12 words = 16 bytes, 24 words = 32 bytes)
 	let bits = match word_count {
 		12 => 128,
@@ -132,10 +138,6 @@ pub fn generate_mnemonic(word_count: usize) -> Result<String, HDLatticeError> {
 	};
 
 	let entropy_bytes = bits / 8;
-	let mut seed = [0u8; 32];
-
-	// Use os rng to make seed
-	OsRng.fill_bytes(&mut seed);
 
 	// Use seed to initiate chacha stream and fill it
 	// NOTE: chacha will "whiten" the entropy provided by the os

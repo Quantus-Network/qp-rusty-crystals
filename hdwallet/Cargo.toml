@@ -17,26 +17,18 @@ keywords = [
 categories = ["cryptography"]
 
 [dependencies]
-qp-rusty-crystals-dilithium = { workspace = true }
+qp-rusty-crystals-dilithium = { workspace = true, default-features = false }
 rand_core = { version = "0.6.4", default-features = false }
-sha2 = { version = "0.10.8", default-features = false }
-hmac = { version = "0.12.1", default-features = false }
 rand_chacha = { version = "0.9.0-beta.1", default-features = false }
-rand = { version = "0.8.5", default-features = false }
 bip39 = { version = "2.0.0", default-features = false }
 thiserror = { workspace = true }
-sp-core = { version = "37.0.0", default-features = false }
-qp-poseidon = { version = "0.9.1", default-features = false }
-hex-literal = "0.4.1"
-nam-tiny-hderive = { version = "0.3.1-nam.0" }
-serde_json = "1.0.140"
-hex = "0.4.3"
-serde = { version = "1.0", features = ["derive"] }
+#qp-poseidon = { version = "0.9.1", default-features = false }
+qp-poseidon = { path = "../../qp-poseidon", default-features = false }
+hex-literal = {  version = "0.4.1", default-features = false }
+nam-tiny-hderive = { version = "0.3.1-nam.0", default-features = false }
+serde_json = { version = "1.0.140", default-features = false, features = ["alloc"] }
+hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 
 [dev-dependencies]
 hex-literal = { version = "0.4.1", default-features = false }
-
-[features]
-default = ["std"]
-std = ["qp-poseidon/std", "rand/std", "sp-core/std"]
-no_std = []

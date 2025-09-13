@@ -1,11 +1,17 @@
 // tests/sign_integration_tests.rs
 
 use qp_rusty_crystals_hdwallet::{generate_mnemonic, HDLattice};
+use rand::{rngs::OsRng, RngCore};
+
 
 #[test]
 fn test_sign() {
-	// Step 1: Generate a random mnemonic and derive Falcon keypair
-	let mnemonic = generate_mnemonic(24).expect("Failed to generate mnemonic");
+	let mut seed = [0u8; 32];
+
+	// Use os rng to make seed
+	OsRng.fill_bytes(&mut seed);
+	// Step 1: Generate a random mnemonic and derive Dilithium keypair
+	let mnemonic = generate_mnemonic(24, seed).expect("Failed to generate mnemonic");
 	let hd_lattice = HDLattice::from_mnemonic(&mnemonic, None)
 		.expect("Failed to create HDLattice from mnemonic");
 

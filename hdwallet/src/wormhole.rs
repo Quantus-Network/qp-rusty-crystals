@@ -7,7 +7,7 @@
 //! ## Overview
 //!
 //! - A `WormholePair` consists of:
-//!     - `address`: a Poseidon-derived `H256` address.
+//!     - `address`: a Poseidon-derived `[u8; 32]` address.
 //!     - `secret`: a 32-byte Poseidon hash derived from entropy or input secret.
 //!
 //! - You can:
@@ -29,7 +29,7 @@
 use qp_poseidon::{
 	digest_bytes_to_felts, injective_bytes_to_felts, injective_string_to_felts, PoseidonHasher,
 };
-use sp_core::{Hasher, H256};
+use alloc::vec::Vec;
 
 /// Salt used when deriving wormhole addresses.
 pub const ADDRESS_SALT: &str = "wormhole";
@@ -45,9 +45,9 @@ pub enum WormholeError {
 #[derive(Clone, Eq, PartialEq)]
 pub struct WormholePair {
 	/// Deterministic Poseidon-derived address.
-	pub address: H256,
+	pub address: [u8; 32],
 	/// First hash of secret
-	pub first_hash: H256,
+	pub first_hash: [u8; 32],
 	/// The hashed secret used to generate this address.
 	pub secret: [u8; 32],
 }
@@ -57,18 +57,10 @@ impl WormholePair {
 	///
 	/// # Errors
 	/// Returns `WormholeError::InvalidSecretFormat` if entropy collection fails.
-	#[cfg(feature = "std")]
-	pub fn generate_new() -> Result<WormholePair, WormholeError> {
-		use rand::{rngs::OsRng, RngCore};
+	pub fn generate_new(seed: [u8; 32]) -> Result<WormholePair, WormholeError> {
+		let secret = PoseidonHasher::hash_padded(&seed);
 
-		let mut random_bytes = [0u8; 32];
-		OsRng
-			.try_fill_bytes(&mut random_bytes)
-			.map_err(|_| WormholeError::InvalidSecretFormat)?;
-
-		let secret = PoseidonHasher::hash(&random_bytes);
-
-		Ok(Self::generate_pair_from_secret(&secret.0))
+		Ok(Self::generate_pair_from_secret(&secret.try_into().expect("PoseidonHash always 32 bytes")))
 	}
 
 	/// Verifies whether the given raw secret generates the specified wormhole address.
@@ -79,7 +71,7 @@ impl WormholePair {
 	///
 	/// # Returns
 	/// `true` if the address matches the derived one, `false` otherwise.
-	pub fn verify(address: H256, secret: &[u8; 32]) -> bool {
+	pub fn verify(address: [u8; 32], secret: &[u8; 32]) -> bool {
 		let generated_address = Self::generate_pair_from_secret(secret).address;
 		generated_address == address
 	}
@@ -97,8 +89,8 @@ impl WormholePair {
 		let inner_hash = PoseidonHasher::hash_no_pad(preimage_felts);
 		let second_hash = PoseidonHasher::hash_no_pad(digest_bytes_to_felts(&inner_hash));
 		WormholePair {
-			address: H256::from_slice(&second_hash),
-			first_hash: H256::from_slice(&inner_hash),
+			address: second_hash.as_slice().try_into().expect("PoseidonHash always 32 bytes"),
+			first_hash: inner_hash.as_slice().try_into().expect("PoseidonHash always 32 bytes"),
 			secret: *secret,
 		}
 	}
@@ -122,8 +114,8 @@ mod tests {
 
 		// We can't easily predict the exact hash output without mocking PoseidonHasher,
 		// but we can verify that it's not zero and that it's deterministic
-		assert_ne!(pair.first_hash, H256::zero());
-		assert_ne!(pair.address, H256::zero());
+		assert_ne!(pair.first_hash, [0u8; 32]);
+		assert_ne!(pair.address, [0u8; 32]);
 
 		// Verify determinism
 		let pair2 = WormholePair::generate_pair_from_secret(&secret);
@@ -221,7 +213,7 @@ mod tests {
 		assert_ne!(pair.secret, [0u8; 32]);
 
 		// Address should not be zero
-		assert_ne!(pair.address, H256::zero());
+		assert_ne!(pair.address, [u8; 32]::zero());
 
 		// Verification should work with the generated secret
 		let verification = WormholePair::verify(pair.address, &pair.secret);
