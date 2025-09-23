@@ -62,9 +62,7 @@ impl WormholePair {
 		let poseidon = Poseidon2Core::new();
 		let secret = poseidon.hash_padded(&seed);
 
-		Ok(Self::generate_pair_from_secret(
-			&secret.try_into().expect("PoseidonHash always 32 bytes"),
-		))
+		Ok(Self::generate_pair_from_secret(&secret))
 	}
 
 	/// Verifies whether the given raw secret generates the specified wormhole address.
@@ -93,11 +91,7 @@ impl WormholePair {
 		let poseidon = Poseidon2Core::new();
 		let inner_hash = poseidon.hash_no_pad(preimage_felts);
 		let second_hash = poseidon.hash_no_pad(digest_bytes_to_felts(&inner_hash));
-		WormholePair {
-			address: second_hash.as_slice().try_into().expect("PoseidonHash always 32 bytes"),
-			first_hash: inner_hash.as_slice().try_into().expect("PoseidonHash always 32 bytes"),
-			secret: *secret,
-		}
+		WormholePair { address: second_hash, first_hash: inner_hash, secret: *secret }
 	}
 }
 
