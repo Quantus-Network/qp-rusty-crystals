@@ -1,18 +1,22 @@
-#![no_std]
-extern crate alloc;
+// #![no_std]
+// extern crate alloc;
 
-use alloc::vec;
-use alloc::vec::Vec;
-use alloc::string::String;
-use alloc::string::ToString;
+// use alloc::vec;
+// use alloc::vec::Vec;
+// use alloc::string::String;
+// use alloc::string::ToString;
 use bip39::{Language, Mnemonic};
+use core::str::FromStr;
 use nam_tiny_hderive::{bip32::ExtendedPrivKey, Error};
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 use rand_chacha::{
 	rand_core::{RngCore as ChaChaCore, SeedableRng},
 	ChaCha20Rng,
 };
-use core::str::FromStr;
+use std::string::String;
+use std::string::ToString;
+use std::vec;
+use std::vec::Vec;
 
 #[cfg(test)]
 mod test_vectors;
@@ -93,7 +97,7 @@ impl HDLattice {
 			.map_err(HDLatticeError::GenericError)?;
 		for element in p.iter() {
 			if !element.is_hardened() {
-				return Err(HDLatticeError::HardenedPathsOnly())
+				return Err(HDLatticeError::HardenedPathsOnly());
 			}
 		}
 		Ok(())
@@ -118,7 +122,7 @@ impl HDLattice {
 		path: &str,
 	) -> Result<WormholePair, HDLatticeError> {
 		if path.split("/").nth(2) != Some(QUANTUS_WORMHOLE_CHAIN_ID) {
-			return Err(HDLatticeError::InvalidWormholePath(path.to_string()))
+			return Err(HDLatticeError::InvalidWormholePath(path.to_string()));
 		}
 		let entropy = self.derive_entropy(path)?;
 		Ok(WormholePair::generate_pair_from_secret(&entropy))
