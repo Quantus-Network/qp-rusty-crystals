@@ -59,10 +59,12 @@ impl WormholePair {
 	/// # Errors
 	/// Returns `WormholeError::InvalidSecretFormat` if entropy collection fails.
 	pub fn generate_new(seed: [u8; 32]) -> Result<WormholePair, WormholeError> {
-	    let poseidon = Poseidon2Core::new();
+		let poseidon = Poseidon2Core::new();
 		let secret = poseidon.hash_padded(&seed);
 
-		Ok(Self::generate_pair_from_secret(&secret.try_into().expect("PoseidonHash always 32 bytes")))
+		Ok(Self::generate_pair_from_secret(
+			&secret.try_into().expect("PoseidonHash always 32 bytes"),
+		))
 	}
 
 	/// Verifies whether the given raw secret generates the specified wormhole address.
@@ -157,7 +159,7 @@ mod tests {
 		// Arrange
 		let secret = hex!("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
 		let secret_felts = injective_bytes_to_felts(&secret);
-		
+
 		// Act - Generate the pair
 		let pair = WormholePair::generate_pair_from_secret(&secret);
 
@@ -209,7 +211,7 @@ mod tests {
 
 	#[test]
 	fn test_generate_new_produces_valid_pair() {
-	    let seed = [55u8; 32];
+		let seed = [55u8; 32];
 		// Act
 		let result = WormholePair::generate_new(seed);
 

@@ -101,8 +101,8 @@ mod hdwallet_tests {
 		// Generate length between 5 and 15 using RngCore
 		let length = (rng.next_u32() % 10) + 5;
 
-		"m/".to_owned()
-			+ &(0..length)
+		"m/".to_owned() +
+			&(0..length)
 				.map(|_| (rng.next_u32() % 99) + 1) // Generate number between 1 and 99
 				.map(|num| num.to_string() + "\'")
 				.collect::<Vec<_>>()

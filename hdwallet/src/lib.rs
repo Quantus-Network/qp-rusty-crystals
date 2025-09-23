@@ -1,10 +1,11 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::string::String;
-use alloc::string::ToString;
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{
+	string::{String, ToString},
+	vec,
+	vec::Vec,
+};
 use bip39::{Language, Mnemonic};
 use core::str::FromStr;
 use nam_tiny_hderive::{bip32::ExtendedPrivKey, Error};

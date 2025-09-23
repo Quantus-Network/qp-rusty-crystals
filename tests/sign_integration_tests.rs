@@ -3,7 +3,6 @@
 use qp_rusty_crystals_hdwallet::{generate_mnemonic, HDLattice};
 use rand::{rngs::OsRng, RngCore};
 
-
 #[test]
 fn test_sign() {
 	let mut seed = [0u8; 32];
