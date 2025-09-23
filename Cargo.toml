@@ -4,7 +4,7 @@ members = ["dilithium", "hdwallet"]
 [workspace.dependencies]
 qp-rusty-crystals-dilithium = { path = "./dilithium", version = "1.0.1" }
 qp-rusty-crystals-hdwallet = { path = "./hdwallet", version = "0.1.2" }
-thiserror = "2.0.4"
+thiserror = { version = "2.0.4", default-features = false }
 
 [package]
 name = "qp-rusty-crystals"

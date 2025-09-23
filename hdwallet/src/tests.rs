@@ -1,3 +1,4 @@
+use alloc::string::String;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -16,11 +17,25 @@ mod hdwallet_tests {
 		},
 		HDLattice, HDLatticeError,
 	};
+	use alloc::{
+		borrow::ToOwned,
+		format,
+		string::{String, ToString},
+		vec::Vec,
+	};
+	use core::str::FromStr;
 	use nam_tiny_hderive::{bip32::ExtendedPrivKey, bip44::ChildNumber};
 	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 	use rand_chacha::ChaCha20Rng;
 	use rand_core::{RngCore, SeedableRng};
-	use std::str::FromStr;
+
+	// For test-only functionality that needs std
+	#[cfg(test)]
+	extern crate std;
+	#[cfg(test)]
+	use std::dbg;
+	#[cfg(test)]
+	use std::println;
 
 	#[test]
 	fn test_from_seed() {
@@ -166,11 +181,10 @@ mod hdwallet_tests {
 	#[test]
 	fn test_generate_mnemonic_invalid_length() {
 		let invalid_lengths = [10, 14, 19, 25]; // Invalid word counts not allowed by BIP-39
-		// Use a deterministic seed for testing
-		let seed = [43u8; 32];
+										  // Use a deterministic seed for testing
+		let test_seed = [43u8; 32];
+		let mut rng = ChaCha20Rng::from_seed(test_seed);
 		for &word_count in &invalid_lengths {
-			let mut rng = ChaCha20Rng::from_seed(seed);
-
 			// Generate a random 32-byte seed
 			let mut seed = [0u8; 32];
 			rng.fill_bytes(&mut seed);

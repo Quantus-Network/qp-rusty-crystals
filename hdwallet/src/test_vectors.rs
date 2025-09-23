@@ -1,6 +1,11 @@
 use crate::tests::TestVector;
 #[cfg(test)]
 use crate::Keypair;
+#[cfg(test)]
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
+#[cfg(test)]
+extern crate std;
+#[cfg(test)]
 use std::{fs::File, io::Read, path::Path};
 
 #[cfg(test)]
@@ -5429,6 +5434,7 @@ pub fn get_test_vectors() -> Vec<(Keypair, &'static str, &'static str)> {
 	]
 }
 
+#[cfg(test)]
 pub fn load_known_private_keys(
 	file_name: &str,
 ) -> Result<Vec<TestVector>, Box<dyn std::error::Error>> {

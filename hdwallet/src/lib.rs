@@ -1,10 +1,10 @@
-// #![no_std]
-// extern crate alloc;
+#![no_std]
+extern crate alloc;
 
-// use alloc::vec;
-// use alloc::vec::Vec;
-// use alloc::string::String;
-// use alloc::string::ToString;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
 use bip39::{Language, Mnemonic};
 use core::str::FromStr;
 use nam_tiny_hderive::{bip32::ExtendedPrivKey, Error};
@@ -13,10 +13,6 @@ use rand_chacha::{
 	rand_core::{RngCore as ChaChaCore, SeedableRng},
 	ChaCha20Rng,
 };
-use std::string::String;
-use std::string::ToString;
-use std::vec;
-use std::vec::Vec;
 
 #[cfg(test)]
 mod test_vectors;

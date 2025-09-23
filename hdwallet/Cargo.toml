@@ -18,7 +18,7 @@ categories = ["cryptography"]
 
 [dependencies]
 qp-rusty-crystals-dilithium = { workspace = true, default-features = false }
-rand_core = { version = "0.9.3", default-features = false, features = ["os_rng"] }
+rand_core = { version = "0.9.3", default-features = false }
 rand_chacha = { version = "0.9.0-beta.1", default-features = false }
 bip39 = { version = "2.0.0", default-features = false }
 thiserror = { workspace = true }
@@ -32,4 +32,4 @@ serde = { version = "1.0", default-features = false, features = ["derive", "allo
 
 [dev-dependencies]
 hex-literal = { version = "0.4.1", default-features = false }
-rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+rand = { version = "0.8", default-features = false }
