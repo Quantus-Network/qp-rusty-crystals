@@ -2,8 +2,8 @@
 members = ["dilithium", "hdwallet"]
 
 [workspace.dependencies]
-qp-rusty-crystals-dilithium = { path = "./dilithium", version = "1.0.1" }
-qp-rusty-crystals-hdwallet = { path = "./hdwallet", version = "0.1.2" }
+qp-rusty-crystals-dilithium = { path = "./dilithium", version = "1.0.1", default-features = false }
+qp-rusty-crystals-hdwallet = { path = "./hdwallet", version = "0.1.2", default-features = false }
 thiserror = { version = "2.0.4", default-features = false }
 
 [package]
@@ -17,8 +17,8 @@ crate-type = ["lib"]
 
 [dependencies]
 getrandom = { version = "0.2", features = ["js"] }
-qp-rusty-crystals-dilithium = { workspace = true }
-qp-rusty-crystals-hdwallet = { workspace = true }
+qp-rusty-crystals-dilithium = { workspace = true, default-features = false }
+qp-rusty-crystals-hdwallet = { workspace = true, default-features = false }
 
 [dev-dependencies]
 rand = "0.8"
