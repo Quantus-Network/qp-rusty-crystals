@@ -18,7 +18,7 @@ impl Display for KeyParsingError {
 	}
 }
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 impl std::error::Error for KeyParsingError {
 	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
 		None

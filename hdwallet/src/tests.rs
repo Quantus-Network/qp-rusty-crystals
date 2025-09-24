@@ -1,3 +1,4 @@
+use alloc::string::String;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -16,10 +17,25 @@ mod hdwallet_tests {
 		},
 		HDLattice, HDLatticeError,
 	};
+	use alloc::{
+		borrow::ToOwned,
+		format,
+		string::{String, ToString},
+		vec::Vec,
+	};
+	use core::str::FromStr;
 	use nam_tiny_hderive::{bip32::ExtendedPrivKey, bip44::ChildNumber};
 	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
-	use rand::Rng;
-	use std::str::FromStr;
+	use rand_chacha::ChaCha20Rng;
+	use rand_core::{RngCore, SeedableRng};
+
+	// For test-only functionality that needs std
+	#[cfg(test)]
+	extern crate std;
+	#[cfg(test)]
+	use std::dbg;
+	#[cfg(test)]
+	use std::println;
 
 	#[test]
 	fn test_from_seed() {
@@ -32,8 +48,10 @@ mod hdwallet_tests {
 
 	#[test]
 	fn test_mnemonic_creation() {
+		let seed = [43u8; 32];
+
 		// Test generating new mnemonic
-		let mnemonic = dbg!(generate_mnemonic(12).unwrap());
+		let mnemonic = dbg!(generate_mnemonic(12, seed).unwrap());
 		assert_eq!(mnemonic.split_whitespace().count(), 12);
 		// println!("Generated mnemonic: {}", mnemonic);
 		// Test creating HDEntropy from mnemonic
@@ -62,9 +80,12 @@ mod hdwallet_tests {
 
 	#[allow(dead_code)]
 	fn generate_test_vectors(n: u8) -> Vec<(Keypair, String, String)> {
+		let mut seed = [0u8; 32];
 		(0..n)
 			.map(|_| {
-				let mnemonic = generate_mnemonic(12).unwrap();
+				let mut rng = ChaCha20Rng::from_seed(seed);
+				rng.fill_bytes(&mut seed);
+				let mnemonic = generate_mnemonic(12, seed).unwrap();
 				let hd = HDLattice::from_mnemonic(&mnemonic, None).unwrap();
 				let path = generate_random_path();
 				let k = hd.generate_derived_keys(&path).unwrap();
@@ -75,12 +96,14 @@ mod hdwallet_tests {
 
 	#[allow(dead_code)]
 	fn generate_random_path() -> String {
-		let mut rng = rand::thread_rng();
-		let length = rng.gen_range(5..15);
+		let seed = [11u8; 32];
+		let mut rng = ChaCha20Rng::from_seed(seed);
+		// Generate length between 5 and 15 using RngCore
+		let length = (rng.next_u32() % 10) + 5;
 
 		"m/".to_owned() +
 			&(0..length)
-				.map(|_| rng.gen_range(1..100))
+				.map(|_| (rng.next_u32() % 99) + 1) // Generate number between 1 and 99
 				.map(|num| num.to_string() + "\'")
 				.collect::<Vec<_>>()
 				.join("/")
@@ -136,8 +159,12 @@ mod hdwallet_tests {
 	#[test]
 	fn test_generate_mnemonic_valid_lengths() {
 		let valid_lengths = [12, 15, 18, 21, 24];
+		// Use a deterministic seed for testing
+		let mut seed = [42u8; 32];
 		for &word_count in &valid_lengths {
-			let mnemonic = generate_mnemonic(word_count)
+			let mut rng = ChaCha20Rng::from_seed(seed);
+			rng.fill_bytes(&mut seed);
+			let mnemonic = generate_mnemonic(word_count, seed)
 				.unwrap_or_else(|_| panic!("Failed to generate mnemonic for {word_count} words"));
 
 			// Split mnemonic into words and count them
@@ -154,8 +181,14 @@ mod hdwallet_tests {
 	#[test]
 	fn test_generate_mnemonic_invalid_length() {
 		let invalid_lengths = [10, 14, 19, 25]; // Invalid word counts not allowed by BIP-39
+										  // Use a deterministic seed for testing
+		let test_seed = [43u8; 32];
+		let mut rng = ChaCha20Rng::from_seed(test_seed);
 		for &word_count in &invalid_lengths {
-			let result = generate_mnemonic(word_count);
+			// Generate a random 32-byte seed
+			let mut seed = [0u8; 32];
+			rng.fill_bytes(&mut seed);
+			let result = generate_mnemonic(word_count, seed);
 
 			// Assert that the result is an error
 			assert!(

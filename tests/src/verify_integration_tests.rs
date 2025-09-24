@@ -1,8 +1,6 @@
 // tests/verify_integration_test.rs
 
-mod helpers;
-
-use helpers::kat::{parse_test_vectors, TestVector};
+use crate::helpers::kat::{parse_test_vectors, TestVector};
 use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, PUBLICKEYBYTES};
 use rand::{thread_rng, Rng};
 
@@ -16,7 +14,7 @@ fn keypair_from_test(test: &TestVector) -> Keypair {
 
 #[test]
 fn test_nist_kat() {
-	let kat_data = include_str!("../test_vectors/PQCsignKAT_Dilithium5.rsp");
+	let kat_data = include_str!("../../test_vectors/PQCsignKAT_Dilithium5.rsp");
 	let test_vectors = parse_test_vectors(kat_data);
 	for test in test_vectors {
 		verify_test_vector(&test);

@@ -1,7 +1,4 @@
-#[cfg(feature = "no_std")]
 use core::mem::swap;
-#[cfg(not(feature = "no_std"))]
-use std::mem::swap;
 
 use crate::{params, poly, poly::Poly};
 

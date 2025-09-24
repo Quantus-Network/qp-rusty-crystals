@@ -7,7 +7,7 @@
 //! ## Overview
 //!
 //! - A `WormholePair` consists of:
-//!     - `address`: a Poseidon-derived `H256` address.
+//!     - `address`: a Poseidon-derived `[u8; 32]` address.
 //!     - `secret`: a 32-byte Poseidon hash derived from entropy or input secret.
 //!
 //! - You can:
@@ -26,10 +26,11 @@
 //! The wormhole addresses provide an additional layer of privacy and security by using
 //! Poseidon hashing, which is particularly well-suited for zero-knowledge proof systems.
 
-use qp_poseidon::{
-	digest_bytes_to_felts, injective_bytes_to_felts, injective_string_to_felts, PoseidonHasher,
+use qp_poseidon_core::{
+	digest_bytes_to_felts, injective_bytes_to_felts, injective_string_to_felts, Poseidon2Core,
 };
-use sp_core::{Hasher, H256};
+extern crate alloc;
+use alloc::vec::Vec;
 
 /// Salt used when deriving wormhole addresses.
 pub const ADDRESS_SALT: &str = "wormhole";
@@ -45,9 +46,9 @@ pub enum WormholeError {
 #[derive(Clone, Eq, PartialEq)]
 pub struct WormholePair {
 	/// Deterministic Poseidon-derived address.
-	pub address: H256,
+	pub address: [u8; 32],
 	/// First hash of secret
-	pub first_hash: H256,
+	pub first_hash: [u8; 32],
 	/// The hashed secret used to generate this address.
 	pub secret: [u8; 32],
 }
@@ -57,18 +58,11 @@ impl WormholePair {
 	///
 	/// # Errors
 	/// Returns `WormholeError::InvalidSecretFormat` if entropy collection fails.
-	#[cfg(feature = "std")]
-	pub fn generate_new() -> Result<WormholePair, WormholeError> {
-		use rand::{rngs::OsRng, RngCore};
+	pub fn generate_new(seed: [u8; 32]) -> Result<WormholePair, WormholeError> {
+		let poseidon = Poseidon2Core::new();
+		let secret = poseidon.hash_padded(&seed);
 
-		let mut random_bytes = [0u8; 32];
-		OsRng
-			.try_fill_bytes(&mut random_bytes)
-			.map_err(|_| WormholeError::InvalidSecretFormat)?;
-
-		let secret = PoseidonHasher::hash(&random_bytes);
-
-		Ok(Self::generate_pair_from_secret(&secret.0))
+		Ok(Self::generate_pair_from_secret(&secret))
 	}
 
 	/// Verifies whether the given raw secret generates the specified wormhole address.
@@ -79,7 +73,7 @@ impl WormholePair {
 	///
 	/// # Returns
 	/// `true` if the address matches the derived one, `false` otherwise.
-	pub fn verify(address: H256, secret: &[u8; 32]) -> bool {
+	pub fn verify(address: [u8; 32], secret: &[u8; 32]) -> bool {
 		let generated_address = Self::generate_pair_from_secret(secret).address;
 		generated_address == address
 	}
@@ -94,13 +88,10 @@ impl WormholePair {
 		let secret_felt = injective_bytes_to_felts(secret);
 		preimage_felts.extend_from_slice(&salt_felt);
 		preimage_felts.extend_from_slice(&secret_felt);
-		let inner_hash = PoseidonHasher::hash_no_pad(preimage_felts);
-		let second_hash = PoseidonHasher::hash_no_pad(digest_bytes_to_felts(&inner_hash));
-		WormholePair {
-			address: H256::from_slice(&second_hash),
-			first_hash: H256::from_slice(&inner_hash),
-			secret: *secret,
-		}
+		let poseidon = Poseidon2Core::new();
+		let inner_hash = poseidon.hash_no_pad(preimage_felts);
+		let second_hash = poseidon.hash_no_pad(digest_bytes_to_felts(&inner_hash));
+		WormholePair { address: second_hash, first_hash: inner_hash, secret: *secret }
 	}
 }
 
@@ -120,10 +111,10 @@ mod tests {
 		// Assert
 		assert_eq!(pair.secret, secret);
 
-		// We can't easily predict the exact hash output without mocking PoseidonHasher,
+		// We can't easily predict the exact hash output without mocking Poseidon2Core,
 		// but we can verify that it's not zero and that it's deterministic
-		assert_ne!(pair.first_hash, H256::zero());
-		assert_ne!(pair.address, H256::zero());
+		assert_ne!(pair.first_hash, [0u8; 32]);
+		assert_ne!(pair.address, [0u8; 32]);
 
 		// Verify determinism
 		let pair2 = WormholePair::generate_pair_from_secret(&secret);
@@ -161,6 +152,7 @@ mod tests {
 	fn test_address_derivation_properties() {
 		// Arrange
 		let secret = hex!("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
+		let secret_felts = injective_bytes_to_felts(&secret);
 
 		// Act - Generate the pair
 		let pair = WormholePair::generate_pair_from_secret(&secret);
@@ -180,8 +172,10 @@ mod tests {
 
 		// 4. Verify that the process uses the salt
 		// (Create a direct hash without salt and ensure it's different)
-		let direct_hash = PoseidonHasher::hash(&secret);
-		let double_hash = PoseidonHasher::hash(&direct_hash.0);
+		let poseidon = Poseidon2Core::new();
+		let direct_hash = poseidon.hash_no_pad(secret_felts);
+		let direct_hash_felts = injective_bytes_to_felts(&direct_hash);
+		let double_hash = poseidon.hash_no_pad(direct_hash_felts);
 		assert_ne!(pair.address, double_hash);
 
 		// 5. Verify that each stage of the hash process changes the result
@@ -189,7 +183,9 @@ mod tests {
 		let mut combined = Vec::with_capacity(ADDRESS_SALT.len() + secret.len());
 		combined.extend_from_slice(ADDRESS_SALT.as_bytes());
 		combined.extend_from_slice(&secret);
-		let first_hash = PoseidonHasher::hash(&combined);
+		let combined_felts = injective_bytes_to_felts(&combined);
+		let poseidon = Poseidon2Core::new();
+		let first_hash = poseidon.hash_no_pad(combined_felts);
 		assert_ne!(pair.address, first_hash);
 	}
 
@@ -207,11 +203,11 @@ mod tests {
 		assert_ne!(pair1.address, pair2.address);
 	}
 
-	#[cfg(feature = "std")]
 	#[test]
 	fn test_generate_new_produces_valid_pair() {
+		let seed = [55u8; 32];
 		// Act
-		let result = WormholePair::generate_new();
+		let result = WormholePair::generate_new(seed);
 
 		// Assert
 		assert!(result.is_ok());
@@ -221,7 +217,7 @@ mod tests {
 		assert_ne!(pair.secret, [0u8; 32]);
 
 		// Address should not be zero
-		assert_ne!(pair.address, H256::zero());
+		assert_ne!(pair.address, [0u8; 32]);
 
 		// Verification should work with the generated secret
 		let verification = WormholePair::verify(pair.address, &pair.secret);
@@ -244,9 +240,12 @@ mod tests {
 		let mut combined = Vec::with_capacity(different_salt.len() + secret.len());
 		combined.extend_from_slice(different_salt);
 		combined.extend_from_slice(&secret);
+		let combined_felts = injective_bytes_to_felts(&combined);
 
-		let first_hash = PoseidonHasher::hash(&combined);
-		let address_with_different_salt = PoseidonHasher::hash(&first_hash.0);
+		let poseidon = Poseidon2Core::new();
+		let first_hash = poseidon.hash_no_pad(combined_felts);
+		let first_hash_felts = injective_bytes_to_felts(&first_hash);
+		let address_with_different_salt = poseidon.hash_no_pad(first_hash_felts);
 
 		// Assert
 		assert_ne!(pair_with_salt.address, address_with_different_salt);

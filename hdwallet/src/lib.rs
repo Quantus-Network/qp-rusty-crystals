@@ -1,12 +1,19 @@
+#![no_std]
+extern crate alloc;
+
+use alloc::{
+	string::{String, ToString},
+	vec,
+	vec::Vec,
+};
 use bip39::{Language, Mnemonic};
+use core::str::FromStr;
 use nam_tiny_hderive::{bip32::ExtendedPrivKey, Error};
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
-use rand::{rngs::OsRng, RngCore};
 use rand_chacha::{
 	rand_core::{RngCore as ChaChaCore, SeedableRng},
 	ChaCha20Rng,
 };
-use std::str::FromStr;
 
 #[cfg(test)]
 mod test_vectors;
@@ -87,7 +94,7 @@ impl HDLattice {
 			.map_err(HDLatticeError::GenericError)?;
 		for element in p.iter() {
 			if !element.is_hardened() {
-				return Err(HDLatticeError::HardenedPathsOnly())
+				return Err(HDLatticeError::HardenedPathsOnly());
 			}
 		}
 		Ok(())
@@ -112,7 +119,7 @@ impl HDLattice {
 		path: &str,
 	) -> Result<WormholePair, HDLatticeError> {
 		if path.split("/").nth(2) != Some(QUANTUS_WORMHOLE_CHAIN_ID) {
-			return Err(HDLatticeError::InvalidWormholePath(path.to_string()))
+			return Err(HDLatticeError::InvalidWormholePath(path.to_string()));
 		}
 		let entropy = self.derive_entropy(path)?;
 		Ok(WormholePair::generate_pair_from_secret(&entropy))
@@ -120,7 +127,7 @@ impl HDLattice {
 }
 
 /// Generate a new random mnemonic of the specified word count
-pub fn generate_mnemonic(word_count: usize) -> Result<String, HDLatticeError> {
+pub fn generate_mnemonic(word_count: usize, seed: [u8; 32]) -> Result<String, HDLatticeError> {
 	// Calculate entropy bytes needed (12 words = 16 bytes, 24 words = 32 bytes)
 	let bits = match word_count {
 		12 => 128,
@@ -132,10 +139,6 @@ pub fn generate_mnemonic(word_count: usize) -> Result<String, HDLatticeError> {
 	};
 
 	let entropy_bytes = bits / 8;
-	let mut seed = [0u8; 32];
-
-	// Use os rng to make seed
-	OsRng.fill_bytes(&mut seed);
 
 	// Use seed to initiate chacha stream and fill it
 	// NOTE: chacha will "whiten" the entropy provided by the os

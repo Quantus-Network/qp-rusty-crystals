@@ -1,13 +1,11 @@
-#![cfg_attr(feature = "no_std", no_std)]
+#![cfg_attr(not(feature = "std"), no_std)]
 #![allow(clippy::identity_op)]
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::precedence)]
 #![allow(clippy::unnecessary_cast)]
 #![allow(clippy::enum_variant_names)]
 
-#[cfg(feature = "no_std")]
 extern crate alloc;
-extern crate core;
 
 mod errors;
 pub mod fips202;
@@ -28,7 +26,7 @@ pub enum PH {
 	SHA512,
 }
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 use rand::RngCore;
 /// Generate random bytes.
 ///
@@ -36,7 +34,7 @@ use rand::RngCore;
 ///
 /// * 'bytes' - an array to fill with random data
 /// * 'n' - number of bytes to generate
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 fn random_bytes(bytes: &mut [u8], n: usize) {
 	rand::prelude::thread_rng().try_fill_bytes(&mut bytes[..n]).unwrap();
 }
