@@ -28,5 +28,5 @@ name = "dilithium_benchmarks"
 harness = false
 
 [features]
-no_std = []
-default = ["dep:rand"]
+default = ["std"]
+std = ["dep:rand"]

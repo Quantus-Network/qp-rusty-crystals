@@ -1,0 +1,11 @@
+[package]
+name = "rusty-crystals-integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+getrandom.workspace = true
+qp-rusty-crystals-dilithium = { workspace = true, default-features = true }
+qp-rusty-crystals-hdwallet = { workspace = true }
+rand = { workspace = true, features = ["std", "std_rng"] }

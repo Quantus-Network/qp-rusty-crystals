@@ -1,4 +1,4 @@
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 use std::mem::swap;
 
 use crate::{params, poly, poly::Poly};
@@ -205,7 +205,7 @@ pub fn k_power2round(v1: &mut Polyveck, v0: &mut Polyveck) {
 	}
 }
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 pub fn k_decompose(v1: &mut Polyveck, v0: &mut Polyveck) {
 	for i in 0..K {
 		poly::lvl3::decompose(&mut v1.vec[i], &mut v0.vec[i]);
