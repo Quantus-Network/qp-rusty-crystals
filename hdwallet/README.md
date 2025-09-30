@@ -10,6 +10,10 @@ Hierarchical Deterministic (HD) wallet implementation for post-quantum ML-DSA ke
 - **Post-Quantum** - Uses ML-DSA (Dilithium) signatures
 - **Hardened First 3 Levels** - Require hardened `purpose'`, `coin_type'`, `account'`; later levels optional
 
+## Standard expected derivation path
+We use 189189 for purpose, 0 for coin type, and account index for account
+Example: "m/189189'/0'/{account_index}'/0/0"
+
 ## Usage
 
 Add to your `Cargo.toml`:
