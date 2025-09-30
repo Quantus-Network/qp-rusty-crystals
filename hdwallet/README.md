@@ -8,7 +8,11 @@ Hierarchical Deterministic (HD) wallet implementation for post-quantum ML-DSA ke
 - **BIP-32 HD Derivation** - Hierarchical deterministic key derivation
 - **BIP-44 Compatible** - Standard derivation paths
 - **Post-Quantum** - Uses ML-DSA (Dilithium) signatures
-- **Hardened Keys Only** - Secure key derivation (no non-hardened keys)
+- **Hardened First 3 Levels** - Require hardened `purpose'`, `coin_type'`, `account'`; later levels optional
+
+## Standard expected derivation path
+We use 44 for purpose, 189189 for coin type (Quantus), and account index for account
+Example: "m/44'/189189'/{account_index}'/0/0"
 
 ## Usage
 
@@ -35,7 +39,7 @@ let hd_wallet = HDLattice::from_mnemonic(&mnemonic, None)?;
 let master_keys = hd_wallet.generate_keys();
 
 // Derive child keys using BIP-44 path
-let child_keys = hd_wallet.generate_derived_keys("44'/0'/0'/0'/0'")?;
+let child_keys = hd_wallet.generate_derived_keys("44'/189189'/0'/0'/0'")?;
 
 // Sign with derived keys
 let message = b"Hello, quantum-safe wallet!";
@@ -46,19 +50,19 @@ let signature = child_keys.sign(message);
 
 Standard BIP-44 derivation paths are supported:
 ```
-m / purpose' / coin_type' / account' / change' / address_index'
+m / purpose' / coin_type' / account' / change / address_index
 ```
 
 Example paths:
-- `m/44'/0'/0'/0'/0'` - First address of first account
-- `m/44'/0'/1'/0'/0'` - First address of second account
-- `m/44'/0'/0'/1'/0'` - First change address
+- `m/44'/189189'/0'/0'/0'` - First address of first account
+- `m/44'/189189'/1'/0'/0'` - First address of second account
+- `m/44'/189189'/0'/1'/0'` - First change address
 
-**Note**: Only hardened derivation (`'`) is supported for security reasons.
+**Note**: For security, the first three indices must be hardened (`purpose'`, `coin_type'`, `account'`). Subsequent indices (`change`, `address_index`) may be unhardened.
 
 ## Why Hardened Keys Only?
 
-Non-hardened key derivation relies on elliptic curve properties not present in lattice-based cryptography. For security, this implementation only supports hardened derivation paths.
+Non-hardened key derivation relies on elliptic curve properties not present in lattice-based cryptography. For security, this implementation requires hardened derivation for the first three indices and permits flexibility for deeper levels.
 
 ## Testing
 
