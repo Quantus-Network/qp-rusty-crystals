@@ -92,8 +92,11 @@ impl HDLattice {
 	pub fn check_path(&self, path: &str) -> Result<(), HDLatticeError> {
 		let p = nam_tiny_hderive::bip44::DerivationPath::from_str(path)
 			.map_err(HDLatticeError::GenericError)?;
-		for element in p.iter() {
-			if !element.is_hardened() {
+		for (index, element) in p.iter().enumerate() {
+			// Enforce hardened for the first three indices (purpose, coin_type, account) as per
+			// BIP44 standard. The reason being, we do not have derivable public keys anyway, it does
+			// not work for dilithium key pairs. 
+			if index < 3 && !element.is_hardened() {
 				return Err(HDLatticeError::HardenedPathsOnly());
 			}
 		}
