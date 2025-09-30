@@ -94,8 +94,8 @@ impl HDLattice {
 			.map_err(HDLatticeError::GenericError)?;
 		for (index, element) in p.iter().enumerate() {
 			// Enforce hardened for the first three indices (purpose, coin_type, account) as per
-			// BIP44 standard. The reason being, we do not have derivable public keys anyway, it does
-			// not work for dilithium key pairs. 
+			// BIP44 standard. The reason being, we do not have derivable public keys anyway, it
+			// does not work for dilithium key pairs.
 			if index < 3 && !element.is_hardened() {
 				return Err(HDLatticeError::HardenedPathsOnly());
 			}
