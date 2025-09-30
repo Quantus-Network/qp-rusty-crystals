@@ -12,7 +12,7 @@ Hierarchical Deterministic (HD) wallet implementation for post-quantum ML-DSA ke
 
 ## Standard expected derivation path
 We use 189189 for purpose, 0 for coin type, and account index for account
-Example: "m/189189'/0'/{account_index}'/0/0"
+Example: "m/44'/189189'/{account_index}'/0/0"
 
 ## Usage
 
