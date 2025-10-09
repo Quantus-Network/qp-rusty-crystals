@@ -1,4 +1,4 @@
-//! Stack Usage Demonstration for ML-DSA (44, 65, 87)
+//! Stack Usage Demonstration for ML-DSA 87
 //!
 //! This example demonstrates that the current ML-DSA implementations
 //! work with very small stack sizes, making them suitable for embedded
