@@ -12,6 +12,4 @@ pub fn power2round(a: i32) -> (i32, i32) {
 	(a0, a1)
 }
 
-pub mod lvl2;
-pub mod lvl3;
 pub mod lvl5;

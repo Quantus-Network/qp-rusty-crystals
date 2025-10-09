@@ -11,8 +11,6 @@ extern crate core;
 
 mod errors;
 pub mod fips202;
-pub mod ml_dsa_44;
-pub mod ml_dsa_65;
 pub mod ml_dsa_87;
 pub mod ntt;
 pub mod packing;

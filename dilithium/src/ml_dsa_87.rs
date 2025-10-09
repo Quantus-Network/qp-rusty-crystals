@@ -53,10 +53,6 @@ struct CryptoWorkspace {
 	cp: Box<Poly>,
 	// Temporary polynomials to avoid stack allocations
 	temp_poly1: Box<Poly>,
-	temp_poly2: Box<Poly>,
-	// Temporary polynomial vectors for copying operations
-	temp_polyvecl: Box<Polyvecl>,
-	temp_polyveck: Box<Polyveck>,
 }
 
 impl CryptoWorkspace {
@@ -74,9 +70,6 @@ impl CryptoWorkspace {
 			h: Box::new(Polyveck::default()),
 			cp: Box::new(Poly::default()),
 			temp_poly1: Box::new(Poly::default()),
-			temp_poly2: Box::new(Poly::default()),
-			temp_polyvecl: Box::new(Polyvecl::default()),
-			temp_polyveck: Box::new(Polyveck::default()),
 		}
 	}
 }
@@ -403,14 +396,7 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 	polyvec::lvl5::l_uniform_eta(&mut workspace.s1, &rhoprime, 0);
 	polyvec::lvl5::k_uniform_eta(&mut workspace.s2, &rhoprime, L as u16);
 
-	// Copy s1 to z using unsafe ptr::copy to eliminate any stack allocation
-	unsafe {
-		std::ptr::copy_nonoverlapping(
-			workspace.s1.vec.as_ptr(),
-			workspace.z.vec.as_mut_ptr(),
-			L,
-		);
-	}
+	*workspace.z = *workspace.s1; // s1hat = s1
 	polyvec::lvl5::l_ntt(&mut workspace.z); // s1hat
 
 	polyvec::lvl5::matrix_pointwise_montgomery(&mut workspace.t1, &*workspace.mat, &workspace.z, &mut workspace.temp_poly1);
@@ -478,14 +464,9 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 		polyvec::lvl5::l_uniform_gamma1(&mut workspace.y, &rhoprime, nonce);
 		nonce += 1;
 
-		// Copy y to z using unsafe ptr::copy to eliminate any stack allocation
-		unsafe {
-			std::ptr::copy_nonoverlapping(
-				workspace.y.vec.as_ptr(),
-				workspace.z.vec.as_mut_ptr(),
-				L,
-			);
-		}
+		// Reuse z workspace for NTT version of y
+		*workspace.z = *workspace.y;
+
 		polyvec::lvl5::l_ntt(&mut workspace.z);
 		polyvec::lvl5::matrix_pointwise_montgomery(
 			&mut workspace.w1,
@@ -603,14 +584,8 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	polyvec::lvl5::k_shiftl(&mut workspace.t1);
 	polyvec::lvl5::k_ntt(&mut workspace.t1);
 
-	// Copy t1 to t0 using unsafe ptr::copy to eliminate any stack allocation
-	unsafe {
-		std::ptr::copy_nonoverlapping(
-			workspace.t1.vec.as_ptr(),
-			workspace.t0.vec.as_mut_ptr(),
-			K,
-		);
-	}
+	// Use t0 as temporary for t1 copy to avoid extra allocation
+	*workspace.t0 = *workspace.t1;
 	polyvec::lvl5::k_pointwise_poly_montgomery(&mut workspace.t1, &workspace.cp, &workspace.t0);
 
 	polyvec::lvl5::k_sub(&mut workspace.w1, &workspace.t1);
