@@ -166,7 +166,7 @@ fn main() {
 		});
 
 		let ml87_keypair_clone2 = ml87_keypair.clone();
-		let ml87_sig_clone = ml87_sig.clone();
+		let ml87_sig_clone = ml87_sig;
 		let ml87_verify = test_verify_with_stack_size(size_kb, "ml-dsa-87", move || {
 			ml87_keypair_clone2.verify(test_msg, &ml87_sig_clone, None)
 		});
