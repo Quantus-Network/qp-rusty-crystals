@@ -45,34 +45,35 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 	let mut key = [0u8; params::SEEDBYTES];
 	key.copy_from_slice(&seedbuf[params::SEEDBYTES + params::CRHBYTES..]);
 
-	let mut mat = [Polyvecl::default(); K];
-	polyvec::lvl5::matrix_expand(&mut mat, &rho);
+	// Move large polynomial structures to heap to reduce stack usage
+	let mut mat = Box::new([Polyvecl::default(); K]);
+	polyvec::lvl5::matrix_expand(&mut *mat, &rho);
 
-	let mut s1 = Polyvecl::default();
-	polyvec::lvl5::l_uniform_eta(&mut s1, &rhoprime, 0);
+	let mut s1 = Box::new(Polyvecl::default());
+	polyvec::lvl5::l_uniform_eta(&mut *s1, &rhoprime, 0);
 
-	let mut s2 = Polyveck::default();
-	polyvec::lvl5::k_uniform_eta(&mut s2, &rhoprime, L as u16);
+	let mut s2 = Box::new(Polyveck::default());
+	polyvec::lvl5::k_uniform_eta(&mut *s2, &rhoprime, L as u16);
 
-	let mut s1hat = s1;
-	polyvec::lvl5::l_ntt(&mut s1hat);
+	let mut s1hat = Box::new(*s1);
+	polyvec::lvl5::l_ntt(&mut *s1hat);
 
-	let mut t1 = Polyveck::default();
-	polyvec::lvl5::matrix_pointwise_montgomery(&mut t1, &mat, &s1hat);
-	polyvec::lvl5::k_reduce(&mut t1);
-	polyvec::lvl5::k_invntt_tomont(&mut t1);
-	polyvec::lvl5::k_add(&mut t1, &s2);
-	polyvec::lvl5::k_caddq(&mut t1);
+	let mut t1 = Box::new(Polyveck::default());
+	polyvec::lvl5::matrix_pointwise_montgomery(&mut *t1, &*mat, &*s1hat);
+	polyvec::lvl5::k_reduce(&mut *t1);
+	polyvec::lvl5::k_invntt_tomont(&mut *t1);
+	polyvec::lvl5::k_add(&mut *t1, &*s2);
+	polyvec::lvl5::k_caddq(&mut *t1);
 
-	let mut t0 = Polyveck::default();
-	polyvec::lvl5::k_power2round(&mut t1, &mut t0);
+	let mut t0 = Box::new(Polyveck::default());
+	polyvec::lvl5::k_power2round(&mut *t1, &mut *t0);
 
-	packing::ml_dsa_87::pack_pk(pk, &rho, &t1);
+	packing::ml_dsa_87::pack_pk(pk, &rho, &*t1);
 
 	let mut tr = [0u8; params::TR_BYTES];
 	fips202::shake256(&mut tr, params::TR_BYTES, pk, params::ml_dsa_87::PUBLICKEYBYTES);
 
-	packing::ml_dsa_87::pack_sk(sk, &rho, &tr, &key, &t0, &s1, &s2);
+	packing::ml_dsa_87::pack_sk(sk, &rho, &tr, &key, &*t0, &*s1, &*s2);
 }
 
 /// Compute a signature for a given message from a private (secret) key.
@@ -89,17 +90,17 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 	let mut rho = [0u8; params::SEEDBYTES];
 	let mut tr = [0u8; params::TR_BYTES];
 	let mut keymu = [0u8; params::SEEDBYTES + params::CRHBYTES];
-	let mut t0 = Polyveck::default();
-	let mut s1 = Polyvecl::default();
-	let mut s2 = Polyveck::default();
+	let mut t0 = Box::new(Polyveck::default());
+	let mut s1 = Box::new(Polyvecl::default());
+	let mut s2 = Box::new(Polyveck::default());
 
 	packing::ml_dsa_87::unpack_sk(
 		&mut rho,
 		&mut tr,
 		&mut keymu[..params::SEEDBYTES],
-		&mut t0,
-		&mut s1,
-		&mut s2,
+		&mut *t0,
+		&mut *s1,
+		&mut *s2,
 		sk,
 	);
 
@@ -125,31 +126,32 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 	let mut rhoprime = [0u8; params::CRHBYTES];
 	fips202::shake256_squeeze(&mut rhoprime, params::CRHBYTES, &mut state);
 
-	let mut mat = [Polyvecl::default(); K];
-	polyvec::lvl5::matrix_expand(&mut mat, &rho);
-	polyvec::lvl5::l_ntt(&mut s1);
-	polyvec::lvl5::k_ntt(&mut s2);
-	polyvec::lvl5::k_ntt(&mut t0);
+	// Move large polynomial structures to heap to reduce stack usage
+	let mut mat = Box::new([Polyvecl::default(); K]);
+	polyvec::lvl5::matrix_expand(&mut *mat, &rho);
+	polyvec::lvl5::l_ntt(&mut *s1);
+	polyvec::lvl5::k_ntt(&mut *s2);
+	polyvec::lvl5::k_ntt(&mut *t0);
 
 	let mut nonce: u16 = 0;
-	let mut y = Polyvecl::default();
-	let mut w1 = Polyveck::default();
-	let mut w0 = Polyveck::default();
-	let mut cp = Poly::default();
-	let mut h = Polyveck::default();
+	let mut y = Box::new(Polyvecl::default());
+	let mut w1 = Box::new(Polyveck::default());
+	let mut w0 = Box::new(Polyveck::default());
+	let mut cp = Box::new(Poly::default());
+	let mut h = Box::new(Polyveck::default());
 	loop {
-		polyvec::lvl5::l_uniform_gamma1(&mut y, &rhoprime, nonce);
+		polyvec::lvl5::l_uniform_gamma1(&mut *y, &rhoprime, nonce);
 		nonce += 1;
 
-		let mut z = y;
-		polyvec::lvl5::l_ntt(&mut z);
-		polyvec::lvl5::matrix_pointwise_montgomery(&mut w1, &mat, &z);
-		polyvec::lvl5::k_reduce(&mut w1);
-		polyvec::lvl5::k_invntt_tomont(&mut w1);
-		polyvec::lvl5::k_caddq(&mut w1);
+		let mut z = Box::new(*y);
+		polyvec::lvl5::l_ntt(&mut *z);
+		polyvec::lvl5::matrix_pointwise_montgomery(&mut *w1, &*mat, &*z);
+		polyvec::lvl5::k_reduce(&mut *w1);
+		polyvec::lvl5::k_invntt_tomont(&mut *w1);
+		polyvec::lvl5::k_caddq(&mut *w1);
 
-		polyvec::lvl5::k_decompose(&mut w1, &mut w0);
-		polyvec::lvl5::k_pack_w1(sig, &w1);
+		polyvec::lvl5::k_decompose(&mut *w1, &mut *w0);
+		polyvec::lvl5::k_pack_w1(sig, &*w1);
 
 		state.init();
 		fips202::shake256_absorb(&mut state, &keymu[params::SEEDBYTES..], params::CRHBYTES);
@@ -157,52 +159,52 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 		fips202::shake256_finalize(&mut state);
 		fips202::shake256_squeeze(sig, params::ml_dsa_87::C_DASH_BYTES, &mut state);
 
-		poly::ml_dsa_87::challenge(&mut cp, sig);
-		poly::ntt(&mut cp);
+		poly::ml_dsa_87::challenge(&mut *cp, sig);
+		poly::ntt(&mut *cp);
 
-		polyvec::lvl5::l_pointwise_poly_montgomery(&mut z, &cp, &s1);
-		polyvec::lvl5::l_invntt_tomont(&mut z);
-		polyvec::lvl5::l_add(&mut z, &y);
-		polyvec::lvl5::l_reduce(&mut z);
+		polyvec::lvl5::l_pointwise_poly_montgomery(&mut *z, &*cp, &*s1);
+		polyvec::lvl5::l_invntt_tomont(&mut *z);
+		polyvec::lvl5::l_add(&mut *z, &*y);
+		polyvec::lvl5::l_reduce(&mut *z);
 
 		if polyvec::lvl5::l_chknorm(
-			&z,
+			&*z,
 			(params::ml_dsa_87::GAMMA1 - params::ml_dsa_87::BETA) as i32,
 		) > 0
 		{
 			continue;
 		}
 
-		polyvec::lvl5::k_pointwise_poly_montgomery(&mut h, &cp, &s2);
-		polyvec::lvl5::k_invntt_tomont(&mut h);
-		polyvec::lvl5::k_sub(&mut w0, &h);
-		polyvec::lvl5::k_reduce(&mut w0);
+		polyvec::lvl5::k_pointwise_poly_montgomery(&mut *h, &*cp, &*s2);
+		polyvec::lvl5::k_invntt_tomont(&mut *h);
+		polyvec::lvl5::k_sub(&mut *w0, &*h);
+		polyvec::lvl5::k_reduce(&mut *w0);
 
 		if polyvec::lvl5::k_chknorm(
-			&w0,
+			&*w0,
 			(params::ml_dsa_87::GAMMA2 - params::ml_dsa_87::BETA) as i32,
 		) > 0
 		{
 			continue;
 		}
 
-		polyvec::lvl5::k_pointwise_poly_montgomery(&mut h, &cp, &t0);
-		polyvec::lvl5::k_invntt_tomont(&mut h);
-		polyvec::lvl5::k_reduce(&mut h);
+		polyvec::lvl5::k_pointwise_poly_montgomery(&mut *h, &*cp, &*t0);
+		polyvec::lvl5::k_invntt_tomont(&mut *h);
+		polyvec::lvl5::k_reduce(&mut *h);
 
-		if polyvec::lvl5::k_chknorm(&h, params::ml_dsa_87::GAMMA2 as i32) > 0 {
+		if polyvec::lvl5::k_chknorm(&*h, params::ml_dsa_87::GAMMA2 as i32) > 0 {
 			continue;
 		}
 
-		polyvec::lvl5::k_add(&mut w0, &h);
+		polyvec::lvl5::k_add(&mut *w0, &*h);
 
-		let n = polyvec::lvl5::k_make_hint(&mut h, &w0, &w1);
+		let n = polyvec::lvl5::k_make_hint(&mut *h, &*w0, &*w1);
 
 		if n > params::ml_dsa_87::OMEGA as i32 {
 			continue;
 		}
 
-		packing::ml_dsa_87::pack_sig(sig, None, &z, &h);
+		packing::ml_dsa_87::pack_sig(sig, None, &*z, &*h);
 
 		return;
 	}
@@ -223,21 +225,25 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	let mut mu = [0u8; params::CRHBYTES];
 	let mut c = [0u8; params::ml_dsa_87::C_DASH_BYTES];
 	let mut c2 = [0u8; params::ml_dsa_87::C_DASH_BYTES];
-	let mut cp = Poly::default();
-	let (mut mat, mut z) = ([Polyvecl::default(); K], Polyvecl::default());
-	let (mut t1, mut w1, mut h) = (Polyveck::default(), Polyveck::default(), Polyveck::default());
+	// Move large polynomial structures to heap to reduce stack usage
+	let mut cp = Box::new(Poly::default());
+	let mut mat = Box::new([Polyvecl::default(); K]);
+	let mut z = Box::new(Polyvecl::default());
+	let mut t1 = Box::new(Polyveck::default());
+	let mut w1 = Box::new(Polyveck::default());
+	let mut h = Box::new(Polyveck::default());
 	let mut state = fips202::KeccakState::default(); // shake256_init()
 
 	if sig.len() != crate::params::ml_dsa_87::SIGNBYTES {
 		return false;
 	}
 
-	packing::ml_dsa_87::unpack_pk(&mut rho, &mut t1, pk);
-	if !packing::ml_dsa_87::unpack_sig(&mut c, &mut z, &mut h, sig) {
+	packing::ml_dsa_87::unpack_pk(&mut rho, &mut *t1, pk);
+	if !packing::ml_dsa_87::unpack_sig(&mut c, &mut *z, &mut *h, sig) {
 		return false;
 	}
 	if polyvec::lvl5::l_chknorm(
-		&z,
+		&*z,
 		(crate::params::ml_dsa_87::GAMMA1 - crate::params::ml_dsa_87::BETA) as i32,
 	) > 0
 	{
@@ -252,26 +258,26 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	fips202::shake256_squeeze(&mut mu, params::CRHBYTES, &mut state);
 
 	// Matrix-vector multiplication; compute Az - c2^dt1
-	poly::ml_dsa_87::challenge(&mut cp, &c);
-	polyvec::lvl5::matrix_expand(&mut mat, &rho);
+	poly::ml_dsa_87::challenge(&mut *cp, &c);
+	polyvec::lvl5::matrix_expand(&mut *mat, &rho);
 
-	polyvec::lvl5::l_ntt(&mut z);
-	polyvec::lvl5::matrix_pointwise_montgomery(&mut w1, &mat, &z);
+	polyvec::lvl5::l_ntt(&mut *z);
+	polyvec::lvl5::matrix_pointwise_montgomery(&mut *w1, &*mat, &*z);
 
-	poly::ntt(&mut cp);
-	polyvec::lvl5::k_shiftl(&mut t1);
-	polyvec::lvl5::k_ntt(&mut t1);
-	let t1_2 = t1;
-	polyvec::lvl5::k_pointwise_poly_montgomery(&mut t1, &cp, &t1_2);
+	poly::ntt(&mut *cp);
+	polyvec::lvl5::k_shiftl(&mut *t1);
+	polyvec::lvl5::k_ntt(&mut *t1);
+	let t1_2 = Box::new(*t1);
+	polyvec::lvl5::k_pointwise_poly_montgomery(&mut *t1, &*cp, &*t1_2);
 
-	polyvec::lvl5::k_sub(&mut w1, &t1);
-	polyvec::lvl5::k_reduce(&mut w1);
-	polyvec::lvl5::k_invntt_tomont(&mut w1);
+	polyvec::lvl5::k_sub(&mut *w1, &*t1);
+	polyvec::lvl5::k_reduce(&mut *w1);
+	polyvec::lvl5::k_invntt_tomont(&mut *w1);
 
 	// Reconstruct w1
-	polyvec::lvl5::k_caddq(&mut w1);
-	polyvec::lvl5::k_use_hint(&mut w1, &h);
-	polyvec::lvl5::k_pack_w1(&mut buf, &w1);
+	polyvec::lvl5::k_caddq(&mut *w1);
+	polyvec::lvl5::k_use_hint(&mut *w1, &*h);
+	polyvec::lvl5::k_pack_w1(&mut buf, &*w1);
 
 	// Call random oracle and verify challenge
 	state.init();
