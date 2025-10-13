@@ -138,9 +138,9 @@ fn main() {
 	let stack_sizes = [
 		512, // 512KB - should definitely work
 		256, // 256KB - typical small embedded system
-		200, 160, 128, // 128KB - typical small embedded system
+		200, 160, 150, 140, 128, // 128KB - typical small embedded system
 		100, 88, 64, // 64KB - large microcontroller
-		32, // 32KB - medium microcontroller
+		50, 40, 36, 34, 33, 32, // 32KB - medium microcontroller
 		16, // 16KB - small microcontroller
 	];
 

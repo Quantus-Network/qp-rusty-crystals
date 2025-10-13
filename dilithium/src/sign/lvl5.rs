@@ -53,26 +53,27 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 	let mut key = [0u8; params::SEEDBYTES];
 	key.copy_from_slice(&seedbuf[params::SEEDBYTES + params::CRHBYTES..]);
 
-	let mut mat = [Polyvecl::default(); K];
-	polyvec::lvl5::matrix_expand(&mut mat, &rho);
+	// Move large polynomial structures to heap to reduce stack usage
+	let mut mat = Box::new([Polyvecl::default(); K]);
+	polyvec::lvl5::matrix_expand(&mut *mat, &rho);
 
-	let mut s1 = Polyvecl::default();
+	let mut s1 = Box::new(Polyvecl::default());
 	polyvec::lvl5::l_uniform_eta(&mut s1, &rhoprime, 0);
 
-	let mut s2 = Polyveck::default();
+	let mut s2 = Box::new(Polyveck::default());
 	polyvec::lvl5::k_uniform_eta(&mut s2, &rhoprime, L as u16);
 
-	let mut s1hat = s1;
+	let mut s1hat = Box::new(*s1);
 	polyvec::lvl5::l_ntt(&mut s1hat);
 
-	let mut t1 = Polyveck::default();
-	polyvec::lvl5::matrix_pointwise_montgomery(&mut t1, &mat, &s1hat);
+	let mut t1 = Box::new(Polyveck::default());
+	polyvec::lvl5::matrix_pointwise_montgomery(&mut t1, &*mat, &s1hat);
 	polyvec::lvl5::k_reduce(&mut t1);
 	polyvec::lvl5::k_invntt_tomont(&mut t1);
 	polyvec::lvl5::k_add(&mut t1, &s2);
 	polyvec::lvl5::k_caddq(&mut t1);
 
-	let mut t0 = Polyveck::default();
+	let mut t0 = Box::new(Polyveck::default());
 	polyvec::lvl5::k_power2round(&mut t1, &mut t0);
 
 	packing::lvl5::pack_pk(pk, &rho, &t1);
@@ -96,9 +97,9 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], randomized: bool) {
 	let mut rho = [0u8; params::SEEDBYTES];
 	let mut tr = [0u8; params::SEEDBYTES];
 	let mut keymu = [0u8; params::SEEDBYTES + params::CRHBYTES];
-	let mut t0 = Polyveck::default();
-	let mut s1 = Polyvecl::default();
-	let mut s2 = Polyveck::default();
+	let mut t0 = Box::new(Polyveck::default());
+	let mut s1 = Box::new(Polyvecl::default());
+	let mut s2 = Box::new(Polyveck::default());
 
 	packing::lvl5::unpack_sk(
 		&mut rho,
@@ -128,25 +129,26 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], randomized: bool) {
 		);
 	}
 
-	let mut mat = [Polyvecl::default(); K];
-	polyvec::lvl5::matrix_expand(&mut mat, &rho);
+	// Move large polynomial structures to heap to reduce stack usage
+	let mut mat = Box::new([Polyvecl::default(); K]);
+	polyvec::lvl5::matrix_expand(&mut *mat, &rho);
 	polyvec::lvl5::l_ntt(&mut s1);
 	polyvec::lvl5::k_ntt(&mut s2);
 	polyvec::lvl5::k_ntt(&mut t0);
 
 	let mut nonce: u16 = 0;
-	let mut y = Polyvecl::default();
-	let mut w1 = Polyveck::default();
-	let mut w0 = Polyveck::default();
-	let mut cp = Poly::default();
-	let mut h = Polyveck::default();
+	let mut y = Box::new(Polyvecl::default());
+	let mut w1 = Box::new(Polyveck::default());
+	let mut w0 = Box::new(Polyveck::default());
+	let mut cp = Box::new(Poly::default());
+	let mut h = Box::new(Polyveck::default());
 	loop {
 		polyvec::lvl5::l_uniform_gamma1(&mut y, &rhoprime, nonce);
 		nonce += 1;
 
-		let mut z = y;
+		let mut z = Box::new(*y);
 		polyvec::lvl5::l_ntt(&mut z);
-		polyvec::lvl5::matrix_pointwise_montgomery(&mut w1, &mat, &z);
+		polyvec::lvl5::matrix_pointwise_montgomery(&mut w1, &*mat, &z);
 		polyvec::lvl5::k_reduce(&mut w1);
 		polyvec::lvl5::k_invntt_tomont(&mut w1);
 		polyvec::lvl5::k_caddq(&mut w1);
@@ -218,9 +220,13 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	let mut mu = [0u8; params::CRHBYTES];
 	let mut c = [0u8; params::SEEDBYTES];
 	let mut c2 = [0u8; params::SEEDBYTES];
-	let mut cp = Poly::default();
-	let (mut mat, mut z) = ([Polyvecl::default(); K], Polyvecl::default());
-	let (mut t1, mut w1, mut h) = (Polyveck::default(), Polyveck::default(), Polyveck::default());
+	// Move large polynomial structures to heap to reduce stack usage
+	let mut cp = Box::new(Poly::default());
+	let mut mat = Box::new([Polyvecl::default(); K]);
+	let mut z = Box::new(Polyvecl::default());
+	let mut t1 = Box::new(Polyveck::default());
+	let mut w1 = Box::new(Polyveck::default());
+	let mut h = Box::new(Polyveck::default());
 	let mut state = fips202::KeccakState::default(); // shake256_init()
 
 	if sig.len() != crate::params::lvl5::SIGNBYTES {
@@ -248,15 +254,15 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 
 	// Matrix-vector multiplication; compute Az - c2^dt1
 	poly::lvl5::challenge(&mut cp, &c);
-	polyvec::lvl5::matrix_expand(&mut mat, &rho);
+	polyvec::lvl5::matrix_expand(&mut *mat, &rho);
 
 	polyvec::lvl5::l_ntt(&mut z);
-	polyvec::lvl5::matrix_pointwise_montgomery(&mut w1, &mat, &z);
+	polyvec::lvl5::matrix_pointwise_montgomery(&mut w1, &*mat, &z);
 
 	poly::ntt(&mut cp);
 	polyvec::lvl5::k_shiftl(&mut t1);
 	polyvec::lvl5::k_ntt(&mut t1);
-	let t1_2 = t1;
+	let t1_2 = Box::new(*t1);
 	polyvec::lvl5::k_pointwise_poly_montgomery(&mut t1, &cp, &t1_2);
 
 	polyvec::lvl5::k_sub(&mut w1, &t1);
