@@ -7,6 +7,223 @@ use crate::{
 const K: usize = params::ml_dsa_87::K;
 const L: usize = params::ml_dsa_87::L;
 
+/// Result of a single signature attempt
+struct SignatureAttemptResult {
+	is_valid: bool,
+	signature_data: Vec<u8>,
+}
+
+/// Generate masking vector y from randomness
+fn generate_masking_vector(
+	signing_randomness_rhoprime: &[u8],
+	rejection_sampling_nonce: u16,
+) -> Box<Polyvecl> {
+	let mut masking_vector_y = Box::new(Polyvecl::default());
+	polyvec::lvl5::l_uniform_gamma1(
+		&mut masking_vector_y,
+		signing_randomness_rhoprime,
+		rejection_sampling_nonce,
+	);
+	masking_vector_y
+}
+
+/// Compute commitment from masking vector and public matrix
+fn compute_commitment(
+	masking_vector_y: &Polyvecl,
+	public_matrix_a: &[Polyvecl; K],
+	output_signature: &mut [u8],
+) -> (Box<Polyveck>, Box<Polyveck>, Box<Polyvecl>) {
+	let mut commitment_high_w1 = Box::new(Polyveck::default());
+	let mut commitment_low_w0 = Box::new(Polyveck::default());
+
+	let mut signature_z_candidate = Box::new(*masking_vector_y);
+	polyvec::lvl5::l_ntt(&mut signature_z_candidate);
+	polyvec::lvl5::matrix_pointwise_montgomery(
+		&mut commitment_high_w1,
+		public_matrix_a,
+		&signature_z_candidate,
+	);
+	polyvec::lvl5::k_reduce(&mut commitment_high_w1);
+	polyvec::lvl5::k_invntt_tomont(&mut commitment_high_w1);
+	polyvec::lvl5::k_caddq(&mut commitment_high_w1);
+
+	polyvec::lvl5::k_decompose(&mut commitment_high_w1, &mut commitment_low_w0);
+	polyvec::lvl5::k_pack_w1(output_signature, &commitment_high_w1);
+
+	(commitment_high_w1, commitment_low_w0, signature_z_candidate)
+}
+
+/// Generate challenge polynomial from commitment
+fn generate_challenge_polynomial(
+	key_and_message_hash: &[u8; params::SEEDBYTES + params::CRHBYTES],
+	output_signature: &mut [u8],
+) -> Box<Poly> {
+	let mut keccak_state = fips202::KeccakState::default();
+	let mut challenge_polynomial_c = Box::new(Poly::default());
+
+	keccak_state.init();
+	fips202::shake256_absorb(
+		&mut keccak_state,
+		&key_and_message_hash[params::SEEDBYTES..],
+		params::CRHBYTES,
+	);
+	fips202::shake256_absorb(
+		&mut keccak_state,
+		output_signature,
+		K * params::ml_dsa_87::POLYW1_PACKEDBYTES,
+	);
+	fips202::shake256_finalize(&mut keccak_state);
+	fips202::shake256_squeeze(output_signature, params::ml_dsa_87::C_DASH_BYTES, &mut keccak_state);
+
+	poly::ml_dsa_87::challenge(&mut challenge_polynomial_c, output_signature);
+	poly::ntt(&mut challenge_polynomial_c);
+
+	challenge_polynomial_c
+}
+
+/// Compute signature candidate z and check norm (rejection check 1)
+fn compute_and_check_signature_z(
+	signature_z_candidate: &mut Polyvecl,
+	challenge_polynomial_c: &Poly,
+	secret_s1_vector: &Polyvecl,
+	masking_vector_y: &Polyvecl,
+) -> bool {
+	polyvec::lvl5::l_pointwise_poly_montgomery(
+		signature_z_candidate,
+		challenge_polynomial_c,
+		secret_s1_vector,
+	);
+	polyvec::lvl5::l_invntt_tomont(signature_z_candidate);
+	polyvec::lvl5::l_add(signature_z_candidate, masking_vector_y);
+	polyvec::lvl5::l_reduce(signature_z_candidate);
+
+	// REJECTION CHECK 1: z vector norm
+	polyvec::lvl5::l_chknorm(
+		signature_z_candidate,
+		(params::ml_dsa_87::GAMMA1 - params::ml_dsa_87::BETA) as i32,
+	) == 0
+}
+
+/// Compute w0 adjustment and check norm (rejection check 2)
+fn compute_and_check_w0_adjustment(
+	commitment_low_w0: &mut Polyveck,
+	challenge_polynomial_c: &Poly,
+	secret_s2_vector: &Polyveck,
+) -> bool {
+	let mut hint_vector_h = Box::new(Polyveck::default());
+
+	polyvec::lvl5::k_pointwise_poly_montgomery(
+		&mut hint_vector_h,
+		challenge_polynomial_c,
+		secret_s2_vector,
+	);
+	polyvec::lvl5::k_invntt_tomont(&mut hint_vector_h);
+	polyvec::lvl5::k_sub(commitment_low_w0, &hint_vector_h);
+	polyvec::lvl5::k_reduce(commitment_low_w0);
+
+	// REJECTION CHECK 2: w0 vector norm
+	polyvec::lvl5::k_chknorm(
+		commitment_low_w0,
+		(params::ml_dsa_87::GAMMA2 - params::ml_dsa_87::BETA) as i32,
+	) == 0
+}
+
+/// Compute hint vector h and check norm (rejection check 3)
+fn compute_and_check_hint_h(
+	hint_vector_h: &mut Polyveck,
+	challenge_polynomial_c: &Poly,
+	secret_t0_vector: &Polyveck,
+) -> bool {
+	polyvec::lvl5::k_pointwise_poly_montgomery(
+		hint_vector_h,
+		challenge_polynomial_c,
+		secret_t0_vector,
+	);
+	polyvec::lvl5::k_invntt_tomont(hint_vector_h);
+	polyvec::lvl5::k_reduce(hint_vector_h);
+
+	// REJECTION CHECK 3: h vector norm
+	polyvec::lvl5::k_chknorm(hint_vector_h, params::ml_dsa_87::GAMMA2 as i32) == 0
+}
+
+/// Compute final hint and check weight (rejection check 4)
+fn compute_and_check_final_hint(
+	hint_vector_h: &mut Polyveck,
+	commitment_low_w0: &mut Polyveck,
+	commitment_high_w1: &Polyveck,
+) -> bool {
+	polyvec::lvl5::k_add(commitment_low_w0, hint_vector_h);
+
+	let hint_weight =
+		polyvec::lvl5::k_make_hint(hint_vector_h, commitment_low_w0, commitment_high_w1);
+
+	// REJECTION CHECK 4: hint weight
+	hint_weight <= params::ml_dsa_87::OMEGA as i32
+}
+
+/// Attempt to generate a signature - returns whether successful and the signature data
+fn attempt_single_signature(
+	output_signature: &mut [u8],
+	key_and_message_hash: &[u8; params::SEEDBYTES + params::CRHBYTES],
+	signing_randomness_rhoprime: &[u8],
+	public_matrix_a: &[Polyvecl; K],
+	secret_s1_vector: &Polyvecl,
+	secret_s2_vector: &Polyveck,
+	secret_t0_vector: &Polyveck,
+	rejection_sampling_nonce: u16,
+) -> SignatureAttemptResult {
+	// Generate masking vector
+	let masking_vector_y =
+		generate_masking_vector(signing_randomness_rhoprime, rejection_sampling_nonce);
+
+	// Compute commitment
+	let (commitment_high_w1, mut commitment_low_w0, mut signature_z_candidate) =
+		compute_commitment(&masking_vector_y, public_matrix_a, output_signature);
+
+	// Generate challenge
+	let challenge_polynomial_c =
+		generate_challenge_polynomial(key_and_message_hash, output_signature);
+
+	// Compute signature candidate and check norm (rejection check 1)
+	if !compute_and_check_signature_z(
+		&mut signature_z_candidate,
+		&challenge_polynomial_c,
+		secret_s1_vector,
+		&masking_vector_y,
+	) {
+		return SignatureAttemptResult { is_valid: false, signature_data: vec![] };
+	}
+
+	// Compute w0 adjustment and check norm (rejection check 2)
+	if !compute_and_check_w0_adjustment(
+		&mut commitment_low_w0,
+		&challenge_polynomial_c,
+		secret_s2_vector,
+	) {
+		return SignatureAttemptResult { is_valid: false, signature_data: vec![] };
+	}
+
+	// Compute hint vector h and check norm (rejection check 3)
+	let mut hint_vector_h = Box::new(Polyveck::default());
+	if !compute_and_check_hint_h(&mut hint_vector_h, &challenge_polynomial_c, secret_t0_vector) {
+		return SignatureAttemptResult { is_valid: false, signature_data: vec![] };
+	}
+
+	// Compute final hint and check weight (rejection check 4)
+	if !compute_and_check_final_hint(
+		&mut hint_vector_h,
+		&mut commitment_low_w0,
+		&commitment_high_w1,
+	) {
+		return SignatureAttemptResult { is_valid: false, signature_data: vec![] };
+	}
+
+	// Success! Pack the signature
+	packing::ml_dsa_87::pack_sig(output_signature, None, &signature_z_candidate, &hint_vector_h);
+
+	SignatureAttemptResult { is_valid: true, signature_data: output_signature.to_vec() }
+}
+
 extern crate alloc; // this makes Vec work
 use alloc::vec::Vec;
 /// Generate public and private key.
@@ -155,122 +372,25 @@ pub fn signature(
 	polyvec::lvl5::k_ntt(&mut secret_t0_vector);
 
 	let mut rejection_sampling_nonce: u16 = 0;
-	let mut masking_vector_y = Box::new(Polyvecl::default());
-	let mut commitment_high_w1 = Box::new(Polyveck::default());
-	let mut commitment_low_w0 = Box::new(Polyveck::default());
-	let mut challenge_polynomial_c = Box::new(Poly::default());
-	let mut hint_vector_h = Box::new(Polyveck::default());
+
 	// REJECTION SAMPLING LOOP - Variable iterations cause timing leak!
 	loop {
-		polyvec::lvl5::l_uniform_gamma1(
-			&mut masking_vector_y,
+		let attempt_result = attempt_single_signature(
+			output_signature,
+			&key_and_message_hash,
 			&signing_randomness_rhoprime,
+			&*public_matrix_a,
+			&secret_s1_vector,
+			&secret_s2_vector,
+			&secret_t0_vector,
 			rejection_sampling_nonce,
 		);
+
+		if attempt_result.is_valid {
+			return;
+		}
+
 		rejection_sampling_nonce += 1;
-
-		let mut signature_z_candidate = Box::new(*masking_vector_y);
-		polyvec::lvl5::l_ntt(&mut signature_z_candidate);
-		polyvec::lvl5::matrix_pointwise_montgomery(
-			&mut commitment_high_w1,
-			&*public_matrix_a,
-			&signature_z_candidate,
-		);
-		polyvec::lvl5::k_reduce(&mut commitment_high_w1);
-		polyvec::lvl5::k_invntt_tomont(&mut commitment_high_w1);
-		polyvec::lvl5::k_caddq(&mut commitment_high_w1);
-
-		polyvec::lvl5::k_decompose(&mut commitment_high_w1, &mut commitment_low_w0);
-		polyvec::lvl5::k_pack_w1(output_signature, &commitment_high_w1);
-
-		keccak_state.init();
-		fips202::shake256_absorb(
-			&mut keccak_state,
-			&key_and_message_hash[params::SEEDBYTES..],
-			params::CRHBYTES,
-		);
-		fips202::shake256_absorb(
-			&mut keccak_state,
-			output_signature,
-			K * params::ml_dsa_87::POLYW1_PACKEDBYTES,
-		);
-		fips202::shake256_finalize(&mut keccak_state);
-		fips202::shake256_squeeze(
-			output_signature,
-			params::ml_dsa_87::C_DASH_BYTES,
-			&mut keccak_state,
-		);
-
-		poly::ml_dsa_87::challenge(&mut challenge_polynomial_c, output_signature);
-		poly::ntt(&mut challenge_polynomial_c);
-
-		polyvec::lvl5::l_pointwise_poly_montgomery(
-			&mut signature_z_candidate,
-			&challenge_polynomial_c,
-			&secret_s1_vector,
-		);
-		polyvec::lvl5::l_invntt_tomont(&mut signature_z_candidate);
-		polyvec::lvl5::l_add(&mut signature_z_candidate, &masking_vector_y);
-		polyvec::lvl5::l_reduce(&mut signature_z_candidate);
-
-		// REJECTION CHECK 1: z vector norm - TIMING LEAK SOURCE!
-		if polyvec::lvl5::l_chknorm(
-			&signature_z_candidate,
-			(params::ml_dsa_87::GAMMA1 - params::ml_dsa_87::BETA) as i32,
-		) > 0
-		{
-			continue;
-		}
-
-		polyvec::lvl5::k_pointwise_poly_montgomery(
-			&mut hint_vector_h,
-			&challenge_polynomial_c,
-			&secret_s2_vector,
-		);
-		polyvec::lvl5::k_invntt_tomont(&mut hint_vector_h);
-		polyvec::lvl5::k_sub(&mut commitment_low_w0, &hint_vector_h);
-		polyvec::lvl5::k_reduce(&mut commitment_low_w0);
-
-		// REJECTION CHECK 2: w0 vector norm - TIMING LEAK SOURCE!
-		if polyvec::lvl5::k_chknorm(
-			&commitment_low_w0,
-			(params::ml_dsa_87::GAMMA2 - params::ml_dsa_87::BETA) as i32,
-		) > 0
-		{
-			continue;
-		}
-
-		polyvec::lvl5::k_pointwise_poly_montgomery(
-			&mut hint_vector_h,
-			&challenge_polynomial_c,
-			&secret_t0_vector,
-		);
-		polyvec::lvl5::k_invntt_tomont(&mut hint_vector_h);
-		polyvec::lvl5::k_reduce(&mut hint_vector_h);
-
-		// REJECTION CHECK 3: h vector norm - TIMING LEAK SOURCE!
-		if polyvec::lvl5::k_chknorm(&hint_vector_h, params::ml_dsa_87::GAMMA2 as i32) > 0 {
-			continue;
-		}
-
-		polyvec::lvl5::k_add(&mut commitment_low_w0, &hint_vector_h);
-
-		let hint_weight =
-			polyvec::lvl5::k_make_hint(&mut hint_vector_h, &commitment_low_w0, &commitment_high_w1);
-
-		// REJECTION CHECK 4: hint weight - TIMING LEAK SOURCE!
-		if hint_weight > params::ml_dsa_87::OMEGA as i32 {
-			continue;
-		}
-
-		packing::ml_dsa_87::pack_sig(
-			output_signature,
-			None,
-			&signature_z_candidate,
-			&hint_vector_h,
-		);
-
-		return;
 	}
 }
 
