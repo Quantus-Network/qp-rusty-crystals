@@ -86,125 +86,189 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 /// * 'hedged' - indicates wether to randomize the signature or to act deterministicly
 ///
 /// Note signature depends on std because k_decompose depends on swap which depends on std
-pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
-	let mut rho = [0u8; params::SEEDBYTES];
-	let mut tr = [0u8; params::TR_BYTES];
-	let mut keymu = [0u8; params::SEEDBYTES + params::CRHBYTES];
-	let mut t0 = Box::new(Polyveck::default());
-	let mut s1 = Box::new(Polyvecl::default());
-	let mut s2 = Box::new(Polyveck::default());
+pub fn signature(
+	output_signature: &mut [u8],
+	message_to_sign: &[u8],
+	secret_key: &[u8],
+	use_randomization: bool,
+) {
+	let mut public_seed_rho = [0u8; params::SEEDBYTES];
+	let mut public_key_hash_tr = [0u8; params::TR_BYTES];
+	let mut key_and_message_hash = [0u8; params::SEEDBYTES + params::CRHBYTES];
+	let mut secret_t0_vector = Box::new(Polyveck::default());
+	let mut secret_s1_vector = Box::new(Polyvecl::default());
+	let mut secret_s2_vector = Box::new(Polyveck::default());
 
 	packing::ml_dsa_87::unpack_sk(
-		&mut rho,
-		&mut tr,
-		&mut keymu[..params::SEEDBYTES],
-		&mut t0,
-		&mut s1,
-		&mut s2,
-		sk,
+		&mut public_seed_rho,
+		&mut public_key_hash_tr,
+		&mut key_and_message_hash[..params::SEEDBYTES],
+		&mut secret_t0_vector,
+		&mut secret_s1_vector,
+		&mut secret_s2_vector,
+		secret_key,
 	);
 
-	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, &tr, params::TR_BYTES);
-	fips202::shake256_absorb(&mut state, msg, msg.len());
-	fips202::shake256_finalize(&mut state);
-	fips202::shake256_squeeze(&mut keymu[params::SEEDBYTES..], params::CRHBYTES, &mut state);
+	let mut keccak_state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut keccak_state, &public_key_hash_tr, params::TR_BYTES);
+	fips202::shake256_absorb(&mut keccak_state, message_to_sign, message_to_sign.len());
+	fips202::shake256_finalize(&mut keccak_state);
+	fips202::shake256_squeeze(
+		&mut key_and_message_hash[params::SEEDBYTES..],
+		params::CRHBYTES,
+		&mut keccak_state,
+	);
 
 	#[allow(unused_mut)]
-	let mut rnd = [0u8; params::SEEDBYTES];
-	if hedged {
+	let mut randomness_for_hedging = [0u8; params::SEEDBYTES];
+	if use_randomization {
 		#[cfg(feature = "std")]
-		crate::random_bytes(&mut rnd, params::SEEDBYTES);
+		crate::random_bytes(&mut randomness_for_hedging, params::SEEDBYTES);
 		#[cfg(not(feature = "std"))]
 		unimplemented!("hedged mode doesn't work in verifier only mode");
 	}
-	state.init();
-	fips202::shake256_absorb(&mut state, &keymu[..params::SEEDBYTES], params::SEEDBYTES);
-	fips202::shake256_absorb(&mut state, &rnd, params::SEEDBYTES);
-	fips202::shake256_absorb(&mut state, &keymu[params::SEEDBYTES..], params::CRHBYTES);
-	fips202::shake256_finalize(&mut state);
-	let mut rhoprime = [0u8; params::CRHBYTES];
-	fips202::shake256_squeeze(&mut rhoprime, params::CRHBYTES, &mut state);
+	keccak_state.init();
+	fips202::shake256_absorb(
+		&mut keccak_state,
+		&key_and_message_hash[..params::SEEDBYTES],
+		params::SEEDBYTES,
+	);
+	fips202::shake256_absorb(&mut keccak_state, &randomness_for_hedging, params::SEEDBYTES);
+	fips202::shake256_absorb(
+		&mut keccak_state,
+		&key_and_message_hash[params::SEEDBYTES..],
+		params::CRHBYTES,
+	);
+	fips202::shake256_finalize(&mut keccak_state);
+	let mut signing_randomness_rhoprime = [0u8; params::CRHBYTES];
+	fips202::shake256_squeeze(
+		&mut signing_randomness_rhoprime,
+		params::CRHBYTES,
+		&mut keccak_state,
+	);
 
 	// Move large polynomial structures to heap to reduce stack usage
-	let mut mat = Box::new([Polyvecl::default(); K]);
-	polyvec::lvl5::matrix_expand(&mut *mat, &rho);
-	polyvec::lvl5::l_ntt(&mut s1);
-	polyvec::lvl5::k_ntt(&mut s2);
-	polyvec::lvl5::k_ntt(&mut t0);
+	let mut public_matrix_a = Box::new([Polyvecl::default(); K]);
+	polyvec::lvl5::matrix_expand(&mut *public_matrix_a, &public_seed_rho);
+	polyvec::lvl5::l_ntt(&mut secret_s1_vector);
+	polyvec::lvl5::k_ntt(&mut secret_s2_vector);
+	polyvec::lvl5::k_ntt(&mut secret_t0_vector);
 
-	let mut nonce: u16 = 0;
-	let mut y = Box::new(Polyvecl::default());
-	let mut w1 = Box::new(Polyveck::default());
-	let mut w0 = Box::new(Polyveck::default());
-	let mut cp = Box::new(Poly::default());
-	let mut h = Box::new(Polyveck::default());
+	let mut rejection_sampling_nonce: u16 = 0;
+	let mut masking_vector_y = Box::new(Polyvecl::default());
+	let mut commitment_high_w1 = Box::new(Polyveck::default());
+	let mut commitment_low_w0 = Box::new(Polyveck::default());
+	let mut challenge_polynomial_c = Box::new(Poly::default());
+	let mut hint_vector_h = Box::new(Polyveck::default());
+	// REJECTION SAMPLING LOOP - Variable iterations cause timing leak!
 	loop {
-		polyvec::lvl5::l_uniform_gamma1(&mut y, &rhoprime, nonce);
-		nonce += 1;
+		polyvec::lvl5::l_uniform_gamma1(
+			&mut masking_vector_y,
+			&signing_randomness_rhoprime,
+			rejection_sampling_nonce,
+		);
+		rejection_sampling_nonce += 1;
 
-		let mut z = Box::new(*y);
-		polyvec::lvl5::l_ntt(&mut z);
-		polyvec::lvl5::matrix_pointwise_montgomery(&mut w1, &*mat, &z);
-		polyvec::lvl5::k_reduce(&mut w1);
-		polyvec::lvl5::k_invntt_tomont(&mut w1);
-		polyvec::lvl5::k_caddq(&mut w1);
+		let mut signature_z_candidate = Box::new(*masking_vector_y);
+		polyvec::lvl5::l_ntt(&mut signature_z_candidate);
+		polyvec::lvl5::matrix_pointwise_montgomery(
+			&mut commitment_high_w1,
+			&*public_matrix_a,
+			&signature_z_candidate,
+		);
+		polyvec::lvl5::k_reduce(&mut commitment_high_w1);
+		polyvec::lvl5::k_invntt_tomont(&mut commitment_high_w1);
+		polyvec::lvl5::k_caddq(&mut commitment_high_w1);
 
-		polyvec::lvl5::k_decompose(&mut w1, &mut w0);
-		polyvec::lvl5::k_pack_w1(sig, &w1);
+		polyvec::lvl5::k_decompose(&mut commitment_high_w1, &mut commitment_low_w0);
+		polyvec::lvl5::k_pack_w1(output_signature, &commitment_high_w1);
 
-		state.init();
-		fips202::shake256_absorb(&mut state, &keymu[params::SEEDBYTES..], params::CRHBYTES);
-		fips202::shake256_absorb(&mut state, sig, K * params::ml_dsa_87::POLYW1_PACKEDBYTES);
-		fips202::shake256_finalize(&mut state);
-		fips202::shake256_squeeze(sig, params::ml_dsa_87::C_DASH_BYTES, &mut state);
+		keccak_state.init();
+		fips202::shake256_absorb(
+			&mut keccak_state,
+			&key_and_message_hash[params::SEEDBYTES..],
+			params::CRHBYTES,
+		);
+		fips202::shake256_absorb(
+			&mut keccak_state,
+			output_signature,
+			K * params::ml_dsa_87::POLYW1_PACKEDBYTES,
+		);
+		fips202::shake256_finalize(&mut keccak_state);
+		fips202::shake256_squeeze(
+			output_signature,
+			params::ml_dsa_87::C_DASH_BYTES,
+			&mut keccak_state,
+		);
 
-		poly::ml_dsa_87::challenge(&mut cp, sig);
-		poly::ntt(&mut cp);
+		poly::ml_dsa_87::challenge(&mut challenge_polynomial_c, output_signature);
+		poly::ntt(&mut challenge_polynomial_c);
 
-		polyvec::lvl5::l_pointwise_poly_montgomery(&mut z, &cp, &s1);
-		polyvec::lvl5::l_invntt_tomont(&mut z);
-		polyvec::lvl5::l_add(&mut z, &y);
-		polyvec::lvl5::l_reduce(&mut z);
+		polyvec::lvl5::l_pointwise_poly_montgomery(
+			&mut signature_z_candidate,
+			&challenge_polynomial_c,
+			&secret_s1_vector,
+		);
+		polyvec::lvl5::l_invntt_tomont(&mut signature_z_candidate);
+		polyvec::lvl5::l_add(&mut signature_z_candidate, &masking_vector_y);
+		polyvec::lvl5::l_reduce(&mut signature_z_candidate);
 
+		// REJECTION CHECK 1: z vector norm - TIMING LEAK SOURCE!
 		if polyvec::lvl5::l_chknorm(
-			&z,
+			&signature_z_candidate,
 			(params::ml_dsa_87::GAMMA1 - params::ml_dsa_87::BETA) as i32,
 		) > 0
 		{
 			continue;
 		}
 
-		polyvec::lvl5::k_pointwise_poly_montgomery(&mut h, &cp, &s2);
-		polyvec::lvl5::k_invntt_tomont(&mut h);
-		polyvec::lvl5::k_sub(&mut w0, &h);
-		polyvec::lvl5::k_reduce(&mut w0);
+		polyvec::lvl5::k_pointwise_poly_montgomery(
+			&mut hint_vector_h,
+			&challenge_polynomial_c,
+			&secret_s2_vector,
+		);
+		polyvec::lvl5::k_invntt_tomont(&mut hint_vector_h);
+		polyvec::lvl5::k_sub(&mut commitment_low_w0, &hint_vector_h);
+		polyvec::lvl5::k_reduce(&mut commitment_low_w0);
 
+		// REJECTION CHECK 2: w0 vector norm - TIMING LEAK SOURCE!
 		if polyvec::lvl5::k_chknorm(
-			&w0,
+			&commitment_low_w0,
 			(params::ml_dsa_87::GAMMA2 - params::ml_dsa_87::BETA) as i32,
 		) > 0
 		{
 			continue;
 		}
 
-		polyvec::lvl5::k_pointwise_poly_montgomery(&mut h, &cp, &t0);
-		polyvec::lvl5::k_invntt_tomont(&mut h);
-		polyvec::lvl5::k_reduce(&mut h);
+		polyvec::lvl5::k_pointwise_poly_montgomery(
+			&mut hint_vector_h,
+			&challenge_polynomial_c,
+			&secret_t0_vector,
+		);
+		polyvec::lvl5::k_invntt_tomont(&mut hint_vector_h);
+		polyvec::lvl5::k_reduce(&mut hint_vector_h);
 
-		if polyvec::lvl5::k_chknorm(&h, params::ml_dsa_87::GAMMA2 as i32) > 0 {
+		// REJECTION CHECK 3: h vector norm - TIMING LEAK SOURCE!
+		if polyvec::lvl5::k_chknorm(&hint_vector_h, params::ml_dsa_87::GAMMA2 as i32) > 0 {
 			continue;
 		}
 
-		polyvec::lvl5::k_add(&mut w0, &h);
+		polyvec::lvl5::k_add(&mut commitment_low_w0, &hint_vector_h);
 
-		let n = polyvec::lvl5::k_make_hint(&mut h, &w0, &w1);
+		let hint_weight =
+			polyvec::lvl5::k_make_hint(&mut hint_vector_h, &commitment_low_w0, &commitment_high_w1);
 
-		if n > params::ml_dsa_87::OMEGA as i32 {
+		// REJECTION CHECK 4: hint weight - TIMING LEAK SOURCE!
+		if hint_weight > params::ml_dsa_87::OMEGA as i32 {
 			continue;
 		}
 
-		packing::ml_dsa_87::pack_sig(sig, None, &z, &h);
+		packing::ml_dsa_87::pack_sig(
+			output_signature,
+			None,
+			&signature_z_candidate,
+			&hint_vector_h,
+		);
 
 		return;
 	}
