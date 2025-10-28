@@ -438,6 +438,8 @@ fn test_rej_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 			Class::Right => accept_heavy_buf.clone(), // Few rejections (fast case)
 		};
 
+		disrupt_cache(rng);
+		
 		inputs.push(buffer);
 		classes.push(class);
 	}

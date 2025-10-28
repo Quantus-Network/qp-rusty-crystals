@@ -69,26 +69,31 @@ pub fn use_hint_ip(a: &mut Poly, hint: &Poly) {
 ///
 /// Returns number of sampled coefficients. Can be smaller than len if not enough random bytes were
 /// given
-pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
-	let mut ctr = 0usize;
-	let mut pos = 0usize;
-	while ctr < alen && pos < buflen {
-		let mut t0 = (buf[pos] & 0x0F) as u32;
-		let mut t1 = (buf[pos] >> 4) as u32;
-		pos += 1;
+pub fn rej_eta(
+	output_coeffs: &mut [i32],
+	needed_count: usize,
+	random_bytes: &[u8],
+	bytes_available: usize,
+) -> usize {
+	let mut accepted_coeffs = 0usize;
+	let mut byte_position = 0usize;
+	while accepted_coeffs < needed_count && byte_position < bytes_available {
+		let mut lower_nibble = (random_bytes[byte_position] & 0x0F) as u32;
+		let mut upper_nibble = (random_bytes[byte_position] >> 4) as u32;
+		byte_position += 1;
 
-		if t0 < 15 {
-			t0 = t0 - (205 * t0 >> 10) * 5;
-			a[ctr] = 2 - t0 as i32;
-			ctr += 1;
+		if lower_nibble < 15 {
+			lower_nibble = lower_nibble - (205 * lower_nibble >> 10) * 5;
+			output_coeffs[accepted_coeffs] = 2 - lower_nibble as i32;
+			accepted_coeffs += 1;
 		}
-		if t1 < 15 && ctr < alen {
-			t1 = t1 - (205 * t1 >> 10) * 5;
-			a[ctr] = 2 - t1 as i32;
-			ctr += 1;
+		if upper_nibble < 15 && accepted_coeffs < needed_count {
+			upper_nibble = upper_nibble - (205 * upper_nibble >> 10) * 5;
+			output_coeffs[accepted_coeffs] = 2 - upper_nibble as i32;
+			accepted_coeffs += 1;
 		}
 	}
-	ctr
+	accepted_coeffs
 }
 
 /// Sample polynomial with uniformly random coefficients in [-ETA,ETA] by performing rejection
