@@ -375,6 +375,122 @@ fn test_edge_cases_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	}
 }
 
+/// Test uniform_eta function for constant time
+#[cfg(feature = "dudect-bencher")]
+fn test_uniform_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running uniform_eta constant-time test...");
+
+	// Generate seeds and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Use fixed seed size matching CRHBYTES = 64 (what uniform_eta expects)
+	let fixed_seed = [42u8; 64];
+
+	for _ in 0..8_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let seed = match class {
+			Class::Left => fixed_seed.to_vec(),
+			Class::Right => {
+				let mut random_seed = vec![0u8; 64];
+				rng.fill_bytes(&mut random_seed);
+				random_seed
+			},
+		};
+
+		inputs.push(seed);
+		classes.push(class);
+	}
+
+	for (class, seed) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let mut poly = qp_rusty_crystals_dilithium::poly::Poly::default();
+			qp_rusty_crystals_dilithium::poly::lvl5::uniform_eta(&mut poly, &seed, 0);
+		});
+	}
+}
+
+/// Test rej_eta function for constant time with different buffer contents
+#[cfg(feature = "dudect-bencher")]
+fn test_rej_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running rej_eta constant-time test...");
+
+	// Generate buffers and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Buffer with many rejections (values >= 15)
+	let reject_heavy_buf = vec![15u8; 168]; // Mostly rejections
+
+	// Buffer with few rejections (values < 15)
+	let mut accept_heavy_buf = vec![0u8; 168];
+	for i in 0..168 {
+		accept_heavy_buf[i] = (i % 15) as u8; // Values 0-14, all accepted
+	}
+
+	for _ in 0..10_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let buffer = match class {
+			Class::Left => reject_heavy_buf.clone(), // Many rejections (slow case)
+			Class::Right => accept_heavy_buf.clone(), // Few rejections (fast case)
+		};
+
+		inputs.push(buffer);
+		classes.push(class);
+	}
+
+	for (class, buffer) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let mut coeffs = [0i32; 256];
+			let _count = qp_rusty_crystals_dilithium::poly::lvl5::rej_eta(
+				&mut coeffs,
+				256,
+				&buffer,
+				buffer.len(),
+			);
+		});
+	}
+}
+
+/// Test uniform_eta with different nonce values to check for timing differences
+#[cfg(feature = "dudect-bencher")]
+fn test_uniform_eta_nonce_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running uniform_eta nonce constant-time test...");
+
+	// Generate inputs and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	let fixed_seed = [42u8; 64].to_vec();
+
+	for _ in 0..6_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let nonce = match class {
+			Class::Left => 0u16,              // Fixed nonce
+			Class::Right => rng.gen::<u16>(), // Random nonce
+		};
+
+		inputs.push((fixed_seed.clone(), nonce));
+		classes.push(class);
+	}
+
+	for (class, (seed, nonce)) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let mut poly = qp_rusty_crystals_dilithium::poly::Poly::default();
+			qp_rusty_crystals_dilithium::poly::lvl5::uniform_eta(&mut poly, &seed, nonce);
+		});
+	}
+}
+
 #[cfg(feature = "dudect-bencher")]
 ctbench_main!(
 	test_keypair_generation_ct,
@@ -384,7 +500,10 @@ ctbench_main!(
 	test_signing_xlarge_ct,
 	test_hedged_signing_small_ct,
 	test_signing_with_context_ct,
-	test_edge_cases_ct
+	test_edge_cases_ct,
+	test_uniform_eta_ct,
+	test_rej_eta_ct,
+	test_uniform_eta_nonce_ct
 );
 
 #[cfg(not(feature = "dudect-bencher"))]
