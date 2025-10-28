@@ -1,5 +1,6 @@
 use super::{Poly, N};
 use crate::{fips202, params, rounding};
+use subtle::{Choice, ConditionallySelectable};
 
 const UNIFORM_ETA_NBLOCKS: usize = (135 + fips202::SHAKE256_RATE) / fips202::SHAKE256_RATE;
 const UNIFORM_GAMMA1_NBLOCKS: usize =
@@ -65,7 +66,7 @@ pub fn use_hint_ip(a: &mut Poly, hint: &Poly) {
 }
 
 /// Sample uniformly random coefficients in [-ETA, ETA] by performing rejection sampling using array
-/// of random bytes.
+/// of random bytes. CONSTANT-TIME version using subtle crate.
 ///
 /// Returns number of sampled coefficients. Can be smaller than len if not enough random bytes were
 /// given
@@ -76,23 +77,50 @@ pub fn rej_eta(
 	bytes_available: usize,
 ) -> usize {
 	let mut accepted_coeffs = 0usize;
-	let mut byte_position = 0usize;
-	while accepted_coeffs < needed_count && byte_position < bytes_available {
-		let mut lower_nibble = (random_bytes[byte_position] & 0x0F) as u32;
-		let mut upper_nibble = (random_bytes[byte_position] >> 4) as u32;
-		byte_position += 1;
+	let mut dummy_value = 0i32; // For dummy writes
 
-		if lower_nibble < 15 {
-			lower_nibble = lower_nibble - (205 * lower_nibble >> 10) * 5;
-			output_coeffs[accepted_coeffs] = 2 - lower_nibble as i32;
-			accepted_coeffs += 1;
+	// Always process exactly bytes_available bytes
+	for byte_position in 0..bytes_available {
+		let lower_nibble = (random_bytes[byte_position] & 0x0F) as u32;
+		let upper_nibble = (random_bytes[byte_position] >> 4) as u32;
+
+		// Process lower nibble
+		let reduced_lower = lower_nibble - (205 * lower_nibble >> 10) * 5;
+		let coeff_lower = 2 - reduced_lower as i32;
+
+		let valid_lower = Choice::from((lower_nibble < 15) as u8);
+		let has_space_lower = Choice::from((accepted_coeffs < needed_count) as u8);
+		let store_lower = valid_lower & has_space_lower;
+
+		// Constant-time conditional assignment
+		// Write to output or dummy location based on condition
+		if accepted_coeffs < output_coeffs.len() {
+			output_coeffs[accepted_coeffs] =
+				i32::conditional_select(&output_coeffs[accepted_coeffs], &coeff_lower, store_lower);
 		}
-		if upper_nibble < 15 && accepted_coeffs < needed_count {
-			upper_nibble = upper_nibble - (205 * upper_nibble >> 10) * 5;
-			output_coeffs[accepted_coeffs] = 2 - upper_nibble as i32;
-			accepted_coeffs += 1;
+		dummy_value = i32::conditional_select(&coeff_lower, &dummy_value, store_lower);
+		accepted_coeffs += store_lower.unwrap_u8() as usize;
+
+		// Process upper nibble
+		let reduced_upper = upper_nibble - (205 * upper_nibble >> 10) * 5;
+		let coeff_upper = 2 - reduced_upper as i32;
+
+		let valid_upper = Choice::from((upper_nibble < 15) as u8);
+		let has_space_upper = Choice::from((accepted_coeffs < needed_count) as u8);
+		let store_upper = valid_upper & has_space_upper;
+
+		// Constant-time conditional assignment
+		// Write to output or dummy location based on condition
+		if accepted_coeffs < output_coeffs.len() {
+			output_coeffs[accepted_coeffs] =
+				i32::conditional_select(&output_coeffs[accepted_coeffs], &coeff_upper, store_upper);
 		}
+		dummy_value = i32::conditional_select(&coeff_upper, &dummy_value, store_upper);
+		accepted_coeffs += store_upper.unwrap_u8() as usize;
 	}
+
+	// Prevent compiler from optimizing away dummy_value
+	core::hint::black_box(dummy_value);
 	accepted_coeffs
 }
 
