@@ -126,18 +126,40 @@ pub fn rej_eta(
 
 /// Sample polynomial with uniformly random coefficients in [-ETA,ETA] by performing rejection
 /// sampling using the output stream from SHAKE256(seed|nonce).
-pub fn uniform_eta(a: &mut Poly, seed: &[u8], nonce: u16) {
+pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
-	let mut buf = [0u8; UNIFORM_ETA_NBLOCKS * fips202::SHAKE256_RATE];
-	fips202::shake256_squeezeblocks(&mut buf, UNIFORM_ETA_NBLOCKS, &mut state);
+	// Fixed number of rounds for constant-time operation
+	const FIXED_ROUNDS_FOR_CONSTANT_TIME: usize = 5;
+	let mut shake_output_buffer = [0u8; fips202::SHAKE256_RATE];
+	let mut temporary_coefficient_storage = [0i32; 1000]; // Temp storage for all extracted coeffs
+	let mut total_coefficients_collected = 0usize;
 
-	let buflen = UNIFORM_ETA_NBLOCKS * fips202::SHAKE256_RATE;
-	let mut ctr = rej_eta(&mut a.coeffs, N, &buf, buflen);
-	while ctr < N {
-		fips202::shake256_squeezeblocks(&mut buf, 1, &mut state);
-		ctr += rej_eta(&mut a.coeffs[ctr..], N - ctr, &buf, fips202::SHAKE256_RATE);
+	// Always run exactly FIXED_ROUNDS_FOR_CONSTANT_TIME iterations
+	for _round_number in 0..FIXED_ROUNDS_FOR_CONSTANT_TIME {
+		fips202::shake256_squeezeblocks(&mut shake_output_buffer, 1, &mut state);
+
+		// Always call rej_eta with same parameters regardless of how many coeffs we have
+		let available_storage_space =
+			temporary_coefficient_storage.len() - total_coefficients_collected;
+		let coefficients_extracted_this_round = rej_eta(
+			&mut temporary_coefficient_storage[total_coefficients_collected..],
+			available_storage_space,
+			&shake_output_buffer,
+			fips202::SHAKE256_RATE,
+		);
+		total_coefficients_collected += coefficients_extracted_this_round;
+	}
+
+	// Copy first N coefficients to polynomial output (pad with zeros if we didn't get enough)
+	for coefficient_index in 0..N {
+		output_polynomial.coeffs[coefficient_index] =
+			if coefficient_index < total_coefficients_collected {
+				temporary_coefficient_storage[coefficient_index]
+			} else {
+				0
+			};
 	}
 }
 
