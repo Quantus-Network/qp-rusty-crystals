@@ -48,14 +48,14 @@ mod tests {
 	}
 	#[test]
 	fn params_lvl5() {
-		assert_eq!(crate::params::lvl5::TAU, 60);
-		assert_eq!(crate::params::lvl5::CHALLENGE_ENTROPY, 257);
-		assert_eq!(crate::params::lvl5::GAMMA1, 524288);
-		assert_eq!(crate::params::lvl5::GAMMA2, 261888);
-		assert_eq!(crate::params::lvl5::K, 8);
-		assert_eq!(crate::params::lvl5::L, 7);
-		assert_eq!(crate::params::lvl5::ETA, 2);
-		assert_eq!(crate::params::lvl5::BETA, 120);
-		assert_eq!(crate::params::lvl5::OMEGA, 75);
+		assert_eq!(crate::params::TAU, 60);
+		assert_eq!(crate::params::CHALLENGE_ENTROPY, 257);
+		assert_eq!(crate::params::GAMMA1, 524288);
+		assert_eq!(crate::params::GAMMA2, 261888);
+		assert_eq!(crate::params::K, 8);
+		assert_eq!(crate::params::L, 7);
+		assert_eq!(crate::params::ETA, 2);
+		assert_eq!(crate::params::BETA, 120);
+		assert_eq!(crate::params::OMEGA, 75);
 	}
 }

@@ -2,8 +2,8 @@ use core::mem::swap;
 
 use crate::{params, poly, poly::Poly};
 
-const L: usize = params::lvl5::L;
-const K: usize = params::lvl5::K;
+const L: usize = params::L;
+const K: usize = params::K;
 
 #[derive(Clone, Copy)]
 pub struct Polyveck {
@@ -227,6 +227,6 @@ pub fn k_use_hint(a: &mut Polyveck, hint: &Polyveck) {
 
 pub fn k_pack_w1(r: &mut [u8], a: &Polyveck) {
 	for i in 0..K {
-		poly::lvl5::w1_pack(&mut r[i * params::lvl5::POLYW1_PACKEDBYTES..], &a.vec[i]);
+		poly::lvl5::w1_pack(&mut r[i * params::POLYW1_PACKEDBYTES..], &a.vec[i]);
 	}
 }

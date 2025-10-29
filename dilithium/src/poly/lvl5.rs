@@ -3,7 +3,7 @@ use crate::{fips202, params, rounding};
 
 const UNIFORM_ETA_NBLOCKS: usize = (135 + fips202::SHAKE256_RATE) / fips202::SHAKE256_RATE;
 const UNIFORM_GAMMA1_NBLOCKS: usize =
-	params::lvl5::POLYZ_PACKEDBYTES.div_ceil(fips202::SHAKE256_RATE);
+	params::POLYZ_PACKEDBYTES.div_ceil(fips202::SHAKE256_RATE);
 
 /// For all coefficients c of the input polynomial, compute high and low bits c0, c1 such c mod Q =
 /// c1*ALPHA + c0 with -ALPHA/2 < c0 <= ALPHA/2 except c1 = (Q-1)/ALPHA where we set c1 = 0 and
@@ -136,7 +136,7 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 
 	let mut pos: usize = 8;
 	c.coeffs.fill(0);
-	for i in (N - params::lvl5::TAU)..N {
+	for i in (N - params::TAU)..N {
 		let mut b: usize;
 		loop {
 			if pos >= fips202::SHAKE256_RATE {
@@ -160,14 +160,14 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 pub fn eta_pack(r: &mut [u8], a: &Poly) {
 	let mut t = [0u8; 8];
 	for i in 0..N / 8 {
-		t[0] = (params::lvl5::ETA as i32 - a.coeffs[8 * i + 0]) as u8;
-		t[1] = (params::lvl5::ETA as i32 - a.coeffs[8 * i + 1]) as u8;
-		t[2] = (params::lvl5::ETA as i32 - a.coeffs[8 * i + 2]) as u8;
-		t[3] = (params::lvl5::ETA as i32 - a.coeffs[8 * i + 3]) as u8;
-		t[4] = (params::lvl5::ETA as i32 - a.coeffs[8 * i + 4]) as u8;
-		t[5] = (params::lvl5::ETA as i32 - a.coeffs[8 * i + 5]) as u8;
-		t[6] = (params::lvl5::ETA as i32 - a.coeffs[8 * i + 6]) as u8;
-		t[7] = (params::lvl5::ETA as i32 - a.coeffs[8 * i + 7]) as u8;
+		t[0] = (params::ETA as i32 - a.coeffs[8 * i + 0]) as u8;
+		t[1] = (params::ETA as i32 - a.coeffs[8 * i + 1]) as u8;
+		t[2] = (params::ETA as i32 - a.coeffs[8 * i + 2]) as u8;
+		t[3] = (params::ETA as i32 - a.coeffs[8 * i + 3]) as u8;
+		t[4] = (params::ETA as i32 - a.coeffs[8 * i + 4]) as u8;
+		t[5] = (params::ETA as i32 - a.coeffs[8 * i + 5]) as u8;
+		t[6] = (params::ETA as i32 - a.coeffs[8 * i + 6]) as u8;
+		t[7] = (params::ETA as i32 - a.coeffs[8 * i + 7]) as u8;
 
 		r[3 * i + 0] = (t[0] >> 0) | (t[1] << 3) | (t[2] << 6);
 		r[3 * i + 1] = (t[2] >> 2) | (t[3] << 1) | (t[4] << 4) | (t[5] << 7);
@@ -187,14 +187,14 @@ pub fn eta_unpack(r: &mut Poly, a: &[u8]) {
 		r.coeffs[8 * i + 6] = ((a[3 * i + 2] >> 2) & 0x07) as i32;
 		r.coeffs[8 * i + 7] = ((a[3 * i + 2] >> 5) & 0x07) as i32;
 
-		r.coeffs[8 * i + 0] = params::lvl5::ETA as i32 - r.coeffs[8 * i + 0];
-		r.coeffs[8 * i + 1] = params::lvl5::ETA as i32 - r.coeffs[8 * i + 1];
-		r.coeffs[8 * i + 2] = params::lvl5::ETA as i32 - r.coeffs[8 * i + 2];
-		r.coeffs[8 * i + 3] = params::lvl5::ETA as i32 - r.coeffs[8 * i + 3];
-		r.coeffs[8 * i + 4] = params::lvl5::ETA as i32 - r.coeffs[8 * i + 4];
-		r.coeffs[8 * i + 5] = params::lvl5::ETA as i32 - r.coeffs[8 * i + 5];
-		r.coeffs[8 * i + 6] = params::lvl5::ETA as i32 - r.coeffs[8 * i + 6];
-		r.coeffs[8 * i + 7] = params::lvl5::ETA as i32 - r.coeffs[8 * i + 7];
+		r.coeffs[8 * i + 0] = params::ETA as i32 - r.coeffs[8 * i + 0];
+		r.coeffs[8 * i + 1] = params::ETA as i32 - r.coeffs[8 * i + 1];
+		r.coeffs[8 * i + 2] = params::ETA as i32 - r.coeffs[8 * i + 2];
+		r.coeffs[8 * i + 3] = params::ETA as i32 - r.coeffs[8 * i + 3];
+		r.coeffs[8 * i + 4] = params::ETA as i32 - r.coeffs[8 * i + 4];
+		r.coeffs[8 * i + 5] = params::ETA as i32 - r.coeffs[8 * i + 5];
+		r.coeffs[8 * i + 6] = params::ETA as i32 - r.coeffs[8 * i + 6];
+		r.coeffs[8 * i + 7] = params::ETA as i32 - r.coeffs[8 * i + 7];
 	}
 }
 
@@ -204,8 +204,8 @@ pub fn z_pack(r: &mut [u8], a: &Poly) {
 	let mut t = [0i32; 2];
 
 	for i in 0..N / 2 {
-		t[0] = params::lvl5::GAMMA1 as i32 - a.coeffs[2 * i + 0];
-		t[1] = params::lvl5::GAMMA1 as i32 - a.coeffs[2 * i + 1];
+		t[0] = params::GAMMA1 as i32 - a.coeffs[2 * i + 0];
+		t[1] = params::GAMMA1 as i32 - a.coeffs[2 * i + 1];
 
 		r[5 * i + 0] = t[0] as u8;
 		r[5 * i + 1] = (t[0] >> 8) as u8;
@@ -230,8 +230,8 @@ pub fn z_unpack(r: &mut Poly, a: &[u8]) {
 		r.coeffs[2 * i + 1] |= (a[5 * i + 4] as i32) << 12;
 		r.coeffs[2 * i + 0] &= 0xFFFFF;
 
-		r.coeffs[2 * i + 0] = params::lvl5::GAMMA1 as i32 - r.coeffs[2 * i + 0];
-		r.coeffs[2 * i + 1] = params::lvl5::GAMMA1 as i32 - r.coeffs[2 * i + 1];
+		r.coeffs[2 * i + 0] = params::GAMMA1 as i32 - r.coeffs[2 * i + 0];
+		r.coeffs[2 * i + 1] = params::GAMMA1 as i32 - r.coeffs[2 * i + 1];
 	}
 }
 

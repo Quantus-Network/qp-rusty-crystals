@@ -4,9 +4,9 @@ use crate::errors::{KeyParsingError, KeyParsingError::BadSecretKey};
 use alloc::{vec, vec::Vec};
 use core::fmt;
 
-pub const SECRETKEYBYTES: usize = crate::params::ml_dsa_87::SECRETKEYBYTES;
-pub const PUBLICKEYBYTES: usize = crate::params::ml_dsa_87::PUBLICKEYBYTES;
-pub const SIGNBYTES: usize = crate::params::ml_dsa_87::SIGNBYTES;
+pub const SECRETKEYBYTES: usize = crate::params::SECRETKEYBYTES;
+pub const PUBLICKEYBYTES: usize = crate::params::PUBLICKEYBYTES;
+pub const SIGNBYTES: usize = crate::params::SIGNBYTES;
 pub const KEYPAIRBYTES: usize = SECRETKEYBYTES + PUBLICKEYBYTES;
 
 pub type Signature = [u8; SIGNBYTES];
