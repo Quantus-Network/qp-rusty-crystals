@@ -68,12 +68,12 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 	let mut t0 = Box::new(Polyveck::default());
 	polyvec::k_power2round(&mut t1, &mut t0);
 
-	packing::ml_dsa_87::pack_pk(pk, &rho, &t1);
+	packing::pack_pk(pk, &rho, &t1);
 
 	let mut tr = [0u8; params::TR_BYTES];
 	fips202::shake256(&mut tr, params::TR_BYTES, pk, params::PUBLICKEYBYTES);
 
-	packing::ml_dsa_87::pack_sk(sk, &rho, &tr, &key, &t0, &s1, &s2);
+	packing::pack_sk(sk, &rho, &tr, &key, &t0, &s1, &s2);
 }
 
 /// Compute a signature for a given message from a private (secret) key.
@@ -94,7 +94,7 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 	let mut s1 = Box::new(Polyvecl::default());
 	let mut s2 = Box::new(Polyveck::default());
 
-	packing::ml_dsa_87::unpack_sk(
+	packing::unpack_sk(
 		&mut rho,
 		&mut tr,
 		&mut keymu[..params::SEEDBYTES],
@@ -204,7 +204,7 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 			continue;
 		}
 
-		packing::ml_dsa_87::pack_sig(sig, None, &z, &h);
+		packing::pack_sig(sig, None, &z, &h);
 
 		return;
 	}
@@ -238,8 +238,8 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 		return false;
 	}
 
-	packing::ml_dsa_87::unpack_pk(&mut rho, &mut t1, pk);
-	if !packing::ml_dsa_87::unpack_sig(&mut c, &mut z, &mut h, sig) {
+	packing::unpack_pk(&mut rho, &mut t1, pk);
+	if !packing::unpack_sig(&mut c, &mut z, &mut h, sig) {
 		return false;
 	}
 	if polyvec::l_chknorm(
