@@ -527,46 +527,6 @@ mod tests {
 			);
 		}
 	}
-	//    #[test]
-	//    fn keypair() {
-	//        let seed: [u8; crate::params::SEEDBYTES] = [];
-	//        let mut pk = [0u8; crate::params::ml_dsa_44::PUBLICKEYBYTES];
-	//        let mut sk = [0u8; crate::params::ml_dsa_44::SECRETKEYBYTES];
-	//        super::keypair(&mut pk, &mut sk, Some(&seed));
-	//
-	//        let test_pk: [u8; crate::params::ml_dsa_44::PUBLICKEYBYTES] = [];
-	//        let test_sk: [u8; crate::params::ml_dsa_44::SECRETKEYBYTES] = [];
-	//        assert_eq!(test_pk, pk);
-	//    #[test]
-	//    fn keypair() {
-	//        let seed: [u8; crate::params::SEEDBYTES] = [];
-	//        let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
-	//        let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-	//        super::keypair(&mut pk, &mut sk, Some(&seed));
-	//
-	//        let test_pk: [u8; crate::params::PUBLICKEYBYTES] = [];
-	//        let test_sk: [u8; crate::params::SECRETKEYBYTES] = [];
-	//        assert_eq!(test_pk, pk);
-	//        assert_eq!(test_sk, sk);
-	//        assert_eq!(pk[..crate::params::SEEDBYTES], sk[..crate::params::SEEDBYTES]);
-	//    }
-	//
-	//    #[test]
-	//    fn signature() {
-	//        let msg: [u8; 33] = [];
-	//        let sk: [u8; crate::params::SECRETKEYBYTES] = [];
-	//        let mut sig = [0u8; crate::params::SIGNBYTES];
-	//        super::signature(&mut sig, &msg, &sk, false);
-	//
-	//        let test_sig: [u8; crate::params::SIGNBYTES + 33] =  [];
-	//        assert!(test_sig[..crate::params::SIGNBYTES] == sig);
-	//    }
-	//
-	//    #[test]
-	//    fn verify() {
-	//        let msg: [u8; 33] = [];
-	//        let sig: [u8; crate::params::SIGNBYTES + 33] = [];
-	//        let pk: [u8; crate::params::PUBLICKEYBYTES] = [];
-	//        assert!(super::verify(&sig[..crate::params::SIGNBYTES], &msg, &pk));
-	//    }
+	// Note: Test vector validation is handled in integration tests (tests/src/verify_integration_tests.rs)
+	// which use proper NIST KAT test vectors for comprehensive validation.
 }
