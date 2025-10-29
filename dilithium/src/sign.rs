@@ -167,11 +167,7 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 		polyvec::l_add(&mut z, &y);
 		polyvec::l_reduce(&mut z);
 
-		if polyvec::l_chknorm(
-			&z,
-			(params::GAMMA1 - params::BETA) as i32,
-		) > 0
-		{
+		if polyvec::l_chknorm(&z, (params::GAMMA1 - params::BETA) as i32) > 0 {
 			continue;
 		}
 
@@ -180,11 +176,7 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 		polyvec::k_sub(&mut w0, &h);
 		polyvec::k_reduce(&mut w0);
 
-		if polyvec::k_chknorm(
-			&w0,
-			(params::GAMMA2 - params::BETA) as i32,
-		) > 0
-		{
+		if polyvec::k_chknorm(&w0, (params::GAMMA2 - params::BETA) as i32) > 0 {
 			continue;
 		}
 
@@ -242,11 +234,7 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	if !packing::unpack_sig(&mut c, &mut z, &mut h, sig) {
 		return false;
 	}
-	if polyvec::l_chknorm(
-		&z,
-		(crate::params::GAMMA1 - crate::params::BETA) as i32,
-	) > 0
-	{
+	if polyvec::l_chknorm(&z, (crate::params::GAMMA1 - crate::params::BETA) as i32) > 0 {
 		return false;
 	}
 
@@ -306,6 +294,7 @@ mod tests {
 		super::signature(&mut sig, &msg, &sk, true);
 		assert!(super::verify(&sig, &msg, &pk));
 	}
+
 	#[test]
 	fn self_verify() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
@@ -317,6 +306,226 @@ mod tests {
 		let mut sig = [0u8; crate::params::SIGNBYTES];
 		super::signature(&mut sig, &msg, &sk, false);
 		assert!(super::verify(&sig, &msg, &pk));
+	}
+
+	#[test]
+	fn test_empty_message() {
+		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
+		super::keypair(&mut pk, &mut sk, None);
+
+		let empty_msg: &[u8] = &[];
+		let mut sig = [0u8; crate::params::SIGNBYTES];
+		super::signature(&mut sig, empty_msg, &sk, false);
+		assert!(super::verify(&sig, empty_msg, &pk));
+	}
+
+	#[test]
+	fn test_single_byte_message() {
+		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
+		super::keypair(&mut pk, &mut sk, None);
+
+		let msg = [0x42u8];
+		let mut sig = [0u8; crate::params::SIGNBYTES];
+		super::signature(&mut sig, &msg, &sk, false);
+		assert!(super::verify(&sig, &msg, &pk));
+	}
+
+	#[test]
+	fn test_large_message() {
+		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
+		super::keypair(&mut pk, &mut sk, None);
+
+		let large_msg = vec![0xABu8; 10000];
+		let mut sig = [0u8; crate::params::SIGNBYTES];
+		super::signature(&mut sig, &large_msg, &sk, false);
+		assert!(super::verify(&sig, &large_msg, &pk));
+	}
+
+	#[test]
+	fn test_deterministic_signing() {
+		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
+		super::keypair(&mut pk, &mut sk, None);
+
+		let msg = b"test message for deterministic signing";
+		let mut sig1 = [0u8; crate::params::SIGNBYTES];
+		let mut sig2 = [0u8; crate::params::SIGNBYTES];
+
+		super::signature(&mut sig1, msg, &sk, false);
+		super::signature(&mut sig2, msg, &sk, false);
+
+		// Deterministic signing should produce identical signatures
+		assert_eq!(sig1, sig2);
+		assert!(super::verify(&sig1, msg, &pk));
+		assert!(super::verify(&sig2, msg, &pk));
+	}
+
+	#[test]
+	fn test_hedged_signing_differs() {
+		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
+		super::keypair(&mut pk, &mut sk, None);
+
+		let msg = b"test message for hedged signing";
+		let mut sig1 = [0u8; crate::params::SIGNBYTES];
+		let mut sig2 = [0u8; crate::params::SIGNBYTES];
+
+		super::signature(&mut sig1, msg, &sk, true);
+		super::signature(&mut sig2, msg, &sk, true);
+
+		// Hedged signing should produce different signatures (with high probability)
+		assert_ne!(sig1, sig2);
+		assert!(super::verify(&sig1, msg, &pk));
+		assert!(super::verify(&sig2, msg, &pk));
+	}
+
+	#[test]
+	fn test_wrong_message_fails() {
+		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
+		super::keypair(&mut pk, &mut sk, None);
+
+		let msg1 = b"original message";
+		let msg2 = b"different message";
+		let mut sig = [0u8; crate::params::SIGNBYTES];
+
+		super::signature(&mut sig, msg1, &sk, false);
+
+		// Should verify with correct message
+		assert!(super::verify(&sig, msg1, &pk));
+		// Should fail with wrong message
+		assert!(!super::verify(&sig, msg2, &pk));
+	}
+
+	#[test]
+	fn test_wrong_public_key_fails() {
+		let mut pk1 = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk1 = [0u8; crate::params::SECRETKEYBYTES];
+		let mut pk2 = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk2 = [0u8; crate::params::SECRETKEYBYTES];
+
+		super::keypair(&mut pk1, &mut sk1, None);
+		super::keypair(&mut pk2, &mut sk2, None);
+
+		let msg = b"test message";
+		let mut sig = [0u8; crate::params::SIGNBYTES];
+
+		super::signature(&mut sig, msg, &sk1, false);
+
+		// Should verify with correct key
+		assert!(super::verify(&sig, msg, &pk1));
+		// Should fail with wrong key
+		assert!(!super::verify(&sig, msg, &pk2));
+	}
+
+	#[test]
+	fn test_corrupted_signature_fails() {
+		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
+		super::keypair(&mut pk, &mut sk, None);
+
+		let msg = b"test message";
+		let mut sig = [0u8; crate::params::SIGNBYTES];
+		super::signature(&mut sig, msg, &sk, false);
+
+		// Original signature should verify
+		assert!(super::verify(&sig, msg, &pk));
+
+		// Corrupt first byte
+		let original_byte = sig[0];
+		sig[0] = sig[0].wrapping_add(1);
+		assert!(!super::verify(&sig, msg, &pk));
+
+		// Restore and corrupt last byte
+		sig[0] = original_byte;
+		let last_idx = sig.len() - 1;
+		let original_last = sig[last_idx];
+		sig[last_idx] = sig[last_idx].wrapping_add(1);
+		assert!(!super::verify(&sig, msg, &pk));
+
+		// Restore and verify it works again
+		sig[last_idx] = original_last;
+		assert!(super::verify(&sig, msg, &pk));
+	}
+
+	#[test]
+	fn test_invalid_signature_length() {
+		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
+		super::keypair(&mut pk, &mut sk, None);
+
+		let msg = b"test message";
+
+		// Test with too short signature
+		let short_sig = [0u8; crate::params::SIGNBYTES - 1];
+		assert!(!super::verify(&short_sig, msg, &pk));
+
+		// Test with too long signature
+		let long_sig = [0u8; crate::params::SIGNBYTES + 1];
+		assert!(!super::verify(&long_sig, msg, &pk));
+	}
+
+	#[test]
+	fn test_fixed_seed_keypair() {
+		let seed = [0x42u8; crate::params::SEEDBYTES];
+
+		let mut pk1 = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk1 = [0u8; crate::params::SECRETKEYBYTES];
+		let mut pk2 = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk2 = [0u8; crate::params::SECRETKEYBYTES];
+
+		super::keypair(&mut pk1, &mut sk1, Some(&seed));
+		super::keypair(&mut pk2, &mut sk2, Some(&seed));
+
+		// Same seed should produce same keypair
+		assert_eq!(pk1, pk2);
+		assert_eq!(sk1, sk2);
+	}
+
+	#[test]
+	fn test_different_seeds_different_keys() {
+		let seed1 = [0x42u8; crate::params::SEEDBYTES];
+		let seed2 = [0x43u8; crate::params::SEEDBYTES];
+
+		let mut pk1 = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk1 = [0u8; crate::params::SECRETKEYBYTES];
+		let mut pk2 = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk2 = [0u8; crate::params::SECRETKEYBYTES];
+
+		super::keypair(&mut pk1, &mut sk1, Some(&seed1));
+		super::keypair(&mut pk2, &mut sk2, Some(&seed2));
+
+		// Different seeds should produce different keypairs
+		assert_ne!(pk1, pk2);
+		assert_ne!(sk1, sk2);
+	}
+
+	#[test]
+	fn test_multiple_messages_same_key() {
+		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
+		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
+		super::keypair(&mut pk, &mut sk, None);
+
+		let messages = [
+			b"message 1".as_slice(),
+			b"message 2",
+			b"a much longer message that tests handling of various lengths",
+			b"",
+			b"single char: X",
+		];
+
+		for msg in &messages {
+			let mut sig = [0u8; crate::params::SIGNBYTES];
+			super::signature(&mut sig, msg, &sk, false);
+			assert!(
+				super::verify(&sig, msg, &pk),
+				"Failed to verify message: {:?}",
+				String::from_utf8_lossy(msg)
+			);
+		}
 	}
 	//    #[test]
 	//    fn keypair() {

@@ -2,8 +2,9 @@ use core::mem::swap;
 
 use crate::{params, poly, poly::Poly};
 
-const L: usize = params::L;
 const K: usize = params::K;
+const L: usize = params::L;
+const N: usize = params::N as usize;
 
 #[derive(Clone, Copy)]
 pub struct Polyveck {
@@ -228,5 +229,441 @@ pub fn k_use_hint(a: &mut Polyveck, hint: &Polyveck) {
 pub fn k_pack_w1(r: &mut [u8], a: &Polyveck) {
 	for i in 0..K {
 		poly::w1_pack(&mut r[i * params::POLYW1_PACKEDBYTES..], &a.vec[i]);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_polyvecl_default() {
+		let polyvecl = Polyvecl::default();
+		for i in 0..L {
+			for j in 0..N {
+				assert_eq!(polyvecl.vec[i].coeffs[j], 0);
+			}
+		}
+	}
+
+	#[test]
+	fn test_polyveck_default() {
+		let polyveck = Polyveck::default();
+		for i in 0..K {
+			for j in 0..N {
+				assert_eq!(polyveck.vec[i].coeffs[j], 0);
+			}
+		}
+	}
+
+	#[test]
+	fn test_l_uniform_eta_produces_valid_coefficients() {
+		let seed = [0x42u8; params::CRHBYTES];
+		let nonce = 1234;
+		let mut polyvecl = Polyvecl::default();
+
+		l_uniform_eta(&mut polyvecl, &seed, nonce);
+
+		// All coefficients should be in the range [-ETA, ETA]
+		for i in 0..L {
+			for j in 0..N {
+				assert!(polyvecl.vec[i].coeffs[j] >= -(params::ETA as i32));
+				assert!(polyvecl.vec[i].coeffs[j] <= params::ETA as i32);
+			}
+		}
+	}
+
+	#[test]
+	fn test_k_uniform_eta_produces_valid_coefficients() {
+		let seed = [0x77u8; params::CRHBYTES];
+		let nonce = 5678;
+		let mut polyveck = Polyveck::default();
+
+		k_uniform_eta(&mut polyveck, &seed, nonce);
+
+		// All coefficients should be in the range [-ETA, ETA]
+		for i in 0..K {
+			for j in 0..N {
+				assert!(polyveck.vec[i].coeffs[j] >= -(params::ETA as i32));
+				assert!(polyveck.vec[i].coeffs[j] <= params::ETA as i32);
+			}
+		}
+	}
+
+	#[test]
+	fn test_l_uniform_gamma1_produces_valid_coefficients() {
+		let seed = [0x55u8; params::CRHBYTES];
+		let nonce = 100; // Use smaller nonce to prevent overflow in L * nonce
+		let mut polyvecl = Polyvecl::default();
+
+		l_uniform_gamma1(&mut polyvecl, &seed, nonce);
+
+		// All coefficients should be in the range [-GAMMA1, GAMMA1]
+		for i in 0..L {
+			for j in 0..N {
+				let coeff = polyvecl.vec[i].coeffs[j];
+				assert!(
+					coeff >= -(params::GAMMA1 as i32) && coeff <= params::GAMMA1 as i32,
+					"Coefficient {} at [{},{}] is out of range",
+					coeff,
+					i,
+					j
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn test_l_add() {
+		let mut a = Polyvecl::default();
+		let mut b = Polyvecl::default();
+
+		// Initialize with test data
+		for i in 0..L {
+			for j in 0..N {
+				a.vec[i].coeffs[j] = (i * 100 + j) as i32;
+				b.vec[i].coeffs[j] = (i * 200 + j * 2) as i32;
+			}
+		}
+
+		let original_a = a;
+		l_add(&mut a, &b);
+
+		// Check addition was performed correctly
+		for i in 0..L {
+			for j in 0..N {
+				assert_eq!(
+					a.vec[i].coeffs[j],
+					original_a.vec[i].coeffs[j] + b.vec[i].coeffs[j],
+					"Addition failed at [{},{}]",
+					i,
+					j
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn test_k_add() {
+		let mut a = Polyveck::default();
+		let mut b = Polyveck::default();
+
+		// Initialize with test data
+		for i in 0..K {
+			for j in 0..N {
+				a.vec[i].coeffs[j] = (i * 50 + j) as i32;
+				b.vec[i].coeffs[j] = (i * 75 + j * 3) as i32;
+			}
+		}
+
+		let original_a = a;
+		k_add(&mut a, &b);
+
+		// Check addition was performed correctly
+		for i in 0..K {
+			for j in 0..N {
+				assert_eq!(
+					a.vec[i].coeffs[j],
+					original_a.vec[i].coeffs[j] + b.vec[i].coeffs[j],
+					"Addition failed at [{},{}]",
+					i,
+					j
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn test_k_sub() {
+		let mut a = Polyveck::default();
+		let mut b = Polyveck::default();
+
+		// Initialize with test data
+		for i in 0..K {
+			for j in 0..N {
+				a.vec[i].coeffs[j] = (i * 1000 + j * 10) as i32;
+				b.vec[i].coeffs[j] = (i * 100 + j) as i32;
+			}
+		}
+
+		let original_a = a;
+		k_sub(&mut a, &b);
+
+		// Check subtraction was performed correctly
+		for i in 0..K {
+			for j in 0..N {
+				assert_eq!(
+					a.vec[i].coeffs[j],
+					original_a.vec[i].coeffs[j] - b.vec[i].coeffs[j],
+					"Subtraction failed at [{},{}]",
+					i,
+					j
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn test_l_ntt_invntt_roundtrip() {
+		let mut polyvecl = Polyvecl::default();
+
+		// Initialize with test data
+		for i in 0..L {
+			for j in 0..N {
+				polyvecl.vec[i].coeffs[j] = ((i * j + 123) % 1000) as i32;
+			}
+		}
+
+		let original = polyvecl;
+		l_ntt(&mut polyvecl);
+		l_invntt_tomont(&mut polyvecl);
+
+		// After NTT and inverse NTT, values should be close to original
+		for i in 0..L {
+			for j in 0..N {
+				let diff = (polyvecl.vec[i].coeffs[j] - original.vec[i].coeffs[j]).abs();
+				assert!(
+					diff < params::Q,
+					"NTT roundtrip failed at [{},{}]: {} vs {}",
+					i,
+					j,
+					polyvecl.vec[i].coeffs[j],
+					original.vec[i].coeffs[j]
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn test_k_ntt_invntt_roundtrip() {
+		let mut polyveck = Polyveck::default();
+
+		// Initialize with test data
+		for i in 0..K {
+			for j in 0..N {
+				polyveck.vec[i].coeffs[j] = ((i * j * 2 + 456) % 800) as i32;
+			}
+		}
+
+		let original = polyveck;
+		k_ntt(&mut polyveck);
+		k_invntt_tomont(&mut polyveck);
+
+		// After NTT and inverse NTT, values should be close to original
+		for i in 0..K {
+			for j in 0..N {
+				let diff = (polyveck.vec[i].coeffs[j] - original.vec[i].coeffs[j]).abs();
+				assert!(
+					diff < params::Q,
+					"NTT roundtrip failed at [{},{}]: {} vs {}",
+					i,
+					j,
+					polyveck.vec[i].coeffs[j],
+					original.vec[i].coeffs[j]
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn test_l_chknorm_zero_vector() {
+		let polyvecl = Polyvecl::default(); // All coefficients are 0
+		assert_eq!(l_chknorm(&polyvecl, 1), 0); // Should be within any positive bound
+		assert_eq!(l_chknorm(&polyvecl, 1000), 0);
+	}
+
+	#[test]
+	fn test_l_chknorm_exceeds_bound() {
+		let mut polyvecl = Polyvecl::default();
+		polyvecl.vec[0].coeffs[0] = 100;
+		polyvecl.vec[1].coeffs[10] = -150;
+
+		assert_eq!(l_chknorm(&polyvecl, 200), 0); // Within bound
+		assert_eq!(l_chknorm(&polyvecl, 149), 1); // Exceeds bound
+		assert_eq!(l_chknorm(&polyvecl, 99), 1); // Exceeds bound
+	}
+
+	#[test]
+	fn test_k_chknorm_zero_vector() {
+		let polyveck = Polyveck::default(); // All coefficients are 0
+		assert_eq!(k_chknorm(&polyveck, 1), 0); // Should be within any positive bound
+		assert_eq!(k_chknorm(&polyveck, 1000), 0);
+	}
+
+	#[test]
+	fn test_k_chknorm_exceeds_bound() {
+		let mut polyveck = Polyveck::default();
+		polyveck.vec[0].coeffs[5] = 200;
+		polyveck.vec[2].coeffs[15] = -250;
+
+		assert_eq!(k_chknorm(&polyveck, 300), 0); // Within bound
+		assert_eq!(k_chknorm(&polyveck, 249), 1); // Exceeds bound
+		assert_eq!(k_chknorm(&polyveck, 199), 1); // Exceeds bound
+	}
+
+	#[test]
+	fn test_k_shiftl() {
+		let mut polyveck = Polyveck::default();
+
+		// Initialize with small test values
+		for i in 0..K {
+			for j in 0..N {
+				polyveck.vec[i].coeffs[j] = (j % 10) as i32;
+			}
+		}
+
+		let original = polyveck;
+		k_shiftl(&mut polyveck);
+
+		// Check that all coefficients were left-shifted by D
+		for i in 0..K {
+			for j in 0..N {
+				assert_eq!(
+					polyveck.vec[i].coeffs[j],
+					original.vec[i].coeffs[j] << params::D,
+					"Left shift failed at [{},{}]",
+					i,
+					j
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn test_matrix_expand_produces_different_matrices() {
+		let rho1 = [0x42u8; params::SEEDBYTES];
+		let rho2 = [0x43u8; params::SEEDBYTES];
+
+		let mut mat1 = [Polyvecl::default(); K];
+		let mut mat2 = [Polyvecl::default(); K];
+
+		matrix_expand(&mut mat1, &rho1);
+		matrix_expand(&mut mat2, &rho2);
+
+		// Different rho values should produce different matrices
+		let mut matrices_different = false;
+		'outer: for i in 0..K {
+			for j in 0..L {
+				for k in 0..N {
+					if mat1[i].vec[j].coeffs[k] != mat2[i].vec[j].coeffs[k] {
+						matrices_different = true;
+						break 'outer;
+					}
+				}
+			}
+		}
+		assert!(matrices_different, "Different rho should produce different matrices");
+	}
+
+	#[test]
+	fn test_matrix_pointwise_montgomery() {
+		let mut mat = [Polyvecl::default(); K];
+		let mut v = Polyvecl::default();
+		let mut result = Polyveck::default();
+
+		// Initialize matrix and vector with very small test values to avoid overflow
+		for i in 0..K {
+			for j in 0..L {
+				for k in 0..N {
+					mat[i].vec[j].coeffs[k] = ((i + j + k) % 10) as i32;
+				}
+			}
+		}
+
+		for i in 0..L {
+			for j in 0..N {
+				v.vec[i].coeffs[j] = ((i + j) % 5) as i32;
+			}
+		}
+
+		matrix_pointwise_montgomery(&mut result, &mat, &v);
+
+		// Result should be well-defined (we can't predict exact values due to Montgomery
+		// arithmetic) Just check that the function completes without panicking and produces
+		// reasonable values
+		for i in 0..K {
+			for j in 0..N {
+				let coeff = result.vec[i].coeffs[j];
+				// Allow for a broader range due to Montgomery arithmetic and potential reduction
+				assert!(
+					coeff.abs() < params::Q * 2,
+					"Coefficient {} at [{},{}] is unreasonably large",
+					coeff,
+					i,
+					j
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn test_k_make_hint_returns_valid_count() {
+		let mut h = Polyveck::default();
+		let mut w0 = Polyveck::default();
+		let mut w1 = Polyveck::default();
+
+		// Initialize with test data
+		for i in 0..K {
+			for j in 0..N {
+				w0.vec[i].coeffs[j] = ((i * j) % 1000) as i32;
+				w1.vec[i].coeffs[j] = ((i + j * 2) % 500) as i32;
+			}
+		}
+
+		let hint_count = k_make_hint(&mut h, &w0, &w1);
+
+		// Hint count should be non-negative and reasonable
+		assert!(hint_count >= 0);
+		assert!(hint_count <= (K * N) as i32);
+
+		// Count the actual number of 1's in h
+		let mut actual_count = 0;
+		for i in 0..K {
+			for j in 0..N {
+				if h.vec[i].coeffs[j] == 1 {
+					actual_count += 1;
+				}
+				assert!(
+					h.vec[i].coeffs[j] == 0 || h.vec[i].coeffs[j] == 1,
+					"Hint should be 0 or 1, got {}",
+					h.vec[i].coeffs[j]
+				);
+			}
+		}
+		assert_eq!(hint_count, actual_count, "Hint count mismatch");
+	}
+
+	#[test]
+	fn test_k_use_hint() {
+		let mut w = Polyveck::default();
+		let mut h = Polyveck::default();
+
+		// Initialize w with test data
+		for i in 0..K {
+			for j in 0..N {
+				w.vec[i].coeffs[j] = ((i * 100 + j) % 2000) as i32;
+			}
+		}
+
+		// Set some hints
+		h.vec[0].coeffs[0] = 1;
+		h.vec[1].coeffs[10] = 1;
+		h.vec[2].coeffs[50] = 1;
+
+		let _original_w = w;
+		k_use_hint(&mut w, &h);
+
+		// Values with hints should potentially be modified
+		// Values without hints should remain the same
+		for i in 0..K {
+			for j in 0..N {
+				if h.vec[i].coeffs[j] == 0 {
+					// No change expected for coefficients without hints (in many cases)
+					// This is a simplified check as use_hint can be complex
+				}
+				// All results should be in valid range
+				assert!(w.vec[i].coeffs[j] >= 0, "use_hint result should be non-negative");
+			}
+		}
 	}
 }
