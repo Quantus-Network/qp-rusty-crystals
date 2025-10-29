@@ -26,8 +26,10 @@
 //! The wormhole addresses provide an additional layer of privacy and security by using
 //! Poseidon hashing, which is particularly well-suited for zero-knowledge proof systems.
 
-use qp_poseidon_core::serialization::{unsafe_digest_bytes_to_felts, injective_string_to_felts};
-use qp_poseidon_core::{hash_variable_length_bytes, double_hash_variable_length, hash_variable_length};
+use qp_poseidon_core::{
+	double_hash_variable_length, hash_variable_length, hash_variable_length_bytes,
+	serialization::{injective_string_to_felts, unsafe_digest_bytes_to_felts},
+};
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -234,7 +236,8 @@ mod tests {
 		let different_salt = b"diffrent";
 		let different_salt_felts = injective_bytes_to_felts(different_salt);
 
-		let mut combined_felts = Vec::with_capacity(different_salt_felts.len() + secret_felts.len());
+		let mut combined_felts =
+			Vec::with_capacity(different_salt_felts.len() + secret_felts.len());
 		combined_felts.extend_from_slice(&different_salt_felts);
 		combined_felts.extend_from_slice(&secret_felts);
 
