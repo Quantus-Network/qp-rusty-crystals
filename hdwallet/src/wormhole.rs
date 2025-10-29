@@ -26,9 +26,7 @@
 //! The wormhole addresses provide an additional layer of privacy and security by using
 //! Poseidon hashing, which is particularly well-suited for zero-knowledge proof systems.
 
-use qp_poseidon_core::{
-	digest_bytes_to_felts, injective_string_to_felts, Poseidon2Core,
-};
+use qp_poseidon_core::{digest_bytes_to_felts, injective_string_to_felts, Poseidon2Core};
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -98,8 +96,8 @@ impl WormholePair {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use qp_poseidon_core::injective_bytes_to_felts;
 	use hex_literal::hex;
+	use qp_poseidon_core::injective_bytes_to_felts;
 
 	#[test]
 	fn test_generate_pair_from_secret() {
