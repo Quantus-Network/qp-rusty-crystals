@@ -16,7 +16,7 @@ const UNIFORM_GAMMA1_NBLOCKS: usize =
 /// Returns a touple of polynomials with coefficients c0, c1
 pub fn decompose(a1: &mut Poly, a0: &mut Poly) {
 	for i in 0..N {
-		(a1.coeffs[i], a0.coeffs[i]) = rounding::lvl5::decompose(a1.coeffs[i]);
+		(a1.coeffs[i], a0.coeffs[i]) = rounding::decompose(a1.coeffs[i]);
 	}
 }
 
@@ -32,7 +32,7 @@ pub fn decompose(a1: &mut Poly, a0: &mut Poly) {
 pub fn make_hint(h: &mut Poly, a0: &Poly, a1: &Poly) -> i32 {
 	let mut s: i32 = 0;
 	for i in 0..N {
-		h.coeffs[i] = rounding::lvl5::make_hint(a0.coeffs[i], a1.coeffs[i]);
+		h.coeffs[i] = rounding::make_hint(a0.coeffs[i], a1.coeffs[i]);
 		s += h.coeffs[i];
 	}
 	s
@@ -48,7 +48,7 @@ pub fn make_hint(h: &mut Poly, a0: &Poly, a1: &Poly) -> i32 {
 /// Returns polynomial with corrected high bits
 pub fn use_hint(a: &mut Poly, hint: &Poly) {
 	for i in 0..N {
-		a.coeffs[i] = rounding::lvl5::use_hint(a.coeffs[i], hint.coeffs[i]);
+		a.coeffs[i] = rounding::use_hint(a.coeffs[i], hint.coeffs[i]);
 	}
 }
 
@@ -60,7 +60,7 @@ pub fn use_hint(a: &mut Poly, hint: &Poly) {
 /// * 'hint' - hint polynomial
 pub fn use_hint_ip(a: &mut Poly, hint: &Poly) {
 	for i in 0..N {
-		a.coeffs[i] = rounding::lvl5::use_hint(a.coeffs[i], hint.coeffs[i]);
+		a.coeffs[i] = rounding::use_hint(a.coeffs[i], hint.coeffs[i]);
 	}
 }
 
