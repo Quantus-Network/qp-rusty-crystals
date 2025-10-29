@@ -97,7 +97,7 @@ impl WormholePair {
 mod tests {
 	use super::*;
 	use hex_literal::hex;
-	use qp_poseidon_core::injective_bytes_to_felts;
+	use qp_poseidon_core::digest_bytes_to_felts;
 
 	#[test]
 	fn test_generate_pair_from_secret() {
@@ -151,7 +151,7 @@ mod tests {
 	fn test_address_derivation_properties() {
 		// Arrange
 		let secret = hex!("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
-		let secret_felts = injective_bytes_to_felts(&secret);
+		let secret_felts = digest_bytes_to_felts(&secret);
 
 		// Act - Generate the pair
 		let pair = WormholePair::generate_pair_from_secret(&secret);
@@ -173,7 +173,7 @@ mod tests {
 		// (Create a direct hash without salt and ensure it's different)
 		let poseidon = Poseidon2Core::new();
 		let direct_hash = poseidon.hash_no_pad(secret_felts);
-		let direct_hash_felts = injective_bytes_to_felts(&direct_hash);
+		let direct_hash_felts = digest_bytes_to_felts(&direct_hash);
 		let double_hash = poseidon.hash_no_pad(direct_hash_felts);
 		assert_ne!(pair.address, double_hash);
 
@@ -182,7 +182,7 @@ mod tests {
 		let mut combined = Vec::with_capacity(ADDRESS_SALT.len() + secret.len());
 		combined.extend_from_slice(ADDRESS_SALT.as_bytes());
 		combined.extend_from_slice(&secret);
-		let combined_felts = injective_bytes_to_felts(&combined);
+		let combined_felts = digest_bytes_to_felts(&combined);
 		let poseidon = Poseidon2Core::new();
 		let first_hash = poseidon.hash_no_pad(combined_felts);
 		assert_ne!(pair.address, first_hash);
@@ -239,11 +239,11 @@ mod tests {
 		let mut combined = Vec::with_capacity(different_salt.len() + secret.len());
 		combined.extend_from_slice(different_salt);
 		combined.extend_from_slice(&secret);
-		let combined_felts = injective_bytes_to_felts(&combined);
+		let combined_felts = digest_bytes_to_felts(&combined);
 
 		let poseidon = Poseidon2Core::new();
 		let first_hash = poseidon.hash_no_pad(combined_felts);
-		let first_hash_felts = injective_bytes_to_felts(&first_hash);
+		let first_hash_felts = digest_bytes_to_felts(&first_hash);
 		let address_with_different_salt = poseidon.hash_no_pad(first_hash_felts);
 
 		// Assert
