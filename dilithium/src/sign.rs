@@ -159,7 +159,7 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 		fips202::shake256_finalize(&mut state);
 		fips202::shake256_squeeze(sig, params::C_DASH_BYTES, &mut state);
 
-		poly::ml_dsa_87::challenge(&mut cp, sig);
+		poly::challenge(&mut cp, sig);
 		poly::ntt(&mut cp);
 
 		polyvec::l_pointwise_poly_montgomery(&mut z, &cp, &s1);
@@ -258,7 +258,7 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	fips202::shake256_squeeze(&mut mu, params::CRHBYTES, &mut state);
 
 	// Matrix-vector multiplication; compute Az - c2^dt1
-	poly::ml_dsa_87::challenge(&mut cp, &c);
+	poly::challenge(&mut cp, &c);
 	polyvec::matrix_expand(&mut *mat, &rho);
 
 	polyvec::l_ntt(&mut z);

@@ -54,7 +54,7 @@ pub fn pack_sk(
 	idx += params::TR_BYTES;
 
 	for i in 0..L {
-		poly::lvl5::eta_pack(
+		poly::eta_pack(
 			&mut sk[idx + i * params::POLYETA_PACKEDBYTES..],
 			&s1.vec[i],
 		);
@@ -62,7 +62,7 @@ pub fn pack_sk(
 	idx += L * params::POLYETA_PACKEDBYTES;
 
 	for i in 0..K {
-		poly::lvl5::eta_pack(
+		poly::eta_pack(
 			&mut sk[idx + i * params::POLYETA_PACKEDBYTES..],
 			&s2.vec[i],
 		);
@@ -94,7 +94,7 @@ pub fn unpack_sk(
 	idx += params::TR_BYTES;
 
 	for i in 0..L {
-		poly::lvl5::eta_unpack(
+		poly::eta_unpack(
 			&mut s1.vec[i],
 			&sk[idx + i * params::POLYETA_PACKEDBYTES..],
 		);
@@ -102,7 +102,7 @@ pub fn unpack_sk(
 	idx += L * params::POLYETA_PACKEDBYTES;
 
 	for i in 0..K {
-		poly::lvl5::eta_unpack(
+		poly::eta_unpack(
 			&mut s2.vec[i],
 			&sk[idx + i * params::POLYETA_PACKEDBYTES..],
 		);
@@ -123,7 +123,7 @@ pub fn pack_sig(sig: &mut [u8], c: Option<&[u8]>, z: &Polyvecl, h: &Polyveck) {
 
 	let mut idx = params::C_DASH_BYTES;
 	for i in 0..L {
-		poly::lvl5::z_pack(&mut sig[idx + i * params::POLYZ_PACKEDBYTES..], &z.vec[i]);
+		poly::z_pack(&mut sig[idx + i * params::POLYZ_PACKEDBYTES..], &z.vec[i]);
 	}
 
 	idx += L * params::POLYZ_PACKEDBYTES;
@@ -148,7 +148,7 @@ pub fn unpack_sig(c: &mut [u8], z: &mut Polyvecl, h: &mut Polyveck, sig: &[u8]) 
 
 	let mut idx = params::C_DASH_BYTES;
 	for i in 0..L {
-		poly::lvl5::z_unpack(&mut z.vec[i], &sig[idx + i * params::POLYZ_PACKEDBYTES..]);
+		poly::z_unpack(&mut z.vec[i], &sig[idx + i * params::POLYZ_PACKEDBYTES..]);
 	}
 	idx += L * params::POLYZ_PACKEDBYTES;
 

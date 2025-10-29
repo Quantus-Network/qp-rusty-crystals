@@ -57,14 +57,14 @@ pub fn matrix_pointwise_montgomery(t: &mut Polyveck, mat: &[Polyvecl], v: &Polyv
 
 pub fn l_uniform_eta(v: &mut Polyvecl, seed: &[u8], mut nonce: u16) {
 	for i in 0..L {
-		poly::lvl5::uniform_eta(&mut v.vec[i], seed, nonce);
+		poly::uniform_eta(&mut v.vec[i], seed, nonce);
 		nonce += 1;
 	}
 }
 
 pub fn l_uniform_gamma1(v: &mut Polyvecl, seed: &[u8], nonce: u16) {
 	for i in 0..L {
-		poly::lvl5::uniform_gamma1(&mut v.vec[i], seed, L as u16 * nonce + i as u16);
+		poly::uniform_gamma1(&mut v.vec[i], seed, L as u16 * nonce + i as u16);
 	}
 }
 pub fn l_reduce(v: &mut Polyvecl) {
@@ -114,7 +114,7 @@ pub fn l_chknorm(v: &Polyvecl, bound: i32) -> u8 {
 
 pub fn k_uniform_eta(v: &mut Polyveck, seed: &[u8], mut nonce: u16) {
 	for i in 0..K {
-		poly::lvl5::uniform_eta(&mut v.vec[i], seed, nonce);
+		poly::uniform_eta(&mut v.vec[i], seed, nonce);
 		nonce += 1
 	}
 }
@@ -206,7 +206,7 @@ pub fn k_power2round(v1: &mut Polyveck, v0: &mut Polyveck) {
 
 pub fn k_decompose(v1: &mut Polyveck, v0: &mut Polyveck) {
 	for i in 0..K {
-		poly::lvl5::decompose(&mut v1.vec[i], &mut v0.vec[i]);
+		poly::decompose(&mut v1.vec[i], &mut v0.vec[i]);
 	}
 	swap(v1, v0);
 }
@@ -214,19 +214,19 @@ pub fn k_decompose(v1: &mut Polyveck, v0: &mut Polyveck) {
 pub fn k_make_hint(h: &mut Polyveck, v0: &Polyveck, v1: &Polyveck) -> i32 {
 	let mut s: i32 = 0;
 	for i in 0..K {
-		s += poly::lvl5::make_hint(&mut h.vec[i], &v0.vec[i], &v1.vec[i]);
+		s += poly::make_hint(&mut h.vec[i], &v0.vec[i], &v1.vec[i]);
 	}
 	s
 }
 
 pub fn k_use_hint(a: &mut Polyveck, hint: &Polyveck) {
 	for i in 0..K {
-		poly::lvl5::use_hint(&mut a.vec[i], &hint.vec[i]);
+		poly::use_hint(&mut a.vec[i], &hint.vec[i]);
 	}
 }
 
 pub fn k_pack_w1(r: &mut [u8], a: &Polyveck) {
 	for i in 0..K {
-		poly::lvl5::w1_pack(&mut r[i * params::POLYW1_PACKEDBYTES..], &a.vec[i]);
+		poly::w1_pack(&mut r[i * params::POLYW1_PACKEDBYTES..], &a.vec[i]);
 	}
 }
