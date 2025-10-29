@@ -27,7 +27,7 @@
 //! Poseidon hashing, which is particularly well-suited for zero-knowledge proof systems.
 
 use qp_poseidon_core::{
-	digest_bytes_to_felts, injective_bytes_to_felts, injective_string_to_felts, Poseidon2Core,
+	digest_bytes_to_felts, injective_string_to_felts, Poseidon2Core,
 };
 extern crate alloc;
 use alloc::vec::Vec;
@@ -85,7 +85,7 @@ impl WormholePair {
 	pub fn generate_pair_from_secret(secret: &[u8; 32]) -> WormholePair {
 		let mut preimage_felts = Vec::new();
 		let salt_felt = injective_string_to_felts(ADDRESS_SALT);
-		let secret_felt = injective_bytes_to_felts(secret);
+		let secret_felt = digest_bytes_to_felts(secret);
 		preimage_felts.extend_from_slice(&salt_felt);
 		preimage_felts.extend_from_slice(&secret_felt);
 		let poseidon = Poseidon2Core::new();
@@ -98,6 +98,7 @@ impl WormholePair {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use qp_poseidon_core::injective_bytes_to_felts;
 	use hex_literal::hex;
 
 	#[test]
