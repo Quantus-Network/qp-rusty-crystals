@@ -60,7 +60,7 @@ impl WormholePair {
 	/// Returns `WormholeError::InvalidSecretFormat` if entropy collection fails.
 	pub fn generate_new(seed: [u8; 32]) -> Result<WormholePair, WormholeError> {
 		let poseidon = Poseidon2Core::new();
-		let secret = poseidon.hash_padded(&seed);
+		let secret = poseidon.hash_no_pad_bytes(&seed);
 
 		Ok(Self::generate_pair_from_secret(&secret))
 	}
