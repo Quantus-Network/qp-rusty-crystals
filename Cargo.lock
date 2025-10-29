@@ -736,16 +736,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "qp-poseidon-constants"
+version = "0.9.5"
+source = "git+https://github.com/Quantus-Network/qp-poseidon?branch=audit-responses#da009ef4d2c00a38297112fb586e7de77c9fe2fa"
+dependencies = [
+ "p3-field",
+ "p3-goldilocks",
+ "p3-poseidon2",
+ "rand 0.9.2",
+ "rand_chacha 0.9.0",
+]
+
+[[package]]
 name = "qp-poseidon-core"
 version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec326fc2631a929de09a38af2613a3db5230882c12a2f68205693ec632751e8b"
+source = "git+https://github.com/Quantus-Network/qp-poseidon?branch=audit-responses#da009ef4d2c00a38297112fb586e7de77c9fe2fa"
 dependencies = [
  "p3-field",
  "p3-goldilocks",
  "p3-poseidon2",
  "p3-symmetric",
- "rand 0.9.2",
+ "qp-poseidon-constants",
  "rand_chacha 0.9.0",
 ]
 
