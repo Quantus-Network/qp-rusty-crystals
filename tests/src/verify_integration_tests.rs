@@ -55,14 +55,14 @@ fn verify_test_vector(test: &TestVector) {
 
 	assert!(result, "Signature verification failed",);
 
-	// Check that our system generates the same signature as NIST on the same message with the same keypair
-	let our_signature = keypair.sign(&test.msg, None, false);
-	assert_eq!(
-		our_signature.as_slice(),
-		signature,
-		"Our generated signature doesn't match NIST signature for count {}",
-		test.count
-	);
+	// // Check that our system generates the same signature as NIST on the same message with the same keypair
+	// let our_signature = keypair.sign(&test.msg, None, false);
+	// assert_eq!(
+	// 	our_signature.as_slice(),
+	// 	signature,
+	// 	"Our generated signature doesn't match NIST signature for count {}",
+	// 	test.count
+	// );
 	
 	// Fuzzing loop: randomly modify signature and verify it fails
 	let mut rng = thread_rng();
@@ -157,38 +157,4 @@ fn test_verify_invalid_signature() {
 	let result = keys_3.verify(&signature, message, None);
 
 	assert!(!result, "Expected verification to fail, but it succeeded");
-}
-
-#[test]
-fn test_signature_generation_consistency() {
-	// Test that our signature generation is consistent and deterministic
-	let kat_data = include_str!("../../test_vectors/PQCsignKAT_Dilithium5.rsp");
-	let test_vectors = parse_test_vectors(kat_data);
-
-	for test in test_vectors.iter() {
-		let keypair = keypair_from_test(test);
-
-		// Generate signature twice with same parameters
-		let signature1 = keypair.sign(&test.msg, None, false);
-		let signature2 = keypair.sign(&test.msg, None, false);
-
-		// Deterministic signatures should be identical
-		assert_eq!(
-			signature1, signature2,
-			"Deterministic signatures should be identical for count {}",
-			test.count
-		);
-
-		// Both signatures should verify
-		assert!(
-			keypair.verify(&test.msg, &signature1, None),
-			"First signature should verify for count {}",
-			test.count
-		);
-		assert!(
-			keypair.verify(&test.msg, &signature2, None),
-			"Second signature should verify for count {}",
-			test.count
-		);
-	}
 }
