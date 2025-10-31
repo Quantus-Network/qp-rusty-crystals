@@ -47,39 +47,15 @@ mod tests {
 		assert_eq!(crate::params::D, 13);
 	}
 	#[test]
-	fn params_lvl2() {
-		assert_eq!(crate::params::lvl2::TAU, 39);
-		assert_eq!(crate::params::lvl2::CHALLENGE_ENTROPY, 192);
-		assert_eq!(crate::params::lvl2::GAMMA1, 131072);
-		assert_eq!(crate::params::lvl2::GAMMA2, 95232);
-		assert_eq!(crate::params::lvl2::K, 4);
-		assert_eq!(crate::params::lvl2::L, 4);
-		assert_eq!(crate::params::lvl2::ETA, 2);
-		assert_eq!(crate::params::lvl2::BETA, 78);
-		assert_eq!(crate::params::lvl2::OMEGA, 80);
-	}
-	#[test]
-	fn params_lvl3() {
-		assert_eq!(crate::params::lvl3::TAU, 49);
-		assert_eq!(crate::params::lvl3::CHALLENGE_ENTROPY, 225);
-		assert_eq!(crate::params::lvl3::GAMMA1, 524288);
-		assert_eq!(crate::params::lvl3::GAMMA2, 261888);
-		assert_eq!(crate::params::lvl3::K, 6);
-		assert_eq!(crate::params::lvl3::L, 5);
-		assert_eq!(crate::params::lvl3::ETA, 4);
-		assert_eq!(crate::params::lvl3::BETA, 196);
-		assert_eq!(crate::params::lvl3::OMEGA, 55);
-	}
-	#[test]
 	fn params_lvl5() {
-		assert_eq!(crate::params::lvl5::TAU, 60);
-		assert_eq!(crate::params::lvl5::CHALLENGE_ENTROPY, 257);
-		assert_eq!(crate::params::lvl5::GAMMA1, 524288);
-		assert_eq!(crate::params::lvl5::GAMMA2, 261888);
-		assert_eq!(crate::params::lvl5::K, 8);
-		assert_eq!(crate::params::lvl5::L, 7);
-		assert_eq!(crate::params::lvl5::ETA, 2);
-		assert_eq!(crate::params::lvl5::BETA, 120);
-		assert_eq!(crate::params::lvl5::OMEGA, 75);
+		assert_eq!(crate::params::TAU, 60);
+		assert_eq!(crate::params::CHALLENGE_ENTROPY, 257);
+		assert_eq!(crate::params::GAMMA1, 524288);
+		assert_eq!(crate::params::GAMMA2, 261888);
+		assert_eq!(crate::params::K, 8);
+		assert_eq!(crate::params::L, 7);
+		assert_eq!(crate::params::ETA, 2);
+		assert_eq!(crate::params::BETA, 120);
+		assert_eq!(crate::params::OMEGA, 75);
 	}
 }

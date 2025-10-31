@@ -4,9 +4,9 @@ use crate::errors::{KeyParsingError, KeyParsingError::BadSecretKey};
 use alloc::{vec, vec::Vec};
 use core::fmt;
 
-pub const SECRETKEYBYTES: usize = crate::params::ml_dsa_87::SECRETKEYBYTES;
-pub const PUBLICKEYBYTES: usize = crate::params::ml_dsa_87::PUBLICKEYBYTES;
-pub const SIGNBYTES: usize = crate::params::ml_dsa_87::SIGNBYTES;
+pub const SECRETKEYBYTES: usize = crate::params::SECRETKEYBYTES;
+pub const PUBLICKEYBYTES: usize = crate::params::PUBLICKEYBYTES;
+pub const SIGNBYTES: usize = crate::params::SIGNBYTES;
 pub const KEYPAIRBYTES: usize = SECRETKEYBYTES + PUBLICKEYBYTES;
 
 pub type Signature = [u8; SIGNBYTES];
@@ -29,7 +29,7 @@ impl Keypair {
 	pub fn generate(entropy: Option<&[u8]>) -> Keypair {
 		let mut pk = [0u8; PUBLICKEYBYTES];
 		let mut sk = [0u8; SECRETKEYBYTES];
-		crate::sign::ml_dsa_87::keypair(&mut pk, &mut sk, entropy);
+		crate::sign::keypair(&mut pk, &mut sk, entropy);
 		Keypair {
 			secret: SecretKey::from_bytes(&sk).expect("Should never fail"),
 			public: PublicKey::from_bytes(&pk).expect("Should never fail"),
@@ -180,7 +180,7 @@ impl SecretKey {
 				m[2..2 + x_len].copy_from_slice(x);
 				m[2 + x_len..].copy_from_slice(msg);
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::ml_dsa_87::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
+				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
 				sig
 			},
 			None => {
@@ -188,7 +188,7 @@ impl SecretKey {
 				let mut m = vec![0; msg_len + 2];
 				m[2..].copy_from_slice(msg);
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::ml_dsa_87::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
+				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
 				sig
 			},
 		}
@@ -242,7 +242,7 @@ impl SecretKey {
 				m[2 + x_len..2 + x_len + 11].copy_from_slice(&oid);
 				m[2 + x_len + 11..].copy_from_slice(phm.as_slice());
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::ml_dsa_87::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
+				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
 				Some(sig)
 			},
 			None => {
@@ -252,7 +252,7 @@ impl SecretKey {
 				m[2..2 + 11].copy_from_slice(&oid);
 				m[2 + 11..].copy_from_slice(phm.as_slice());
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::ml_dsa_87::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
+				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
 				Some(sig)
 			},
 		}
@@ -309,13 +309,13 @@ impl PublicKey {
 				m[1] = x_len as u8;
 				m[2..2 + x_len].copy_from_slice(x);
 				m[2 + x_len..].copy_from_slice(msg);
-				crate::sign::ml_dsa_87::verify(sig, m.as_slice(), &self.bytes)
+				crate::sign::verify(sig, m.as_slice(), &self.bytes)
 			},
 			None => {
 				let msg_len = msg.len();
 				let mut m = vec![0; msg_len + 2];
 				m[2..].copy_from_slice(msg);
-				crate::sign::ml_dsa_87::verify(sig, m.as_slice(), &self.bytes)
+				crate::sign::verify(sig, m.as_slice(), &self.bytes)
 			},
 		}
 	}
@@ -369,7 +369,7 @@ impl PublicKey {
 				m[2..2 + x_len].copy_from_slice(x);
 				m[2 + x_len..2 + x_len + 11].copy_from_slice(&oid);
 				m[2 + x_len + 11..].copy_from_slice(phm.as_slice());
-				crate::sign::ml_dsa_87::verify(sig, m.as_slice(), &self.bytes)
+				crate::sign::verify(sig, m.as_slice(), &self.bytes)
 			},
 			None => {
 				let phm_len = phm.len();
@@ -377,7 +377,7 @@ impl PublicKey {
 				m[0] = 1;
 				m[2..2 + 11].copy_from_slice(&oid);
 				m[2 + 11..].copy_from_slice(phm.as_slice());
-				crate::sign::ml_dsa_87::verify(sig, m.as_slice(), &self.bytes)
+				crate::sign::verify(sig, m.as_slice(), &self.bytes)
 			},
 		}
 	}
