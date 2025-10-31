@@ -527,6 +527,7 @@ mod tests {
 			);
 		}
 	}
-	// Note: Test vector validation is handled in integration tests (tests/src/verify_integration_tests.rs)
-	// which use proper NIST KAT test vectors for comprehensive validation.
+	// Note: Test vector validation is handled in integration tests
+	// (tests/src/verify_integration_tests.rs) which use proper NIST KAT test vectors for
+	// comprehensive validation.
 }
