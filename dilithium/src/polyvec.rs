@@ -4,7 +4,6 @@ use crate::{params, poly, poly::Poly};
 
 const K: usize = params::K;
 const L: usize = params::L;
-const N: usize = params::N as usize;
 
 #[derive(Clone, Copy)]
 pub struct Polyveck {
@@ -235,6 +234,7 @@ pub fn k_pack_w1(r: &mut [u8], a: &Polyveck) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	const N: usize = params::N as usize;
 
 	#[test]
 	fn test_polyvecl_default() {
