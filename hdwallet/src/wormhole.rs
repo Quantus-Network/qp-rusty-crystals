@@ -27,7 +27,8 @@
 //! Poseidon hashing, which is particularly well-suited for zero-knowledge proof systems.
 
 use qp_poseidon_core::{
-	digest_bytes_to_felts, injective_bytes_to_felts, injective_string_to_felts, Poseidon2Core,
+	double_hash_variable_length, hash_variable_length, hash_variable_length_bytes,
+	serialization::{injective_string_to_felts, unsafe_digest_bytes_to_felts},
 };
 extern crate alloc;
 use alloc::vec::Vec;
@@ -59,8 +60,7 @@ impl WormholePair {
 	/// # Errors
 	/// Returns `WormholeError::InvalidSecretFormat` if entropy collection fails.
 	pub fn generate_new(seed: [u8; 32]) -> Result<WormholePair, WormholeError> {
-		let poseidon = Poseidon2Core::new();
-		let secret = poseidon.hash_padded(&seed);
+		let secret = hash_variable_length_bytes(&seed);
 
 		Ok(Self::generate_pair_from_secret(&secret))
 	}
@@ -85,12 +85,11 @@ impl WormholePair {
 	pub fn generate_pair_from_secret(secret: &[u8; 32]) -> WormholePair {
 		let mut preimage_felts = Vec::new();
 		let salt_felt = injective_string_to_felts(ADDRESS_SALT);
-		let secret_felt = injective_bytes_to_felts(secret);
+		let secret_felt = unsafe_digest_bytes_to_felts(secret);
 		preimage_felts.extend_from_slice(&salt_felt);
 		preimage_felts.extend_from_slice(&secret_felt);
-		let poseidon = Poseidon2Core::new();
-		let inner_hash = poseidon.hash_no_pad(preimage_felts);
-		let second_hash = poseidon.hash_no_pad(digest_bytes_to_felts(&inner_hash));
+		let inner_hash = hash_variable_length(preimage_felts.clone());
+		let second_hash = double_hash_variable_length(preimage_felts);
 		WormholePair { address: second_hash, first_hash: inner_hash, secret: *secret }
 	}
 }
@@ -99,6 +98,7 @@ impl WormholePair {
 mod tests {
 	use super::*;
 	use hex_literal::hex;
+	use qp_poseidon_core::serialization::{injective_bytes_to_felts, unsafe_digest_bytes_to_felts};
 
 	#[test]
 	fn test_generate_pair_from_secret() {
@@ -152,7 +152,7 @@ mod tests {
 	fn test_address_derivation_properties() {
 		// Arrange
 		let secret = hex!("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
-		let secret_felts = injective_bytes_to_felts(&secret);
+		let secret_felts = unsafe_digest_bytes_to_felts(&secret);
 
 		// Act - Generate the pair
 		let pair = WormholePair::generate_pair_from_secret(&secret);
@@ -172,20 +172,16 @@ mod tests {
 
 		// 4. Verify that the process uses the salt
 		// (Create a direct hash without salt and ensure it's different)
-		let poseidon = Poseidon2Core::new();
-		let direct_hash = poseidon.hash_no_pad(secret_felts);
-		let direct_hash_felts = injective_bytes_to_felts(&direct_hash);
-		let double_hash = poseidon.hash_no_pad(direct_hash_felts);
+		let double_hash = double_hash_variable_length(secret_felts.to_vec());
 		assert_ne!(pair.address, double_hash);
 
 		// 5. Verify that each stage of the hash process changes the result
 		// (Create a hash with salt but without the second hashing step)
-		let mut combined = Vec::with_capacity(ADDRESS_SALT.len() + secret.len());
-		combined.extend_from_slice(ADDRESS_SALT.as_bytes());
-		combined.extend_from_slice(&secret);
-		let combined_felts = injective_bytes_to_felts(&combined);
-		let poseidon = Poseidon2Core::new();
-		let first_hash = poseidon.hash_no_pad(combined_felts);
+		let address_salt_felts = injective_string_to_felts(ADDRESS_SALT);
+		let mut combined_felts = Vec::with_capacity(address_salt_felts.len() + secret_felts.len());
+		combined_felts.extend_from_slice(address_salt_felts.as_ref());
+		combined_felts.extend_from_slice(&secret_felts);
+		let first_hash = hash_variable_length(combined_felts.to_vec());
 		assert_ne!(pair.address, first_hash);
 	}
 
@@ -231,21 +227,21 @@ mod tests {
 		// Arrange
 		let secret = [7u8; 32];
 
+		let secret_felts = unsafe_digest_bytes_to_felts(&secret);
+
 		// Generate a pair normally (with salt)
 		let pair_with_salt = WormholePair::generate_pair_from_secret(&secret);
 
 		// Simulate address generation without salt or with different salt
 		let different_salt = b"diffrent";
+		let different_salt_felts = injective_bytes_to_felts(different_salt);
 
-		let mut combined = Vec::with_capacity(different_salt.len() + secret.len());
-		combined.extend_from_slice(different_salt);
-		combined.extend_from_slice(&secret);
-		let combined_felts = injective_bytes_to_felts(&combined);
+		let mut combined_felts =
+			Vec::with_capacity(different_salt_felts.len() + secret_felts.len());
+		combined_felts.extend_from_slice(&different_salt_felts);
+		combined_felts.extend_from_slice(&secret_felts);
 
-		let poseidon = Poseidon2Core::new();
-		let first_hash = poseidon.hash_no_pad(combined_felts);
-		let first_hash_felts = injective_bytes_to_felts(&first_hash);
-		let address_with_different_salt = poseidon.hash_no_pad(first_hash_felts);
+		let address_with_different_salt = double_hash_variable_length(combined_felts);
 
 		// Assert
 		assert_ne!(pair_with_salt.address, address_with_different_salt);
