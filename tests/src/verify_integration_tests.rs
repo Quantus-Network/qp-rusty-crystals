@@ -3,6 +3,30 @@
 use crate::helpers::kat::{parse_test_vectors, TestVector};
 use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, PUBLICKEYBYTES};
 use rand::{thread_rng, Rng};
+use aes::Aes256;
+use ctr::Ctr128BE; // Or Ctr64BE if needed, but NIST uses 128-bit counter typically
+use ctr::cipher::{BlockCipher, BlockEncryptMut, KeyInit, StreamCipher};
+use aes::cipher::KeyIvInit;
+
+// Function to derive the actual 32-byte seed (ζ) from the 48-byte KAT seed
+fn derive_kat_seed(kat_seed: &[u8]) -> [u8; 32] {
+    assert_eq!(kat_seed.len(), 48, "KAT seed must be 48 bytes");
+
+    // Key: first 32 bytes
+    let key: [u8; 32] = kat_seed[0..32].try_into().expect("Invalid key length");
+
+    // Nonce/IV: next 16 bytes (for 128-bit CTR)
+    let nonce: [u8; 16] = kat_seed[32..48].try_into().expect("Invalid nonce length");
+
+    // Initialize AES-256-CTR
+    let mut cipher = Ctr128BE::<Aes256>::new(&key.into(), &nonce.into());
+
+    // Generate 32 bytes of keystream
+    let mut derived_seed = [0u8; 32];
+    cipher.apply_keystream(&mut derived_seed);
+
+    derived_seed
+}
 
 fn keypair_from_test(test: &TestVector) -> Keypair {
 	let total_len = test.sk.len() + test.pk.len();
@@ -33,12 +57,13 @@ fn verify_test_vector(test: &TestVector) {
 	// works correctly, indicating our implementation is internally consistent.
 	//
 	// TODO: Investigate differences between our keygen and NIST reference implementation
-	//
-	// let generated_keypair = Keypair::generate(Some(&test.seed));
-	// let generated_pk = generated_keypair.public.to_bytes();
-	// let generated_sk = generated_keypair.secret.to_bytes();
-	// assert_eq!(&generated_pk[..], &test.pk[..], "Generated public key doesn't match NIST KAT for count {}", test.count);
-	// assert_eq!(&generated_sk[..], &test.sk[..], "Generated secret key doesn't match NIST KAT for count {}", test.count);
+
+	let actual_seed = derive_kat_seed(&test.seed);
+	let generated_keypair = Keypair::generate(Some(&actual_seed));
+	let generated_pk = generated_keypair.public.to_bytes();
+	let generated_sk = generated_keypair.secret.to_bytes();
+	assert_eq!(&generated_pk[..], &test.pk[..], "Generated public key doesn't match NIST KAT for count {}", test.count);
+	assert_eq!(&generated_sk[..], &test.sk[..], "Generated secret key doesn't match NIST KAT for count {}", test.count);
 
 	// Check if the fields have correct lengths
 	assert_eq!(test.msg.len(), test.mlen, "Message length mismatch from test vector");
