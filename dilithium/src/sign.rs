@@ -17,24 +17,27 @@ use alloc::vec::Vec;
 /// * 'sk' - preallocated buffer for private key
 /// * 'seed' - optional seed; if None [random_bytes()] is used for randomness generation
 pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
-	#[allow(unused_mut)]
-	let mut init_seed: Vec<u8>;
+	const SEEDBUF_LEN: usize = 2 * params::SEEDBYTES + params::CRHBYTES;
+	let mut seedbuf = [0u8; SEEDBUF_LEN];
+	
 	match seed {
-		Some(x) => init_seed = x.to_vec(),
+		Some(x) => {
+			seedbuf[..params::SEEDBYTES].copy_from_slice(x);
+		},
 		None => {
 			#[cfg(not(feature = "std"))]
 			unimplemented!("must provide entropy in verifier only mode");
 			#[cfg(feature = "std")]
-			{
-				init_seed = vec![0u8; params::SEEDBYTES];
-				crate::random_bytes(&mut init_seed, params::SEEDBYTES)
-			}
+			crate::random_bytes(&mut seedbuf[..params::SEEDBYTES], params::SEEDBYTES);
 		},
-	};
-
-	const SEEDBUF_LEN: usize = 2 * params::SEEDBYTES + params::CRHBYTES;
-	let mut seedbuf = [0u8; SEEDBUF_LEN];
-	fips202::shake256(&mut seedbuf, SEEDBUF_LEN, &init_seed, params::SEEDBYTES);
+	}
+	
+	seedbuf[params::SEEDBYTES + 0] = params::K as u8;
+	seedbuf[params::SEEDBYTES + 1] = params::L as u8;
+	let input_len = params::SEEDBYTES + 2;
+	let mut input_buf = [0u8; 2 * params::SEEDBYTES + 2];
+	input_buf[..input_len].copy_from_slice(&seedbuf[..input_len]);
+	fips202::shake256(&mut seedbuf, SEEDBUF_LEN, &input_buf[..input_len], input_len);
 
 	let mut rho = [0u8; params::SEEDBYTES];
 	rho.copy_from_slice(&seedbuf[..params::SEEDBYTES]);
@@ -84,9 +87,25 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 /// * 'msg' - message to sign
 /// * 'sk' - private key to use
 /// * 'hedged' - indicates wether to randomize the signature or to act deterministicly
+/// * 'rnd' - optional random bytes (SEEDBYTES length). If Some, uses these bytes instead of generating/having zeros.
+///           This allows deterministic signing for KAT testing when combined with seeded RNG.
 ///
 /// Note signature depends on std because k_decompose depends on swap which depends on std
-pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
+pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool, rnd: Option<&[u8]>) {
+	// DEBUG: Only print for first test case (controlled by environment or caller)
+	static mut DEBUG_ENABLED: bool = false;
+	unsafe {
+		DEBUG_ENABLED = std::env::var("RUST_DEBUG_SIG").is_ok();
+	}
+	
+	// DEBUG POINT 1: Print input parameters
+	if unsafe { DEBUG_ENABLED } {
+		eprintln!("[RUST DEBUG 1] signature() called");
+		eprintln!("  msg len: {}, first 16 bytes: {:02X?}", msg.len(), &msg[..msg.len().min(16)]);
+		eprintln!("  sk len: {}, first 16 bytes: {:02X?}", sk.len(), &sk[..sk.len().min(16)]);
+		eprintln!("  hedged: {}, rnd: {:?}", hedged, rnd.map(|r| &r[..r.len().min(16)]));
+	}
+	
 	let mut rho = [0u8; params::SEEDBYTES];
 	let mut tr = [0u8; params::TR_BYTES];
 	let mut keymu = [0u8; params::SEEDBYTES + params::CRHBYTES];
@@ -106,25 +125,54 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, &tr, params::TR_BYTES);
+	// Prepare pre = (0, ctxlen, ctx) - for now ctxlen=0, ctx=NULL, so pre = (0, 0)
+	let pre = [0u8, 0u8];
+	fips202::shake256_absorb(&mut state, &pre, 2);
 	fips202::shake256_absorb(&mut state, msg, msg.len());
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut keymu[params::SEEDBYTES..], params::CRHBYTES, &mut state);
 
+	// DEBUG POINT 2: After computing mu
+	if unsafe { DEBUG_ENABLED } {
+		eprintln!("[RUST DEBUG 2] After computing mu");
+		eprintln!("  tr (first 16): {:02X?}", &tr[..tr.len().min(16)]);
+		eprintln!("  mu (first 16): {:02X?}", &keymu[params::SEEDBYTES..params::SEEDBYTES + params::CRHBYTES.min(16)]);
+	}
+
 	#[allow(unused_mut)]
-	let mut rnd = [0u8; params::SEEDBYTES];
-	if hedged {
-		#[cfg(feature = "std")]
-		crate::random_bytes(&mut rnd, params::SEEDBYTES);
-		#[cfg(not(feature = "std"))]
-		unimplemented!("hedged mode doesn't work in verifier only mode");
+	let mut rnd_bytes = [0u8; params::SEEDBYTES];
+	match rnd {
+		Some(provided_rnd) => {
+			// Use provided random bytes (for deterministic signing/KAT testing)
+			if provided_rnd.len() >= params::SEEDBYTES {
+				rnd_bytes.copy_from_slice(&provided_rnd[..params::SEEDBYTES]);
+			}
+		},
+		None => {
+			// Only call randombytes in hedged mode (matching C DILITHIUM_RANDOMIZED_SIGNING behavior)
+			if hedged {
+				#[cfg(not(feature = "std"))]
+				unimplemented!("hedged mode requires std feature");
+				#[cfg(feature = "std")]
+				crate::random_bytes(&mut rnd_bytes, params::SEEDBYTES);
+			}
+		},
 	}
 	state.init();
 	fips202::shake256_absorb(&mut state, &keymu[..params::SEEDBYTES], params::SEEDBYTES);
-	fips202::shake256_absorb(&mut state, &rnd, params::SEEDBYTES);
+	fips202::shake256_absorb(&mut state, &rnd_bytes, params::SEEDBYTES);
 	fips202::shake256_absorb(&mut state, &keymu[params::SEEDBYTES..], params::CRHBYTES);
 	fips202::shake256_finalize(&mut state);
 	let mut rhoprime = [0u8; params::CRHBYTES];
 	fips202::shake256_squeeze(&mut rhoprime, params::CRHBYTES, &mut state);
+
+	// DEBUG POINT 3: After computing rhoprime
+	if unsafe { DEBUG_ENABLED } {
+		eprintln!("[RUST DEBUG 3] After computing rhoprime");
+		eprintln!("  key (first 16): {:02X?}", &keymu[..params::SEEDBYTES.min(16)]);
+		eprintln!("  rnd_bytes (first 16): {:02X?}", &rnd_bytes[..rnd_bytes.len().min(16)]);
+		eprintln!("  rhoprime (first 16): {:02X?}", &rhoprime[..rhoprime.len().min(16)]);
+	}
 
 	// Move large polynomial structures to heap to reduce stack usage
 	let mut mat = Box::new([Polyvecl::default(); K]);
@@ -158,6 +206,13 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 		fips202::shake256_absorb(&mut state, sig, K * params::POLYW1_PACKEDBYTES);
 		fips202::shake256_finalize(&mut state);
 		fips202::shake256_squeeze(sig, params::C_DASH_BYTES, &mut state);
+
+		// DEBUG POINT 4: After computing challenge
+		if unsafe { DEBUG_ENABLED } {
+			eprintln!("[RUST DEBUG 4] After computing challenge (nonce: {})", nonce - 1);
+			eprintln!("  w1 packed (first 16): {:02X?}", &sig[..(K * params::POLYW1_PACKEDBYTES).min(16)]);
+			eprintln!("  challenge (first 16): {:02X?}", &sig[..params::C_DASH_BYTES.min(16)]);
+		}
 
 		poly::challenge(&mut cp, sig);
 		poly::ntt(&mut cp);
@@ -196,8 +251,21 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 			continue;
 		}
 
+		// DEBUG POINT 5: Before pack_sig
+		if unsafe { DEBUG_ENABLED } {
+			eprintln!("[RUST DEBUG 5] Before pack_sig");
+			eprintln!("  challenge (first 16): {:02X?}", &sig[..params::C_DASH_BYTES.min(16)]);
+			eprintln!("  z[0] coeffs[0..4]: {:?}", &z.vec[0].coeffs[..4.min(params::N as usize)]);
+			eprintln!("  h[0] coeffs[0..4]: {:?}", &h.vec[0].coeffs[..4.min(params::N as usize)]);
+		}
+
+		// pack_sig: challenge is already in sig[0..C_DASH_BYTES] from shake256_squeeze above
+		// Passing None preserves it (matches C behavior where pack_sig(sig, sig, ...) uses existing challenge)
 		packing::pack_sig(sig, None, &z, &h);
 
+		if unsafe { DEBUG_ENABLED } {
+			eprintln!("[RUST DEBUG 6] After pack_sig - final sig (first 32): {:02X?}", &sig[..sig.len().min(32)]);
+		}
 		return;
 	}
 }
@@ -291,7 +359,7 @@ mod tests {
 		let mut msg = [0u8; MSG_BYTES];
 		crate::random_bytes(&mut msg, MSG_BYTES);
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, &msg, &sk, true);
+		super::signature(&mut sig, &msg, &sk, true, None);
 		assert!(super::verify(&sig, &msg, &pk));
 	}
 
@@ -304,7 +372,7 @@ mod tests {
 		let mut msg = [0u8; MSG_BYTES];
 		crate::random_bytes(&mut msg, MSG_BYTES);
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, &msg, &sk, false);
+		super::signature(&mut sig, &msg, &sk, false, None);
 		assert!(super::verify(&sig, &msg, &pk));
 	}
 
@@ -316,7 +384,7 @@ mod tests {
 
 		let empty_msg: &[u8] = &[];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, empty_msg, &sk, false);
+		super::signature(&mut sig, empty_msg, &sk, false, None);
 		assert!(super::verify(&sig, empty_msg, &pk));
 	}
 
@@ -328,7 +396,7 @@ mod tests {
 
 		let msg = [0x42u8];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, &msg, &sk, false);
+		super::signature(&mut sig, &msg, &sk, false, None);
 		assert!(super::verify(&sig, &msg, &pk));
 	}
 
@@ -340,7 +408,7 @@ mod tests {
 
 		let large_msg = vec![0xABu8; 10000];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, &large_msg, &sk, false);
+		super::signature(&mut sig, &large_msg, &sk, false, None);
 		assert!(super::verify(&sig, &large_msg, &pk));
 	}
 
@@ -354,8 +422,8 @@ mod tests {
 		let mut sig1 = [0u8; crate::params::SIGNBYTES];
 		let mut sig2 = [0u8; crate::params::SIGNBYTES];
 
-		super::signature(&mut sig1, msg, &sk, false);
-		super::signature(&mut sig2, msg, &sk, false);
+		super::signature(&mut sig1, msg, &sk, false, None);
+		super::signature(&mut sig2, msg, &sk, false, None);
 
 		// Deterministic signing should produce identical signatures
 		assert_eq!(sig1, sig2);
@@ -373,8 +441,8 @@ mod tests {
 		let mut sig1 = [0u8; crate::params::SIGNBYTES];
 		let mut sig2 = [0u8; crate::params::SIGNBYTES];
 
-		super::signature(&mut sig1, msg, &sk, true);
-		super::signature(&mut sig2, msg, &sk, true);
+		super::signature(&mut sig1, msg, &sk, true, None);
+		super::signature(&mut sig2, msg, &sk, true, None);
 
 		// Hedged signing should produce different signatures (with high probability)
 		assert_ne!(sig1, sig2);
@@ -392,7 +460,7 @@ mod tests {
 		let msg2 = b"different message";
 		let mut sig = [0u8; crate::params::SIGNBYTES];
 
-		super::signature(&mut sig, msg1, &sk, false);
+		super::signature(&mut sig, msg1, &sk, false, None);
 
 		// Should verify with correct message
 		assert!(super::verify(&sig, msg1, &pk));
@@ -413,7 +481,7 @@ mod tests {
 		let msg = b"test message";
 		let mut sig = [0u8; crate::params::SIGNBYTES];
 
-		super::signature(&mut sig, msg, &sk1, false);
+		super::signature(&mut sig, msg, &sk1, false, None);
 
 		// Should verify with correct key
 		assert!(super::verify(&sig, msg, &pk1));
@@ -429,7 +497,7 @@ mod tests {
 
 		let msg = b"test message";
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, msg, &sk, false);
+		super::signature(&mut sig, msg, &sk, false, None);
 
 		// Original signature should verify
 		assert!(super::verify(&sig, msg, &pk));
@@ -519,7 +587,7 @@ mod tests {
 
 		for msg in &messages {
 			let mut sig = [0u8; crate::params::SIGNBYTES];
-			super::signature(&mut sig, msg, &sk, false);
+			super::signature(&mut sig, msg, &sk, false, None);
 			assert!(
 				super::verify(&sig, msg, &pk),
 				"Failed to verify message: {:?}",

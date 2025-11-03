@@ -180,7 +180,7 @@ impl SecretKey {
 				m[2..2 + x_len].copy_from_slice(x);
 				m[2 + x_len..].copy_from_slice(msg);
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
+				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged, None);
 				sig
 			},
 			None => {
@@ -188,7 +188,7 @@ impl SecretKey {
 				let mut m = vec![0; msg_len + 2];
 				m[2..].copy_from_slice(msg);
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
+				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged, None);
 				sig
 			},
 		}
@@ -242,7 +242,7 @@ impl SecretKey {
 				m[2 + x_len..2 + x_len + 11].copy_from_slice(&oid);
 				m[2 + x_len + 11..].copy_from_slice(phm.as_slice());
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
+				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged, None);
 				Some(sig)
 			},
 			None => {
@@ -252,7 +252,7 @@ impl SecretKey {
 				m[2..2 + 11].copy_from_slice(&oid);
 				m[2 + 11..].copy_from_slice(phm.as_slice());
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
+				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged, None);
 				Some(sig)
 			},
 		}
