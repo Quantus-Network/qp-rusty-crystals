@@ -875,40 +875,159 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_produces_valid_coefficients() {
-		let seed = [0x42u8; params::CRHBYTES];
-		let nonce = 1234;
-		let mut poly = Poly::default();
+		use rand::rngs::StdRng;
+		use rand::{RngCore, SeedableRng};
 
-		uniform_eta(&mut poly, &seed, nonce);
+		let mut rng = StdRng::seed_from_u64(0x123456789ABCDEF0);
+		const NUM_TESTS: usize = 100;
 
-		// All coefficients should be in the range [-ETA, ETA]
-		for i in 0..N {
-			assert!(poly.coeffs[i] >= -(params::ETA as i32));
-			assert!(poly.coeffs[i] <= params::ETA as i32);
+		for test_iteration in 0..NUM_TESTS {
+			let mut seed = [0u8; params::CRHBYTES];
+			rng.fill_bytes(&mut seed);
+			let nonce = rng.next_u32() as u16;
+
+			let mut poly = Poly::default();
+			uniform_eta(&mut poly, &seed, nonce);
+
+			// All coefficients should be in the range [-ETA, ETA]
+			for i in 0..N {
+				assert!(
+					poly.coeffs[i] >= -(params::ETA as i32),
+					"Test {}: Coefficient {} = {} is below -ETA ({})",
+					test_iteration,
+					i,
+					poly.coeffs[i],
+					-(params::ETA as i32)
+				);
+				assert!(
+					poly.coeffs[i] <= params::ETA as i32,
+					"Test {}: Coefficient {} = {} is above ETA ({})",
+					test_iteration,
+					i,
+					poly.coeffs[i],
+					params::ETA as i32
+				);
+			}
 		}
 	}
 
 	#[test]
 	fn test_uniform_eta_different_seeds() {
-		let seed1 = [0x42u8; params::CRHBYTES];
-		let seed2 = [0x43u8; params::CRHBYTES];
-		let nonce = 1000;
+		use rand::rngs::StdRng;
+		use rand::{RngCore, SeedableRng};
 
-		let mut poly1 = Poly::default();
-		let mut poly2 = Poly::default();
+		let mut rng = StdRng::seed_from_u64(0xFEDCBA9876543210);
+		const NUM_TESTS: usize = 50;
 
-		uniform_eta(&mut poly1, &seed1, nonce);
-		uniform_eta(&mut poly2, &seed2, nonce);
+		for test_iteration in 0..NUM_TESTS {
+			// Generate two different random seeds
+			let mut seed1 = [0u8; params::CRHBYTES];
+			let mut seed2 = [0u8; params::CRHBYTES];
+			rng.fill_bytes(&mut seed1);
+			rng.fill_bytes(&mut seed2);
 
-		// Different seeds should produce different polynomials
-		let mut different = false;
-		for i in 0..N {
-			if poly1.coeffs[i] != poly2.coeffs[i] {
-				different = true;
-				break;
+			// Make sure seeds are different
+			if seed1 == seed2 {
+				seed2[0] = seed2[0].wrapping_add(1);
+			}
+
+			let nonce = rng.next_u32() as u16;
+
+			let mut poly1 = Poly::default();
+			let mut poly2 = Poly::default();
+
+			uniform_eta(&mut poly1, &seed1, nonce);
+			uniform_eta(&mut poly2, &seed2, nonce);
+
+			// Different seeds should produce different polynomials
+			let mut different = false;
+			for i in 0..N {
+				if poly1.coeffs[i] != poly2.coeffs[i] {
+					different = true;
+					break;
+				}
+			}
+			assert!(
+				different,
+				"Test {}: Different seeds should produce different polynomials",
+				test_iteration
+			);
+		}
+	}
+
+	#[test]
+	fn test_uniform_eta_deterministic() {
+		use rand::rngs::StdRng;
+		use rand::{RngCore, SeedableRng};
+
+		let mut rng = StdRng::seed_from_u64(0x1122334455667788);
+		const NUM_TESTS: usize = 25;
+
+		for test_iteration in 0..NUM_TESTS {
+			let mut seed = [0u8; params::CRHBYTES];
+			rng.fill_bytes(&mut seed);
+			let nonce = rng.next_u32() as u16;
+
+			// Generate the same polynomial twice with identical inputs
+			let mut poly1 = Poly::default();
+			let mut poly2 = Poly::default();
+
+			uniform_eta(&mut poly1, &seed, nonce);
+			uniform_eta(&mut poly2, &seed, nonce);
+
+			// Should produce identical results
+			for i in 0..N {
+				assert_eq!(
+					poly1.coeffs[i], poly2.coeffs[i],
+					"Test {}: Coefficient {} differs between identical calls: {} vs {}",
+					test_iteration, i, poly1.coeffs[i], poly2.coeffs[i]
+				);
 			}
 		}
-		assert!(different, "Different seeds should produce different polynomials");
+	}
+
+	#[test]
+	fn test_uniform_eta_nonce_variations() {
+		use rand::rngs::StdRng;
+		use rand::{RngCore, SeedableRng};
+
+		let mut rng = StdRng::seed_from_u64(0x9999888877776666);
+		const NUM_TESTS: usize = 30;
+
+		for test_iteration in 0..NUM_TESTS {
+			let mut seed = [0u8; params::CRHBYTES];
+			rng.fill_bytes(&mut seed);
+
+			let nonce1 = rng.next_u32() as u16;
+			let mut nonce2 = rng.next_u32() as u16;
+
+			// Make sure nonces are different
+			if nonce1 == nonce2 {
+				nonce2 = nonce2.wrapping_add(1);
+			}
+
+			let mut poly1 = Poly::default();
+			let mut poly2 = Poly::default();
+
+			uniform_eta(&mut poly1, &seed, nonce1);
+			uniform_eta(&mut poly2, &seed, nonce2);
+
+			// Same seed but different nonces should produce different polynomials
+			let mut different = false;
+			for i in 0..N {
+				if poly1.coeffs[i] != poly2.coeffs[i] {
+					different = true;
+					break;
+				}
+			}
+			assert!(
+				different,
+				"Test {}: Same seed with different nonces should produce different polynomials (nonce1={}, nonce2={})",
+				test_iteration,
+				nonce1,
+				nonce2
+			);
+		}
 	}
 
 	#[test]
