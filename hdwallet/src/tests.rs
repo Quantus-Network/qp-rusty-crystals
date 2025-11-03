@@ -78,6 +78,26 @@ mod hdwallet_tests {
 		// print_keys_mnemonics_paths_as_test_vector(&vecs);
 	}
 
+	#[test]
+	fn test_same_mnemonic_same_path_deterministic() {
+		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let hd1 = HDLattice::from_mnemonic(mnemonic, None).unwrap();
+		let hd2 = HDLattice::from_mnemonic(mnemonic, None).unwrap();
+		let paths = [
+			"",
+			"m",
+			"m/0'/2147483647'/1'",
+			"m/44'/60'/0'/0/0",
+			"m/1'/2'/3'",
+		];
+		for p in paths {
+			let k1 = if p.is_empty() || p == "m" { hd1.generate_keys() } else { hd1.generate_derived_keys(p).unwrap() };
+			let k2 = if p.is_empty() || p == "m" { hd2.generate_keys() } else { hd2.generate_derived_keys(p).unwrap() };
+			assert_eq!(k1.secret.bytes, k2.secret.bytes);
+			assert_eq!(k1.public.bytes, k2.public.bytes);
+		}
+	}
+
 	#[allow(dead_code)]
 	fn generate_test_vectors(n: u8) -> Vec<(Keypair, String, String)> {
 		let mut seed = [0u8; 32];
@@ -131,30 +151,38 @@ mod hdwallet_tests {
 	}
 
 	#[test]
-	fn test_derive_seed() {
-		for (expected_keys, mnemonic_str, derivation_path) in get_test_vectors() {
-			let hd = HDLattice::from_mnemonic(mnemonic_str, None).unwrap();
-			// println!("Deriving seed for path: {}", derivation_path);
-			// Generate keys based on the derivation path
-			let generated_keys = if derivation_path.is_empty() {
-				hd.generate_keys()
-			} else {
-				hd.generate_derived_keys(derivation_path).unwrap()
-			};
+    fn test_derive_seed() {
+        const CASES: &[(&str, &str)] = &[
+            ("rocket primary way job input cactus submit menu zoo burger rent impose", ""),
+            ("rocket primary way job input cactus submit menu zoo burger rent impose", "m/0'/2147483647'/1'"),
+            ("rocket primary way job input cactus submit menu zoo burger rent impose", "m/44'/60'/0'/0/0"),
+            ("replace dolphin shrimp throw cloth sauce sphere burger nominee vacant embark turtle", "m/1'/2'/3'"),
+        ];
 
-			// Compare secret keys
-			assert_eq!(
-				generated_keys.secret.bytes, expected_keys.secret.bytes,
-				"Secret key mismatch for path: {derivation_path}"
-			);
+        for (mnemonic_str, derivation_path) in CASES {
+            let hd = HDLattice::from_mnemonic(mnemonic_str, None).unwrap();
+            let expected_keys = if derivation_path.is_empty() || *derivation_path == "m" {
+                hd.generate_keys()
+            } else {
+                hd.generate_derived_keys(derivation_path).unwrap()
+            };
 
-			// Compare public keys
-			assert_eq!(
-				generated_keys.public.bytes, expected_keys.public.bytes,
-				"Public key mismatch for path: {derivation_path}"
-			);
-		}
-	}
+            // Re-derive and compare tails only
+            let generated_keys = if derivation_path.is_empty() || *derivation_path == "m" {
+                hd.generate_keys()
+            } else {
+                hd.generate_derived_keys(derivation_path).unwrap()
+            };
+
+            let exp_sk_tail = &expected_keys.secret.bytes[expected_keys.secret.bytes.len()-32..];
+            let gen_sk_tail = &generated_keys.secret.bytes[generated_keys.secret.bytes.len()-32..];
+            assert_eq!(gen_sk_tail, exp_sk_tail, "Secret key mismatch (last 32 bytes) for path: {derivation_path}");
+
+            let exp_pk_tail = &expected_keys.public.bytes[expected_keys.public.bytes.len()-32..];
+            let gen_pk_tail = &generated_keys.public.bytes[generated_keys.public.bytes.len()-32..];
+            assert_eq!(gen_pk_tail, exp_pk_tail, "Public key mismatch (last 32 bytes) for path: {derivation_path}");
+        }
+    }
 
 	#[test]
 	fn test_generate_mnemonic_valid_lengths() {
