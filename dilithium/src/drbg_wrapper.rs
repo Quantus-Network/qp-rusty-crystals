@@ -159,9 +159,14 @@ pub fn randombytes(x: &mut [u8], xlen: usize) -> Result<(), ()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
+
+    static TEST_DRBG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 	#[test]
 	fn test_drbg_deterministic() {
+        let _g = TEST_DRBG_LOCK.lock().unwrap();
 		let seed = [0x42u8; 48];
 
 		// Initialize twice with same seed
