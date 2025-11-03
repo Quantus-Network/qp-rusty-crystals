@@ -235,9 +235,8 @@ fn main() {
             eprintln!("\n=== Processing count 0 ===");
             std::env::set_var("RUST_DEBUG_SIG", "1");
         }
-        let mut m_reversed: Vec<u8> = m.iter().rev().copied().collect();
         let mut sig = vec![0u8; params::SIGNBYTES];
-        signature(&mut sig, &m_reversed, &sk_gen, true, None);
+        signature(&mut sig, &m, &sk_gen, true, None);
         if count == 0 {
             std::env::remove_var("RUST_DEBUG_SIG");
         }
