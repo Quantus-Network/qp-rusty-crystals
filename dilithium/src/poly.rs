@@ -419,6 +419,7 @@ pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
 		let upper_nibble = (buf[pos] >> 4) as u32;
 
 		// Compute all arithmetic operations upfront to avoid data-dependent timing
+		// the following operations are a fast way to do % 5 (205 ~= 1024/5)
 		let reduced_lower = lower_nibble - (205 * lower_nibble >> 10) * 5;
 		let reduced_upper = upper_nibble - (205 * upper_nibble >> 10) * 5;
 		let coeff_lower = 2 - reduced_lower as i32;
