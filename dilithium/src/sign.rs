@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 	const SEEDBUF_LEN: usize = 2 * params::SEEDBYTES + params::CRHBYTES;
 	let mut seedbuf = [0u8; SEEDBUF_LEN];
-	
+
 	match seed {
 		Some(x) => {
 			seedbuf[..params::SEEDBYTES].copy_from_slice(x);
@@ -31,7 +31,7 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 			crate::random_bytes(&mut seedbuf[..params::SEEDBYTES], params::SEEDBYTES);
 		},
 	}
-	
+
 	seedbuf[params::SEEDBYTES + 0] = params::K as u8;
 	seedbuf[params::SEEDBYTES + 1] = params::L as u8;
 	let input_len = params::SEEDBYTES + 2;
@@ -116,13 +116,13 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut keymu[params::SEEDBYTES..], params::CRHBYTES, &mut state);
 
-    let mut rnd_bytes = [0u8; params::SEEDBYTES];
-    if hedged {
-        #[cfg(not(feature = "std"))]
-        unimplemented!("hedged mode requires std feature");
-        #[cfg(feature = "std")]
-        crate::random_bytes(&mut rnd_bytes, params::SEEDBYTES);
-    }
+	let mut rnd_bytes = [0u8; params::SEEDBYTES];
+	if hedged {
+		#[cfg(not(feature = "std"))]
+		unimplemented!("hedged mode requires std feature");
+		#[cfg(feature = "std")]
+		crate::random_bytes(&mut rnd_bytes, params::SEEDBYTES);
+	}
 	state.init();
 	fips202::shake256_absorb(&mut state, &keymu[..params::SEEDBYTES], params::SEEDBYTES);
 	fips202::shake256_absorb(&mut state, &rnd_bytes, params::SEEDBYTES);
