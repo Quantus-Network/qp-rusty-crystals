@@ -408,7 +408,7 @@ fn test_uniform_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 		runner.run_one(class, || {
 			let mut poly = qp_rusty_crystals_dilithium::poly::Poly::default();
-			qp_rusty_crystals_dilithium::poly::lvl5::uniform_eta(&mut poly, &seed, 0);
+			qp_rusty_crystals_dilithium::poly::uniform_eta(&mut poly, &seed, 0);
 		});
 	}
 }
@@ -448,7 +448,7 @@ fn test_rej_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 		runner.run_one(class, || {
 			let mut coeffs = [0i32; 256];
-			let _count = qp_rusty_crystals_dilithium::poly::lvl5::rej_eta(
+			let _count = qp_rusty_crystals_dilithium::poly::rej_eta(
 				&mut coeffs,
 				256,
 				&buffer,
@@ -486,7 +486,7 @@ fn test_uniform_eta_nonce_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 		runner.run_one(class, || {
 			let mut poly = qp_rusty_crystals_dilithium::poly::Poly::default();
-			qp_rusty_crystals_dilithium::poly::lvl5::uniform_eta(&mut poly, &seed, nonce);
+			qp_rusty_crystals_dilithium::poly::uniform_eta(&mut poly, &seed, nonce);
 		});
 	}
 }
