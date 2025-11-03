@@ -4,17 +4,14 @@
 use aes::cipher::{BlockEncrypt, KeyInit};
 use aes::{Aes256, Block};
 
-/// DRBG context matching C implementation's AES256_CTR_DRBG_struct
 struct DrbgCtx {
     key: [u8; 32],
     v: [u8; 16],
     reseed_counter: u64,
 }
 
-/// Global DRBG context (matching C implementation's global state)
 static mut DRBG_CTX: Option<DrbgCtx> = None;
 
-/// Increment a 16-byte counter in big-endian order (matching C implementation)
 fn increment_counter(counter: &mut [u8; 16]) {
     for j in (0..16).rev() {
         if counter[j] == 0xff {
@@ -26,7 +23,6 @@ fn increment_counter(counter: &mut [u8; 16]) {
     }
 }
 
-/// AES256-ECB encryption (matching C AES256_ECB function)
 fn aes256_ecb(key: &[u8; 32], input: &[u8; 16], output: &mut [u8; 16]) {
     let cipher = Aes256::new_from_slice(key).unwrap();
     let mut block = *Block::from_slice(input);
@@ -34,7 +30,6 @@ fn aes256_ecb(key: &[u8; 32], input: &[u8; 16], output: &mut [u8; 16]) {
     output.copy_from_slice(block.as_slice());
 }
 
-/// AES256_CTR_DRBG_Update function (matching C implementation exactly)
 fn aes256_ctr_drbg_update(provided_data: Option<&[u8; 48]>, key: &mut [u8; 32], v: &mut [u8; 16]) {
     let mut temp = [0u8; 48];
     
