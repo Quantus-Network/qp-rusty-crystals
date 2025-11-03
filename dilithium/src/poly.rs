@@ -995,11 +995,11 @@ mod tests {
 		];
 		let result = rej_eta(&mut output, 20, &buffer, 4);
 
-		// Should accept 6 coefficients (all except nibbles 15)
-		assert_eq!(result, 6);
+		// Should accept 8 coefficients (all are < 15)
+		assert_eq!(result, 8);
 
 		// Manually verify the reduction formula for each nibble
-		let nibbles = [4u32, 5u32, 8u32, 9u32, 12u32, 13u32];
+		let nibbles = [4u32, 5u32, 8u32, 9u32, 12u32, 13u32, 14u32, 14u32];
 		for (i, &nibble) in nibbles.iter().enumerate() {
 			let reduced = nibble - (205 * nibble >> 10) * 5;
 			let expected_coeff = 2 - reduced as i32;
@@ -1027,11 +1027,12 @@ mod tests {
 		let mut output = [0i32; 20];
 		// Create buffer with all possible valid nibbles (0-14)
 		let buffer = [
-			0x10u8, 0x32u8, 0x54u8, 0x76u8, 0x98u8, 0xBAu8, 0xDCu8, 0xEEu8, // up to nibble 14
+			0x10u8, 0x32u8, 0x54u8, 0x76u8, 0x98u8, 0xBAu8, 0xDCu8,
+			0xEEu8, // nibbles: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,14
 		];
 		let result = rej_eta(&mut output, 20, &buffer, 8);
 
-		assert_eq!(result, 15); // Should accept 15 coefficients (nibbles 0-14, twice for some)
+		assert_eq!(result, 16); // Should accept 16 coefficients (all nibbles are < 15)
 
 		// Verify all coefficients are in expected range [-2, 2]
 		for i in 0..result {
