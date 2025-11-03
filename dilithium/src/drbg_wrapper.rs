@@ -1,6 +1,7 @@
 //! Wrapper for DRBG (Deterministic Random Bit Generator) to match C reference implementation
 //! Implements the exact same AES256_CTR_DRBG as the C reference code
 
+use crate::errors::DrbgError;
 use aes::{
 	cipher::{BlockEncrypt, KeyInit},
 	Aes256, Block,
@@ -76,11 +77,11 @@ pub fn randombytes_init(
 	entropy_input: &[u8],
 	personalization_string: Option<&[u8]>,
 	_security_strength: u32,
-) -> Result<(), ()> {
+) -> Result<(), DrbgError> {
 	#[cfg(test)]
 	let _g = DRBG_LOCK.lock().unwrap();
 	if entropy_input.len() != 48 {
-		return Err(());
+		return Err(DrbgError::InvalidEntropyLength);
 	}
 
 	let mut seed_material = [0u8; 48];
@@ -119,7 +120,7 @@ pub fn randombytes_init(
 /// * `xlen` - Number of bytes to generate
 ///
 /// This matches the C function: `randombytes(x, xlen)`
-pub fn randombytes(x: &mut [u8], xlen: usize) -> Result<(), ()> {
+pub fn randombytes(x: &mut [u8], xlen: usize) -> Result<(), DrbgError> {
 	#[cfg(test)]
 	let _g = DRBG_LOCK.lock().unwrap();
 	unsafe {
@@ -151,7 +152,7 @@ pub fn randombytes(x: &mut [u8], xlen: usize) -> Result<(), ()> {
 
 			Ok(())
 		} else {
-			Err(())
+			Err(DrbgError::NotInitialized)
 		}
 	}
 }

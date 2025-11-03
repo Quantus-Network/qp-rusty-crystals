@@ -13,7 +13,7 @@ mod hdwallet_tests {
 	use crate::{
 		generate_mnemonic,
 		test_vectors::{
-			get_test_vectors, load_known_private_keys, str_to_32_bytes, str_to_64_bytes,
+			load_known_private_keys, str_to_32_bytes, str_to_64_bytes,
 		},
 		HDLattice, HDLatticeError,
 	};

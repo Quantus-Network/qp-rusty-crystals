@@ -24,3 +24,26 @@ impl std::error::Error for KeyParsingError {
 		None
 	}
 }
+
+#[derive(Debug)]
+pub enum DrbgError {
+	InvalidEntropyLength,
+	NotInitialized,
+}
+
+impl Display for DrbgError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let str = match self {
+			DrbgError::InvalidEntropyLength => "InvalidEntropyLength",
+			DrbgError::NotInitialized => "NotInitialized",
+		};
+		write!(f, "{str}")
+	}
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for DrbgError {
+	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+		None
+	}
+}
