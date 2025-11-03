@@ -19,31 +19,26 @@ use alloc::boxed::Box;
 pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 	const SEEDBUF_LEN: usize = 2 * params::SEEDBYTES + params::CRHBYTES;
 	let mut seedbuf = [0u8; SEEDBUF_LEN];
-
-	match seed {
-		Some(x) => {
-			if x.len() == params::SEEDBYTES {
-				seedbuf[..params::SEEDBYTES].copy_from_slice(x);
-			} else {
-				let mut tmp = [0u8; params::SEEDBYTES];
-				fips202::shake256(&mut tmp, params::SEEDBYTES, x, x.len());
-				seedbuf[..params::SEEDBYTES].copy_from_slice(&tmp);
-			}
-		},
-		None => {
-			#[cfg(not(feature = "std"))]
-			unimplemented!("must provide entropy in verifier only mode");
-			#[cfg(feature = "std")]
-			crate::random_bytes(&mut seedbuf[..params::SEEDBYTES], params::SEEDBYTES);
-		},
-	}
-
-	seedbuf[params::SEEDBYTES + 0] = params::K as u8;
-	seedbuf[params::SEEDBYTES + 1] = params::L as u8;
-	let input_len = params::SEEDBYTES + 2;
-	let mut input_buf = [0u8; 2 * params::SEEDBYTES + 2];
-	input_buf[..input_len].copy_from_slice(&seedbuf[..input_len]);
-	fips202::shake256(&mut seedbuf, SEEDBUF_LEN, &input_buf[..input_len], input_len);
+    // Build preimage = seed || K || L (accept any seed length when provided)
+    let mut preimage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    match seed {
+        Some(x) => {
+            preimage.extend_from_slice(x);
+        },
+        None => {
+            #[cfg(not(feature = "std"))]
+            unimplemented!("must provide entropy in verifier only mode");
+            #[cfg(feature = "std")]
+            {
+                let mut rnd = [0u8; params::SEEDBYTES];
+                crate::random_bytes(&mut rnd, params::SEEDBYTES);
+                preimage.extend_from_slice(&rnd);
+            }
+        },
+    }
+    preimage.push(params::K as u8);
+    preimage.push(params::L as u8);
+    fips202::shake256(&mut seedbuf, SEEDBUF_LEN, &preimage, preimage.len());
 
 	let mut rho = [0u8; params::SEEDBYTES];
 	rho.copy_from_slice(&seedbuf[..params::SEEDBYTES]);
