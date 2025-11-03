@@ -7,8 +7,7 @@ use crate::{
 const K: usize = params::K;
 const L: usize = params::L;
 
-extern crate alloc; // this makes Vec work
-use alloc::vec::Vec;
+extern crate alloc;
 /// Generate public and private key.
 ///
 /// # Arguments
@@ -243,10 +242,12 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 		return false;
 	}
 
-	// Compute CRH(CRH(rho, t1), msg)
-	fips202::shake256(&mut mu, params::CRHBYTES, pk, crate::params::PUBLICKEYBYTES);
-	fips202::shake256_absorb(&mut state, &mu, params::CRHBYTES);
-	fips202::shake256_absorb(&mut state, m, m.len());
+    // Compute CRH(H(rho, t1), pre, msg) with pre=(0,0)
+    fips202::shake256(&mut mu, params::CRHBYTES, pk, crate::params::PUBLICKEYBYTES);
+    fips202::shake256_absorb(&mut state, &mu, params::CRHBYTES);
+    let pre = [0u8, 0u8];
+    fips202::shake256_absorb(&mut state, &pre, 2);
+    fips202::shake256_absorb(&mut state, m, m.len());
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut mu, params::CRHBYTES, &mut state);
 
