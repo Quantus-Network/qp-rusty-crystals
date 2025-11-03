@@ -184,11 +184,8 @@ impl SecretKey {
 				sig
 			},
 			None => {
-				let msg_len = msg.len();
-				let mut m = vec![0; msg_len + 2];
-				m[2..].copy_from_slice(msg);
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
+				crate::sign::signature(&mut sig, msg, &self.bytes, hedged);
 				sig
 			},
 		}
@@ -312,10 +309,7 @@ impl PublicKey {
 				crate::sign::verify(sig, m.as_slice(), &self.bytes)
 			},
 			None => {
-				let msg_len = msg.len();
-				let mut m = vec![0; msg_len + 2];
-				m[2..].copy_from_slice(msg);
-				crate::sign::verify(sig, m.as_slice(), &self.bytes)
+				crate::sign::verify(sig, msg, &self.bytes)
 			},
 		}
 	}
