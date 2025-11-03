@@ -6,6 +6,11 @@ use aes::{
 	Aes256, Block,
 };
 
+#[cfg(test)]
+use once_cell::sync::Lazy;
+#[cfg(test)]
+use std::sync::Mutex;
+
 struct DrbgCtx {
 	key: [u8; 32],
 	v: [u8; 16],
@@ -13,6 +18,9 @@ struct DrbgCtx {
 }
 
 static mut DRBG_CTX: Option<DrbgCtx> = None;
+
+#[cfg(test)]
+static DRBG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn increment_counter(counter: &mut [u8; 16]) {
 	for j in (0..16).rev() {
@@ -69,6 +77,8 @@ pub fn randombytes_init(
 	personalization_string: Option<&[u8]>,
 	_security_strength: u32,
 ) -> Result<(), ()> {
+    #[cfg(test)]
+    let _g = DRBG_LOCK.lock().unwrap();
 	if entropy_input.len() != 48 {
 		return Err(());
 	}
@@ -76,7 +86,7 @@ pub fn randombytes_init(
 	let mut seed_material = [0u8; 48];
 	seed_material.copy_from_slice(entropy_input);
 
-	// XOR with personalization string if provided (matching C implementation)
+	// XOR with personalization string if provided
 	if let Some(pers) = personalization_string {
 		if pers.len() == 48 {
 			for i in 0..48 {
@@ -85,8 +95,9 @@ pub fn randombytes_init(
 		}
 	}
 
-	// Initialize DRBG context (matching C implementation)
+	// Initialize DRBG context
 	unsafe {
+        DRBG_CTX = None;
 		let mut key = [0u8; 32];
 		let mut v = [0u8; 16];
 		key.fill(0x00);
@@ -109,6 +120,8 @@ pub fn randombytes_init(
 ///
 /// This matches the C function: `randombytes(x, xlen)`
 pub fn randombytes(x: &mut [u8], xlen: usize) -> Result<(), ()> {
+    #[cfg(test)]
+    let _g = DRBG_LOCK.lock().unwrap();
 	unsafe {
 		if let Some(ref mut ctx) = DRBG_CTX {
 			let mut i = 0;
@@ -132,7 +145,7 @@ pub fn randombytes(x: &mut [u8], xlen: usize) -> Result<(), ()> {
 				}
 			}
 
-			// Update DRBG state (matching C implementation)
+			// Update DRBG state
 			aes256_ctr_drbg_update(None, &mut ctx.key, &mut ctx.v);
 			ctx.reseed_counter += 1;
 

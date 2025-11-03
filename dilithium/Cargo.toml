@@ -36,6 +36,7 @@ cipher = "0.4"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
+once_cell = "1.19"
 
 [[bench]]
 name = "dilithium_benchmarks"
