@@ -91,21 +91,7 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 ///           This allows deterministic signing for KAT testing when combined with seeded RNG.
 ///
 /// Note signature depends on std because k_decompose depends on swap which depends on std
-pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool, rnd: Option<&[u8]>) {
-	// DEBUG: Only print for first test case (controlled by environment or caller)
-	static mut DEBUG_ENABLED: bool = false;
-	unsafe {
-		DEBUG_ENABLED = std::env::var("RUST_DEBUG_SIG").is_ok();
-	}
-	
-	// DEBUG POINT 1: Print input parameters
-	if unsafe { DEBUG_ENABLED } {
-		eprintln!("[RUST DEBUG 1] signature() called");
-		eprintln!("  msg len: {}, first 16 bytes: {:02X?}", msg.len(), &msg[..msg.len().min(16)]);
-		eprintln!("  sk len: {}, first 16 bytes: {:02X?}", sk.len(), &sk[..sk.len().min(16)]);
-		eprintln!("  hedged: {}, rnd: {:?}", hedged, rnd.map(|r| &r[..r.len().min(16)]));
-	}
-	
+pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool, rnd: Option<&[u8]>) {		
 	let mut rho = [0u8; params::SEEDBYTES];
 	let mut tr = [0u8; params::TR_BYTES];
 	let mut keymu = [0u8; params::SEEDBYTES + params::CRHBYTES];
@@ -132,24 +118,15 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool, rnd: Optio
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut keymu[params::SEEDBYTES..], params::CRHBYTES, &mut state);
 
-	// DEBUG POINT 2: After computing mu
-	if unsafe { DEBUG_ENABLED } {
-		eprintln!("[RUST DEBUG 2] After computing mu");
-		eprintln!("  tr (first 16): {:02X?}", &tr[..tr.len().min(16)]);
-		eprintln!("  mu (first 16): {:02X?}", &keymu[params::SEEDBYTES..params::SEEDBYTES + params::CRHBYTES.min(16)]);
-	}
-
 	#[allow(unused_mut)]
 	let mut rnd_bytes = [0u8; params::SEEDBYTES];
 	match rnd {
 		Some(provided_rnd) => {
-			// Use provided random bytes (for deterministic signing/KAT testing)
 			if provided_rnd.len() >= params::SEEDBYTES {
 				rnd_bytes.copy_from_slice(&provided_rnd[..params::SEEDBYTES]);
 			}
 		},
 		None => {
-			// Only call randombytes in hedged mode (matching C DILITHIUM_RANDOMIZED_SIGNING behavior)
 			if hedged {
 				#[cfg(not(feature = "std"))]
 				unimplemented!("hedged mode requires std feature");
@@ -165,14 +142,6 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool, rnd: Optio
 	fips202::shake256_finalize(&mut state);
 	let mut rhoprime = [0u8; params::CRHBYTES];
 	fips202::shake256_squeeze(&mut rhoprime, params::CRHBYTES, &mut state);
-
-	// DEBUG POINT 3: After computing rhoprime
-	if unsafe { DEBUG_ENABLED } {
-		eprintln!("[RUST DEBUG 3] After computing rhoprime");
-		eprintln!("  key (first 16): {:02X?}", &keymu[..params::SEEDBYTES.min(16)]);
-		eprintln!("  rnd_bytes (first 16): {:02X?}", &rnd_bytes[..rnd_bytes.len().min(16)]);
-		eprintln!("  rhoprime (first 16): {:02X?}", &rhoprime[..rhoprime.len().min(16)]);
-	}
 
 	// Move large polynomial structures to heap to reduce stack usage
 	let mut mat = Box::new([Polyvecl::default(); K]);
@@ -206,13 +175,6 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool, rnd: Optio
 		fips202::shake256_absorb(&mut state, sig, K * params::POLYW1_PACKEDBYTES);
 		fips202::shake256_finalize(&mut state);
 		fips202::shake256_squeeze(sig, params::C_DASH_BYTES, &mut state);
-
-		// DEBUG POINT 4: After computing challenge
-		if unsafe { DEBUG_ENABLED } {
-			eprintln!("[RUST DEBUG 4] After computing challenge (nonce: {})", nonce - 1);
-			eprintln!("  w1 packed (first 16): {:02X?}", &sig[..(K * params::POLYW1_PACKEDBYTES).min(16)]);
-			eprintln!("  challenge (first 16): {:02X?}", &sig[..params::C_DASH_BYTES.min(16)]);
-		}
 
 		poly::challenge(&mut cp, sig);
 		poly::ntt(&mut cp);
@@ -251,21 +213,8 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool, rnd: Optio
 			continue;
 		}
 
-		// DEBUG POINT 5: Before pack_sig
-		if unsafe { DEBUG_ENABLED } {
-			eprintln!("[RUST DEBUG 5] Before pack_sig");
-			eprintln!("  challenge (first 16): {:02X?}", &sig[..params::C_DASH_BYTES.min(16)]);
-			eprintln!("  z[0] coeffs[0..4]: {:?}", &z.vec[0].coeffs[..4.min(params::N as usize)]);
-			eprintln!("  h[0] coeffs[0..4]: {:?}", &h.vec[0].coeffs[..4.min(params::N as usize)]);
-		}
-
-		// pack_sig: challenge is already in sig[0..C_DASH_BYTES] from shake256_squeeze above
-		// Passing None preserves it (matches C behavior where pack_sig(sig, sig, ...) uses existing challenge)
 		packing::pack_sig(sig, None, &z, &h);
 
-		if unsafe { DEBUG_ENABLED } {
-			eprintln!("[RUST DEBUG 6] After pack_sig - final sig (first 32): {:02X?}", &sig[..sig.len().min(32)]);
-		}
 		return;
 	}
 }

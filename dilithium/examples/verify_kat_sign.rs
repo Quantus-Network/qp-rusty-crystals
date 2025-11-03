@@ -228,18 +228,8 @@ fn main() {
             process::exit(1);
         }
         
-        // Generate signature (signature function only fills the signature part)
-        // Note: C crypto_sign places message in reverse order before signing
-        // So we need to reverse the message to match
-        if count == 0 {
-            eprintln!("\n=== Processing count 0 ===");
-            std::env::set_var("RUST_DEBUG_SIG", "1");
-        }
         let mut sig = vec![0u8; params::SIGNBYTES];
         signature(&mut sig, &m, &sk_gen, true, None);
-        if count == 0 {
-            std::env::remove_var("RUST_DEBUG_SIG");
-        }
         
         // Construct signed message: [signature, message] (matching C crypto_sign)
         // C code places message in reverse: sm[CRYPTO_BYTES + mlen - 1 - i] = m[mlen - 1 - i]
