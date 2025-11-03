@@ -6,10 +6,7 @@ use aes::{
 	cipher::{BlockEncrypt, KeyInit},
 	Aes256, Block,
 };
-
-#[cfg(test)]
 use once_cell::sync::Lazy;
-#[cfg(test)]
 use std::sync::Mutex;
 
 struct DrbgCtx {
@@ -18,10 +15,7 @@ struct DrbgCtx {
 	reseed_counter: u64,
 }
 
-static mut DRBG_CTX: Option<DrbgCtx> = None;
-
-#[cfg(test)]
-static DRBG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static DRBG_CTX: Lazy<Mutex<Option<DrbgCtx>>> = Lazy::new(|| Mutex::new(None));
 
 fn increment_counter(counter: &mut [u8; 16]) {
 	for j in (0..16).rev() {
@@ -78,8 +72,6 @@ pub fn randombytes_init(
 	personalization_string: Option<&[u8]>,
 	_security_strength: u32,
 ) -> Result<(), DrbgError> {
-	#[cfg(test)]
-	let _g = DRBG_LOCK.lock().unwrap();
 	if entropy_input.len() != 48 {
 		return Err(DrbgError::InvalidEntropyLength);
 	}
@@ -87,7 +79,6 @@ pub fn randombytes_init(
 	let mut seed_material = [0u8; 48];
 	seed_material.copy_from_slice(entropy_input);
 
-	// XOR with personalization string if provided
 	if let Some(pers) = personalization_string {
 		if pers.len() == 48 {
 			for i in 0..48 {
@@ -96,19 +87,15 @@ pub fn randombytes_init(
 		}
 	}
 
-	// Initialize DRBG context
-	unsafe {
-		DRBG_CTX = None;
-		let mut key = [0u8; 32];
-		let mut v = [0u8; 16];
-		key.fill(0x00);
-		v.fill(0x00);
+	let mut key = [0u8; 32];
+	let mut v = [0u8; 16];
+	key.fill(0x00);
+	v.fill(0x00);
 
-		// Call AES256_CTR_DRBG_Update with seed_material
-		aes256_ctr_drbg_update(Some(&seed_material), &mut key, &mut v);
+	aes256_ctr_drbg_update(Some(&seed_material), &mut key, &mut v);
 
-		DRBG_CTX = Some(DrbgCtx { key, v, reseed_counter: 1 });
-	}
+	let mut ctx_guard = DRBG_CTX.lock().unwrap();
+	*ctx_guard = Some(DrbgCtx { key, v, reseed_counter: 1 });
 
 	Ok(())
 }
@@ -121,56 +108,45 @@ pub fn randombytes_init(
 ///
 /// This matches the C function: `randombytes(x, xlen)`
 pub fn randombytes(x: &mut [u8], xlen: usize) -> Result<(), DrbgError> {
-	#[cfg(test)]
-	let _g = DRBG_LOCK.lock().unwrap();
-	unsafe {
-		if let Some(ref mut ctx) = DRBG_CTX {
-			let mut i = 0;
-			let mut remaining = xlen;
+	let mut ctx_guard = DRBG_CTX.lock().unwrap();
+	let ctx = match ctx_guard.as_mut() {
+		Some(ctx) => ctx,
+		None => return Err(DrbgError::NotInitialized),
+	};
 
-			while remaining > 0 {
-				// Increment V
-				increment_counter(&mut ctx.v);
+	let mut i = 0;
+	let mut remaining = xlen;
 
-				// Encrypt V to get block
-				let mut block = [0u8; 16];
-				aes256_ecb(&ctx.key, &ctx.v, &mut block);
+	while remaining > 0 {
+		increment_counter(&mut ctx.v);
 
-				if remaining > 15 {
-					x[i..i + 16].copy_from_slice(&block);
-					i += 16;
-					remaining -= 16;
-				} else {
-					x[i..i + remaining].copy_from_slice(&block[..remaining]);
-					remaining = 0;
-				}
-			}
+		let mut block = [0u8; 16];
+		aes256_ecb(&ctx.key, &ctx.v, &mut block);
 
-			// Update DRBG state
-			aes256_ctr_drbg_update(None, &mut ctx.key, &mut ctx.v);
-			ctx.reseed_counter += 1;
-
-			Ok(())
+		if remaining > 15 {
+			x[i..i + 16].copy_from_slice(&block);
+			i += 16;
+			remaining -= 16;
 		} else {
-			Err(DrbgError::NotInitialized)
+			x[i..i + remaining].copy_from_slice(&block[..remaining]);
+			remaining = 0;
 		}
 	}
+
+	aes256_ctr_drbg_update(None, &mut ctx.key, &mut ctx.v);
+	ctx.reseed_counter += 1;
+
+	Ok(())
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use once_cell::sync::Lazy;
-	use std::sync::Mutex;
-
-	static TEST_DRBG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 	#[test]
 	fn test_drbg_deterministic() {
-		let _g = TEST_DRBG_LOCK.lock().unwrap();
 		let seed = [0x42u8; 48];
 
-		// Initialize twice with same seed
 		randombytes_init(&seed, None, 256).unwrap();
 		let mut bytes1 = [0u8; 32];
 		randombytes(&mut bytes1, 32).unwrap();
@@ -179,7 +155,6 @@ mod tests {
 		let mut bytes2 = [0u8; 32];
 		randombytes(&mut bytes2, 32).unwrap();
 
-		// Should produce same output
 		assert_eq!(bytes1, bytes2);
 	}
 }
