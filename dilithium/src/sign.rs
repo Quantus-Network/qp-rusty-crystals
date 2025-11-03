@@ -8,6 +8,7 @@ const K: usize = params::K;
 const L: usize = params::L;
 
 extern crate alloc;
+use alloc::boxed::Box;
 /// Generate public and private key.
 ///
 /// # Arguments
@@ -21,7 +22,13 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 
 	match seed {
 		Some(x) => {
-			seedbuf[..params::SEEDBYTES].copy_from_slice(x);
+			if x.len() == params::SEEDBYTES {
+				seedbuf[..params::SEEDBYTES].copy_from_slice(x);
+			} else {
+				let mut tmp = [0u8; params::SEEDBYTES];
+				fips202::shake256(&mut tmp, params::SEEDBYTES, x, x.len());
+				seedbuf[..params::SEEDBYTES].copy_from_slice(&tmp);
+			}
 		},
 		None => {
 			#[cfg(not(feature = "std"))]
