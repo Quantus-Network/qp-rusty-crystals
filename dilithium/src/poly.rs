@@ -1,4 +1,5 @@
 use crate::{fips202, ntt, params, reduce, rounding};
+use subtle::{Choice, ConditionallySelectable};
 const N: usize = params::N as usize;
 const UNIFORM_NBLOCKS: usize = (767 + fips202::SHAKE128_RATE) / fips202::SHAKE128_RATE;
 const D_SHL: i32 = 1 << (params::D - 1);
@@ -410,23 +411,50 @@ pub fn use_hint_ip(a: &mut Poly, hint: &Poly) {
 /// given
 pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
 	let mut ctr = 0usize;
-	let mut pos = 0usize;
-	while ctr < alen && pos < buflen {
-		let mut t0 = (buf[pos] & 0x0F) as u32;
-		let mut t1 = (buf[pos] >> 4) as u32;
-		pos += 1;
+	let mut dummy_value = 0i32; // For dummy writes
 
-		if t0 < 15 {
-			t0 = t0 - (205 * t0 >> 10) * 5;
-			a[ctr] = 2 - t0 as i32;
-			ctr += 1;
+	// Always process exactly buflen bytes
+	for pos in 0..buflen {
+		let lower_nibble = (buf[pos] & 0x0F) as u32;
+		let upper_nibble = (buf[pos] >> 4) as u32;
+
+		// Compute all arithmetic operations upfront to avoid data-dependent timing
+		let reduced_lower = lower_nibble - (205 * lower_nibble >> 10) * 5;
+		let reduced_upper = upper_nibble - (205 * upper_nibble >> 10) * 5;
+		let coeff_lower = 2 - reduced_lower as i32;
+		let coeff_upper = 2 - reduced_upper as i32;
+
+		// Nibbles valid?
+		let valid_lower = Choice::from((lower_nibble < 15) as u8);
+		let valid_upper = Choice::from((upper_nibble < 15) as u8);
+
+		let has_space_lower = Choice::from((ctr < alen) as u8);
+		let store_lower = valid_lower & has_space_lower;
+
+		// Constant-time-ish conditional assignment
+		// Write to output or dummy location based on condition
+		if ctr < a.len() {
+			a[ctr] = i32::conditional_select(&a[ctr], &coeff_lower, store_lower);
+		} else {
+			dummy_value = i32::conditional_select(&coeff_lower, &dummy_value, store_lower);
 		}
-		if t1 < 15 && ctr < alen {
-			t1 = t1 - (205 * t1 >> 10) * 5;
-			a[ctr] = 2 - t1 as i32;
-			ctr += 1;
+		ctr += store_lower.unwrap_u8() as usize;
+
+		let has_space_upper = Choice::from((ctr < alen) as u8);
+		let store_upper = valid_upper & has_space_upper;
+
+		// Constant-time-ish conditional assignment
+		// Write to output or dummy location based on condition
+		if ctr < a.len() {
+			a[ctr] = i32::conditional_select(&a[ctr], &coeff_upper, store_upper);
+		} else {
+			dummy_value = i32::conditional_select(&coeff_upper, &dummy_value, store_upper);
 		}
+		ctr += store_upper.unwrap_u8() as usize;
 	}
+
+	// Prevent compiler from optimizing away dummy_value
+	core::hint::black_box(dummy_value);
 	ctr
 }
 
@@ -859,6 +887,161 @@ mod tests {
 			}
 		}
 		assert!(different, "Different seeds should produce different polynomials");
+	}
+
+	#[test]
+	fn test_rej_eta_empty_buffer() {
+		let mut output = [0i32; 10];
+		let buffer = [];
+		let result = rej_eta(&mut output, 5, &buffer, 0);
+		assert_eq!(result, 0);
+		// All coefficients should remain unchanged (zero)
+		for coeff in &output {
+			assert_eq!(*coeff, 0);
+		}
+	}
+
+	#[test]
+	fn test_rej_eta_all_invalid_nibbles() {
+		let mut output = [0i32; 10];
+		// Create buffer with all nibbles = 15 (invalid)
+		let buffer = [0xFFu8; 4]; // 8 nibbles, all invalid
+		let result = rej_eta(&mut output, 10, &buffer, 4);
+		assert_eq!(result, 0);
+		// All coefficients should remain unchanged (zero)
+		for coeff in &output {
+			assert_eq!(*coeff, 0);
+		}
+	}
+
+	#[test]
+	fn test_rej_eta_all_valid_nibbles() {
+		let mut output = [0i32; 10];
+		// Create buffer with all nibbles < 15
+		let buffer = [0x00u8, 0x11u8, 0x22u8, 0x33u8]; // nibbles: 0,0,1,1,2,2,3,3
+		let result = rej_eta(&mut output, 10, &buffer, 4);
+
+		// Should accept all 8 coefficients
+		assert_eq!(result, 8);
+
+		// Verify coefficient values using the reduction formula
+		// For nibble n: reduced = n - (205 * n >> 10) * 5, coeff = 2 - reduced
+		let expected = [
+			2 - (0 - (205 * 0 >> 10) * 5), // nibble 0
+			2 - (0 - (205 * 0 >> 10) * 5), // nibble 0
+			2 - (1 - (205 * 1 >> 10) * 5), // nibble 1
+			2 - (1 - (205 * 1 >> 10) * 5), // nibble 1
+			2 - (2 - (205 * 2 >> 10) * 5), // nibble 2
+			2 - (2 - (205 * 2 >> 10) * 5), // nibble 2
+			2 - (3 - (205 * 3 >> 10) * 5), // nibble 3
+			2 - (3 - (205 * 3 >> 10) * 5), // nibble 3
+		];
+
+		for i in 0..8 {
+			assert_eq!(output[i], expected[i]);
+		}
+	}
+
+	#[test]
+	fn test_rej_eta_mixed_valid_invalid() {
+		let mut output = [0i32; 10];
+		// Mix valid and invalid nibbles: 0xF0 = nibbles 0 (valid), 15 (invalid)
+		let buffer = [0xF0u8, 0x1Fu8]; // nibbles: 0,15,1,15
+		let result = rej_eta(&mut output, 10, &buffer, 2);
+
+		// Should accept 2 coefficients (nibbles 0 and 1)
+		assert_eq!(result, 2);
+
+		// Check the accepted coefficients
+		assert_eq!(output[0], 2 - (0 - (205 * 0 >> 10) * 5)); // nibble 0
+		assert_eq!(output[1], 2 - (1 - (205 * 1 >> 10) * 5)); // nibble 1
+
+		// Remaining should be unchanged (zero)
+		for i in 2..10 {
+			assert_eq!(output[i], 0);
+		}
+	}
+
+	#[test]
+	fn test_rej_eta_limited_space() {
+		let mut output = [0i32; 10];
+		// Create buffer with many valid nibbles
+		let buffer = [0x01u8, 0x23u8, 0x45u8]; // nibbles: 1,0,3,2,5,4
+		let result = rej_eta(&mut output, 3, &buffer, 3); // Only space for 3 coefficients
+
+		// Should stop after accepting 3 coefficients
+		assert_eq!(result, 3);
+
+		// Check the first 3 coefficients
+		assert_eq!(output[0], 2 - (1 - (205 * 1 >> 10) * 5)); // nibble 1
+		assert_eq!(output[1], 2 - (0 - (205 * 0 >> 10) * 5)); // nibble 0
+		assert_eq!(output[2], 2 - (3 - (205 * 3 >> 10) * 5)); // nibble 3
+
+		// Remaining should be unchanged
+		for i in 3..10 {
+			assert_eq!(output[i], 0);
+		}
+	}
+
+	#[test]
+	fn test_rej_eta_reduction_formula() {
+		let mut output = [0i32; 20];
+		// Test specific nibble values to verify reduction formula
+		let buffer = [
+			0x54u8, // nibbles: 4,5
+			0x98u8, // nibbles: 8,9
+			0xDCu8, // nibbles: 12,13
+			0xEEu8, // nibbles: 14,14
+		];
+		let result = rej_eta(&mut output, 20, &buffer, 4);
+
+		// Should accept 6 coefficients (all except nibbles 15)
+		assert_eq!(result, 6);
+
+		// Manually verify the reduction formula for each nibble
+		let nibbles = [4u32, 5u32, 8u32, 9u32, 12u32, 13u32];
+		for (i, &nibble) in nibbles.iter().enumerate() {
+			let reduced = nibble - (205 * nibble >> 10) * 5;
+			let expected_coeff = 2 - reduced as i32;
+			assert_eq!(output[i], expected_coeff, "Failed for nibble {}", nibble);
+		}
+	}
+
+	#[test]
+	fn test_rej_eta_boundary_nibble_14() {
+		let mut output = [0i32; 4];
+		// Test nibble 14 (valid) and 15 (invalid)
+		let buffer = [0xFEu8]; // nibbles: 14,15
+		let result = rej_eta(&mut output, 4, &buffer, 1);
+
+		// Should accept 1 coefficient (nibble 14)
+		assert_eq!(result, 1);
+
+		let reduced = 14u32 - (205 * 14u32 >> 10) * 5;
+		let expected = 2 - reduced as i32;
+		assert_eq!(output[0], expected);
+	}
+
+	#[test]
+	fn test_rej_eta_output_range() {
+		let mut output = [0i32; 20];
+		// Create buffer with all possible valid nibbles (0-14)
+		let buffer = [
+			0x10u8, 0x32u8, 0x54u8, 0x76u8, 0x98u8, 0xBAu8, 0xDCu8, 0xEEu8, // up to nibble 14
+		];
+		let result = rej_eta(&mut output, 20, &buffer, 8);
+
+		assert_eq!(result, 15); // Should accept 15 coefficients (nibbles 0-14, twice for some)
+
+		// Verify all coefficients are in expected range [-2, 2]
+		for i in 0..result {
+			assert!(
+				output[i] >= -2 && output[i] <= 2,
+				"Coefficient {} = {} is out of range [-2, 2]",
+				i,
+				output[i]
+			);
+		}
 	}
 
 	#[test]

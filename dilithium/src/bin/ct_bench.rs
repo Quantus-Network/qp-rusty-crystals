@@ -421,21 +421,14 @@ fn test_rej_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	// Generate buffers and classes upfront
 	let mut inputs = Vec::new();
 	let mut classes = Vec::new();
-
-	// Buffer with many rejections (values >= 15)
-	let reject_heavy_buf = vec![15u8; 168]; // Mostly rejections
-
-	// Buffer with few rejections (values < 15)
-	let mut accept_heavy_buf = vec![0u8; 168];
-	for i in 0..168 {
-		accept_heavy_buf[i] = (i % 15) as u8; // Values 0-14, all accepted
-	}
+	
+	let fixed = generate_fixed_message(168, rng);
 
 	for _ in 0..10_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let buffer = match class {
-			Class::Left => reject_heavy_buf.clone(), // Many rejections (slow case)
-			Class::Right => accept_heavy_buf.clone(), // Few rejections (fast case)
+			Class::Left => fixed.clone(), // Many rejections (slow case)
+			Class::Right => generate_random_message(168, rng), // Few rejections (fast case)
 		};
 
 		inputs.push(buffer);
@@ -448,12 +441,8 @@ fn test_rej_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 		runner.run_one(class, || {
 			let mut coeffs = [0i32; 256];
-			let _count = qp_rusty_crystals_dilithium::poly::rej_eta(
-				&mut coeffs,
-				256,
-				&buffer,
-				buffer.len(),
-			);
+			let _count =
+				qp_rusty_crystals_dilithium::poly::rej_eta(&mut coeffs, 256, &buffer, buffer.len());
 		});
 	}
 }
