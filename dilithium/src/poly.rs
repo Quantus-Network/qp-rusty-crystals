@@ -342,7 +342,6 @@ pub fn t0_unpack(r: &mut Poly, a: &[u8]) {
 	}
 }
 
-const UNIFORM_ETA_NBLOCKS: usize = (135 + fips202::SHAKE256_RATE) / fips202::SHAKE256_RATE;
 const UNIFORM_GAMMA1_NBLOCKS: usize = params::POLYZ_PACKEDBYTES.div_ceil(fips202::SHAKE256_RATE);
 
 /// For all coefficients c of the input polynomial, compute high and low bits c0, c1 such c mod Q =
@@ -466,35 +465,37 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
 	// Fixed number of rounds for constant-time operation
-	const FIXED_ROUNDS: usize = 5;
+	const FIXED_ROUNDS: usize = 2;
 	let mut shake_output_buffer = [0u8; fips202::SHAKE256_RATE];
 	let mut temporary_coefficient_storage = [0i32; 1000]; // Temp storage for all extracted coeffs
 	let mut total_coefficients_collected = 0usize;
 
-	// Always run exactly FIXED_ROUNDS iterations
-	for _round_number in 0..FIXED_ROUNDS {
-		fips202::shake256_squeezeblocks(&mut shake_output_buffer, 1, &mut state);
+	// In case by some freak accident 2 rounds isn't enough, we keep going. This makes it
+	// non-constant time in only a negligible set of cases. The vast majority of cases will run
+	// this outer loop exactly once
+	while total_coefficients_collected < N {
+		// Always run exactly FIXED_ROUNDS iterations
+		for _round_number in 0..FIXED_ROUNDS {
+			// Squeeze one block at a time and collect
+			fips202::shake256_squeezeblocks(&mut shake_output_buffer, 1, &mut state);
 
-		// Always call rej_eta with same parameters regardless of how many coeffs we have
-		let available_storage_space =
-			temporary_coefficient_storage.len() - total_coefficients_collected;
-		let coefficients_extracted_this_round = rej_eta(
-			&mut temporary_coefficient_storage[total_coefficients_collected..],
-			available_storage_space,
-			&shake_output_buffer,
-			fips202::SHAKE256_RATE,
-		);
-		total_coefficients_collected += coefficients_extracted_this_round;
+			// Always call rej_eta with same parameters regardless of how many coeffs we have
+			let available_storage_space =
+				temporary_coefficient_storage.len() - total_coefficients_collected;
+			let coefficients_extracted_this_round = rej_eta(
+				&mut temporary_coefficient_storage[total_coefficients_collected..],
+				available_storage_space,
+				&shake_output_buffer,
+				fips202::SHAKE256_RATE,
+			);
+			total_coefficients_collected += coefficients_extracted_this_round;
+		}
 	}
 
 	// Copy first N coefficients to polynomial output (pad with zeros if we didn't get enough)
 	for coefficient_index in 0..N {
 		output_polynomial.coeffs[coefficient_index] =
-			if coefficient_index < total_coefficients_collected {
-				temporary_coefficient_storage[coefficient_index]
-			} else {
-				0
-			};
+			temporary_coefficient_storage[coefficient_index];
 	}
 }
 
@@ -876,8 +877,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_produces_valid_coefficients() {
-		use rand::rngs::StdRng;
-		use rand::{RngCore, SeedableRng};
+		use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0x123456789ABCDEF0);
 		const NUM_TESTS: usize = 100;
@@ -914,8 +914,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_different_seeds() {
-		use rand::rngs::StdRng;
-		use rand::{RngCore, SeedableRng};
+		use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0xFEDCBA9876543210);
 		const NUM_TESTS: usize = 50;
@@ -958,8 +957,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_deterministic() {
-		use rand::rngs::StdRng;
-		use rand::{RngCore, SeedableRng};
+		use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0x1122334455667788);
 		const NUM_TESTS: usize = 25;
@@ -989,8 +987,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_nonce_variations() {
-		use rand::rngs::StdRng;
-		use rand::{RngCore, SeedableRng};
+		use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0x9999888877776666);
 		const NUM_TESTS: usize = 30;
@@ -1185,6 +1182,92 @@ mod tests {
 				output[i]
 			);
 		}
+	}
+
+	#[test]
+	fn test_uniform_eta_coefficient_efficiency() {
+		use rand::{rngs::StdRng, RngCore, SeedableRng};
+
+		let mut rng = StdRng::seed_from_u64(0xABCDEF0123456789);
+		const NUM_TESTS: usize = 100;
+
+		let mut total_coefficients_generated = 0usize;
+		let mut total_coefficients_needed = 0usize;
+		let mut tests_with_insufficient_coefficients = 0usize;
+		const FIXED_ROUNDS_FOR_CONSTANT_TIME: usize = 2;
+
+		for _test_iteration in 0..NUM_TESTS {
+			let mut seed = [0u8; params::CRHBYTES];
+			rng.fill_bytes(&mut seed);
+			let nonce = rng.next_u32() as u16;
+
+			// Use a large temporary storage to count all generated coefficients
+			let mut temporary_coefficient_storage = [0i32; 2000];
+			let mut total_coefficients_collected = 0usize;
+
+			// Replicate the same logic from uniform_eta to count coefficients
+			let mut state = fips202::KeccakState::default();
+			fips202::shake256_stream_init(&mut state, &seed, nonce);
+
+			let mut shake_output_buffer = [0u8; fips202::SHAKE256_RATE];
+
+			for _round_number in 0..FIXED_ROUNDS_FOR_CONSTANT_TIME {
+				fips202::shake256_squeezeblocks(&mut shake_output_buffer, 1, &mut state);
+
+				let available_storage_space =
+					temporary_coefficient_storage.len() - total_coefficients_collected;
+				let coefficients_extracted_this_round = rej_eta(
+					&mut temporary_coefficient_storage[total_coefficients_collected..],
+					available_storage_space,
+					&shake_output_buffer,
+					fips202::SHAKE256_RATE,
+				);
+				total_coefficients_collected += coefficients_extracted_this_round;
+			}
+
+			total_coefficients_generated += total_coefficients_collected;
+			total_coefficients_needed += N;
+
+			if total_coefficients_collected < N {
+				tests_with_insufficient_coefficients += 1;
+			}
+		}
+
+		let average_generated = total_coefficients_generated as f64 / NUM_TESTS as f64;
+		let average_needed = total_coefficients_needed as f64 / NUM_TESTS as f64;
+		let efficiency_ratio = average_generated / average_needed;
+		let insufficient_percentage =
+			(tests_with_insufficient_coefficients as f64 / NUM_TESTS as f64) * 100.0;
+
+		println!("=== Uniform ETA Coefficient Generation Efficiency ===");
+		println!("Tests run: {}", NUM_TESTS);
+		println!("Average coefficients generated per test: {:.2}", average_generated);
+		println!("Average coefficients needed per test: {:.2}", average_needed);
+		println!("Efficiency ratio (generated/needed): {:.2}", efficiency_ratio);
+		println!(
+			"Tests with insufficient coefficients: {} ({:.1}%)",
+			tests_with_insufficient_coefficients, insufficient_percentage
+		);
+		println!("SHAKE256 blocks used per test: {}", FIXED_ROUNDS_FOR_CONSTANT_TIME);
+		println!(
+			"Bytes processed per test: {}",
+			FIXED_ROUNDS_FOR_CONSTANT_TIME * fips202::SHAKE256_RATE
+		);
+
+		// Ensure we're generating a reasonable number of coefficients
+		assert!(
+			average_generated >= N as f64 * 0.8,
+			"Average coefficients generated ({:.2}) is less than 80% of needed ({})",
+			average_generated,
+			N
+		);
+
+		// Ensure most tests generate enough coefficients
+		assert!(
+			insufficient_percentage < 50.0,
+			"Too many tests ({:.1}%) had insufficient coefficients",
+			insufficient_percentage
+		);
 	}
 
 	#[test]

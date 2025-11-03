@@ -391,7 +391,7 @@ fn test_uniform_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let seed = match class {
 			Class::Left => fixed_seed.to_vec(),
-			Class::Right => generate_random_message(64, rng)
+			Class::Right => generate_random_message(64, rng),
 		};
 
 		inputs.push(seed);
@@ -417,7 +417,7 @@ fn test_rej_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	// Generate buffers and classes upfront
 	let mut inputs = Vec::new();
 	let mut classes = Vec::new();
-	
+
 	let fixed = generate_fixed_message(168, rng);
 
 	for _ in 0..10_000 {
@@ -453,7 +453,7 @@ fn test_uniform_eta_nonce_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	let mut classes = Vec::new();
 
 	let fixed_seed = generate_fixed_message(64, rng);
-	let fixed_nonce= generate_fixed_message(2, rng);
+	let fixed_nonce = generate_fixed_message(2, rng);
 
 	for _ in 0..6_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
@@ -462,7 +462,7 @@ fn test_uniform_eta_nonce_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 			Class::Right => generate_random_message(2, rng), // Random nonce
 		};
 		let seed = match class {
-			Class::Left => fixed_seed.clone(),              // Fixed seed
+			Class::Left => fixed_seed.clone(),                // Fixed seed
 			Class::Right => generate_random_message(64, rng), // Random seed
 		};
 		inputs.push((seed, nonce));
@@ -475,7 +475,11 @@ fn test_uniform_eta_nonce_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 		runner.run_one(class, || {
 			let mut poly = qp_rusty_crystals_dilithium::poly::Poly::default();
-			qp_rusty_crystals_dilithium::poly::uniform_eta(&mut poly, &seed, u16::from_be_bytes(nonce.clone().try_into().expect("Nonce conversion failed")));
+			qp_rusty_crystals_dilithium::poly::uniform_eta(
+				&mut poly,
+				&seed,
+				u16::from_be_bytes(nonce.clone().try_into().expect("Nonce conversion failed")),
+			);
 		});
 	}
 }
