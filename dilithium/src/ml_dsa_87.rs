@@ -308,9 +308,7 @@ impl PublicKey {
 				m[2 + x_len..].copy_from_slice(msg);
 				crate::sign::verify(sig, m.as_slice(), &self.bytes)
 			},
-			None => {
-				crate::sign::verify(sig, msg, &self.bytes)
-			},
+			None => crate::sign::verify(sig, msg, &self.bytes),
 		}
 	}
 

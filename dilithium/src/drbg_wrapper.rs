@@ -77,8 +77,8 @@ pub fn randombytes_init(
 	personalization_string: Option<&[u8]>,
 	_security_strength: u32,
 ) -> Result<(), ()> {
-    #[cfg(test)]
-    let _g = DRBG_LOCK.lock().unwrap();
+	#[cfg(test)]
+	let _g = DRBG_LOCK.lock().unwrap();
 	if entropy_input.len() != 48 {
 		return Err(());
 	}
@@ -97,7 +97,7 @@ pub fn randombytes_init(
 
 	// Initialize DRBG context
 	unsafe {
-        DRBG_CTX = None;
+		DRBG_CTX = None;
 		let mut key = [0u8; 32];
 		let mut v = [0u8; 16];
 		key.fill(0x00);
@@ -120,8 +120,8 @@ pub fn randombytes_init(
 ///
 /// This matches the C function: `randombytes(x, xlen)`
 pub fn randombytes(x: &mut [u8], xlen: usize) -> Result<(), ()> {
-    #[cfg(test)]
-    let _g = DRBG_LOCK.lock().unwrap();
+	#[cfg(test)]
+	let _g = DRBG_LOCK.lock().unwrap();
 	unsafe {
 		if let Some(ref mut ctx) = DRBG_CTX {
 			let mut i = 0;
@@ -159,14 +159,14 @@ pub fn randombytes(x: &mut [u8], xlen: usize) -> Result<(), ()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-    use once_cell::sync::Lazy;
-    use std::sync::Mutex;
+	use once_cell::sync::Lazy;
+	use std::sync::Mutex;
 
-    static TEST_DRBG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+	static TEST_DRBG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 	#[test]
 	fn test_drbg_deterministic() {
-        let _g = TEST_DRBG_LOCK.lock().unwrap();
+		let _g = TEST_DRBG_LOCK.lock().unwrap();
 		let seed = [0x42u8; 48];
 
 		// Initialize twice with same seed

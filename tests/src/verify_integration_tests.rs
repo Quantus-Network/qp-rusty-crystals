@@ -1,7 +1,10 @@
 // tests/verify_integration_test.rs
 
 use crate::helpers::kat::{parse_test_vectors, TestVector};
-use qp_rusty_crystals_dilithium::{drbg_wrapper, ml_dsa_87::{Keypair, PUBLICKEYBYTES}};
+use qp_rusty_crystals_dilithium::{
+	drbg_wrapper,
+	ml_dsa_87::{Keypair, PUBLICKEYBYTES},
+};
 use rand::{thread_rng, Rng};
 
 fn keypair_from_test(test: &TestVector) -> Keypair {
@@ -30,17 +33,28 @@ fn verify_test_vector(test: &TestVector) {
 	// NOTE: Keypair generation KAT test uses a random number generator
 	// This means: The rng must be initialized with the seed, same as the NIST KAT file does it
 	// It also means key gen and secret must happen in the same order because each invocation of the
-	// rng changes the next rng output. 
+	// rng changes the next rng output.
 	//
-	// Initialize DRBG with seed - same as KAT file 
+	// Initialize DRBG with seed - same as KAT file
 	drbg_wrapper::randombytes_init(&test.seed, None, 256).unwrap();
 
 	let generated_keypair = Keypair::generate(None);
 	let generated_pk = generated_keypair.public.to_bytes();
 	let generated_sk = generated_keypair.secret.to_bytes();
-	assert_eq!(&generated_pk[..], &test.pk[..], "Generated public key doesn't match NIST KAT for
-	// count {}", test.count); assert_eq!(&generated_sk[..], &test.sk[..], "Generated secret key
-	// doesn't match NIST KAT for count {}", test.count);
+	assert_eq!(
+		&generated_pk[..],
+		&test.pk[..],
+		"Generated public key doesn't match NIST KAT for
+	// count {}",
+		test.count
+	);
+	assert_eq!(
+		&generated_sk[..],
+		&test.sk[..],
+		"Generated secret key
+	// doesn't match NIST KAT for count {}",
+		test.count
+	);
 
 	// Check if the fields have correct lengths
 	assert_eq!(test.msg.len(), test.mlen, "Message length mismatch from test vector");
@@ -58,7 +72,7 @@ fn verify_test_vector(test: &TestVector) {
 	assert!(result, "Signature verification failed",);
 
 	// // Check that our system generates the same signature as NIST on the same message with the
-	// same keypair 
+	// same keypair
 	let our_signature = keypair.sign(&test.msg, None, true);
 	assert_eq!(
 		our_signature.as_slice(),

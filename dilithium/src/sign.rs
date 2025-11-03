@@ -19,26 +19,26 @@ use alloc::boxed::Box;
 pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 	const SEEDBUF_LEN: usize = 2 * params::SEEDBYTES + params::CRHBYTES;
 	let mut seedbuf = [0u8; SEEDBUF_LEN];
-    // Build preimage = seed || K || L (accept any seed length when provided)
-    let mut preimage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-    match seed {
-        Some(x) => {
-            preimage.extend_from_slice(x);
-        },
-        None => {
-            #[cfg(not(feature = "std"))]
-            unimplemented!("must provide entropy in verifier only mode");
-            #[cfg(feature = "std")]
-            {
-                let mut rnd = [0u8; params::SEEDBYTES];
-                crate::random_bytes(&mut rnd, params::SEEDBYTES);
-                preimage.extend_from_slice(&rnd);
-            }
-        },
-    }
-    preimage.push(params::K as u8);
-    preimage.push(params::L as u8);
-    fips202::shake256(&mut seedbuf, SEEDBUF_LEN, &preimage, preimage.len());
+	// Build preimage = seed || K || L (accept any seed length when provided)
+	let mut preimage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+	match seed {
+		Some(x) => {
+			preimage.extend_from_slice(x);
+		},
+		None => {
+			#[cfg(not(feature = "std"))]
+			unimplemented!("must provide entropy in verifier only mode");
+			#[cfg(feature = "std")]
+			{
+				let mut rnd = [0u8; params::SEEDBYTES];
+				crate::random_bytes(&mut rnd, params::SEEDBYTES);
+				preimage.extend_from_slice(&rnd);
+			}
+		},
+	}
+	preimage.push(params::K as u8);
+	preimage.push(params::L as u8);
+	fips202::shake256(&mut seedbuf, SEEDBUF_LEN, &preimage, preimage.len());
 
 	let mut rho = [0u8; params::SEEDBYTES];
 	rho.copy_from_slice(&seedbuf[..params::SEEDBYTES]);
@@ -244,12 +244,12 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 		return false;
 	}
 
-    // Compute CRH(H(rho, t1), pre, msg) with pre=(0,0)
-    fips202::shake256(&mut mu, params::CRHBYTES, pk, crate::params::PUBLICKEYBYTES);
-    fips202::shake256_absorb(&mut state, &mu, params::CRHBYTES);
-    let pre = [0u8, 0u8];
-    fips202::shake256_absorb(&mut state, &pre, 2);
-    fips202::shake256_absorb(&mut state, m, m.len());
+	// Compute CRH(H(rho, t1), pre, msg) with pre=(0,0)
+	fips202::shake256(&mut mu, params::CRHBYTES, pk, crate::params::PUBLICKEYBYTES);
+	fips202::shake256_absorb(&mut state, &mu, params::CRHBYTES);
+	let pre = [0u8, 0u8];
+	fips202::shake256_absorb(&mut state, &pre, 2);
+	fips202::shake256_absorb(&mut state, m, m.len());
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut mu, params::CRHBYTES, &mut state);
 

@@ -83,16 +83,18 @@ mod hdwallet_tests {
 		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
 		let hd1 = HDLattice::from_mnemonic(mnemonic, None).unwrap();
 		let hd2 = HDLattice::from_mnemonic(mnemonic, None).unwrap();
-		let paths = [
-			"",
-			"m",
-			"m/0'/2147483647'/1'",
-			"m/44'/60'/0'/0/0",
-			"m/1'/2'/3'",
-		];
+		let paths = ["", "m", "m/0'/2147483647'/1'", "m/44'/60'/0'/0/0", "m/1'/2'/3'"];
 		for p in paths {
-			let k1 = if p.is_empty() || p == "m" { hd1.generate_keys() } else { hd1.generate_derived_keys(p).unwrap() };
-			let k2 = if p.is_empty() || p == "m" { hd2.generate_keys() } else { hd2.generate_derived_keys(p).unwrap() };
+			let k1 = if p.is_empty() || p == "m" {
+				hd1.generate_keys()
+			} else {
+				hd1.generate_derived_keys(p).unwrap()
+			};
+			let k2 = if p.is_empty() || p == "m" {
+				hd2.generate_keys()
+			} else {
+				hd2.generate_derived_keys(p).unwrap()
+			};
 			assert_eq!(k1.secret.bytes, k2.secret.bytes);
 			assert_eq!(k1.public.bytes, k2.public.bytes);
 		}
