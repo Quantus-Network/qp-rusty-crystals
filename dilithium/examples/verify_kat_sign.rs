@@ -87,7 +87,7 @@ fn read_hex<R: Read>(reader: &mut R, output: &mut [u8], marker: &str) -> std::io
 					ch - b'a' + 10
 				};
 
-				// Shift and add nibble (matching C implementation)
+				// Shift and add nibble
 				for i in 0..output.len() - 1 {
 					output[i] = (output[i] << 4) | (output[i + 1] >> 4);
 				}
