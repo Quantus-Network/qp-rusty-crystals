@@ -229,7 +229,7 @@ fn main() {
         }
         
         let mut sig = vec![0u8; params::SIGNBYTES];
-        signature(&mut sig, &m, &sk_gen, true, None);
+        signature(&mut sig, &m, &sk_gen, true);
         
         // Construct signed message: [signature, message] (matching C crypto_sign)
         // C code places message in reverse: sm[CRYPTO_BYTES + mlen - 1 - i] = m[mlen - 1 - i]

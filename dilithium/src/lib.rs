@@ -27,7 +27,7 @@ pub enum PH {
 
 #[cfg(feature = "std")]
 use rand::RngCore;
-/// Generate random bytes using DRBG (matches C reference implementation).
+/// Generate random bytes using DRBG
 ///
 /// # Arguments
 ///
@@ -38,7 +38,7 @@ use rand::RngCore;
 /// it will initialize it with OS entropy on first use.
 #[cfg(feature = "std")]
 fn random_bytes(bytes: &mut [u8], n: usize) {
-	// Try DRBG first (will be initialized for KAT testing)
+	// Try DRBG first
 	if drbg_wrapper::randombytes(bytes, n).is_err() {
 		// Initialize DRBG with OS entropy for normal use
 		let mut seed = [0u8; 48];

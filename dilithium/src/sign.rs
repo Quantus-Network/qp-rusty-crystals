@@ -87,11 +87,9 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: Option<&[u8]>) {
 /// * 'msg' - message to sign
 /// * 'sk' - private key to use
 /// * 'hedged' - indicates wether to randomize the signature or to act deterministicly
-/// * 'rnd' - optional random bytes (SEEDBYTES length). If Some, uses these bytes instead of generating/having zeros.
-///           This allows deterministic signing for KAT testing when combined with seeded RNG.
 ///
 /// Note signature depends on std because k_decompose depends on swap which depends on std
-pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool, rnd: Option<&[u8]>) {		
+pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool) {
 	let mut rho = [0u8; params::SEEDBYTES];
 	let mut tr = [0u8; params::TR_BYTES];
 	let mut keymu = [0u8; params::SEEDBYTES + params::CRHBYTES];
@@ -118,23 +116,13 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedged: bool, rnd: Optio
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut keymu[params::SEEDBYTES..], params::CRHBYTES, &mut state);
 
-	#[allow(unused_mut)]
-	let mut rnd_bytes = [0u8; params::SEEDBYTES];
-	match rnd {
-		Some(provided_rnd) => {
-			if provided_rnd.len() >= params::SEEDBYTES {
-				rnd_bytes.copy_from_slice(&provided_rnd[..params::SEEDBYTES]);
-			}
-		},
-		None => {
-			if hedged {
-				#[cfg(not(feature = "std"))]
-				unimplemented!("hedged mode requires std feature");
-				#[cfg(feature = "std")]
-				crate::random_bytes(&mut rnd_bytes, params::SEEDBYTES);
-			}
-		},
-	}
+    let mut rnd_bytes = [0u8; params::SEEDBYTES];
+    if hedged {
+        #[cfg(not(feature = "std"))]
+        unimplemented!("hedged mode requires std feature");
+        #[cfg(feature = "std")]
+        crate::random_bytes(&mut rnd_bytes, params::SEEDBYTES);
+    }
 	state.init();
 	fips202::shake256_absorb(&mut state, &keymu[..params::SEEDBYTES], params::SEEDBYTES);
 	fips202::shake256_absorb(&mut state, &rnd_bytes, params::SEEDBYTES);
@@ -308,7 +296,7 @@ mod tests {
 		let mut msg = [0u8; MSG_BYTES];
 		crate::random_bytes(&mut msg, MSG_BYTES);
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, &msg, &sk, true, None);
+		super::signature(&mut sig, &msg, &sk, true);
 		assert!(super::verify(&sig, &msg, &pk));
 	}
 
@@ -321,7 +309,7 @@ mod tests {
 		let mut msg = [0u8; MSG_BYTES];
 		crate::random_bytes(&mut msg, MSG_BYTES);
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, &msg, &sk, false, None);
+		super::signature(&mut sig, &msg, &sk, false);
 		assert!(super::verify(&sig, &msg, &pk));
 	}
 
@@ -333,7 +321,7 @@ mod tests {
 
 		let empty_msg: &[u8] = &[];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, empty_msg, &sk, false, None);
+		super::signature(&mut sig, empty_msg, &sk, false);
 		assert!(super::verify(&sig, empty_msg, &pk));
 	}
 
@@ -345,7 +333,7 @@ mod tests {
 
 		let msg = [0x42u8];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, &msg, &sk, false, None);
+		super::signature(&mut sig, &msg, &sk, false);
 		assert!(super::verify(&sig, &msg, &pk));
 	}
 
@@ -357,7 +345,7 @@ mod tests {
 
 		let large_msg = vec![0xABu8; 10000];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, &large_msg, &sk, false, None);
+		super::signature(&mut sig, &large_msg, &sk, false);
 		assert!(super::verify(&sig, &large_msg, &pk));
 	}
 
@@ -371,8 +359,8 @@ mod tests {
 		let mut sig1 = [0u8; crate::params::SIGNBYTES];
 		let mut sig2 = [0u8; crate::params::SIGNBYTES];
 
-		super::signature(&mut sig1, msg, &sk, false, None);
-		super::signature(&mut sig2, msg, &sk, false, None);
+		super::signature(&mut sig1, msg, &sk, false);
+		super::signature(&mut sig2, msg, &sk, false);
 
 		// Deterministic signing should produce identical signatures
 		assert_eq!(sig1, sig2);
@@ -390,8 +378,8 @@ mod tests {
 		let mut sig1 = [0u8; crate::params::SIGNBYTES];
 		let mut sig2 = [0u8; crate::params::SIGNBYTES];
 
-		super::signature(&mut sig1, msg, &sk, true, None);
-		super::signature(&mut sig2, msg, &sk, true, None);
+		super::signature(&mut sig1, msg, &sk, true);
+		super::signature(&mut sig2, msg, &sk, true);
 
 		// Hedged signing should produce different signatures (with high probability)
 		assert_ne!(sig1, sig2);
@@ -409,7 +397,7 @@ mod tests {
 		let msg2 = b"different message";
 		let mut sig = [0u8; crate::params::SIGNBYTES];
 
-		super::signature(&mut sig, msg1, &sk, false, None);
+		super::signature(&mut sig, msg1, &sk, false);
 
 		// Should verify with correct message
 		assert!(super::verify(&sig, msg1, &pk));
@@ -430,7 +418,7 @@ mod tests {
 		let msg = b"test message";
 		let mut sig = [0u8; crate::params::SIGNBYTES];
 
-		super::signature(&mut sig, msg, &sk1, false, None);
+		super::signature(&mut sig, msg, &sk1, false);
 
 		// Should verify with correct key
 		assert!(super::verify(&sig, msg, &pk1));
@@ -446,7 +434,7 @@ mod tests {
 
 		let msg = b"test message";
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, msg, &sk, false, None);
+		super::signature(&mut sig, msg, &sk, false);
 
 		// Original signature should verify
 		assert!(super::verify(&sig, msg, &pk));
@@ -536,7 +524,7 @@ mod tests {
 
 		for msg in &messages {
 			let mut sig = [0u8; crate::params::SIGNBYTES];
-			super::signature(&mut sig, msg, &sk, false, None);
+			super::signature(&mut sig, msg, &sk, false);
 			assert!(
 				super::verify(&sig, msg, &pk),
 				"Failed to verify message: {:?}",
