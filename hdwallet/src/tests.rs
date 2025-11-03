@@ -12,9 +12,7 @@ pub struct TestVector {
 mod hdwallet_tests {
 	use crate::{
 		generate_mnemonic,
-		test_vectors::{
-			load_known_private_keys, str_to_32_bytes, str_to_64_bytes,
-		},
+		test_vectors::{load_known_private_keys, str_to_32_bytes, str_to_64_bytes},
 		HDLattice, HDLatticeError,
 	};
 	use alloc::{
