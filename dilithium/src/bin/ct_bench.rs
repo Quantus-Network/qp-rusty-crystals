@@ -385,17 +385,13 @@ fn test_uniform_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	let mut classes = Vec::new();
 
 	// Use fixed seed size matching CRHBYTES = 64 (what uniform_eta expects)
-	let fixed_seed = [42u8; 64];
+	let fixed_seed = generate_fixed_message(64, rng);
 
 	for _ in 0..8_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let seed = match class {
 			Class::Left => fixed_seed.to_vec(),
-			Class::Right => {
-				let mut random_seed = vec![0u8; 64];
-				rng.fill_bytes(&mut random_seed);
-				random_seed
-			},
+			Class::Right => generate_random_message(64, rng)
 		};
 
 		inputs.push(seed);
@@ -456,16 +452,20 @@ fn test_uniform_eta_nonce_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	let mut inputs = Vec::new();
 	let mut classes = Vec::new();
 
-	let fixed_seed = [42u8; 64].to_vec();
+	let fixed_seed = generate_fixed_message(64, rng);
+	let fixed_nonce= generate_fixed_message(2, rng);
 
 	for _ in 0..6_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let nonce = match class {
-			Class::Left => 0u16,              // Fixed nonce
-			Class::Right => rng.gen::<u16>(), // Random nonce
+			Class::Left => fixed_nonce.clone(),              // Fixed nonce
+			Class::Right => generate_random_message(2, rng), // Random nonce
 		};
-
-		inputs.push((fixed_seed.clone(), nonce));
+		let seed = match class {
+			Class::Left => fixed_seed.clone(),              // Fixed seed
+			Class::Right => generate_random_message(64, rng), // Random seed
+		};
+		inputs.push((seed, nonce));
 		classes.push(class);
 	}
 
@@ -475,7 +475,7 @@ fn test_uniform_eta_nonce_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 		runner.run_one(class, || {
 			let mut poly = qp_rusty_crystals_dilithium::poly::Poly::default();
-			qp_rusty_crystals_dilithium::poly::uniform_eta(&mut poly, &seed, nonce);
+			qp_rusty_crystals_dilithium::poly::uniform_eta(&mut poly, &seed, u16::from_be_bytes(nonce.clone().try_into().expect("Nonce conversion failed")));
 		});
 	}
 }
