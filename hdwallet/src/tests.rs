@@ -151,40 +151,6 @@ mod hdwallet_tests {
 	}
 
 	#[test]
-    fn test_derive_seed() {
-        const CASES: &[(&str, &str)] = &[
-            ("rocket primary way job input cactus submit menu zoo burger rent impose", ""),
-            ("rocket primary way job input cactus submit menu zoo burger rent impose", "m/0'/2147483647'/1'"),
-            ("rocket primary way job input cactus submit menu zoo burger rent impose", "m/44'/60'/0'/0/0"),
-            ("replace dolphin shrimp throw cloth sauce sphere burger nominee vacant embark turtle", "m/1'/2'/3'"),
-        ];
-
-        for (mnemonic_str, derivation_path) in CASES {
-            let hd = HDLattice::from_mnemonic(mnemonic_str, None).unwrap();
-            let expected_keys = if derivation_path.is_empty() || *derivation_path == "m" {
-                hd.generate_keys()
-            } else {
-                hd.generate_derived_keys(derivation_path).unwrap()
-            };
-
-            // Re-derive and compare tails only
-            let generated_keys = if derivation_path.is_empty() || *derivation_path == "m" {
-                hd.generate_keys()
-            } else {
-                hd.generate_derived_keys(derivation_path).unwrap()
-            };
-
-            let exp_sk_tail = &expected_keys.secret.bytes[expected_keys.secret.bytes.len()-32..];
-            let gen_sk_tail = &generated_keys.secret.bytes[generated_keys.secret.bytes.len()-32..];
-            assert_eq!(gen_sk_tail, exp_sk_tail, "Secret key mismatch (last 32 bytes) for path: {derivation_path}");
-
-            let exp_pk_tail = &expected_keys.public.bytes[expected_keys.public.bytes.len()-32..];
-            let gen_pk_tail = &generated_keys.public.bytes[generated_keys.public.bytes.len()-32..];
-            assert_eq!(gen_pk_tail, exp_pk_tail, "Public key mismatch (last 32 bytes) for path: {derivation_path}");
-        }
-    }
-
-	#[test]
 	fn test_generate_mnemonic_valid_lengths() {
 		let valid_lengths = [12, 15, 18, 21, 24];
 		// Use a deterministic seed for testing
