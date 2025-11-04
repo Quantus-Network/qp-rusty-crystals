@@ -2,7 +2,7 @@
 
 use crate::helpers::kat::{parse_test_vectors, TestVector};
 use qp_rusty_crystals_dilithium::{
-	drbg_wrapper,
+	drbg,
 	ml_dsa_87::{Keypair, PUBLICKEYBYTES},
 };
 use rand::{thread_rng, Rng};
@@ -24,6 +24,13 @@ fn test_nist_kat() {
 	}
 }
 
+fn get_random_bytes() -> [u8; 32] {
+	let mut rng = rand::thread_rng();
+	let mut bytes = [0u8; 32];
+	rng.fill(&mut bytes);
+	bytes
+}
+
 /// Verifies a single test vector for Falcon-1024 (padded).
 ///
 /// # Arguments
@@ -36,9 +43,11 @@ fn verify_test_vector(test: &TestVector) {
 	// rng changes the next rng output.
 	//
 	// Initialize DRBG with seed - same as KAT file
-	drbg_wrapper::randombytes_init(&test.seed, None, 256).unwrap();
-
-	let generated_keypair = Keypair::generate(None);
+	let mut drbg = drbg::DRBG::new(&test.seed, None).unwrap();
+	let mut entropy = [0u8; 32];
+	let res = drbg.randombytes(&mut entropy, 32);
+	assert!(res.is_ok());
+	let generated_keypair = Keypair::generate(&entropy);
 	let generated_pk = generated_keypair.public.to_bytes();
 	let generated_sk = generated_keypair.secret.to_bytes();
 	assert_eq!(
@@ -62,21 +71,24 @@ fn verify_test_vector(test: &TestVector) {
 	// Check public key length for Dilithium5
 	assert_eq!(test.pk.len(), PUBLICKEYBYTES, "Public key length mismatch");
 
-	let signature = test.extract_signature();
+	let nist_signature = test.extract_signature();
 
 	// Now call verify with the extracted signature
 
 	let keypair = keypair_from_test(test);
-	let result = keypair.verify(&test.msg, signature, None);
+	let result = keypair.verify(&test.msg, nist_signature, None);
 
 	assert!(result, "Signature verification failed",);
 
 	// // Check that our system generates the same signature as NIST on the same message with the
 	// same keypair
-	let our_signature = keypair.sign(&test.msg, None, true);
+	let mut hedge = [0u8; 32];
+	let res = drbg.randombytes(&mut hedge, 32);
+	assert!(res.is_ok());
+	let our_signature = keypair.sign(&test.msg, None, Some(hedge));
 	assert_eq!(
 		our_signature.as_slice(),
-		signature,
+		nist_signature,
 		"Our generated signature doesn't match NIST signature for count {}",
 		test.count
 	);
@@ -86,7 +98,7 @@ fn verify_test_vector(test: &TestVector) {
 	let num_fuzz_attempts = 20; // Number of random modifications to test
 
 	for _ in 0..num_fuzz_attempts {
-		let mut fuzzed_signature = signature.to_vec();
+		let mut fuzzed_signature = nist_signature.to_vec();
 
 		// Skip if signature is empty
 		if fuzzed_signature.is_empty() {
@@ -146,7 +158,7 @@ fn verify_test_vector(test: &TestVector) {
 		assert!(
             !fuzzed_result,
             "Fuzzed signature unexpectedly passed verification! Original signature length: {}, fuzzed signature length: {}",
-            signature.len(),
+            nist_signature.len(),
             fuzzed_signature.len()
         );
 	}
@@ -155,14 +167,17 @@ fn verify_test_vector(test: &TestVector) {
 #[test]
 fn test_verify_invalid_signature() {
 	// Generate Dilithium keypair
-	let keys_1 = Keypair::generate(None);
-	let keys_2 = Keypair::generate(None);
-	let keys_3 = Keypair::generate(None);
+	let entropy1 = get_random_bytes();
+	let entropy2 = get_random_bytes();
+	let entropy3 = get_random_bytes();
+	let keys_1 = Keypair::generate(&entropy1);
+	let keys_2 = Keypair::generate(&entropy2);
+	let keys_3 = Keypair::generate(&entropy3);
 
 	// Message to sign
 	let message = b"Hello, Resonance!";
 	// Sign the message
-	let signature = keys_2.sign(message, None, false);
+	let signature = keys_2.sign(message, None, None);
 
 	// Verify the signature with wrong key
 	let result = keys_1.verify(&signature, message, None);

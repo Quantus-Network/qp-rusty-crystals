@@ -1,6 +1,9 @@
 use sha2::{Digest, Sha256, Sha512};
 
-use crate::errors::{KeyParsingError, KeyParsingError::BadSecretKey};
+use crate::{
+	errors::{KeyParsingError, KeyParsingError::BadSecretKey},
+	params,
+};
 use alloc::{vec, vec::Vec};
 use core::fmt;
 
@@ -26,7 +29,7 @@ impl Keypair {
 	/// * 'entropy' - optional bytes for determining the generation process
 	///
 	/// Returns an instance of Keypair
-	pub fn generate(entropy: Option<&[u8]>) -> Keypair {
+	pub fn generate(entropy: &[u8]) -> Keypair {
 		let mut pk = [0u8; PUBLICKEYBYTES];
 		let mut sk = [0u8; SECRETKEYBYTES];
 		crate::sign::keypair(&mut pk, &mut sk, entropy);
@@ -72,8 +75,13 @@ impl Keypair {
 	/// * 'msg' - message to sign
 	///
 	/// Returns Option<Signature>
-	pub fn sign(&self, msg: &[u8], ctx: Option<&[u8]>, hedged: bool) -> Signature {
-		self.secret.sign(msg, ctx, hedged)
+	pub fn sign(
+		&self,
+		msg: &[u8],
+		ctx: Option<&[u8]>,
+		hedge: Option<[u8; params::SEEDBYTES]>,
+	) -> Signature {
+		self.secret.sign(msg, ctx, hedge)
 	}
 
 	/// Verify a signature for a given message with a public key.
@@ -95,15 +103,14 @@ impl Keypair {
 	/// * 'msg' - message to sign
 	///
 	/// Returns Option<Signature>
-	#[cfg(feature = "std")]
 	pub fn prehash_sign(
 		&self,
 		msg: &[u8],
 		ctx: Option<&[u8]>,
-		hedged: bool,
+		hedge: Option<[u8; params::SEEDBYTES]>,
 		ph: crate::PH,
 	) -> Option<Signature> {
-		self.secret.prehash_sign(msg, ctx, hedged, ph)
+		self.secret.prehash_sign(msg, ctx, hedge, ph)
 	}
 
 	/// Verify a signature for a given message with a public key.
@@ -167,7 +174,12 @@ impl SecretKey {
 	/// * 'hedged' - wether to use RNG or not
 	///
 	/// Returns Option<Signature>
-	pub fn sign(&self, msg: &[u8], ctx: Option<&[u8]>, hedged: bool) -> Signature {
+	pub fn sign(
+		&self,
+		msg: &[u8],
+		ctx: Option<&[u8]>,
+		hedge: Option<[u8; params::SEEDBYTES]>,
+	) -> Signature {
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
@@ -180,12 +192,12 @@ impl SecretKey {
 				m[2..2 + x_len].copy_from_slice(x);
 				m[2 + x_len..].copy_from_slice(msg);
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
+				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
 				sig
 			},
 			None => {
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, msg, &self.bytes, hedged);
+				crate::sign::signature(&mut sig, msg, &self.bytes, hedge);
 				sig
 			},
 		}
@@ -201,12 +213,11 @@ impl SecretKey {
 	/// * 'ph' - pre-hash function
 	///
 	/// Returns Option<Signature>
-	#[cfg(feature = "std")]
 	pub fn prehash_sign(
 		&self,
 		msg: &[u8],
 		ctx: Option<&[u8]>,
-		hedged: bool,
+		hedge: Option<[u8; params::SEEDBYTES]>,
 		ph: crate::PH,
 	) -> Option<Signature> {
 		let mut oid = [0u8; 11];
@@ -239,7 +250,7 @@ impl SecretKey {
 				m[2 + x_len..2 + x_len + 11].copy_from_slice(&oid);
 				m[2 + x_len + 11..].copy_from_slice(phm.as_slice());
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
+				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
 				Some(sig)
 			},
 			None => {
@@ -249,7 +260,7 @@ impl SecretKey {
 				m[2..2 + 11].copy_from_slice(&oid);
 				m[2 + 11..].copy_from_slice(phm.as_slice());
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedged);
+				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
 				Some(sig)
 			},
 		}
@@ -378,40 +389,56 @@ impl PublicKey {
 #[cfg(test)]
 mod tests {
 	use super::Keypair;
+	use rand::Rng;
+
+	fn get_random_bytes() -> [u8; 32] {
+		let mut rng = rand::thread_rng();
+		let mut bytes = [0u8; 32];
+		rng.fill(&mut bytes);
+		bytes
+	}
+
+	fn get_random_msg() -> [u8; 128] {
+		let mut rng = rand::thread_rng();
+		let mut bytes = [0u8; 128];
+		rng.fill(&mut bytes);
+		bytes
+	}
+
 	#[test]
 	fn self_verify_hedged() {
-		const MSG_BYTES: usize = 94;
-		let mut msg = [0u8; MSG_BYTES];
-		crate::random_bytes(&mut msg, MSG_BYTES);
-		let keys = Keypair::generate(None);
-		let sig = keys.sign(&msg, None, true);
+		let msg = get_random_msg();
+		let entropy = get_random_bytes();
+		let keys = Keypair::generate(&entropy);
+		let hedge = get_random_bytes();
+		let sig = keys.sign(&msg, None, Some(hedge));
 		assert!(keys.verify(&msg, &sig, None));
 	}
+
 	#[test]
 	fn self_verify() {
-		const MSG_BYTES: usize = 94;
-		let mut msg = [0u8; MSG_BYTES];
-		crate::random_bytes(&mut msg, MSG_BYTES);
-		let keys = Keypair::generate(None);
-		let sig = keys.sign(&msg, None, false);
+		let msg = get_random_msg();
+		let entropy = get_random_bytes();
+		let keys = Keypair::generate(&entropy);
+		let hedge = get_random_bytes();
+		let sig = keys.sign(&msg, None, Some(hedge));
 		assert!(keys.verify(&msg, &sig, None));
 	}
 	#[test]
 	fn self_verify_prehash_hedged() {
-		const MSG_BYTES: usize = 94;
-		let mut msg = [0u8; MSG_BYTES];
-		crate::random_bytes(&mut msg, MSG_BYTES);
-		let keys = Keypair::generate(None);
-		let sig = keys.prehash_sign(&msg, None, true, crate::PH::SHA256);
+		let msg = get_random_msg();
+		let entropy = get_random_bytes();
+		let keys = Keypair::generate(&entropy);
+		let hedge = get_random_bytes();
+		let sig = keys.prehash_sign(&msg, None, Some(hedge), crate::PH::SHA256);
 		assert!(keys.prehash_verify(&msg, &sig.unwrap(), None, crate::PH::SHA256));
 	}
 	#[test]
 	fn self_verify_prehash() {
-		const MSG_BYTES: usize = 94;
-		let mut msg = [0u8; MSG_BYTES];
-		crate::random_bytes(&mut msg, MSG_BYTES);
-		let keys = Keypair::generate(None);
-		let sig = keys.prehash_sign(&msg, None, false, crate::PH::SHA256);
+		let msg = get_random_msg();
+		let entropy = get_random_bytes();
+		let keys = Keypair::generate(&entropy);
+		let sig = keys.prehash_sign(&msg, None, None, crate::PH::SHA256);
 		assert!(keys.prehash_verify(&msg, &sig.unwrap(), None, crate::PH::SHA256));
 	}
 }

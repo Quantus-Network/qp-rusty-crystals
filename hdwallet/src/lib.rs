@@ -81,12 +81,12 @@ impl HDLattice {
 	}
 
 	pub fn generate_keys(&self) -> Keypair {
-		Keypair::generate(Some(&self.seed))
+		Keypair::generate(&self.seed)
 	}
 
 	pub fn generate_derived_keys(&self, path: &str) -> Result<Keypair, HDLatticeError> {
 		let derived_entropy = self.derive_entropy(path)?;
-		Ok(Keypair::generate(Some(&derived_entropy)))
+		Ok(Keypair::generate(&derived_entropy))
 	}
 
 	pub fn check_path(&self, path: &str) -> Result<(), HDLatticeError> {

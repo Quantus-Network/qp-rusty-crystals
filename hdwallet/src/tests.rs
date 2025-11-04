@@ -12,7 +12,9 @@ pub struct TestVector {
 mod hdwallet_tests {
 	use crate::{
 		generate_mnemonic,
-		test_vectors::{load_known_private_keys, str_to_32_bytes, str_to_64_bytes},
+		test_vectors::{
+			get_test_vectors, load_known_private_keys, str_to_32_bytes, str_to_64_bytes,
+		},
 		HDLattice, HDLatticeError,
 	};
 	use alloc::{
@@ -71,7 +73,7 @@ mod hdwallet_tests {
 		let derived_key = hd.generate_derived_keys("m/0'/2147483647'/1'").unwrap();
 		assert_ne!(master_key.secret.bytes, derived_key.secret.bytes, "derived key not derived");
 
-		// // UNCOMMENT THIS AND RUN WITH `cargo test -- --nocapture` TO GENERATE TEST VECTORS
+		// UNCOMMENT THIS AND RUN WITH `cargo test -- --nocapture` TO GENERATE TEST VECTORS
 		// let vecs = generate_test_vectors(10);
 		// print_keys_mnemonics_paths_as_test_vector(&vecs);
 	}
@@ -114,6 +116,32 @@ mod hdwallet_tests {
 			.collect()
 	}
 
+	#[test]
+	fn test_derive_seed() {
+		for (expected_keys, mnemonic_str, derivation_path) in get_test_vectors() {
+			let hd = HDLattice::from_mnemonic(mnemonic_str, None).unwrap();
+			// println!("Deriving seed for path: {}", derivation_path);
+			// Generate keys based on the derivation path
+			let generated_keys = if derivation_path.is_empty() {
+				hd.generate_keys()
+			} else {
+				hd.generate_derived_keys(derivation_path).unwrap()
+			};
+
+			// Compare secret keys
+			assert_eq!(
+				generated_keys.secret.bytes, expected_keys.secret.bytes,
+				"Secret key mismatch for path: {derivation_path}"
+			);
+
+			// Compare public keys
+			assert_eq!(
+				generated_keys.public.bytes, expected_keys.public.bytes,
+				"Public key mismatch for path: {derivation_path}"
+			);
+		}
+	}
+
 	#[allow(dead_code)]
 	fn generate_random_path() -> String {
 		let seed = [11u8; 32];
@@ -135,7 +163,7 @@ mod hdwallet_tests {
 		let mut vector_str = String::from("[\n");
 		for (key, mnemonic, path) in keys.iter() {
 			vector_str.push_str(&format!(
-				"    (Keypair::from_bytes(&*vec![{}]), \"{}\", \"{}\"),\n",
+				"    (Keypair::from_bytes(&*vec![{}]).expect(\"Should not fail\"), \"{}\", \"{}\"),\n",
 				key.to_bytes()
 					.iter()
 					.map(|b| format!("0x{b:02x}"))

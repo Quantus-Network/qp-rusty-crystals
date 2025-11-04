@@ -18,13 +18,6 @@ impl Display for KeyParsingError {
 	}
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for KeyParsingError {
-	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-		None
-	}
-}
-
 #[derive(Debug)]
 pub enum DrbgError {
 	InvalidEntropyLength,
@@ -38,12 +31,5 @@ impl Display for DrbgError {
 			DrbgError::NotInitialized => "NotInitialized",
 		};
 		write!(f, "{str}")
-	}
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for DrbgError {
-	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-		None
 	}
 }

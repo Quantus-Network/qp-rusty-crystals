@@ -1,4 +1,4 @@
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 #![allow(clippy::identity_op)]
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::precedence)]
@@ -7,7 +7,7 @@
 
 extern crate alloc;
 
-pub mod drbg_wrapper;
+pub mod drbg;
 mod errors;
 pub mod fips202;
 pub mod ml_dsa_87;
@@ -23,29 +23,6 @@ pub mod sign;
 pub enum PH {
 	SHA256,
 	SHA512,
-}
-
-#[cfg(feature = "std")]
-use rand::RngCore;
-/// Generate random bytes using DRBG
-///
-/// # Arguments
-///
-/// * 'bytes' - an array to fill with random data
-/// * 'n' - number of bytes to generate
-///
-/// This function uses DRBG for deterministic randomness. If DRBG is not initialized,
-/// it will initialize it with OS entropy on first use.
-#[cfg(feature = "std")]
-fn random_bytes(bytes: &mut [u8], n: usize) {
-	// Try DRBG first
-	if drbg_wrapper::randombytes(bytes, n).is_err() {
-		// Initialize DRBG with OS entropy for normal use
-		let mut seed = [0u8; 48];
-		rand::prelude::thread_rng().try_fill_bytes(&mut seed).unwrap();
-		drbg_wrapper::randombytes_init(&seed, None, 256).unwrap();
-		drbg_wrapper::randombytes(bytes, n).unwrap();
-	}
 }
 
 #[cfg(test)]
