@@ -633,6 +633,11 @@ pub fn w1_pack(r: &mut [u8], a: &Poly) {
 
 #[cfg(test)]
 mod tests {
+	#[cfg(test)]
+	extern crate std;
+	#[cfg(test)]
+	use std::println;
+
 	use super::*;
 
 	#[test]

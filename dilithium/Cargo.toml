@@ -43,4 +43,4 @@ required-features = ["ct-testing"]
 
 [features]
 default = []
-ct-testing = ["dudect-bencher", "std"] # Enable constant-time testing features
+ct-testing = ["dudect-bencher"]
