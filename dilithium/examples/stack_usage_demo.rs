@@ -7,6 +7,16 @@
 use qp_rusty_crystals_dilithium::ml_dsa_87;
 use std::{panic, sync::mpsc, thread, time::Duration};
 
+use rand::Rng;
+
+fn get_random_bytes() -> [u8; 32] {
+    let mut rng = rand::thread_rng();
+    let mut bytes = [0u8; 32];
+    rng.fill(&mut bytes);
+    bytes
+}
+
+
 /// Test ML-DSA key generation with a specific stack size
 fn test_keygen_with_stack_size<T>(stack_kb: usize, variant_name: &str, keygen_fn: T) -> bool
 where
@@ -128,11 +138,12 @@ fn main() {
 	println!("=== ML-DSA Stack Usage Analysis ===\n");
 
 	// Pre-generate test data for all variants
-	let ml87_keypair = ml_dsa_87::Keypair::generate(None);
+	let entropy = get_random_bytes();
+	let ml87_keypair = ml_dsa_87::Keypair::generate(&entropy);
 
 	let test_msg = b"stack usage test message";
 
-	let ml87_sig = ml87_keypair.sign(test_msg, None, false);
+	let ml87_sig = ml87_keypair.sign(test_msg, None, None);
 
 	// Test with progressively smaller stack sizes
 	let stack_sizes = [
@@ -155,13 +166,13 @@ fn main() {
 	for &size_kb in &stack_sizes {
 		// Test ML-DSA-87
 		let ml87_keygen = test_keygen_with_stack_size(size_kb, "ml-dsa-87", move || {
-			let _kp = ml_dsa_87::Keypair::generate(Some(&[1u8; 32]));
+			let _kp = ml_dsa_87::Keypair::generate(&[1u8; 32]);
 			true
 		});
 
 		let ml87_keypair_clone = ml87_keypair.clone();
 		let ml87_sign = test_sign_with_stack_size(size_kb, "ml-dsa-87", move || {
-			let _sig = ml87_keypair_clone.sign(test_msg, None, false);
+			let _sig = ml87_keypair_clone.sign(test_msg, None, None);
 			true
 		});
 
