@@ -107,7 +107,7 @@ fn test_keypair_generation_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _keypair = Keypair::generate(Some(&seed));
+			let _keypair = Keypair::generate(&seed);
 		});
 	}
 }
@@ -118,7 +118,7 @@ fn test_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running small message signing constant-time test...");
 
 	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(Some(&[0x42; SEED_SIZE]));
+	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
 
 	// Generate messages and classes upfront
 	let mut inputs = Vec::new();
@@ -143,7 +143,7 @@ fn test_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, None, false);
+			let _signature = keypair.sign(&message, None, None);
 		});
 	}
 }
@@ -154,7 +154,7 @@ fn test_signing_medium_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running medium message signing constant-time test...");
 
 	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(Some(&[0x42; SEED_SIZE]));
+	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
 
 	// Generate messages and classes upfront
 	let mut inputs = Vec::new();
@@ -179,7 +179,7 @@ fn test_signing_medium_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, None, false);
+			let _signature = keypair.sign(&message, None, None);
 		});
 	}
 }
@@ -190,7 +190,7 @@ fn test_signing_large_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running large message signing constant-time test...");
 
 	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(Some(&[0x42; SEED_SIZE]));
+	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
 
 	// Generate messages and classes upfront
 	let mut inputs = Vec::new();
@@ -215,7 +215,7 @@ fn test_signing_large_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, None, false);
+			let _signature = keypair.sign(&message, None, None);
 		});
 	}
 }
@@ -226,7 +226,7 @@ fn test_signing_xlarge_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running extra large message signing constant-time test...");
 
 	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(Some(&[0x42; SEED_SIZE]));
+	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
 
 	// Generate messages and classes upfront
 	let mut inputs = Vec::new();
@@ -251,7 +251,7 @@ fn test_signing_xlarge_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, None, false);
+			let _signature = keypair.sign(&message, None, None);
 		});
 	}
 }
@@ -262,7 +262,7 @@ fn test_hedged_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running hedged signing constant-time test...");
 
 	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(Some(&[0x42; SEED_SIZE]));
+	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
 
 	// Generate messages and classes upfront
 	let mut inputs = Vec::new();
@@ -287,7 +287,7 @@ fn test_hedged_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, None, true); // hedged = true
+			let _signature = keypair.sign(&message, None, None); // hedged = true
 		});
 	}
 }
@@ -298,7 +298,7 @@ fn test_signing_with_context_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running context signing constant-time test...");
 
 	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(Some(&[0x42; SEED_SIZE]));
+	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
 
 	// Generate messages and classes upfront
 	let mut inputs = Vec::new();
@@ -330,7 +330,7 @@ fn test_signing_with_context_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, Some(&context), false);
+			let _signature = keypair.sign(&message, Some(&context), None);
 		});
 	}
 }
@@ -341,7 +341,7 @@ fn test_edge_cases_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running edge cases constant-time test...");
 
 	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(Some(&[0x42; SEED_SIZE]));
+	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
 
 	// Generate messages and classes upfront
 	let mut inputs = Vec::new();
@@ -370,7 +370,7 @@ fn test_edge_cases_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, None, false);
+			let _signature = keypair.sign(&message, None, None);
 		});
 	}
 }
