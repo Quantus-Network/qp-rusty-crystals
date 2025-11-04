@@ -275,25 +275,24 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use rand::Rng;
-    use alloc::vec;
-     use alloc::string::String;
-     
-    fn get_random_bytes() -> [u8; 32] {
-        let mut rng = rand::thread_rng();
-        let mut bytes = [0u8; 32];
-        rng.fill(&mut bytes);
-        bytes
-    }
-    
-    fn get_random_msg() -> [u8; 128] {
-        let mut rng = rand::thread_rng();
-        let mut bytes = [0u8; 128];
-        rng.fill(&mut bytes);
-        bytes
-    }
+	use alloc::{string::String, vec};
+	use rand::Rng;
 
-    #[test]
+	fn get_random_bytes() -> [u8; 32] {
+		let mut rng = rand::thread_rng();
+		let mut bytes = [0u8; 32];
+		rng.fill(&mut bytes);
+		bytes
+	}
+
+	fn get_random_msg() -> [u8; 128] {
+		let mut rng = rand::thread_rng();
+		let mut bytes = [0u8; 128];
+		rng.fill(&mut bytes);
+		bytes
+	}
+
+	#[test]
 	fn self_verify_hedged() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
@@ -332,7 +331,7 @@ mod tests {
 	fn test_single_byte_message() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-		super::keypair(&mut pk, &mut sk,&get_random_bytes());
+		super::keypair(&mut pk, &mut sk, &get_random_bytes());
 
 		let msg = [0x42u8];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
@@ -382,7 +381,7 @@ mod tests {
 		let msg = b"test message for hedged signing";
 		let mut sig1 = [0u8; crate::params::SIGNBYTES];
 		let mut sig2 = [0u8; crate::params::SIGNBYTES];
-		
+
 		let hedge1 = get_random_bytes();
 		let hedge2 = get_random_bytes();
 

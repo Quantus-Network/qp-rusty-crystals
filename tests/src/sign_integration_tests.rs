@@ -1,15 +1,13 @@
 // tests/sign_integration_tests.rs
 
 use qp_rusty_crystals_hdwallet::{generate_mnemonic, HDLattice};
-use rand::{rngs::OsRng, RngCore};
-use rand::{Rng};
-
+use rand::{rngs::OsRng, Rng, RngCore};
 
 fn get_random_bytes() -> [u8; 32] {
-    let mut rng = rand::thread_rng();
-    let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes);
-    bytes
+	let mut rng = rand::thread_rng();
+	let mut bytes = [0u8; 32];
+	rng.fill(&mut bytes);
+	bytes
 }
 
 #[test]

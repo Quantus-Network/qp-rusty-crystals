@@ -25,12 +25,11 @@ fn test_nist_kat() {
 }
 
 fn get_random_bytes() -> [u8; 32] {
-    let mut rng = rand::thread_rng();
-    let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes);
-    bytes
+	let mut rng = rand::thread_rng();
+	let mut bytes = [0u8; 32];
+	rng.fill(&mut bytes);
+	bytes
 }
-
 
 /// Verifies a single test vector for Falcon-1024 (padded).
 ///

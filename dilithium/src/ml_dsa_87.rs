@@ -1,9 +1,11 @@
 use sha2::{Digest, Sha256, Sha512};
 
-use crate::errors::{KeyParsingError, KeyParsingError::BadSecretKey};
+use crate::{
+	errors::{KeyParsingError, KeyParsingError::BadSecretKey},
+	params,
+};
 use alloc::{vec, vec::Vec};
 use core::fmt;
-use crate::params;
 
 pub const SECRETKEYBYTES: usize = crate::params::SECRETKEYBYTES;
 pub const PUBLICKEYBYTES: usize = crate::params::PUBLICKEYBYTES;
@@ -73,7 +75,12 @@ impl Keypair {
 	/// * 'msg' - message to sign
 	///
 	/// Returns Option<Signature>
-	pub fn sign(&self, msg: &[u8], ctx: Option<&[u8]>, hedge: Option<[u8; params::SEEDBYTES]>) -> Signature {
+	pub fn sign(
+		&self,
+		msg: &[u8],
+		ctx: Option<&[u8]>,
+		hedge: Option<[u8; params::SEEDBYTES]>,
+	) -> Signature {
 		self.secret.sign(msg, ctx, hedge)
 	}
 
@@ -167,7 +174,12 @@ impl SecretKey {
 	/// * 'hedged' - wether to use RNG or not
 	///
 	/// Returns Option<Signature>
-	pub fn sign(&self, msg: &[u8], ctx: Option<&[u8]>, hedge: Option<[u8; params::SEEDBYTES]>) -> Signature {
+	pub fn sign(
+		&self,
+		msg: &[u8],
+		ctx: Option<&[u8]>,
+		hedge: Option<[u8; params::SEEDBYTES]>,
+	) -> Signature {
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
@@ -378,20 +390,20 @@ impl PublicKey {
 mod tests {
 	use super::Keypair;
 	use rand::Rng;
-    
-    fn get_random_bytes() -> [u8; 32] {
-        let mut rng = rand::thread_rng();
-        let mut bytes = [0u8; 32];
-        rng.fill(&mut bytes);
-        bytes
-    }
 
-    fn get_random_msg() -> [u8; 128] {
-        let mut rng = rand::thread_rng();
-        let mut bytes = [0u8; 128];
-        rng.fill(&mut bytes);
-        bytes
-    }
+	fn get_random_bytes() -> [u8; 32] {
+		let mut rng = rand::thread_rng();
+		let mut bytes = [0u8; 32];
+		rng.fill(&mut bytes);
+		bytes
+	}
+
+	fn get_random_msg() -> [u8; 128] {
+		let mut rng = rand::thread_rng();
+		let mut bytes = [0u8; 128];
+		rng.fill(&mut bytes);
+		bytes
+	}
 
 	#[test]
 	fn self_verify_hedged() {
@@ -402,7 +414,7 @@ mod tests {
 		let sig = keys.sign(&msg, None, Some(hedge));
 		assert!(keys.verify(&msg, &sig, None));
 	}
-	
+
 	#[test]
 	fn self_verify() {
 		let msg = get_random_msg();

@@ -10,12 +10,11 @@ use std::{panic, sync::mpsc, thread, time::Duration};
 use rand::Rng;
 
 fn get_random_bytes() -> [u8; 32] {
-    let mut rng = rand::thread_rng();
-    let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes);
-    bytes
+	let mut rng = rand::thread_rng();
+	let mut bytes = [0u8; 32];
+	rng.fill(&mut bytes);
+	bytes
 }
-
 
 /// Test ML-DSA key generation with a specific stack size
 fn test_keygen_with_stack_size<T>(stack_kb: usize, variant_name: &str, keygen_fn: T) -> bool
