@@ -21,16 +21,17 @@ name = "stack_usage_demo"
 path = "examples/stack_usage_demo.rs"
 
 [dependencies]
-rand = { version = "0.7.3", optional = true }
 sha2 = { version = "0.10.8", default-features = false }
+aes = "0.8"
+cipher = "0.4"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
+rand = { version = "0.7.3" }
 
 [[bench]]
 name = "dilithium_benchmarks"
 harness = false
 
 [features]
-default = ["std"]
-std = ["dep:rand"]
+default = []
