@@ -104,10 +104,7 @@ pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedge: Option<[u8; param
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut keymu[params::SEEDBYTES..], params::CRHBYTES, &mut state);
 
-	let rnd_bytes = match hedge {
-		Some(seed) => seed,
-		None => [0u8; params::SEEDBYTES],
-	};
+	let rnd_bytes = hedge.unwrap_or([0u8; params::SEEDBYTES]);
 
 	state.init();
 	fips202::shake256_absorb(&mut state, &keymu[..params::SEEDBYTES], params::SEEDBYTES);
