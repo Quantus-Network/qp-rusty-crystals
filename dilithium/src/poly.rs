@@ -492,11 +492,8 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
 		}
 	}
 
-	// Copy first N coefficients to polynomial output (pad with zeros if we didn't get enough)
-	for coefficient_index in 0..N {
-		output_polynomial.coeffs[coefficient_index] =
-			temporary_coefficient_storage[coefficient_index];
-	}
+	// Copy first N coefficients to polynomial output
+	output_polynomial.coeffs[..N].copy_from_slice(&temporary_coefficient_storage[..N]);
 }
 
 /// Sample polynomial with uniformly random coefficients in [-(GAMMA1 - 1), GAMMA1 - 1] by
@@ -1054,6 +1051,7 @@ mod tests {
 	}
 
 	#[test]
+	#[allow(clippy::erasing_op)]
 	fn test_rej_eta_all_valid_nibbles() {
 		let mut output = [0i32; 10];
 		// Create buffer with all nibbles < 15
@@ -1082,6 +1080,7 @@ mod tests {
 	}
 
 	#[test]
+	#[allow(clippy::erasing_op)]
 	fn test_rej_eta_mixed_valid_invalid() {
 		let mut output = [0i32; 10];
 		// Mix valid and invalid nibbles: 0xF0 = nibbles 0 (valid), 15 (invalid)
@@ -1102,6 +1101,7 @@ mod tests {
 	}
 
 	#[test]
+	#[allow(clippy::erasing_op)]
 	fn test_rej_eta_limited_space() {
 		let mut output = [0i32; 10];
 		// Create buffer with many valid nibbles
