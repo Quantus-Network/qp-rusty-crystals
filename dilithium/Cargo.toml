@@ -21,15 +21,17 @@ name = "stack_usage_demo"
 path = "examples/stack_usage_demo.rs"
 
 [dependencies]
-rand = { version = "0.7.3", optional = true }
 sha2 = { version = "0.10.8", default-features = false }
 subtle = { version = "2.4.1", default-features = false }
 
 # Constant-time testing (optional for binaries)
 dudect-bencher = { version = "0.6", optional = true }
+aes = "0.8"
+cipher = "0.4"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
+rand = { version = "0.7.3" }
 
 [[bench]]
 name = "dilithium_benchmarks"
@@ -40,6 +42,5 @@ name = "ct_bench"
 required-features = ["ct-testing"]
 
 [features]
-default = ["std"]
-std = ["dep:rand"]
+default = []
 ct-testing = ["dudect-bencher", "std"] # Enable constant-time testing features

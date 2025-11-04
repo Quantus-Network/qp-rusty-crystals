@@ -73,9 +73,31 @@ mod hdwallet_tests {
 		let derived_key = hd.generate_derived_keys("m/0'/2147483647'/1'").unwrap();
 		assert_ne!(master_key.secret.bytes, derived_key.secret.bytes, "derived key not derived");
 
-		// // UNCOMMENT THIS AND RUN WITH `cargo test -- --nocapture` TO GENERATE TEST VECTORS
+		// UNCOMMENT THIS AND RUN WITH `cargo test -- --nocapture` TO GENERATE TEST VECTORS
 		// let vecs = generate_test_vectors(10);
 		// print_keys_mnemonics_paths_as_test_vector(&vecs);
+	}
+
+	#[test]
+	fn test_same_mnemonic_same_path_deterministic() {
+		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let hd1 = HDLattice::from_mnemonic(mnemonic, None).unwrap();
+		let hd2 = HDLattice::from_mnemonic(mnemonic, None).unwrap();
+		let paths = ["", "m", "m/0'/2147483647'/1'", "m/44'/60'/0'/0/0", "m/1'/2'/3'"];
+		for p in paths {
+			let k1 = if p.is_empty() || p == "m" {
+				hd1.generate_keys()
+			} else {
+				hd1.generate_derived_keys(p).unwrap()
+			};
+			let k2 = if p.is_empty() || p == "m" {
+				hd2.generate_keys()
+			} else {
+				hd2.generate_derived_keys(p).unwrap()
+			};
+			assert_eq!(k1.secret.bytes, k2.secret.bytes);
+			assert_eq!(k1.public.bytes, k2.public.bytes);
+		}
 	}
 
 	#[allow(dead_code)]
@@ -92,42 +114,6 @@ mod hdwallet_tests {
 				(k, mnemonic, path)
 			})
 			.collect()
-	}
-
-	#[allow(dead_code)]
-	fn generate_random_path() -> String {
-		let seed = [11u8; 32];
-		let mut rng = ChaCha20Rng::from_seed(seed);
-		// Generate length between 5 and 15 using RngCore
-		let length = (rng.next_u32() % 10) + 5;
-
-		"m/".to_owned() +
-			&(0..length)
-				.map(|_| (rng.next_u32() % 99) + 1) // Generate number between 1 and 99
-				.map(|num| num.to_string() + "\'")
-				.collect::<Vec<_>>()
-				.join("/")
-	}
-
-	// Leave this in, we may need to generate new test vectors
-	#[allow(dead_code)]
-	fn print_keys_mnemonics_paths_as_test_vector(keys: &[(Keypair, String, String)]) {
-		let mut vector_str = String::from("[\n");
-		for (key, mnemonic, path) in keys.iter() {
-			vector_str.push_str(&format!(
-				"    (Keypair::from_bytes(&*vec![{}]), \"{}\", \"{}\"),\n",
-				key.to_bytes()
-					.iter()
-					.map(|b| format!("0x{b:02x}"))
-					.collect::<Vec<String>>()
-					.join(", "),
-				mnemonic,
-				path
-			));
-		}
-		vector_str.push(']');
-
-		println!("{vector_str}");
 	}
 
 	#[test]
@@ -154,6 +140,42 @@ mod hdwallet_tests {
 				"Public key mismatch for path: {derivation_path}"
 			);
 		}
+	}
+
+	#[allow(dead_code)]
+	fn generate_random_path() -> String {
+		let seed = [11u8; 32];
+		let mut rng = ChaCha20Rng::from_seed(seed);
+		// Generate length between 5 and 15 using RngCore
+		let length = (rng.next_u32() % 10) + 5;
+
+		"m/".to_owned() +
+			&(0..length)
+				.map(|_| (rng.next_u32() % 99) + 1) // Generate number between 1 and 99
+				.map(|num| num.to_string() + "\'")
+				.collect::<Vec<_>>()
+				.join("/")
+	}
+
+	// Leave this in, we may need to generate new test vectors
+	#[allow(dead_code)]
+	fn print_keys_mnemonics_paths_as_test_vector(keys: &[(Keypair, String, String)]) {
+		let mut vector_str = String::from("[\n");
+		for (key, mnemonic, path) in keys.iter() {
+			vector_str.push_str(&format!(
+				"    (Keypair::from_bytes(&*vec![{}]).expect(\"Should not fail\"), \"{}\", \"{}\"),\n",
+				key.to_bytes()
+					.iter()
+					.map(|b| format!("0x{b:02x}"))
+					.collect::<Vec<String>>()
+					.join(", "),
+				mnemonic,
+				path
+			));
+		}
+		vector_str.push(']');
+
+		println!("{vector_str}");
 	}
 
 	#[test]

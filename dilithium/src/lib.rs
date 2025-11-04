@@ -1,4 +1,4 @@
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 #![allow(clippy::identity_op)]
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::precedence)]
@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+pub mod drbg;
 mod errors;
 pub mod fips202;
 pub mod ml_dsa_87;
@@ -22,19 +23,6 @@ pub mod sign;
 pub enum PH {
 	SHA256,
 	SHA512,
-}
-
-#[cfg(feature = "std")]
-use rand::RngCore;
-/// Generate random bytes.
-///
-/// # Arguments
-///
-/// * 'bytes' - an array to fill with random data
-/// * 'n' - number of bytes to generate
-#[cfg(feature = "std")]
-fn random_bytes(bytes: &mut [u8], n: usize) {
-	rand::prelude::thread_rng().try_fill_bytes(&mut bytes[..n]).unwrap();
 }
 
 #[cfg(test)]
