@@ -1,4 +1,5 @@
 use crate::{fips202, ntt, params, reduce, rounding};
+use subtle::{Choice, ConditionallySelectable};
 const N: usize = params::N as usize;
 const UNIFORM_NBLOCKS: usize = (767 + fips202::SHAKE128_RATE) / fips202::SHAKE128_RATE;
 const D_SHL: i32 = 1 << (params::D - 1);
@@ -341,7 +342,6 @@ pub fn t0_unpack(r: &mut Poly, a: &[u8]) {
 	}
 }
 
-const UNIFORM_ETA_NBLOCKS: usize = (135 + fips202::SHAKE256_RATE) / fips202::SHAKE256_RATE;
 const UNIFORM_GAMMA1_NBLOCKS: usize = params::POLYZ_PACKEDBYTES.div_ceil(fips202::SHAKE256_RATE);
 
 /// For all coefficients c of the input polynomial, compute high and low bits c0, c1 such c mod Q =
@@ -410,41 +410,90 @@ pub fn use_hint_ip(a: &mut Poly, hint: &Poly) {
 /// given
 pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
 	let mut ctr = 0usize;
-	let mut pos = 0usize;
-	while ctr < alen && pos < buflen {
-		let mut t0 = (buf[pos] & 0x0F) as u32;
-		let mut t1 = (buf[pos] >> 4) as u32;
-		pos += 1;
+	let mut dummy_value = 0i32; // For dummy writes
 
-		if t0 < 15 {
-			t0 = t0 - (205 * t0 >> 10) * 5;
-			a[ctr] = 2 - t0 as i32;
-			ctr += 1;
+	// Always process exactly buflen bytes
+	for pos in 0..buflen {
+		let lower_nibble = (buf[pos] & 0x0F) as u32;
+		let upper_nibble = (buf[pos] >> 4) as u32;
+
+		// Compute all arithmetic operations upfront to avoid data-dependent timing
+		// the following operations are a fast way to do % 5 (205 ~= 1024/5)
+		let reduced_lower = lower_nibble - (205 * lower_nibble >> 10) * 5;
+		let reduced_upper = upper_nibble - (205 * upper_nibble >> 10) * 5;
+		let coeff_lower = 2 - reduced_lower as i32;
+		let coeff_upper = 2 - reduced_upper as i32;
+
+		// Nibbles valid?
+		let valid_lower = Choice::from((lower_nibble < 15) as u8);
+		let valid_upper = Choice::from((upper_nibble < 15) as u8);
+
+		let has_space_lower = Choice::from((ctr < alen) as u8);
+		let store_lower = valid_lower & has_space_lower;
+
+		// Constant-time-ish conditional assignment
+		// Write to output or dummy location based on condition
+		if ctr < a.len() {
+			a[ctr] = i32::conditional_select(&a[ctr], &coeff_lower, store_lower);
+		} else {
+			dummy_value = i32::conditional_select(&coeff_lower, &dummy_value, store_lower);
 		}
-		if t1 < 15 && ctr < alen {
-			t1 = t1 - (205 * t1 >> 10) * 5;
-			a[ctr] = 2 - t1 as i32;
-			ctr += 1;
+		ctr += store_lower.unwrap_u8() as usize;
+
+		let has_space_upper = Choice::from((ctr < alen) as u8);
+		let store_upper = valid_upper & has_space_upper;
+
+		// Constant-time-ish conditional assignment
+		// Write to output or dummy location based on condition
+		if ctr < a.len() {
+			a[ctr] = i32::conditional_select(&a[ctr], &coeff_upper, store_upper);
+		} else {
+			dummy_value = i32::conditional_select(&coeff_upper, &dummy_value, store_upper);
 		}
+		ctr += store_upper.unwrap_u8() as usize;
 	}
+
+	// Prevent compiler from optimizing away dummy_value
+	core::hint::black_box(dummy_value);
 	ctr
 }
 
 /// Sample polynomial with uniformly random coefficients in [-ETA,ETA] by performing rejection
 /// sampling using the output stream from SHAKE256(seed|nonce).
-pub fn uniform_eta(a: &mut Poly, seed: &[u8], nonce: u16) {
+pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
-	let mut buf = [0u8; UNIFORM_ETA_NBLOCKS * fips202::SHAKE256_RATE];
-	fips202::shake256_squeezeblocks(&mut buf, UNIFORM_ETA_NBLOCKS, &mut state);
+	// Fixed number of rounds for constant-time operation
+	const FIXED_ROUNDS: usize = 2;
+	let mut shake_output_buffer = [0u8; fips202::SHAKE256_RATE];
+	let mut temporary_coefficient_storage = [0i32; 1000]; // Temp storage for all extracted coeffs
+	let mut total_coefficients_collected = 0usize;
 
-	let buflen = UNIFORM_ETA_NBLOCKS * fips202::SHAKE256_RATE;
-	let mut ctr = rej_eta(&mut a.coeffs, N, &buf, buflen);
-	while ctr < N {
-		fips202::shake256_squeezeblocks(&mut buf, 1, &mut state);
-		ctr += rej_eta(&mut a.coeffs[ctr..], N - ctr, &buf, fips202::SHAKE256_RATE);
+	// In case by some freak accident 2 rounds isn't enough, we keep going. This makes it
+	// non-constant time in only a negligible set of cases. The vast majority of cases will run
+	// this outer loop exactly once
+	while total_coefficients_collected < N {
+		// Always run exactly FIXED_ROUNDS iterations
+		for _round_number in 0..FIXED_ROUNDS {
+			// Squeeze one block at a time and collect
+			fips202::shake256_squeezeblocks(&mut shake_output_buffer, 1, &mut state);
+
+			// Always call rej_eta with same parameters regardless of how many coeffs we have
+			let available_storage_space =
+				temporary_coefficient_storage.len() - total_coefficients_collected;
+			let coefficients_extracted_this_round = rej_eta(
+				&mut temporary_coefficient_storage[total_coefficients_collected..],
+				available_storage_space,
+				&shake_output_buffer,
+				fips202::SHAKE256_RATE,
+			);
+			total_coefficients_collected += coefficients_extracted_this_round;
+		}
 	}
+
+	// Copy first N coefficients to polynomial output
+	output_polynomial.coeffs[..N].copy_from_slice(&temporary_coefficient_storage[..N]);
 }
 
 /// Sample polynomial with uniformly random coefficients in [-(GAMMA1 - 1), GAMMA1 - 1] by
@@ -584,6 +633,11 @@ pub fn w1_pack(r: &mut [u8], a: &Poly) {
 
 #[cfg(test)]
 mod tests {
+	#[cfg(test)]
+	extern crate std;
+	#[cfg(test)]
+	use std::println;
+
 	use super::*;
 
 	#[test]
@@ -825,40 +879,400 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_produces_valid_coefficients() {
-		let seed = [0x42u8; params::CRHBYTES];
-		let nonce = 1234;
-		let mut poly = Poly::default();
+		use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-		uniform_eta(&mut poly, &seed, nonce);
+		let mut rng = StdRng::seed_from_u64(0x123456789ABCDEF0);
+		const NUM_TESTS: usize = 100;
 
-		// All coefficients should be in the range [-ETA, ETA]
-		for i in 0..N {
-			assert!(poly.coeffs[i] >= -(params::ETA as i32));
-			assert!(poly.coeffs[i] <= params::ETA as i32);
+		for test_iteration in 0..NUM_TESTS {
+			let mut seed = [0u8; params::CRHBYTES];
+			rng.fill_bytes(&mut seed);
+			let nonce = rng.next_u32() as u16;
+
+			let mut poly = Poly::default();
+			uniform_eta(&mut poly, &seed, nonce);
+
+			// All coefficients should be in the range [-ETA, ETA]
+			for i in 0..N {
+				assert!(
+					poly.coeffs[i] >= -(params::ETA as i32),
+					"Test {}: Coefficient {} = {} is below -ETA ({})",
+					test_iteration,
+					i,
+					poly.coeffs[i],
+					-(params::ETA as i32)
+				);
+				assert!(
+					poly.coeffs[i] <= params::ETA as i32,
+					"Test {}: Coefficient {} = {} is above ETA ({})",
+					test_iteration,
+					i,
+					poly.coeffs[i],
+					params::ETA as i32
+				);
+			}
 		}
 	}
 
 	#[test]
 	fn test_uniform_eta_different_seeds() {
-		let seed1 = [0x42u8; params::CRHBYTES];
-		let seed2 = [0x43u8; params::CRHBYTES];
-		let nonce = 1000;
+		use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-		let mut poly1 = Poly::default();
-		let mut poly2 = Poly::default();
+		let mut rng = StdRng::seed_from_u64(0xFEDCBA9876543210);
+		const NUM_TESTS: usize = 50;
 
-		uniform_eta(&mut poly1, &seed1, nonce);
-		uniform_eta(&mut poly2, &seed2, nonce);
+		for test_iteration in 0..NUM_TESTS {
+			// Generate two different random seeds
+			let mut seed1 = [0u8; params::CRHBYTES];
+			let mut seed2 = [0u8; params::CRHBYTES];
+			rng.fill_bytes(&mut seed1);
+			rng.fill_bytes(&mut seed2);
 
-		// Different seeds should produce different polynomials
-		let mut different = false;
-		for i in 0..N {
-			if poly1.coeffs[i] != poly2.coeffs[i] {
-				different = true;
-				break;
+			// Make sure seeds are different
+			if seed1 == seed2 {
+				seed2[0] = seed2[0].wrapping_add(1);
+			}
+
+			let nonce = rng.next_u32() as u16;
+
+			let mut poly1 = Poly::default();
+			let mut poly2 = Poly::default();
+
+			uniform_eta(&mut poly1, &seed1, nonce);
+			uniform_eta(&mut poly2, &seed2, nonce);
+
+			// Different seeds should produce different polynomials
+			let mut different = false;
+			for i in 0..N {
+				if poly1.coeffs[i] != poly2.coeffs[i] {
+					different = true;
+					break;
+				}
+			}
+			assert!(
+				different,
+				"Test {}: Different seeds should produce different polynomials",
+				test_iteration
+			);
+		}
+	}
+
+	#[test]
+	fn test_uniform_eta_deterministic() {
+		use rand::{rngs::StdRng, RngCore, SeedableRng};
+
+		let mut rng = StdRng::seed_from_u64(0x1122334455667788);
+		const NUM_TESTS: usize = 25;
+
+		for test_iteration in 0..NUM_TESTS {
+			let mut seed = [0u8; params::CRHBYTES];
+			rng.fill_bytes(&mut seed);
+			let nonce = rng.next_u32() as u16;
+
+			// Generate the same polynomial twice with identical inputs
+			let mut poly1 = Poly::default();
+			let mut poly2 = Poly::default();
+
+			uniform_eta(&mut poly1, &seed, nonce);
+			uniform_eta(&mut poly2, &seed, nonce);
+
+			// Should produce identical results
+			for i in 0..N {
+				assert_eq!(
+					poly1.coeffs[i], poly2.coeffs[i],
+					"Test {}: Coefficient {} differs between identical calls: {} vs {}",
+					test_iteration, i, poly1.coeffs[i], poly2.coeffs[i]
+				);
 			}
 		}
-		assert!(different, "Different seeds should produce different polynomials");
+	}
+
+	#[test]
+	fn test_uniform_eta_nonce_variations() {
+		use rand::{rngs::StdRng, RngCore, SeedableRng};
+
+		let mut rng = StdRng::seed_from_u64(0x9999888877776666);
+		const NUM_TESTS: usize = 30;
+
+		for test_iteration in 0..NUM_TESTS {
+			let mut seed = [0u8; params::CRHBYTES];
+			rng.fill_bytes(&mut seed);
+
+			let nonce1 = rng.next_u32() as u16;
+			let mut nonce2 = rng.next_u32() as u16;
+
+			// Make sure nonces are different
+			if nonce1 == nonce2 {
+				nonce2 = nonce2.wrapping_add(1);
+			}
+
+			let mut poly1 = Poly::default();
+			let mut poly2 = Poly::default();
+
+			uniform_eta(&mut poly1, &seed, nonce1);
+			uniform_eta(&mut poly2, &seed, nonce2);
+
+			// Same seed but different nonces should produce different polynomials
+			let mut different = false;
+			for i in 0..N {
+				if poly1.coeffs[i] != poly2.coeffs[i] {
+					different = true;
+					break;
+				}
+			}
+			assert!(
+				different,
+				"Test {}: Same seed with different nonces should produce different polynomials (nonce1={}, nonce2={})",
+				test_iteration,
+				nonce1,
+				nonce2
+			);
+		}
+	}
+
+	#[test]
+	fn test_rej_eta_empty_buffer() {
+		let mut output = [0i32; 10];
+		let buffer = [];
+		let result = rej_eta(&mut output, 5, &buffer, 0);
+		assert_eq!(result, 0);
+		// All coefficients should remain unchanged (zero)
+		for coeff in &output {
+			assert_eq!(*coeff, 0);
+		}
+	}
+
+	#[test]
+	fn test_rej_eta_all_invalid_nibbles() {
+		let mut output = [0i32; 10];
+		// Create buffer with all nibbles = 15 (invalid)
+		let buffer = [0xFFu8; 4]; // 8 nibbles, all invalid
+		let result = rej_eta(&mut output, 10, &buffer, 4);
+		assert_eq!(result, 0);
+		// All coefficients should remain unchanged (zero)
+		for coeff in &output {
+			assert_eq!(*coeff, 0);
+		}
+	}
+
+	#[test]
+	#[allow(clippy::erasing_op)]
+	fn test_rej_eta_all_valid_nibbles() {
+		let mut output = [0i32; 10];
+		// Create buffer with all nibbles < 15
+		let buffer = [0x00u8, 0x11u8, 0x22u8, 0x33u8]; // nibbles: 0,0,1,1,2,2,3,3
+		let result = rej_eta(&mut output, 10, &buffer, 4);
+
+		// Should accept all 8 coefficients
+		assert_eq!(result, 8);
+
+		// Verify coefficient values using the reduction formula
+		// For nibble n: reduced = n - (205 * n >> 10) * 5, coeff = 2 - reduced
+		let expected = [
+			2 - (0 - (205 * 0 >> 10) * 5), // nibble 0
+			2 - (0 - (205 * 0 >> 10) * 5), // nibble 0
+			2 - (1 - (205 * 1 >> 10) * 5), // nibble 1
+			2 - (1 - (205 * 1 >> 10) * 5), // nibble 1
+			2 - (2 - (205 * 2 >> 10) * 5), // nibble 2
+			2 - (2 - (205 * 2 >> 10) * 5), // nibble 2
+			2 - (3 - (205 * 3 >> 10) * 5), // nibble 3
+			2 - (3 - (205 * 3 >> 10) * 5), // nibble 3
+		];
+
+		for i in 0..8 {
+			assert_eq!(output[i], expected[i]);
+		}
+	}
+
+	#[test]
+	#[allow(clippy::erasing_op)]
+	fn test_rej_eta_mixed_valid_invalid() {
+		let mut output = [0i32; 10];
+		// Mix valid and invalid nibbles: 0xF0 = nibbles 0 (valid), 15 (invalid)
+		let buffer = [0xF0u8, 0x1Fu8]; // nibbles: 0,15,1,15
+		let result = rej_eta(&mut output, 10, &buffer, 2);
+
+		// Should accept 2 coefficients (nibbles 0 and 1)
+		assert_eq!(result, 2);
+
+		// Check the accepted coefficients
+		assert_eq!(output[0], 2 - (0 - (205 * 0 >> 10) * 5)); // nibble 0
+		assert_eq!(output[1], 2 - (1 - (205 * 1 >> 10) * 5)); // nibble 1
+
+		// Remaining should be unchanged (zero)
+		for i in 2..10 {
+			assert_eq!(output[i], 0);
+		}
+	}
+
+	#[test]
+	#[allow(clippy::erasing_op)]
+	fn test_rej_eta_limited_space() {
+		let mut output = [0i32; 10];
+		// Create buffer with many valid nibbles
+		let buffer = [0x01u8, 0x23u8, 0x45u8]; // nibbles: 1,0,3,2,5,4
+		let result = rej_eta(&mut output, 3, &buffer, 3); // Only space for 3 coefficients
+
+		// Should stop after accepting 3 coefficients
+		assert_eq!(result, 3);
+
+		// Check the first 3 coefficients
+		assert_eq!(output[0], 2 - (1 - (205 * 1 >> 10) * 5)); // nibble 1
+		assert_eq!(output[1], 2 - (0 - (205 * 0 >> 10) * 5)); // nibble 0
+		assert_eq!(output[2], 2 - (3 - (205 * 3 >> 10) * 5)); // nibble 3
+
+		// Remaining should be unchanged
+		for i in 3..10 {
+			assert_eq!(output[i], 0);
+		}
+	}
+
+	#[test]
+	fn test_rej_eta_reduction_formula() {
+		let mut output = [0i32; 20];
+		// Test specific nibble values to verify reduction formula
+		let buffer = [
+			0x54u8, // nibbles: 4,5
+			0x98u8, // nibbles: 8,9
+			0xDCu8, // nibbles: 12,13
+			0xEEu8, // nibbles: 14,14
+		];
+		let result = rej_eta(&mut output, 20, &buffer, 4);
+
+		// Should accept 8 coefficients (all are < 15)
+		assert_eq!(result, 8);
+
+		// Manually verify the reduction formula for each nibble
+		let nibbles = [4u32, 5u32, 8u32, 9u32, 12u32, 13u32, 14u32, 14u32];
+		for (i, &nibble) in nibbles.iter().enumerate() {
+			let reduced = nibble - (205 * nibble >> 10) * 5;
+			let expected_coeff = 2 - reduced as i32;
+			assert_eq!(output[i], expected_coeff, "Failed for nibble {}", nibble);
+		}
+	}
+
+	#[test]
+	fn test_rej_eta_boundary_nibble_14() {
+		let mut output = [0i32; 4];
+		// Test nibble 14 (valid) and 15 (invalid)
+		let buffer = [0xFEu8]; // nibbles: 14,15
+		let result = rej_eta(&mut output, 4, &buffer, 1);
+
+		// Should accept 1 coefficient (nibble 14)
+		assert_eq!(result, 1);
+
+		let reduced = 14u32 - (205 * 14u32 >> 10) * 5;
+		let expected = 2 - reduced as i32;
+		assert_eq!(output[0], expected);
+	}
+
+	#[test]
+	fn test_rej_eta_output_range() {
+		let mut output = [0i32; 20];
+		// Create buffer with all possible valid nibbles (0-14)
+		let buffer = [
+			0x10u8, 0x32u8, 0x54u8, 0x76u8, 0x98u8, 0xBAu8, 0xDCu8,
+			0xEEu8, // nibbles: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,14
+		];
+		let result = rej_eta(&mut output, 20, &buffer, 8);
+
+		assert_eq!(result, 16); // Should accept 16 coefficients (all nibbles are < 15)
+
+		// Verify all coefficients are in expected range [-2, 2]
+		for i in 0..result {
+			assert!(
+				output[i] >= -2 && output[i] <= 2,
+				"Coefficient {} = {} is out of range [-2, 2]",
+				i,
+				output[i]
+			);
+		}
+	}
+
+	#[test]
+	fn test_uniform_eta_coefficient_efficiency() {
+		use rand::{rngs::StdRng, RngCore, SeedableRng};
+
+		let mut rng = StdRng::seed_from_u64(0xABCDEF0123456789);
+		const NUM_TESTS: usize = 100;
+
+		let mut total_coefficients_generated = 0usize;
+		let mut total_coefficients_needed = 0usize;
+		let mut tests_with_insufficient_coefficients = 0usize;
+		const FIXED_ROUNDS_FOR_CONSTANT_TIME: usize = 2;
+
+		for _test_iteration in 0..NUM_TESTS {
+			let mut seed = [0u8; params::CRHBYTES];
+			rng.fill_bytes(&mut seed);
+			let nonce = rng.next_u32() as u16;
+
+			// Use a large temporary storage to count all generated coefficients
+			let mut temporary_coefficient_storage = [0i32; 2000];
+			let mut total_coefficients_collected = 0usize;
+
+			// Replicate the same logic from uniform_eta to count coefficients
+			let mut state = fips202::KeccakState::default();
+			fips202::shake256_stream_init(&mut state, &seed, nonce);
+
+			let mut shake_output_buffer = [0u8; fips202::SHAKE256_RATE];
+
+			for _round_number in 0..FIXED_ROUNDS_FOR_CONSTANT_TIME {
+				fips202::shake256_squeezeblocks(&mut shake_output_buffer, 1, &mut state);
+
+				let available_storage_space =
+					temporary_coefficient_storage.len() - total_coefficients_collected;
+				let coefficients_extracted_this_round = rej_eta(
+					&mut temporary_coefficient_storage[total_coefficients_collected..],
+					available_storage_space,
+					&shake_output_buffer,
+					fips202::SHAKE256_RATE,
+				);
+				total_coefficients_collected += coefficients_extracted_this_round;
+			}
+
+			total_coefficients_generated += total_coefficients_collected;
+			total_coefficients_needed += N;
+
+			if total_coefficients_collected < N {
+				tests_with_insufficient_coefficients += 1;
+			}
+		}
+
+		let average_generated = total_coefficients_generated as f64 / NUM_TESTS as f64;
+		let average_needed = total_coefficients_needed as f64 / NUM_TESTS as f64;
+		let efficiency_ratio = average_generated / average_needed;
+		let insufficient_percentage =
+			(tests_with_insufficient_coefficients as f64 / NUM_TESTS as f64) * 100.0;
+
+		println!("=== Uniform ETA Coefficient Generation Efficiency ===");
+		println!("Tests run: {}", NUM_TESTS);
+		println!("Average coefficients generated per test: {:.2}", average_generated);
+		println!("Average coefficients needed per test: {:.2}", average_needed);
+		println!("Efficiency ratio (generated/needed): {:.2}", efficiency_ratio);
+		println!(
+			"Tests with insufficient coefficients: {} ({:.1}%)",
+			tests_with_insufficient_coefficients, insufficient_percentage
+		);
+		println!("SHAKE256 blocks used per test: {}", FIXED_ROUNDS_FOR_CONSTANT_TIME);
+		println!(
+			"Bytes processed per test: {}",
+			FIXED_ROUNDS_FOR_CONSTANT_TIME * fips202::SHAKE256_RATE
+		);
+
+		// Ensure we're generating a reasonable number of coefficients
+		assert!(
+			average_generated >= N as f64 * 0.8,
+			"Average coefficients generated ({:.2}) is less than 80% of needed ({})",
+			average_generated,
+			N
+		);
+
+		// Ensure most tests generate enough coefficients
+		assert!(
+			insufficient_percentage < 50.0,
+			"Too many tests ({:.1}%) had insufficient coefficients",
+			insufficient_percentage
+		);
 	}
 
 	#[test]
