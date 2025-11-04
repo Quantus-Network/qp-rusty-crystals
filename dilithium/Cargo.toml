@@ -42,4 +42,4 @@ required-features = ["ct-testing"]
 [features]
 default = ["std"]
 std = ["dep:rand"]
-ct-testing = ["std", "dudect-bencher"] # Enable constant-time testing features
+ct-testing = ["dudect-bencher", "std"] # Enable constant-time testing features
