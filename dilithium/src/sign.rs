@@ -230,6 +230,31 @@ fn compute_and_check_hint_vector(
 	hint_weight <= params::OMEGA as i32
 }
 
+/// Generate masking vector and compute commitment w = Ay, then decompose w = w1*2^d + w0
+fn generate_masking_vector_and_commitment(
+	masking_vector_y: &mut Polyvecl,
+	commitment_w1: &mut Polyveck,
+	commitment_w0: &mut Polyveck,
+	signature_z_temp: &mut Polyvecl,
+	expanded_matrix_a: &[Polyvecl; K],
+	signing_entropy: &[u8],
+	attempt_nonce: u16,
+) {
+	// Generate random masking vector y
+	polyvec::l_uniform_gamma1(masking_vector_y, signing_entropy, attempt_nonce);
+
+	// Compute commitment w = Ay
+	*signature_z_temp = *masking_vector_y;
+	polyvec::l_ntt(signature_z_temp);
+	polyvec::matrix_pointwise_montgomery(commitment_w1, expanded_matrix_a, signature_z_temp);
+	polyvec::k_reduce(commitment_w1);
+	polyvec::k_invntt_tomont(commitment_w1);
+	polyvec::k_caddq(commitment_w1);
+
+	// Decompose w = w1*2^d + w0
+	polyvec::k_decompose(commitment_w1, commitment_w0);
+}
+
 /// Generate challenge polynomial from commitment and message hash
 fn generate_challenge_polynomial(
 	signature_buffer: &mut [u8],
@@ -273,28 +298,18 @@ pub fn signature(
 	let mut hint_vector_h = Box::new(Polyveck::default());
 
 	loop {
-		// Generate random masking vector y
-		polyvec::l_uniform_gamma1(
+		// Generate masking vector and compute commitment
+		let mut signature_z = Box::new(Polyvecl::default());
+		generate_masking_vector_and_commitment(
 			&mut masking_vector_y,
+			&mut commitment_w1,
+			&mut commitment_w0,
+			&mut signature_z,
+			&*signing_ctx.expanded_matrix_a,
 			&signing_ctx.signing_entropy_rho_prime,
 			attempt_nonce,
 		);
 		attempt_nonce += 1;
-
-		// Compute commitment w = Ay
-		let mut signature_z = Box::new(*masking_vector_y);
-		polyvec::l_ntt(&mut signature_z);
-		polyvec::matrix_pointwise_montgomery(
-			&mut commitment_w1,
-			&*signing_ctx.expanded_matrix_a,
-			&signature_z,
-		);
-		polyvec::k_reduce(&mut commitment_w1);
-		polyvec::k_invntt_tomont(&mut commitment_w1);
-		polyvec::k_caddq(&mut commitment_w1);
-
-		// Decompose w = w1*2^d + w0
-		polyvec::k_decompose(&mut commitment_w1, &mut commitment_w0);
 
 		// Generate challenge c = H(μ, w1)
 		challenge_poly_c = generate_challenge_polynomial(
@@ -304,48 +319,41 @@ pub fn signature(
 		);
 
 		// Check first rejection condition: compute z = y + cs1 and check ||z||∞ < γ₁ - β
-		if !compute_and_check_signature_z(
+		let condition1 = compute_and_check_signature_z(
 			&mut signature_z,
 			&masking_vector_y,
 			&challenge_poly_c,
 			&unpacked_sk.secret_poly_s1_ntt,
-		) {
-			continue;
-		}
-
+		);
 		// Check second rejection condition: compute w0 - cs2 and check ||w0 - cs2||∞ < γ₂ - β
-		if !compute_and_check_commitment_w0(
+		let condition2 = compute_and_check_commitment_w0(
 			&mut commitment_w0,
 			&challenge_poly_c,
 			&unpacked_sk.secret_poly_s2_ntt,
 			&mut hint_vector_h, // Use hint_vector_h as temporary storage
-		) {
-			continue;
-		}
+		);
 
 		// Compute challenge_t0 for third norm check and hint generation
 		let mut challenge_t0 = Box::new(Polyveck::default());
-		if !compute_and_check_challenge_t0(
+		let condition3 = compute_and_check_challenge_t0(
 			&mut challenge_t0,
 			&challenge_poly_c,
 			&unpacked_sk.secret_poly_t0_ntt,
-		) {
-			continue;
-		}
+		);
 
 		// Check fourth rejection condition: compute hint vector and check weight ≤ ω
-		if !compute_and_check_hint_vector(
+		let condition4 = compute_and_check_hint_vector(
 			&mut hint_vector_h,
 			&commitment_w0,
 			&challenge_t0,
 			&commitment_w1,
-		) {
-			continue;
-		}
+		);
 
-		// All checks passed - pack final signature (c, z, h)
-		packing::pack_sig(signature_output, None, &signature_z, &hint_vector_h);
-		return;
+		if condition1 && condition2 && condition3 && condition4 {
+			// All checks passed - pack final signature (c, z, h)
+			packing::pack_sig(signature_output, None, &signature_z, &hint_vector_h);
+			return;
+		}
 	}
 }
 
@@ -381,7 +389,10 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	if !packing::unpack_sig(&mut c, &mut z, &mut h, sig) {
 		return false;
 	}
-	if !polyvec::polyvecl_is_norm_within_bound(&z, (crate::params::GAMMA1 - crate::params::BETA) as i32) {
+	if !polyvec::polyvecl_is_norm_within_bound(
+		&z,
+		(crate::params::GAMMA1 - crate::params::BETA) as i32,
+	) {
 		return false;
 	}
 
