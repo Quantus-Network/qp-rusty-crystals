@@ -155,25 +155,25 @@ pub fn power2round(a1: &mut Poly, a0: &mut Poly) {
 /// * 'b' - norm bound
 ///
 /// Returns 0 if norm is strictly smaller than B and B <= (Q-1)/8, 1 otherwise.
-pub fn chknorm(a: &Poly, b: i32) -> i32 {
+pub fn check_norm(a: &Poly, b: i32) -> bool {
+	let mut result = false;
+
+	// Check bound condition first - this is a constant-time check
 	if b > (params::Q - 1) / 8 {
-		return 1;
+		result = true;
 	}
-	// for i in a.coeffs.iter() {
-	//     let mut t = *i >> 31;
-	//     t = *i - (t & 2 * *i);
-	//     if t.ge(&b) {
-	//         return 1;
-	//     }
-	// }
+
+	// Always process all coefficients for constant-time
 	for i in 0..N {
 		let mut t = a.coeffs[i] >> 31;
 		t = a.coeffs[i] - (t & 2 * a.coeffs[i]);
+
+		// Use bitwise OR to accumulate any failures without early exit
 		if t >= b {
-			return 1;
+			result = true;
 		}
 	}
-	0
+	result
 }
 
 /// Sample uniformly random coefficients in [0, Q-1] by performing rejection sampling on array of
@@ -817,8 +817,8 @@ mod tests {
 	#[test]
 	fn test_chknorm_zero_poly() {
 		let poly = Poly::default(); // All coefficients are 0
-		assert_eq!(chknorm(&poly, 1), 0); // Should be within any positive bound
-		assert_eq!(chknorm(&poly, 1000), 0);
+		assert!(!check_norm(&poly, 1)); // Should be within any positive bound
+		assert!(!check_norm(&poly, 1000));
 	}
 
 	#[test]
@@ -827,9 +827,9 @@ mod tests {
 		poly.coeffs[0] = 100;
 		poly.coeffs[1] = -50;
 
-		assert_eq!(chknorm(&poly, 200), 0); // Within bound
-		assert_eq!(chknorm(&poly, 99), 1); // Exceeds bound
-		assert_eq!(chknorm(&poly, 49), 1); // Exceeds bound
+		assert!(!check_norm(&poly, 200)); // Within bound
+		assert!(check_norm(&poly, 99)); // Exceeds bound
+		assert!(check_norm(&poly, 49)); // Exceeds bound
 	}
 
 	#[test]

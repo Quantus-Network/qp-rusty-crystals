@@ -102,12 +102,12 @@ pub fn l_pointwise_poly_montgomery(r: &mut Polyvecl, a: &Poly, v: &Polyvecl) {
 }
 
 pub fn polyvecl_is_norm_within_bound(v: &Polyvecl, bound: i32) -> bool {
+	let mut result = true;
 	for i in 0..L {
-		if poly::chknorm(&v.vec[i], bound) > 0 {
-			return false;
-		}
+		let norm_check = poly::check_norm(&v.vec[i], bound);
+		result = result && !norm_check;
 	}
-	true
+	result
 }
 
 //---------------------------------
@@ -188,12 +188,12 @@ pub fn k_pointwise_poly_montgomery(r: &mut Polyveck, a: &Poly, v: &Polyveck) {
 //
 /// Returns 0 if norm of all polynomials are strictly smaller than B and 1 otherwise.
 pub fn polyveck_is_norm_within_bound(v: &Polyveck, bound: i32) -> bool {
+	let mut result = true;
 	for i in 0..K {
-		if poly::chknorm(&v.vec[i], bound) == 1 {
-			return false;
-		}
+		let norm_check = poly::check_norm(&v.vec[i], bound);
+		result = result && !norm_check;
 	}
-	true
+	result
 }
 
 /// For all coefficients a of polynomials in vector of length K, compute a0, a1 such that a mod Q =

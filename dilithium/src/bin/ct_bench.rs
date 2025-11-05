@@ -484,6 +484,146 @@ fn test_uniform_eta_nonce_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	}
 }
 
+/// Test l_uniform_gamma1 function for constant time
+#[cfg(feature = "dudect-bencher")]
+fn test_l_uniform_gamma1_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running l_uniform_gamma1 constant-time test...");
+
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	let fixed_seed = generate_fixed_message(64, rng);
+	for _ in 0..5_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let seed = match class {
+			Class::Left => fixed_seed.clone(),
+			Class::Right => generate_random_message(64, rng),
+		};
+		inputs.push(seed);
+		classes.push(class);
+	}
+
+	for (class, seed) in classes.into_iter().zip(inputs.into_iter()) {
+		disrupt_cache(rng);
+		runner.run_one(class, || {
+			let mut y = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+			qp_rusty_crystals_dilithium::polyvec::l_uniform_gamma1(&mut y, &seed, 0);
+		});
+	}
+}
+
+/// Test polyvecl_is_norm_within_bound function for constant time
+#[cfg(feature = "dudect-bencher")]
+fn test_polyvecl_norm_check_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running polyvecl norm check constant-time test...");
+
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	let fixed_polyvec = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+	for _ in 0..8_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let poly = match class {
+			Class::Left => fixed_polyvec,
+			Class::Right => {
+				let mut p = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+				for i in 0..7 {
+					for j in 0..256 {
+						p.vec[i].coeffs[j] = rng.gen::<i32>() % 1000;
+					}
+				}
+				p
+			},
+		};
+		inputs.push(poly);
+		classes.push(class);
+	}
+
+	for (class, poly) in classes.into_iter().zip(inputs.into_iter()) {
+		disrupt_cache(rng);
+		runner.run_one(class, || {
+			let _result =
+				qp_rusty_crystals_dilithium::polyvec::polyvecl_is_norm_within_bound(&poly, 500000);
+		});
+	}
+}
+
+/// Test polyveck_is_norm_within_bound function for constant time
+#[cfg(feature = "dudect-bencher")]
+fn test_polyveck_norm_check_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running polyveck norm check constant-time test...");
+
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	let fixed_polyvec = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+	for _ in 0..8_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let poly = match class {
+			Class::Left => fixed_polyvec,
+			Class::Right => {
+				let mut p = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+				for i in 0..8 {
+					for j in 0..256 {
+						p.vec[i].coeffs[j] = rng.gen::<i32>() % 1000;
+					}
+				}
+				p
+			},
+		};
+		inputs.push(poly);
+		classes.push(class);
+	}
+
+	for (class, poly) in classes.into_iter().zip(inputs.into_iter()) {
+		disrupt_cache(rng);
+		runner.run_one(class, || {
+			let _result =
+				qp_rusty_crystals_dilithium::polyvec::polyveck_is_norm_within_bound(&poly, 500000);
+		});
+	}
+}
+
+/// Test k_make_hint function for constant time
+#[cfg(feature = "dudect-bencher")]
+fn test_k_make_hint_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running k_make_hint constant-time test...");
+
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	let fixed_w0 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+	let fixed_w1 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+
+	for _ in 0..6_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let (w0, w1) = match class {
+			Class::Left => (fixed_w0, fixed_w1),
+			Class::Right => {
+				let mut w0 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+				let mut w1 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+				for i in 0..8 {
+					for j in 0..256 {
+						w0.vec[i].coeffs[j] = rng.gen::<i32>() % 10000;
+						w1.vec[i].coeffs[j] = rng.gen::<i32>() % 10000;
+					}
+				}
+				(w0, w1)
+			},
+		};
+		inputs.push((w0, w1));
+		classes.push(class);
+	}
+
+	for (class, (w0, w1)) in classes.into_iter().zip(inputs.into_iter()) {
+		disrupt_cache(rng);
+		runner.run_one(class, || {
+			let mut hint = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+			let _weight = qp_rusty_crystals_dilithium::polyvec::k_make_hint(&mut hint, &w0, &w1);
+		});
+	}
+}
+
 #[cfg(feature = "dudect-bencher")]
 ctbench_main!(
 	test_keypair_generation_ct,
@@ -496,7 +636,11 @@ ctbench_main!(
 	test_edge_cases_ct,
 	test_uniform_eta_ct,
 	test_rej_eta_ct,
-	test_uniform_eta_nonce_ct
+	test_uniform_eta_nonce_ct,
+	test_l_uniform_gamma1_ct,
+	test_polyvecl_norm_check_ct,
+	test_polyveck_norm_check_ct,
+	test_k_make_hint_ct
 );
 
 #[cfg(not(feature = "dudect-bencher"))]
