@@ -2,6 +2,7 @@ use crate::{
 	params, poly,
 	polyvec::{Polyveck, Polyvecl},
 };
+use subtle::{Choice, ConditionallySelectable};
 const K: usize = params::K;
 const L: usize = params::L;
 const N: usize = params::N as usize;
@@ -119,10 +120,14 @@ pub fn pack_sig(sig: &mut [u8], c: Option<&[u8]>, z: &Polyvecl, h: &Polyveck) {
 	let mut k = 0;
 	for i in 0..K {
 		for j in 0..N {
-			if h.vec[i].coeffs[j] != 0 {
-				sig[idx + k] = j as u8;
-				k += 1;
-			}
+			// Constant-time hint packing: always compute but conditionally store
+			let is_nonzero = Choice::from((h.vec[i].coeffs[j] != 0) as u8);
+
+			// Use constant-time conditional assignment
+			sig[idx + k] = u8::conditional_select(&sig[idx + k], &(j as u8), is_nonzero);
+
+			// Always increment k when coefficient is non-zero, regardless of storage space
+			k += bool::from(is_nonzero) as usize;
 		}
 		sig[idx + params::OMEGA + i] = k as u8;
 	}
