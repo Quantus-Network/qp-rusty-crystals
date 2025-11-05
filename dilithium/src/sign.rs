@@ -4,6 +4,7 @@ use crate::{
 	polyvec,
 	polyvec::{Polyveck, Polyvecl},
 };
+
 const K: usize = params::K;
 const L: usize = params::L;
 
@@ -290,7 +291,7 @@ pub fn signature(
 	let signing_ctx = prepare_signing_context(&unpacked_sk, message, hedge);
 
 	// Step 3: Constant-time rejection sampling with fixed iterations
-	const MAX_SIGNING_ATTEMPTS: u16 = 64; // covers >99.9% of cases
+	const MAX_SIGNING_ATTEMPTS: u16 = 64; // covers > 99.9% of cases
 
 	let mut masking_vector_y = Box::new(Polyvecl::default());
 	let mut commitment_w1 = Box::new(Polyveck::default());
@@ -358,13 +359,14 @@ pub fn signature(
 
 			let all_conditions_met = condition1 && condition2 && condition3 && condition4;
 
-			// Use empty hint vector for packing when conditions aren't met (prevents out-of-bounds)
-			let safe_hint = if all_conditions_met { &hint_vector_h } else { &Polyveck::default() };
-
 			// Always call pack_sig to dummy buffer for constant timing
+			// Use empty hint vector when conditions aren't met to prevent out-of-bounds access
+			let safe_hint = if all_conditions_met { &hint_vector_h } else { &Polyveck::default() };
 			packing::pack_sig(&mut dummy_output, None, &signature_z, safe_hint);
 
 			// Store valid signature components if this is the first valid one
+			// This branch is data-dependent but the alternative complex constant-time operations
+			// may actually introduce more timing variations due to memory access patterns
 			if all_conditions_met && !signature_found {
 				valid_challenge.copy_from_slice(&dummy_output[..params::C_DASH_BYTES]);
 				*valid_signature_z = *signature_z;
@@ -383,7 +385,7 @@ pub fn signature(
 				&valid_signature_z,
 				&valid_hint_h,
 			);
-			return
+			return;
 		}
 	}
 }

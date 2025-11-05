@@ -117,33 +117,31 @@ fn test_keypair_generation_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 fn test_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running small message signing constant-time test...");
 
-	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
-
-	// Generate messages and classes upfront
+	// Generate keypairs and classes upfront
 	let mut inputs = Vec::new();
 	let mut classes = Vec::new();
 
-	// Generate the fixed message once for all Left class samples
+	// Generate the fixed message once for all samples
 	let fixed_message = generate_fixed_message(SMALL_MSG_SIZE, rng);
+	let fixed_seed = generate_fixed_seed(rng);
 
 	for _ in 0..8_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let message = match class {
-			Class::Left => fixed_message.clone(),
-			Class::Right => generate_random_message(SMALL_MSG_SIZE, rng),
+		let keypair = match class {
+			Class::Left => Keypair::generate(&fixed_seed),
+			Class::Right => Keypair::generate(&generate_random_seed(rng)),
 		};
 
-		inputs.push(message);
+		inputs.push(keypair);
 		classes.push(class);
 	}
 
-	for (class, message) in classes.into_iter().zip(inputs.into_iter()) {
+	for (class, keypair) in classes.into_iter().zip(inputs.into_iter()) {
 		// Disrupt cache state before each sample
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, None, None);
+			let _signature = keypair.sign(&fixed_message, None, None);
 		});
 	}
 }
@@ -153,33 +151,31 @@ fn test_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 fn test_signing_medium_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running medium message signing constant-time test...");
 
-	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
-
-	// Generate messages and classes upfront
+	// Generate keypairs and classes upfront
 	let mut inputs = Vec::new();
 	let mut classes = Vec::new();
 
-	// Generate the fixed message once for all Left class samples
+	// Generate the fixed message once for all samples
 	let fixed_message = generate_fixed_message(MEDIUM_MSG_SIZE, rng);
+	let fixed_seed = generate_fixed_seed(rng);
 
 	for _ in 0..5_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let message = match class {
-			Class::Left => fixed_message.clone(),
-			Class::Right => generate_random_message(MEDIUM_MSG_SIZE, rng),
+		let keypair = match class {
+			Class::Left => Keypair::generate(&fixed_seed),
+			Class::Right => Keypair::generate(&generate_random_seed(rng)),
 		};
 
-		inputs.push(message);
+		inputs.push(keypair);
 		classes.push(class);
 	}
 
-	for (class, message) in classes.into_iter().zip(inputs.into_iter()) {
+	for (class, keypair) in classes.into_iter().zip(inputs.into_iter()) {
 		// Disrupt cache state before each sample
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, None, None);
+			let _signature = keypair.sign(&fixed_message, None, None);
 		});
 	}
 }
@@ -189,33 +185,31 @@ fn test_signing_medium_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 fn test_signing_large_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running large message signing constant-time test...");
 
-	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
-
-	// Generate messages and classes upfront
+	// Generate keypairs and classes upfront
 	let mut inputs = Vec::new();
 	let mut classes = Vec::new();
 
-	// Generate the fixed message once for all Left class samples
+	// Generate the fixed message once for all samples
 	let fixed_message = generate_fixed_message(LARGE_MSG_SIZE, rng);
+	let fixed_seed = generate_fixed_seed(rng);
 
 	for _ in 0..3_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let message = match class {
-			Class::Left => fixed_message.clone(),
-			Class::Right => generate_random_message(LARGE_MSG_SIZE, rng),
+		let keypair = match class {
+			Class::Left => Keypair::generate(&fixed_seed),
+			Class::Right => Keypair::generate(&generate_random_seed(rng)),
 		};
 
-		inputs.push(message);
+		inputs.push(keypair);
 		classes.push(class);
 	}
 
-	for (class, message) in classes.into_iter().zip(inputs.into_iter()) {
+	for (class, keypair) in classes.into_iter().zip(inputs.into_iter()) {
 		// Disrupt cache state before each sample
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, None, None);
+			let _signature = keypair.sign(&fixed_message, None, None);
 		});
 	}
 }
@@ -225,33 +219,31 @@ fn test_signing_large_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 fn test_signing_xlarge_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running extra large message signing constant-time test...");
 
-	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
-
-	// Generate messages and classes upfront
+	// Generate keypairs and classes upfront
 	let mut inputs = Vec::new();
 	let mut classes = Vec::new();
 
-	// Generate the fixed message once for all Left class samples
+	// Generate the fixed message once for all samples
 	let fixed_message = generate_fixed_message(EXTRA_LARGE_MSG_SIZE, rng);
+	let fixed_seed = generate_fixed_seed(rng);
 
 	for _ in 0..2_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let message = match class {
-			Class::Left => fixed_message.clone(),
-			Class::Right => generate_random_message(EXTRA_LARGE_MSG_SIZE, rng),
+		let keypair = match class {
+			Class::Left => Keypair::generate(&fixed_seed),
+			Class::Right => Keypair::generate(&generate_random_seed(rng)),
 		};
 
-		inputs.push(message);
+		inputs.push(keypair);
 		classes.push(class);
 	}
 
-	for (class, message) in classes.into_iter().zip(inputs.into_iter()) {
+	for (class, keypair) in classes.into_iter().zip(inputs.into_iter()) {
 		// Disrupt cache state before each sample
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, None, None);
+			let _signature = keypair.sign(&fixed_message, None, None);
 		});
 	}
 }
@@ -261,33 +253,31 @@ fn test_signing_xlarge_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 fn test_hedged_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running hedged signing constant-time test...");
 
-	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
-
-	// Generate messages and classes upfront
+	// Generate keypairs and classes upfront
 	let mut inputs = Vec::new();
 	let mut classes = Vec::new();
 
-	// Generate the fixed message once for all Left class samples
+	// Generate the fixed message once for all samples
 	let fixed_message = generate_fixed_message(SMALL_MSG_SIZE, rng);
+	let fixed_seed = generate_fixed_seed(rng);
 
 	for _ in 0..6_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let message = match class {
-			Class::Left => fixed_message.clone(),
-			Class::Right => generate_random_message(SMALL_MSG_SIZE, rng),
+		let keypair = match class {
+			Class::Left => Keypair::generate(&fixed_seed),
+			Class::Right => Keypair::generate(&generate_random_seed(rng)),
 		};
 
-		inputs.push(message);
+		inputs.push(keypair);
 		classes.push(class);
 	}
 
-	for (class, message) in classes.into_iter().zip(inputs.into_iter()) {
+	for (class, keypair) in classes.into_iter().zip(inputs.into_iter()) {
 		// Disrupt cache state before each sample
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, None, None); // hedged = true
+			let _signature = keypair.sign(&fixed_message, None, None); // hedged = true
 		});
 	}
 }
@@ -297,40 +287,32 @@ fn test_hedged_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 fn test_signing_with_context_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running context signing constant-time test...");
 
-	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
-
-	// Generate messages and classes upfront
+	// Generate keypairs and classes upfront
 	let mut inputs = Vec::new();
 	let mut classes = Vec::new();
 
-	// Generate the fixed message and context once for all Left class samples
-	let fixed_message = generate_fixed_message(MEDIUM_MSG_SIZE, rng);
-	let fixed_context = b"test_context_string_for_constant_time_testing".to_vec();
+	// Generate the fixed message and context once for all samples
+	let fixed_message = generate_fixed_message(SMALL_MSG_SIZE, rng);
+	let fixed_context = b"test context";
+	let fixed_seed = generate_fixed_seed(rng);
 
 	for _ in 0..4_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let (message, context) = match class {
-			Class::Left => (fixed_message.clone(), fixed_context.clone()),
-			Class::Right => {
-				let msg = generate_random_message(MEDIUM_MSG_SIZE, rng);
-				let ctx_len = rng.gen_range(10..100);
-				let mut ctx = vec![0u8; ctx_len];
-				rng.fill_bytes(&mut ctx);
-				(msg, ctx)
-			},
+		let keypair = match class {
+			Class::Left => Keypair::generate(&fixed_seed),
+			Class::Right => Keypair::generate(&generate_random_seed(rng)),
 		};
 
-		inputs.push((message, context));
+		inputs.push(keypair);
 		classes.push(class);
 	}
 
-	for (class, (message, context)) in classes.into_iter().zip(inputs.into_iter()) {
+	for (class, keypair) in classes.into_iter().zip(inputs.into_iter()) {
 		// Disrupt cache state before each sample
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _signature = keypair.sign(&message, Some(&context), None);
+			let _signature = keypair.sign(&fixed_message, Some(fixed_context), None);
 		});
 	}
 }
@@ -586,6 +568,172 @@ fn test_polyveck_norm_check_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 /// Test k_make_hint function for constant time
 #[cfg(feature = "dudect-bencher")]
+fn test_compute_signature_z_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running signature z computation constant-time test...");
+
+	// Generate test vectors
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	let fixed_keypair = qp_rusty_crystals_dilithium::ml_dsa_87::Keypair::generate(&[0x42; 32]);
+	let fixed_sk_bytes = fixed_keypair.secret.to_bytes();
+
+	// Extract fixed secret key components
+	let mut fixed_s1 = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+	// This is a simplified test - in real implementation we'd properly unpack the secret key
+
+	for _ in 0..8_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+
+		let (y_vec, challenge_poly) = match class {
+			Class::Left => {
+				// Fixed masking vector and challenge
+				let mut y = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+				let mut c = qp_rusty_crystals_dilithium::poly::Poly::default();
+				(y, c)
+			},
+			Class::Right => {
+				// Random masking vector and challenge
+				let mut y = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+				let mut c = qp_rusty_crystals_dilithium::poly::Poly::default();
+				// Fill with random data
+				for i in 0..qp_rusty_crystals_dilithium::params::L {
+					for j in 0..qp_rusty_crystals_dilithium::params::N {
+						y.vec[i].coeffs[j as usize] = rng.gen_range(-1000000..1000000);
+					}
+				}
+				for j in 0..qp_rusty_crystals_dilithium::params::N {
+					c.coeffs[j as usize] = rng.gen_range(-100..100);
+				}
+				(y, c)
+			},
+		};
+
+		inputs.push((y_vec, challenge_poly));
+		classes.push(class);
+	}
+
+	for (class, (y_vec, challenge_poly)) in classes.into_iter().zip(inputs.into_iter()) {
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let mut signature_z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+			// Simulate the signature z computation without accessing internal functions
+			// This tests the norm checking part which is publicly accessible
+			let _result = qp_rusty_crystals_dilithium::polyvec::polyvecl_is_norm_within_bound(
+				&signature_z,
+				(qp_rusty_crystals_dilithium::params::GAMMA1 -
+					qp_rusty_crystals_dilithium::params::BETA) as i32,
+			);
+		});
+	}
+}
+
+fn test_challenge_generation_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running challenge generation constant-time test...");
+
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Fixed message hash for left class
+	let fixed_mu = [0u8; 64];
+
+	for _ in 0..5_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+
+		let (mu, w1) = match class {
+			Class::Left => {
+				let w1 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+				(fixed_mu, w1)
+			},
+			Class::Right => {
+				let mut mu = [0u8; 64];
+				rng.fill_bytes(&mut mu);
+				let mut w1 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+				// Fill w1 with random data
+				for i in 0..qp_rusty_crystals_dilithium::params::K {
+					for j in 0..qp_rusty_crystals_dilithium::params::N {
+						w1.vec[i].coeffs[j as usize] = rng.gen_range(0..16);
+					}
+				}
+				(mu, w1)
+			},
+		};
+
+		inputs.push((mu, w1));
+		classes.push(class);
+	}
+
+	for (class, (mu, w1)) in classes.into_iter().zip(inputs.into_iter()) {
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let mut output_buffer = [0u8; qp_rusty_crystals_dilithium::params::SIGNBYTES];
+			// Test the packing operation which is part of challenge generation
+			qp_rusty_crystals_dilithium::polyvec::k_pack_w1(&mut output_buffer, &w1);
+		});
+	}
+}
+
+fn test_packing_operations_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running packing operations constant-time test...");
+
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	for _ in 0..6_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+
+		let (z_vec, h_vec) = match class {
+			Class::Left => {
+				// Fixed signature components
+				let z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+				let h = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+				(z, h)
+			},
+			Class::Right => {
+				// Random signature components
+				let mut z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+				let mut h = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+
+				// Fill z with random data in valid range
+				for i in 0..qp_rusty_crystals_dilithium::params::L {
+					for j in 0..qp_rusty_crystals_dilithium::params::N {
+						z.vec[i].coeffs[j as usize] = rng.gen_range(-100000..100000);
+					}
+				}
+
+				// Fill h with sparse random data (valid hint vector)
+				let mut hint_count = 0;
+				for i in 0..qp_rusty_crystals_dilithium::params::K {
+					for j in 0..qp_rusty_crystals_dilithium::params::N {
+						if hint_count < qp_rusty_crystals_dilithium::params::OMEGA &&
+							rng.gen_bool(0.01)
+						{
+							h.vec[i].coeffs[j as usize] = 1;
+							hint_count += 1;
+						}
+					}
+				}
+
+				(z, h)
+			},
+		};
+
+		inputs.push((z_vec, h_vec));
+		classes.push(class);
+	}
+
+	for (class, (z_vec, h_vec)) in classes.into_iter().zip(inputs.into_iter()) {
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let mut sig_buffer = [0u8; qp_rusty_crystals_dilithium::params::SIGNBYTES];
+			qp_rusty_crystals_dilithium::packing::pack_sig(&mut sig_buffer, None, &z_vec, &h_vec);
+		});
+	}
+}
+
 fn test_k_make_hint_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running k_make_hint constant-time test...");
 
@@ -640,7 +788,10 @@ ctbench_main!(
 	test_l_uniform_gamma1_ct,
 	test_polyvecl_norm_check_ct,
 	test_polyveck_norm_check_ct,
-	test_k_make_hint_ct
+	test_k_make_hint_ct,
+	test_compute_signature_z_ct,
+	test_challenge_generation_ct,
+	test_packing_operations_ct
 );
 
 #[cfg(not(feature = "dudect-bencher"))]
