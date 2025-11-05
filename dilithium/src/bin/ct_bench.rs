@@ -457,8 +457,8 @@ fn test_rej_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	for _ in 0..10_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let buffer = match class {
-			Class::Left => fixed.clone(), // Many rejections (slow case)
-			Class::Right => generate_random_message(168, rng), // Few rejections (fast case)
+			Class::Left => fixed.clone(),
+			Class::Right => generate_random_message(168, rng),
 		};
 
 		inputs.push(buffer);
@@ -805,6 +805,100 @@ fn test_k_make_hint_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	}
 }
 
+/// Test NTT (Number Theoretic Transform) for constant-time execution
+#[cfg(feature = "dudect-bencher")]
+fn test_ntt_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running NTT constant-time test...");
+
+	// Generate arrays and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Generate the fixed array once for all Left class samples
+	let fixed_array = generate_fixed_polynomial_array(rng);
+
+	for _ in 0..5_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let array = match class {
+			Class::Left => fixed_array.clone(),
+			Class::Right => generate_random_polynomial_array(rng),
+		};
+
+		inputs.push(array);
+		classes.push(class);
+	}
+
+	for (class, array) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let mut array_copy = array.clone();
+			qp_rusty_crystals_dilithium::ntt::ntt(&mut array_copy);
+		});
+	}
+}
+
+/// Generate a fixed polynomial array for Left class (deterministic pattern)
+#[cfg(feature = "dudect-bencher")]
+fn generate_fixed_polynomial_array(rng: &mut BenchRng) -> Vec<i32> {
+	// Use a deterministic pattern based on a single random byte
+	let pattern = rng.gen::<u8>() as i32;
+	let mut array = Vec::with_capacity(qp_rusty_crystals_dilithium::params::N as usize);
+
+	for i in 0..qp_rusty_crystals_dilithium::params::N as usize {
+		// Create a simple deterministic pattern that varies by position
+		array.push(pattern.wrapping_add(i as i32) & 0x7FFFFF); // Keep within reasonable range
+	}
+	array
+}
+
+/// Generate a random polynomial array for Right class
+#[cfg(feature = "dudect-bencher")]
+fn generate_random_polynomial_array(rng: &mut BenchRng) -> Vec<i32> {
+	let mut array = Vec::with_capacity(qp_rusty_crystals_dilithium::params::N as usize);
+
+	for _ in 0..qp_rusty_crystals_dilithium::params::N as usize {
+		// Generate random coefficients within a reasonable range
+		array.push(rng.gen::<i32>() & 0x7FFFFF);
+	}
+	array
+}
+
+/// Test inverse NTT for constant-time execution
+#[cfg(feature = "dudect-bencher")]
+fn test_invntt_tomont_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running inverse NTT constant-time test...");
+
+	// Generate arrays and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Generate the fixed array once for all Left class samples
+	let fixed_array = generate_fixed_polynomial_array(rng);
+
+	for _ in 0..5_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let array = match class {
+			Class::Left => fixed_array.clone(),
+			Class::Right => generate_random_polynomial_array(rng),
+		};
+
+		inputs.push(array);
+		classes.push(class);
+	}
+
+	for (class, array) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let mut array_copy = array.clone();
+			qp_rusty_crystals_dilithium::ntt::invntt_tomont(&mut array_copy);
+		});
+	}
+}
+
 #[cfg(feature = "dudect-bencher")]
 ctbench_main!(
 	test_keypair_generation_ct,
@@ -824,7 +918,9 @@ ctbench_main!(
 	test_k_make_hint_ct,
 	test_compute_signature_z_ct,
 	test_challenge_generation_ct,
-	test_packing_operations_ct
+	test_packing_operations_ct,
+	test_ntt_ct,
+	test_invntt_tomont_ct
 );
 
 #[cfg(not(feature = "dudect-bencher"))]
