@@ -93,8 +93,8 @@ fn generate_fixed_hint_polyveck() -> qp_rusty_crystals_dilithium::polyvec::Polyv
 	let mut hint_count = 0;
 	for i in 0..qp_rusty_crystals_dilithium::params::K {
 		for j in 0..qp_rusty_crystals_dilithium::params::N {
-			if hint_count < qp_rusty_crystals_dilithium::params::OMEGA
-				&& (i * qp_rusty_crystals_dilithium::params::N as usize + j as usize) % 37 == 0
+			if hint_count < qp_rusty_crystals_dilithium::params::OMEGA &&
+				(i * qp_rusty_crystals_dilithium::params::N as usize + j as usize) % 37 == 0
 			{
 				h.vec[i].coeffs[j as usize] = 1;
 				hint_count += 1;
@@ -618,89 +618,21 @@ fn test_polyveck_norm_check_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	}
 }
 
-/// Test k_make_hint function for constant time
-#[cfg(feature = "dudect-bencher")]
-fn test_compute_signature_z_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
-	println!("Running signature z computation constant-time test...");
-
-	// Generate test vectors
-	let mut inputs = Vec::new();
-	let mut classes = Vec::new();
-
-	let fixed_keypair = qp_rusty_crystals_dilithium::ml_dsa_87::Keypair::generate(&[0x42; 32]);
-	let fixed_sk_bytes = fixed_keypair.secret.to_bytes();
-
-	// Extract fixed secret key components
-	let mut fixed_s1 = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
-	// This is a simplified test - in real implementation we'd properly unpack the secret key
-
-	for _ in 0..8_000 {
-		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-
-		let (y_vec, challenge_poly) = match class {
-			Class::Left => {
-				// Fixed masking vector and challenge
-				let mut y = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
-				let mut c = qp_rusty_crystals_dilithium::poly::Poly::default();
-				(y, c)
-			},
-			Class::Right => {
-				// Random masking vector and challenge
-				let mut y = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
-				let mut c = qp_rusty_crystals_dilithium::poly::Poly::default();
-				// Fill with random data
-				for i in 0..qp_rusty_crystals_dilithium::params::L {
-					for j in 0..qp_rusty_crystals_dilithium::params::N {
-						y.vec[i].coeffs[j as usize] = rng.gen_range(-1000000..1000000);
-					}
-				}
-				for j in 0..qp_rusty_crystals_dilithium::params::N {
-					c.coeffs[j as usize] = rng.gen_range(-100..100);
-				}
-				(y, c)
-			},
-		};
-
-		inputs.push((y_vec, challenge_poly));
-		classes.push(class);
-	}
-
-	for (class, (y_vec, challenge_poly)) in classes.into_iter().zip(inputs.into_iter()) {
-		disrupt_cache(rng);
-
-		runner.run_one(class, || {
-			let mut signature_z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
-			// Simulate the signature z computation without accessing internal functions
-			// This tests the norm checking part which is publicly accessible
-			let _result = qp_rusty_crystals_dilithium::polyvec::polyvecl_is_norm_within_bound(
-				&signature_z,
-				(qp_rusty_crystals_dilithium::params::GAMMA1
-					- qp_rusty_crystals_dilithium::params::BETA) as i32,
-			);
-		});
-	}
-}
-
 fn test_challenge_generation_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running challenge generation constant-time test...");
 
 	let mut inputs = Vec::new();
 	let mut classes = Vec::new();
 
-	// Fixed message hash for left class
-	let fixed_mu = [0u8; 64];
-
 	for _ in 0..5_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 
-		let (mu, w1) = match class {
+		let w1 = match class {
 			Class::Left => {
 				let w1 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
-				(fixed_mu, w1)
+				w1
 			},
 			Class::Right => {
-				let mut mu = [0u8; 64];
-				rng.fill_bytes(&mut mu);
 				let mut w1 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
 				// Fill w1 with random data
 				for i in 0..qp_rusty_crystals_dilithium::params::K {
@@ -708,15 +640,15 @@ fn test_challenge_generation_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 						w1.vec[i].coeffs[j as usize] = rng.gen_range(0..16);
 					}
 				}
-				(mu, w1)
+				w1
 			},
 		};
 
-		inputs.push((mu, w1));
+		inputs.push(w1);
 		classes.push(class);
 	}
 
-	for (class, (mu, w1)) in classes.into_iter().zip(inputs.into_iter()) {
+	for (class, w1) in classes.into_iter().zip(inputs.into_iter()) {
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
@@ -1199,8 +1131,8 @@ fn test_challenge_generation_detailed_ct(runner: &mut CtRunner, rng: &mut BenchR
 			fips202::shake256_absorb(
 				&mut keccak_state,
 				&signature_buffer,
-				qp_rusty_crystals_dilithium::params::K as usize
-					* qp_rusty_crystals_dilithium::params::POLYW1_PACKEDBYTES,
+				qp_rusty_crystals_dilithium::params::K as usize *
+					qp_rusty_crystals_dilithium::params::POLYW1_PACKEDBYTES,
 			);
 			fips202::shake256_finalize(&mut keccak_state);
 			fips202::shake256_squeeze(
@@ -1367,7 +1299,6 @@ ctbench_main!(
 	test_polyvecl_norm_check_ct,
 	test_polyveck_norm_check_ct,
 	test_k_make_hint_ct,
-	test_compute_signature_z_ct,
 	test_challenge_generation_ct,
 	test_packing_operations_ct,
 	test_ntt_ct,

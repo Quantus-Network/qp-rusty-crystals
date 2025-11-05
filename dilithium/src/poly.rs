@@ -522,21 +522,43 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 		signs |= (byte as u64) << 8 * i;
 	}
 
+	// Create dummy state for constant-time padding
+	let mut dummy_state = fips202::KeccakState::default();
+	let mut dummy_buf = [0u8; fips202::SHAKE256_RATE];
+	let mut dummy_pos = 0;
+
 	let mut pos: usize = 8;
 	c.coeffs.fill(0);
 	for i in (N - params::TAU)..N {
-		let mut b: usize;
-		loop {
-			if pos >= fips202::SHAKE256_RATE {
-				fips202::shake256_squeezeblocks(&mut buf, 1, &mut state);
-				pos = 0;
-			}
-			b = buf[pos] as usize;
-			pos += 1;
-			if b <= i {
-				break;
+		let mut b: usize = 0;
+		let mut found = false;
+
+		// in vast majority of cases this outer loop will run exactly once
+		while !found {
+			// do 16 iterations no matter what for constant time
+			for _ in 0..16 {
+				if !found {
+					if pos >= fips202::SHAKE256_RATE {
+						fips202::shake256_squeezeblocks(&mut buf, 1, &mut state);
+						pos = 0;
+					}
+					b = buf[pos] as usize;
+					pos += 1;
+					if b <= i {
+						found = true;
+					}
+				} else {
+					// Dummy operations when already found to maintain constant timing
+					if dummy_pos >= fips202::SHAKE256_RATE {
+						fips202::shake256_squeezeblocks(&mut dummy_buf, 1, &mut dummy_state);
+						dummy_pos = 0;
+					}
+					let _dummy = dummy_buf[dummy_pos] as usize;
+					dummy_pos += 1;
+				}
 			}
 		}
+
 		c.coeffs[i] = c.coeffs[b];
 		c.coeffs[b] = 1 - 2 * ((signs & 1) as i32);
 		signs >>= 1;
