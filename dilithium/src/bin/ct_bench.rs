@@ -93,8 +93,8 @@ fn generate_fixed_hint_polyveck() -> qp_rusty_crystals_dilithium::polyvec::Polyv
 	let mut hint_count = 0;
 	for i in 0..qp_rusty_crystals_dilithium::params::K {
 		for j in 0..qp_rusty_crystals_dilithium::params::N {
-			if hint_count < qp_rusty_crystals_dilithium::params::OMEGA &&
-				(i * qp_rusty_crystals_dilithium::params::N as usize + j as usize) % 37 == 0
+			if hint_count < qp_rusty_crystals_dilithium::params::OMEGA
+				&& (i * qp_rusty_crystals_dilithium::params::N as usize + j as usize) % 37 == 0
 			{
 				h.vec[i].coeffs[j as usize] = 1;
 				hint_count += 1;
@@ -674,8 +674,8 @@ fn test_compute_signature_z_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 			// This tests the norm checking part which is publicly accessible
 			let _result = qp_rusty_crystals_dilithium::polyvec::polyvecl_is_norm_within_bound(
 				&signature_z,
-				(qp_rusty_crystals_dilithium::params::GAMMA1 -
-					qp_rusty_crystals_dilithium::params::BETA) as i32,
+				(qp_rusty_crystals_dilithium::params::GAMMA1
+					- qp_rusty_crystals_dilithium::params::BETA) as i32,
 			);
 		});
 	}
@@ -899,6 +899,457 @@ fn test_invntt_tomont_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	}
 }
 
+/// Test check_norm function for constant-time execution
+#[cfg(feature = "dudect-bencher")]
+fn test_check_norm_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running check_norm constant-time test...");
+
+	// Generate polynomials and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Generate the fixed polynomial once for all Left class samples
+	let fixed_poly = generate_fixed_polynomial(rng);
+
+	for _ in 0..5_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let poly = match class {
+			Class::Left => fixed_poly,
+			Class::Right => generate_random_polynomial(rng),
+		};
+
+		inputs.push(poly);
+		classes.push(class);
+	}
+
+	// Use a fixed bound for the test
+	let bound = 100_000i32;
+
+	for (class, poly) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let _result = qp_rusty_crystals_dilithium::poly::check_norm(&poly, bound);
+		});
+	}
+}
+
+/// Generate a fixed polynomial for Left class (deterministic pattern)
+#[cfg(feature = "dudect-bencher")]
+fn generate_fixed_polynomial(rng: &mut BenchRng) -> qp_rusty_crystals_dilithium::poly::Poly {
+	use qp_rusty_crystals_dilithium::poly::Poly;
+
+	let pattern = rng.gen::<u8>() as i32;
+	let mut poly = Poly::default();
+
+	for i in 0..qp_rusty_crystals_dilithium::params::N as usize {
+		// Create a deterministic pattern that varies by position
+		poly.coeffs[i] = pattern.wrapping_add(i as i32) & 0x7FFFFF;
+	}
+	poly
+}
+
+/// Generate a random polynomial for Right class
+#[cfg(feature = "dudect-bencher")]
+fn generate_random_polynomial(rng: &mut BenchRng) -> qp_rusty_crystals_dilithium::poly::Poly {
+	use qp_rusty_crystals_dilithium::poly::Poly;
+
+	let mut poly = Poly::default();
+
+	for i in 0..qp_rusty_crystals_dilithium::params::N as usize {
+		// Generate random coefficients within a reasonable range
+		poly.coeffs[i] = rng.gen::<i32>() & 0x7FFFFF;
+	}
+	poly
+}
+
+/// Test make_hint function for constant-time execution
+#[cfg(feature = "dudect-bencher")]
+fn test_make_hint_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running make_hint constant-time test...");
+
+	// Generate inputs and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Generate fixed values for Left class
+	let fixed_a0 = rng.gen::<i32>() % 1000000;
+	let fixed_a1 = rng.gen::<i32>() % 1000000;
+
+	for _ in 0..10_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let (a0, a1) = match class {
+			Class::Left => (fixed_a0, fixed_a1),
+			Class::Right => (rng.gen::<i32>() % 1000000, rng.gen::<i32>() % 1000000),
+		};
+
+		inputs.push((a0, a1));
+		classes.push(class);
+	}
+
+	for (class, (a0, a1)) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let _result = qp_rusty_crystals_dilithium::rounding::make_hint(a0, a1);
+		});
+	}
+}
+
+/// Test use_hint function for constant-time execution
+#[cfg(feature = "dudect-bencher")]
+fn test_use_hint_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running use_hint constant-time test...");
+
+	// Generate inputs and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Generate fixed values for Left class
+	let fixed_a = rng.gen::<i32>() % 1000000;
+	let fixed_hint = rng.gen::<i32>() % 2;
+
+	for _ in 0..10_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let (a, hint) = match class {
+			Class::Left => (fixed_a, fixed_hint),
+			Class::Right => (rng.gen::<i32>() % 1000000, rng.gen::<i32>() % 2),
+		};
+
+		inputs.push((a, hint));
+		classes.push(class);
+	}
+
+	for (class, (a, hint)) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let _result = qp_rusty_crystals_dilithium::rounding::use_hint(a, hint);
+		});
+	}
+}
+
+/// Test signing with fixed keypair but different messages for constant-time
+#[cfg(feature = "dudect-bencher")]
+fn test_signing_fixed_key_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running signing with fixed key constant-time test...");
+
+	// Generate inputs and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Generate single fixed keypair for all tests
+	let fixed_seed = generate_fixed_seed(rng);
+	let keypair = Keypair::generate(&fixed_seed);
+
+	// Generate the fixed message once for all Left class samples
+	let fixed_message = generate_fixed_message(SMALL_MSG_SIZE, rng);
+
+	for _ in 0..5_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let message = match class {
+			Class::Left => fixed_message.clone(),
+			Class::Right => generate_random_message(SMALL_MSG_SIZE, rng),
+		};
+
+		inputs.push(message);
+		classes.push(class);
+	}
+
+	for (class, message) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let _signature = keypair.sign(&message, None, None);
+		});
+	}
+}
+
+/// Test message hashing specifically for constant-time
+#[cfg(feature = "dudect-bencher")]
+fn test_message_hashing_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running message hashing constant-time test...");
+
+	// Generate inputs and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Generate fixed values for Left class
+	let fixed_tr = {
+		let mut tr = [0u8; qp_rusty_crystals_dilithium::params::TR_BYTES];
+		rng.fill_bytes(&mut tr);
+		tr
+	};
+	let fixed_message = generate_fixed_message(MEDIUM_MSG_SIZE, rng);
+
+	for _ in 0..8_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let (tr, message) = match class {
+			Class::Left => (fixed_tr, fixed_message.clone()),
+			Class::Right => {
+				let mut tr = [0u8; qp_rusty_crystals_dilithium::params::TR_BYTES];
+				rng.fill_bytes(&mut tr);
+				(tr, generate_random_message(MEDIUM_MSG_SIZE, rng))
+			},
+		};
+
+		inputs.push((tr, message));
+		classes.push(class);
+	}
+
+	for (class, (tr, message)) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			// Simulate the message hashing operation from signing
+			use qp_rusty_crystals_dilithium::fips202;
+			let mut keccak_state = fips202::KeccakState::default();
+			fips202::shake256_absorb(
+				&mut keccak_state,
+				&tr,
+				qp_rusty_crystals_dilithium::params::TR_BYTES,
+			);
+			let context_prefix = [0u8, 0u8];
+			fips202::shake256_absorb(&mut keccak_state, &context_prefix, 2);
+			fips202::shake256_absorb(&mut keccak_state, &message, message.len());
+			fips202::shake256_finalize(&mut keccak_state);
+			let mut message_hash_mu = [0u8; qp_rusty_crystals_dilithium::params::CRHBYTES];
+			fips202::shake256_squeeze(
+				&mut message_hash_mu,
+				qp_rusty_crystals_dilithium::params::CRHBYTES,
+				&mut keccak_state,
+			);
+		});
+	}
+}
+
+/// Test challenge polynomial generation for constant-time execution
+#[cfg(feature = "dudect-bencher")]
+fn test_challenge_generation_detailed_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running detailed challenge generation constant-time test...");
+
+	// Generate inputs and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Generate fixed values for Left class
+	let fixed_mu = {
+		let mut mu = [0u8; qp_rusty_crystals_dilithium::params::CRHBYTES];
+		rng.fill_bytes(&mut mu);
+		mu
+	};
+	let fixed_w1 = {
+		let mut w1 = Box::new(qp_rusty_crystals_dilithium::polyvec::Polyveck::default());
+		for i in 0..qp_rusty_crystals_dilithium::params::K as usize {
+			for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
+				w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16; // w1 coefficients are in [0, 15]
+			}
+		}
+		w1
+	};
+
+	for _ in 0..8_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let (mu, w1) = match class {
+			Class::Left => {
+				let mut mu = [0u8; qp_rusty_crystals_dilithium::params::CRHBYTES];
+				mu.copy_from_slice(&fixed_mu);
+				(mu, *fixed_w1)
+			},
+			Class::Right => {
+				let mut mu = [0u8; qp_rusty_crystals_dilithium::params::CRHBYTES];
+				rng.fill_bytes(&mut mu);
+				let mut w1 = Box::new(qp_rusty_crystals_dilithium::polyvec::Polyveck::default());
+				for i in 0..qp_rusty_crystals_dilithium::params::K as usize {
+					for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
+						w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16;
+					}
+				}
+				(mu, *w1)
+			},
+		};
+
+		inputs.push((mu, w1));
+		classes.push(class);
+	}
+
+	for (class, (mu, w1)) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let mut signature_buffer = [0u8; qp_rusty_crystals_dilithium::params::SIGNBYTES];
+
+			// Pack w1 into signature buffer
+			qp_rusty_crystals_dilithium::polyvec::k_pack_w1(&mut signature_buffer, &w1);
+
+			// Generate challenge
+			use qp_rusty_crystals_dilithium::fips202;
+			let mut keccak_state = fips202::KeccakState::default();
+			fips202::shake256_absorb(
+				&mut keccak_state,
+				&mu,
+				qp_rusty_crystals_dilithium::params::CRHBYTES,
+			);
+			fips202::shake256_absorb(
+				&mut keccak_state,
+				&signature_buffer,
+				qp_rusty_crystals_dilithium::params::K as usize
+					* qp_rusty_crystals_dilithium::params::POLYW1_PACKEDBYTES,
+			);
+			fips202::shake256_finalize(&mut keccak_state);
+			fips202::shake256_squeeze(
+				&mut signature_buffer,
+				qp_rusty_crystals_dilithium::params::C_DASH_BYTES,
+				&mut keccak_state,
+			);
+
+			let mut challenge_poly_c = qp_rusty_crystals_dilithium::poly::Poly::default();
+			qp_rusty_crystals_dilithium::poly::challenge(&mut challenge_poly_c, &signature_buffer);
+			qp_rusty_crystals_dilithium::poly::ntt(&mut challenge_poly_c);
+		});
+	}
+}
+
+/// Test polynomial arithmetic operations for constant-time execution
+#[cfg(feature = "dudect-bencher")]
+fn test_polynomial_arithmetic_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running polynomial arithmetic constant-time test...");
+
+	// Generate inputs and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Generate fixed polynomials for Left class
+	let fixed_poly1 = generate_fixed_polynomial(rng);
+	let fixed_poly2 = generate_fixed_polynomial(rng);
+
+	for _ in 0..8_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let (poly1, poly2) = match class {
+			Class::Left => (fixed_poly1, fixed_poly2),
+			Class::Right => (generate_random_polynomial(rng), generate_random_polynomial(rng)),
+		};
+
+		inputs.push((poly1, poly2));
+		classes.push(class);
+	}
+
+	for (class, (poly1, poly2)) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			// Test various polynomial operations that happen during signing
+			let mut poly1_copy = poly1;
+			qp_rusty_crystals_dilithium::poly::ntt(&mut poly1_copy);
+			let mut result = qp_rusty_crystals_dilithium::poly::Poly::default();
+			qp_rusty_crystals_dilithium::poly::pointwise_montgomery(
+				&mut result,
+				&poly1_copy,
+				&poly2,
+			);
+		});
+	}
+}
+
+/// Test k_pack_w1 operation for constant-time execution
+#[cfg(feature = "dudect-bencher")]
+fn test_k_pack_w1_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running k_pack_w1 constant-time test...");
+
+	// Generate inputs and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Generate fixed w1 for Left class
+	let fixed_w1 = {
+		let mut w1 = Box::new(qp_rusty_crystals_dilithium::polyvec::Polyveck::default());
+		for i in 0..qp_rusty_crystals_dilithium::params::K as usize {
+			for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
+				w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16; // w1 coefficients are in [0, 15]
+			}
+		}
+		w1
+	};
+
+	for _ in 0..8_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let w1 = match class {
+			Class::Left => *fixed_w1,
+			Class::Right => {
+				let mut w1 = Box::new(qp_rusty_crystals_dilithium::polyvec::Polyveck::default());
+				for i in 0..qp_rusty_crystals_dilithium::params::K as usize {
+					for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
+						w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16;
+					}
+				}
+				*w1
+			},
+		};
+
+		inputs.push(w1);
+		classes.push(class);
+	}
+
+	for (class, w1) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let mut signature_buffer = [0u8; qp_rusty_crystals_dilithium::params::SIGNBYTES];
+			qp_rusty_crystals_dilithium::polyvec::k_pack_w1(&mut signature_buffer, &w1);
+		});
+	}
+}
+
+/// Test poly::challenge function for constant-time execution
+#[cfg(feature = "dudect-bencher")]
+fn test_poly_challenge_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+	println!("Running poly::challenge constant-time test...");
+
+	// Generate inputs and classes upfront
+	let mut inputs = Vec::new();
+	let mut classes = Vec::new();
+
+	// Generate fixed seed for Left class
+	let fixed_seed = {
+		let mut seed = [0u8; qp_rusty_crystals_dilithium::params::C_DASH_BYTES];
+		rng.fill_bytes(&mut seed);
+		seed
+	};
+
+	for _ in 0..10_000 {
+		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
+		let seed = match class {
+			Class::Left => fixed_seed,
+			Class::Right => {
+				let mut seed = [0u8; qp_rusty_crystals_dilithium::params::C_DASH_BYTES];
+				rng.fill_bytes(&mut seed);
+				seed
+			},
+		};
+
+		inputs.push(seed);
+		classes.push(class);
+	}
+
+	for (class, seed) in classes.into_iter().zip(inputs.into_iter()) {
+		// Disrupt cache state before each sample
+		disrupt_cache(rng);
+
+		runner.run_one(class, || {
+			let mut challenge_poly = qp_rusty_crystals_dilithium::poly::Poly::default();
+			qp_rusty_crystals_dilithium::poly::challenge(&mut challenge_poly, &seed);
+		});
+	}
+}
+
 #[cfg(feature = "dudect-bencher")]
 ctbench_main!(
 	test_keypair_generation_ct,
@@ -920,7 +1371,16 @@ ctbench_main!(
 	test_challenge_generation_ct,
 	test_packing_operations_ct,
 	test_ntt_ct,
-	test_invntt_tomont_ct
+	test_invntt_tomont_ct,
+	test_check_norm_ct,
+	test_make_hint_ct,
+	test_use_hint_ct,
+	test_signing_fixed_key_ct,
+	test_message_hashing_ct,
+	test_challenge_generation_detailed_ct,
+	test_polynomial_arithmetic_ct,
+	test_k_pack_w1_ct,
+	test_poly_challenge_ct
 );
 
 #[cfg(not(feature = "dudect-bencher"))]
