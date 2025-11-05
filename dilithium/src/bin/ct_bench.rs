@@ -52,6 +52,58 @@ fn generate_random_message(size: usize, rng: &mut BenchRng) -> Vec<u8> {
 	message
 }
 
+fn generate_random_polyvecl(rng: &mut BenchRng) -> qp_rusty_crystals_dilithium::polyvec::Polyvecl {
+	let mut z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+	for i in 0..qp_rusty_crystals_dilithium::params::L {
+		for j in 0..qp_rusty_crystals_dilithium::params::N {
+			z.vec[i].coeffs[j as usize] = rng.gen_range(-100000..100000);
+		}
+	}
+	z
+}
+
+fn generate_random_hint_polyveck(
+	rng: &mut BenchRng,
+) -> qp_rusty_crystals_dilithium::polyvec::Polyveck {
+	let mut h = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+	let mut hint_count = 0;
+	for i in 0..qp_rusty_crystals_dilithium::params::K {
+		for j in 0..qp_rusty_crystals_dilithium::params::N {
+			if hint_count < qp_rusty_crystals_dilithium::params::OMEGA && rng.gen_bool(0.01) {
+				h.vec[i].coeffs[j as usize] = 1;
+				hint_count += 1;
+			}
+		}
+	}
+	h
+}
+
+fn generate_fixed_polyvecl() -> qp_rusty_crystals_dilithium::polyvec::Polyvecl {
+	let mut z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+	for i in 0..qp_rusty_crystals_dilithium::params::L {
+		for j in 0..qp_rusty_crystals_dilithium::params::N {
+			z.vec[i].coeffs[j as usize] = (i as i32 * 1000 + j as i32) % 200000 - 100000;
+		}
+	}
+	z
+}
+
+fn generate_fixed_hint_polyveck() -> qp_rusty_crystals_dilithium::polyvec::Polyveck {
+	let mut h = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+	let mut hint_count = 0;
+	for i in 0..qp_rusty_crystals_dilithium::params::K {
+		for j in 0..qp_rusty_crystals_dilithium::params::N {
+			if hint_count < qp_rusty_crystals_dilithium::params::OMEGA &&
+				(i * qp_rusty_crystals_dilithium::params::N as usize + j as usize) % 37 == 0
+			{
+				h.vec[i].coeffs[j as usize] = 1;
+				hint_count += 1;
+			}
+		}
+	}
+	h
+}
+
 /// Disrupt cache and microarchitectural state between samples
 fn disrupt_cache(rng: &mut BenchRng) {
 	// Large memory access to evict cache lines
@@ -678,44 +730,25 @@ fn test_challenge_generation_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 fn test_packing_operations_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running packing operations constant-time test...");
 
+	// Generate fixed signature components upfront
+	let fixed_z = generate_fixed_polyvecl();
+	let fixed_h = generate_fixed_hint_polyveck();
+
 	let mut inputs = Vec::new();
 	let mut classes = Vec::new();
 
-	for _ in 0..6_000 {
+	for _ in 0..10_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 
 		let (z_vec, h_vec) = match class {
 			Class::Left => {
-				// Fixed signature components
-				let z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
-				let h = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
-				(z, h)
+				// Use the fixed signature components
+				(fixed_z, fixed_h)
 			},
 			Class::Right => {
-				// Random signature components
-				let mut z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
-				let mut h = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
-
-				// Fill z with random data in valid range
-				for i in 0..qp_rusty_crystals_dilithium::params::L {
-					for j in 0..qp_rusty_crystals_dilithium::params::N {
-						z.vec[i].coeffs[j as usize] = rng.gen_range(-100000..100000);
-					}
-				}
-
-				// Fill h with sparse random data (valid hint vector)
-				let mut hint_count = 0;
-				for i in 0..qp_rusty_crystals_dilithium::params::K {
-					for j in 0..qp_rusty_crystals_dilithium::params::N {
-						if hint_count < qp_rusty_crystals_dilithium::params::OMEGA &&
-							rng.gen_bool(0.01)
-						{
-							h.vec[i].coeffs[j as usize] = 1;
-							hint_count += 1;
-						}
-					}
-				}
-
+				// Generate random signature components
+				let z = generate_random_polyvecl(rng);
+				let h = generate_random_hint_polyveck(rng);
 				(z, h)
 			},
 		};
