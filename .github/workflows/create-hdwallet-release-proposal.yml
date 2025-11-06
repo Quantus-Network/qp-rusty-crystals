@@ -80,7 +80,7 @@ jobs:
           
           if [ -z "$latest_dilithium_tag" ]; then
             # Fallback to current dilithium version in Cargo.toml
-            latest_dilithium_version=$(grep -E "^version\s*=" dilithium/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+            latest_dilithium_version=$(grep -E "^version[[:space:]]*=" dilithium/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
           else
             latest_dilithium_version=${latest_dilithium_tag#dilithium-v}
           fi
@@ -160,27 +160,38 @@ jobs:
 
           # Create new branch from source branch
           git checkout "$SOURCE_BRANCH"
+          
+          # Delete branch if it exists locally
+          if git show-ref --verify --quiet refs/heads/"$branch_name"; then
+            git branch -D "$branch_name"
+          fi
+          
+          # Delete branch if it exists remotely
+          if git ls-remote --heads origin "$branch_name" | grep -q "$branch_name"; then
+            git push origin --delete "$branch_name" || true
+          fi
+          
           git checkout -b "$branch_name"
           
           # Update hdwallet version
           echo "Updating hdwallet/Cargo.toml to version: $new_cargo_version"
-          sed -i -E "s/^version\s*=\s*\"[0-9a-zA-Z.-]+\"/version = \"$new_cargo_version\"/" hdwallet/Cargo.toml
+          sed -i -E "s/^version[[:space:]]*=[[:space:]]*\"[0-9a-zA-Z.-]+\"/version = \"$new_cargo_version\"/" hdwallet/Cargo.toml
           
           # Update tests crate that references hdwallet version directly
-          if grep -q "^qp-rusty-crystals-hdwallet\s*=.*version\s*=\s*\"" tests/Cargo.toml; then
+          if grep -qE "^qp-rusty-crystals-hdwallet[[:space:]]*=.*version[[:space:]]*=[[:space:]]*\"" tests/Cargo.toml; then
             echo "Updating tests' hdwallet dependency to version: $new_cargo_version"
-            sed -i -E "s/(^qp-rusty-crystals-hdwallet\s*=.*version\s*=\s*\")[^"]+(\")/\\1${new_cargo_version}\\2/" tests/Cargo.toml
+            sed -i -E "s/(^qp-rusty-crystals-hdwallet[[:space:]]*=.*version[[:space:]]*=[[:space:]]*\")[^\"]+(\")/\\1${new_cargo_version}\\2/" tests/Cargo.toml
           fi
 
           # Update dilithium dependency if requested (in hdwallet and tests crates)
           if [[ "$UPDATE_DILITHIUM" == "true" && -n "$LATEST_DILITHIUM_VERSION" ]]; then
-            if grep -q "^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\"" hdwallet/Cargo.toml; then
+            if grep -qE "^qp-rusty-crystals-dilithium[[:space:]]*=.*version[[:space:]]*=[[:space:]]*\"" hdwallet/Cargo.toml; then
               echo "Updating hdwallet's dilithium dependency to version: $LATEST_DILITHIUM_VERSION"
-              sed -i -E "s/(^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\")[^"]+(\")/\\1${LATEST_DILITHIUM_VERSION}\\2/" hdwallet/Cargo.toml
+              sed -i -E "s/(^qp-rusty-crystals-dilithium[[:space:]]*=.*version[[:space:]]*=[[:space:]]*\")[^\"]+(\")/\\1${LATEST_DILITHIUM_VERSION}\\2/" hdwallet/Cargo.toml
             fi
-            if grep -q "^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\"" tests/Cargo.toml; then
+            if grep -qE "^qp-rusty-crystals-dilithium[[:space:]]*=.*version[[:space:]]*=[[:space:]]*\"" tests/Cargo.toml; then
               echo "Updating tests' dilithium dependency to version: $LATEST_DILITHIUM_VERSION"
-              sed -i -E "s/(^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\")[^"]+(\")/\\1${LATEST_DILITHIUM_VERSION}\\2/" tests/Cargo.toml
+              sed -i -E "s/(^qp-rusty-crystals-dilithium[[:space:]]*=.*version[[:space:]]*=[[:space:]]*\")[^\"]+(\")/\\1${LATEST_DILITHIUM_VERSION}\\2/" tests/Cargo.toml
             fi
           fi
 

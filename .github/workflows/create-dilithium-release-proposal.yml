@@ -135,20 +135,31 @@ jobs:
 
           # Create new branch from source branch
           git checkout "$SOURCE_BRANCH"
+          
+          # Delete branch if it exists locally
+          if git show-ref --verify --quiet refs/heads/"$branch_name"; then
+            git branch -D "$branch_name"
+          fi
+          
+          # Delete branch if it exists remotely
+          if git ls-remote --heads origin "$branch_name" | grep -q "$branch_name"; then
+            git push origin --delete "$branch_name" || true
+          fi
+          
           git checkout -b "$branch_name"
           
           # Update dilithium version
           echo "Updating dilithium/Cargo.toml to version: $new_cargo_version"
-          sed -i -E "s/^version\s*=\s*\"[0-9a-zA-Z.-]+\"/version = \"$new_cargo_version\"/" dilithium/Cargo.toml
+          sed -i -E "s/^version[[:space:]]*=[[:space:]]*\"[0-9a-zA-Z.-]+\"/version = \"$new_cargo_version\"/" dilithium/Cargo.toml
           
           # Update dependent crates that reference dilithium version directly
-          if grep -q "^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\"" hdwallet/Cargo.toml; then
+          if grep -qE "^qp-rusty-crystals-dilithium[[:space:]]*=.*version[[:space:]]*=[[:space:]]*\"" hdwallet/Cargo.toml; then
             echo "Updating hdwallet's dilithium dependency to version: $new_cargo_version"
-            sed -i -E "s/(^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\")[^"]+(\")/\\1${new_cargo_version}\\2/" hdwallet/Cargo.toml
+            sed -i -E "s/(^qp-rusty-crystals-dilithium[[:space:]]*=.*version[[:space:]]*=[[:space:]]*\")[^\"]+(\")/\\1${new_cargo_version}\\2/" hdwallet/Cargo.toml
           fi
-          if grep -q "^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\"" tests/Cargo.toml; then
+          if grep -qE "^qp-rusty-crystals-dilithium[[:space:]]*=.*version[[:space:]]*=[[:space:]]*\"" tests/Cargo.toml; then
             echo "Updating tests' dilithium dependency to version: $new_cargo_version"
-            sed -i -E "s/(^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\")[^"]+(\")/\\1${new_cargo_version}\\2/" tests/Cargo.toml
+            sed -i -E "s/(^qp-rusty-crystals-dilithium[[:space:]]*=.*version[[:space:]]*=[[:space:]]*\")[^\"]+(\")/\\1${new_cargo_version}\\2/" tests/Cargo.toml
           fi
 
           # Update Cargo.lock
