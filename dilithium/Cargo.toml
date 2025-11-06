@@ -1,6 +1,6 @@
 [package]
 name = "qp-rusty-crystals-dilithium"
-version = "2.0.0"
+version = "1.0.3"
 edition = "2021"
 license = "GPL-3.0"
 description = "Pure Quantus RUST implementation of CRYSTALS-Dilithium digital signature scheme"
