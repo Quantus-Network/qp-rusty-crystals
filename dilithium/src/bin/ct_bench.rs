@@ -80,9 +80,9 @@ fn generate_random_hint_polyveck(
 
 fn generate_fixed_polyvecl() -> qp_rusty_crystals_dilithium::polyvec::Polyvecl {
 	let mut z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
-	for i in 0..qp_rusty_crystals_dilithium::params::L {
+		for i in 0..qp_rusty_crystals_dilithium::params::L {
 		for j in 0..qp_rusty_crystals_dilithium::params::N {
-			z.vec[i].coeffs[j as usize] = (i as i32 * 1000 + j as i32) % 200000 - 100000;
+			z.vec[i].coeffs[j as usize] = (i as i32 * 1000 + j) % 200000 - 100000;
 		}
 	}
 	z
@@ -628,10 +628,7 @@ fn test_challenge_generation_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 
 		let w1 = match class {
-			Class::Left => {
-				let w1 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
-				w1
-			},
+			Class::Left => qp_rusty_crystals_dilithium::polyvec::Polyveck::default(),
 			Class::Right => {
 				let mut w1 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
 				// Fill w1 with random data
@@ -1077,7 +1074,7 @@ fn test_challenge_generation_detailed_ct(runner: &mut CtRunner, rng: &mut BenchR
 	};
 	let fixed_w1 = {
 		let mut w1 = Box::new(qp_rusty_crystals_dilithium::polyvec::Polyveck::default());
-		for i in 0..qp_rusty_crystals_dilithium::params::K as usize {
+		for i in 0..qp_rusty_crystals_dilithium::params::K {
 			for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
 				w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16; // w1 coefficients are in [0, 15]
 			}
@@ -1097,7 +1094,7 @@ fn test_challenge_generation_detailed_ct(runner: &mut CtRunner, rng: &mut BenchR
 				let mut mu = [0u8; qp_rusty_crystals_dilithium::params::CRHBYTES];
 				rng.fill_bytes(&mut mu);
 				let mut w1 = Box::new(qp_rusty_crystals_dilithium::polyvec::Polyveck::default());
-				for i in 0..qp_rusty_crystals_dilithium::params::K as usize {
+				for i in 0..qp_rusty_crystals_dilithium::params::K {
 					for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
 						w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16;
 					}
@@ -1131,7 +1128,7 @@ fn test_challenge_generation_detailed_ct(runner: &mut CtRunner, rng: &mut BenchR
 			fips202::shake256_absorb(
 				&mut keccak_state,
 				&signature_buffer,
-				qp_rusty_crystals_dilithium::params::K as usize *
+				qp_rusty_crystals_dilithium::params::K *
 					qp_rusty_crystals_dilithium::params::POLYW1_PACKEDBYTES,
 			);
 			fips202::shake256_finalize(&mut keccak_state);
@@ -1202,7 +1199,7 @@ fn test_k_pack_w1_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	// Generate fixed w1 for Left class
 	let fixed_w1 = {
 		let mut w1 = Box::new(qp_rusty_crystals_dilithium::polyvec::Polyveck::default());
-		for i in 0..qp_rusty_crystals_dilithium::params::K as usize {
+		for i in 0..qp_rusty_crystals_dilithium::params::K {
 			for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
 				w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16; // w1 coefficients are in [0, 15]
 			}
@@ -1216,7 +1213,7 @@ fn test_k_pack_w1_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 			Class::Left => *fixed_w1,
 			Class::Right => {
 				let mut w1 = Box::new(qp_rusty_crystals_dilithium::polyvec::Polyveck::default());
-				for i in 0..qp_rusty_crystals_dilithium::params::K as usize {
+				for i in 0..qp_rusty_crystals_dilithium::params::K {
 					for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
 						w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16;
 					}

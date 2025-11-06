@@ -314,7 +314,7 @@ pub fn signature(
 				&mut commitment_w1,
 				&mut commitment_w0,
 				&mut signature_z,
-				&*signing_ctx.expanded_matrix_a,
+				&signing_ctx.expanded_matrix_a,
 				&signing_ctx.signing_entropy_rho_prime,
 				attempt_nonce,
 			);
