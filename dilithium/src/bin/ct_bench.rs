@@ -80,7 +80,7 @@ fn generate_random_hint_polyveck(
 
 fn generate_fixed_polyvecl() -> qp_rusty_crystals_dilithium::polyvec::Polyvecl {
 	let mut z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
-		for i in 0..qp_rusty_crystals_dilithium::params::L {
+	for i in 0..qp_rusty_crystals_dilithium::params::L {
 		for j in 0..qp_rusty_crystals_dilithium::params::N {
 			z.vec[i].coeffs[j as usize] = (i as i32 * 1000 + j) % 200000 - 100000;
 		}
