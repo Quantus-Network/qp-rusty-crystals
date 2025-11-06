@@ -6,6 +6,6 @@ publish = false
 
 [dev-dependencies]
 getrandom.workspace = true
-qp-rusty-crystals-dilithium = { workspace = true, default-features = true }
-qp-rusty-crystals-hdwallet = { workspace = true }
+qp-rusty-crystals-dilithium = { path = "../dilithium", version = "2.0.0", default-features = true }
+qp-rusty-crystals-hdwallet = { path = "../hdwallet", version = "1.0.0", default-features = true }
 rand = { workspace = true, features = ["std", "std_rng"] }
