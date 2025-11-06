@@ -93,8 +93,8 @@ fn generate_fixed_hint_polyveck() -> qp_rusty_crystals_dilithium::polyvec::Polyv
 	let mut hint_count = 0;
 	for i in 0..qp_rusty_crystals_dilithium::params::K {
 		for j in 0..qp_rusty_crystals_dilithium::params::N {
-			if hint_count < qp_rusty_crystals_dilithium::params::OMEGA
-				&& (i * qp_rusty_crystals_dilithium::params::N as usize + j as usize)
+			if hint_count < qp_rusty_crystals_dilithium::params::OMEGA &&
+				(i * qp_rusty_crystals_dilithium::params::N as usize + j as usize)
 					.is_multiple_of(37)
 			{
 				h.vec[i].coeffs[j as usize] = 1;
@@ -1129,8 +1129,8 @@ fn test_challenge_generation_detailed_ct(runner: &mut CtRunner, rng: &mut BenchR
 			fips202::shake256_absorb(
 				&mut keccak_state,
 				&signature_buffer,
-				qp_rusty_crystals_dilithium::params::K
-					* qp_rusty_crystals_dilithium::params::POLYW1_PACKEDBYTES,
+				qp_rusty_crystals_dilithium::params::K *
+					qp_rusty_crystals_dilithium::params::POLYW1_PACKEDBYTES,
 			);
 			fips202::shake256_finalize(&mut keccak_state);
 			fips202::shake256_squeeze(
