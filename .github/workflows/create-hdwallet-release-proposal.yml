@@ -166,14 +166,22 @@ jobs:
           echo "Updating hdwallet/Cargo.toml to version: $new_cargo_version"
           sed -i -E "s/^version\s*=\s*\"[0-9a-zA-Z.-]+\"/version = \"$new_cargo_version\"/" hdwallet/Cargo.toml
           
-          # Update workspace dependencies in main Cargo.toml
-          echo "Updating hdwallet workspace dependency in main Cargo.toml"
-          sed -i "/qp-rusty-crystals-hdwallet/s/version = \"[^\"]*\"/version = \"$new_cargo_version\"/" Cargo.toml
+          # Update tests crate that references hdwallet version directly
+          if grep -q "^qp-rusty-crystals-hdwallet\s*=.*version\s*=\s*\"" tests/Cargo.toml; then
+            echo "Updating tests' hdwallet dependency to version: $new_cargo_version"
+            sed -i -E "s/(^qp-rusty-crystals-hdwallet\s*=.*version\s*=\s*\")[^"]+(\")/\\1${new_cargo_version}\\2/" tests/Cargo.toml
+          fi
 
-          # Update dilithium dependency if requested
+          # Update dilithium dependency if requested (in hdwallet and tests crates)
           if [[ "$UPDATE_DILITHIUM" == "true" && -n "$LATEST_DILITHIUM_VERSION" ]]; then
-            echo "Updating dilithium workspace dependency to version: $LATEST_DILITHIUM_VERSION"
-            sed -i "/qp-rusty-crystals-dilithium/s/version = \"[^\"]*\"/version = \"$LATEST_DILITHIUM_VERSION\"/" Cargo.toml
+            if grep -q "^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\"" hdwallet/Cargo.toml; then
+              echo "Updating hdwallet's dilithium dependency to version: $LATEST_DILITHIUM_VERSION"
+              sed -i -E "s/(^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\")[^"]+(\")/\\1${LATEST_DILITHIUM_VERSION}\\2/" hdwallet/Cargo.toml
+            fi
+            if grep -q "^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\"" tests/Cargo.toml; then
+              echo "Updating tests' dilithium dependency to version: $LATEST_DILITHIUM_VERSION"
+              sed -i -E "s/(^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\")[^"]+(\")/\\1${LATEST_DILITHIUM_VERSION}\\2/" tests/Cargo.toml
+            fi
           fi
 
           # Update Cargo.lock
@@ -186,7 +194,7 @@ jobs:
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           
-          git add Cargo.toml hdwallet/Cargo.toml Cargo.lock
+          git add hdwallet/Cargo.toml tests/Cargo.toml Cargo.lock
           git commit -m "ci: Automate hdwallet version bump to $NEW_VERSION"
           git push origin "$branch_name"
 

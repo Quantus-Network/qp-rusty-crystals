@@ -141,9 +141,15 @@ jobs:
           echo "Updating dilithium/Cargo.toml to version: $new_cargo_version"
           sed -i -E "s/^version\s*=\s*\"[0-9a-zA-Z.-]+\"/version = \"$new_cargo_version\"/" dilithium/Cargo.toml
           
-          # Update workspace dependency in main Cargo.toml
-          echo "Updating dilithium workspace dependency in main Cargo.toml"
-          sed -i "/qp-rusty-crystals-dilithium/s/version = \"[^\"]*\"/version = \"$new_cargo_version\"/" Cargo.toml
+          # Update dependent crates that reference dilithium version directly
+          if grep -q "^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\"" hdwallet/Cargo.toml; then
+            echo "Updating hdwallet's dilithium dependency to version: $new_cargo_version"
+            sed -i -E "s/(^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\")[^"]+(\")/\\1${new_cargo_version}\\2/" hdwallet/Cargo.toml
+          fi
+          if grep -q "^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\"" tests/Cargo.toml; then
+            echo "Updating tests' dilithium dependency to version: $new_cargo_version"
+            sed -i -E "s/(^qp-rusty-crystals-dilithium\s*=.*version\s*=\s*\")[^"]+(\")/\\1${new_cargo_version}\\2/" tests/Cargo.toml
+          fi
 
           # Update Cargo.lock
           cargo update --package qp-rusty-crystals-dilithium
@@ -152,7 +158,7 @@ jobs:
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           
-          git add Cargo.toml dilithium/Cargo.toml Cargo.lock
+          git add dilithium/Cargo.toml hdwallet/Cargo.toml tests/Cargo.toml Cargo.lock
           git commit -m "ci: Automate dilithium version bump to $NEW_VERSION"
           git push origin "$branch_name"
 
