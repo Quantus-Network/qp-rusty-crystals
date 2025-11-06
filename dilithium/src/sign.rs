@@ -296,7 +296,7 @@ pub fn signature(
 	let mut masking_vector_y = Box::new(Polyvecl::default());
 	let mut commitment_w1 = Box::new(Polyveck::default());
 	let mut commitment_w0 = Box::new(Polyveck::default());
-	let mut challenge_poly_c = Box::new(Poly::default());
+	let mut challenge_poly_c;
 	let mut hint_vector_h = Box::new(Polyveck::default());
 	let mut signature_found = false;
 	let mut dummy_output = [0u8; params::SIGNBYTES]; // Dummy buffer for constant-time packing
