@@ -153,8 +153,8 @@ pub fn unpack_sig(c: &mut [u8], z: &mut Polyvecl, h: &mut Polyveck, sig: &[u8]) 
 
 	let mut k: usize = 0;
 	for i in 0..K {
-		if sig[idx + params::OMEGA + i] < k as u8 ||
-			sig[idx + params::OMEGA + i] > params::OMEGA as u8
+		if sig[idx + params::OMEGA + i] < k as u8
+			|| sig[idx + params::OMEGA + i] > params::OMEGA as u8
 		{
 			return false;
 		}
