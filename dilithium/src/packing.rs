@@ -2,6 +2,7 @@ use crate::{
 	params, poly,
 	polyvec::{Polyveck, Polyvecl},
 };
+use subtle::{Choice, ConditionallySelectable};
 const K: usize = params::K;
 const L: usize = params::L;
 const N: usize = params::N as usize;
@@ -119,10 +120,22 @@ pub fn pack_sig(sig: &mut [u8], c: Option<&[u8]>, z: &Polyvecl, h: &Polyveck) {
 	let mut k = 0;
 	for i in 0..K {
 		for j in 0..N {
-			if h.vec[i].coeffs[j] != 0 {
-				sig[idx + k] = j as u8;
-				k += 1;
-			}
+			let is_nonzero = Choice::from((h.vec[i].coeffs[j] != 0) as u8);
+			let has_space = Choice::from((k < params::OMEGA) as u8);
+			let should_store = is_nonzero & has_space;
+
+			// Use constant-time selection for write index
+			let in_bounds_idx = (idx + k) as u32;
+			let out_bounds_idx = (idx + params::OMEGA - 1) as u32;
+			let has_space_choice = Choice::from((k < params::OMEGA) as u8);
+			let write_idx =
+				u32::conditional_select(&out_bounds_idx, &in_bounds_idx, has_space_choice) as usize;
+
+			// Always write to some location for constant timing
+			sig[write_idx] = u8::conditional_select(&sig[write_idx], &(j as u8), should_store);
+
+			// use constant-time increment
+			k += u8::conditional_select(&0, &1, is_nonzero) as usize;
 		}
 		sig[idx + params::OMEGA + i] = k as u8;
 	}

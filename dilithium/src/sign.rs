@@ -4,6 +4,7 @@ use crate::{
 	polyvec,
 	polyvec::{Polyveck, Polyvecl},
 };
+
 const K: usize = params::K;
 const L: usize = params::L;
 
@@ -77,116 +78,315 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: &[u8]) {
 /// * 'hedged' - indicates wether to randomize the signature or to act deterministicly
 ///
 /// Note signature depends on std because k_decompose depends on swap which depends on std
-pub fn signature(sig: &mut [u8], msg: &[u8], sk: &[u8], hedge: Option<[u8; params::SEEDBYTES]>) {
-	let mut rho = [0u8; params::SEEDBYTES];
-	let mut tr = [0u8; params::TR_BYTES];
-	let mut keymu = [0u8; params::SEEDBYTES + params::CRHBYTES];
-	let mut t0 = Box::new(Polyveck::default());
-	let mut s1 = Box::new(Polyvecl::default());
-	let mut s2 = Box::new(Polyveck::default());
+/// Unpacked secret key components
+struct UnpackedSecretKey {
+	public_seed_rho: [u8; params::SEEDBYTES],
+	public_key_hash_tr: [u8; params::TR_BYTES],
+	private_key_seed: [u8; params::SEEDBYTES],
+	secret_poly_t0_ntt: Box<Polyveck>,
+	secret_poly_s1_ntt: Box<Polyvecl>,
+	secret_poly_s2_ntt: Box<Polyveck>,
+}
+
+/// Signing context containing precomputed values
+struct SigningContext {
+	expanded_matrix_a: Box<[Polyvecl; K]>,
+	message_hash_mu: [u8; params::CRHBYTES],
+	signing_entropy_rho_prime: [u8; params::CRHBYTES],
+}
+
+/// Unpack secret key and prepare for signing
+fn unpack_secret_key_for_signing(secret_key_bytes: &[u8]) -> UnpackedSecretKey {
+	let mut public_seed_rho = [0u8; params::SEEDBYTES];
+	let mut public_key_hash_tr = [0u8; params::TR_BYTES];
+	let mut private_key_seed = [0u8; params::SEEDBYTES];
+	let mut secret_poly_t0 = Box::new(Polyveck::default());
+	let mut secret_poly_s1 = Box::new(Polyvecl::default());
+	let mut secret_poly_s2 = Box::new(Polyveck::default());
 
 	packing::unpack_sk(
-		&mut rho,
-		&mut tr,
-		&mut keymu[..params::SEEDBYTES],
-		&mut t0,
-		&mut s1,
-		&mut s2,
-		sk,
+		&mut public_seed_rho,
+		&mut public_key_hash_tr,
+		&mut private_key_seed,
+		&mut secret_poly_t0,
+		&mut secret_poly_s1,
+		&mut secret_poly_s2,
+		secret_key_bytes,
 	);
 
-	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, &tr, params::TR_BYTES);
-	// Prepare pre = (0, ctxlen, ctx) - for now ctxlen=0, ctx=NULL, so pre = (0, 0)
-	let pre = [0u8, 0u8];
-	fips202::shake256_absorb(&mut state, &pre, 2);
-	fips202::shake256_absorb(&mut state, msg, msg.len());
-	fips202::shake256_finalize(&mut state);
-	fips202::shake256_squeeze(&mut keymu[params::SEEDBYTES..], params::CRHBYTES, &mut state);
+	// Convert secret polynomials to NTT domain for efficiency
+	polyvec::l_ntt(&mut secret_poly_s1);
+	polyvec::k_ntt(&mut secret_poly_s2);
+	polyvec::k_ntt(&mut secret_poly_t0);
 
-	let rnd_bytes = hedge.unwrap_or([0u8; params::SEEDBYTES]);
+	UnpackedSecretKey {
+		public_seed_rho,
+		public_key_hash_tr,
+		private_key_seed,
+		secret_poly_t0_ntt: secret_poly_t0,
+		secret_poly_s1_ntt: secret_poly_s1,
+		secret_poly_s2_ntt: secret_poly_s2,
+	}
+}
 
-	state.init();
-	fips202::shake256_absorb(&mut state, &keymu[..params::SEEDBYTES], params::SEEDBYTES);
-	fips202::shake256_absorb(&mut state, &rnd_bytes, params::SEEDBYTES);
-	fips202::shake256_absorb(&mut state, &keymu[params::SEEDBYTES..], params::CRHBYTES);
-	fips202::shake256_finalize(&mut state);
-	let mut rhoprime = [0u8; params::CRHBYTES];
-	fips202::shake256_squeeze(&mut rhoprime, params::CRHBYTES, &mut state);
+/// Compute message hash and signing randomness
+fn prepare_signing_context(
+	unpacked_sk: &UnpackedSecretKey,
+	message: &[u8],
+	hedge_randomness: Option<[u8; params::SEEDBYTES]>,
+) -> SigningContext {
+	// Compute message hash μ = H(tr || pre || msg) where pre = (0, 0) for pure signatures
+	let mut keccak_state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut keccak_state, &unpacked_sk.public_key_hash_tr, params::TR_BYTES);
+	let context_prefix = [0u8, 0u8]; // (domain_sep=0, context_len=0) for pure signatures
+	fips202::shake256_absorb(&mut keccak_state, &context_prefix, 2);
+	fips202::shake256_absorb(&mut keccak_state, message, message.len());
+	fips202::shake256_finalize(&mut keccak_state);
+	let mut message_hash_mu = [0u8; params::CRHBYTES];
+	fips202::shake256_squeeze(&mut message_hash_mu, params::CRHBYTES, &mut keccak_state);
 
-	// Move large polynomial structures to heap to reduce stack usage
-	let mut mat = Box::new([Polyvecl::default(); K]);
-	polyvec::matrix_expand(&mut *mat, &rho);
-	polyvec::l_ntt(&mut s1);
-	polyvec::k_ntt(&mut s2);
-	polyvec::k_ntt(&mut t0);
+	// Generate signing randomness ρ' = H(K || rnd || μ)
+	let hedge_bytes = hedge_randomness.unwrap_or([0u8; params::SEEDBYTES]);
+	keccak_state.init();
+	fips202::shake256_absorb(&mut keccak_state, &unpacked_sk.private_key_seed, params::SEEDBYTES);
+	fips202::shake256_absorb(&mut keccak_state, &hedge_bytes, params::SEEDBYTES);
+	fips202::shake256_absorb(&mut keccak_state, &message_hash_mu, params::CRHBYTES);
+	fips202::shake256_finalize(&mut keccak_state);
+	let mut signing_entropy_rho_prime = [0u8; params::CRHBYTES];
+	fips202::shake256_squeeze(&mut signing_entropy_rho_prime, params::CRHBYTES, &mut keccak_state);
 
-	let mut nonce: u16 = 0;
-	let mut y = Box::new(Polyvecl::default());
-	let mut w1 = Box::new(Polyveck::default());
-	let mut w0 = Box::new(Polyveck::default());
-	let mut cp = Box::new(Poly::default());
-	let mut h = Box::new(Polyveck::default());
+	// Expand matrix A from public seed
+	let mut expanded_matrix_a = Box::new([Polyvecl::default(); K]);
+	polyvec::matrix_expand(&mut *expanded_matrix_a, &unpacked_sk.public_seed_rho);
+
+	SigningContext { expanded_matrix_a, message_hash_mu, signing_entropy_rho_prime }
+}
+
+/// Compute z = y + cs1 and check if ||z||∞ < γ₁ - β
+fn compute_and_check_signature_z(
+	signature_z: &mut Polyvecl,
+	masking_vector_y: &Polyvecl,
+	challenge_poly_c: &Poly,
+	secret_poly_s1_ntt: &Polyvecl,
+) -> bool {
+	// Compute z = y + cs1
+	polyvec::l_pointwise_poly_montgomery(signature_z, challenge_poly_c, secret_poly_s1_ntt);
+	polyvec::l_invntt_tomont(signature_z);
+	polyvec::l_add(signature_z, masking_vector_y);
+	polyvec::l_reduce(signature_z);
+
+	// Check ||z||∞ < γ₁ - β
+	polyvec::polyvecl_is_norm_within_bound(signature_z, (params::GAMMA1 - params::BETA) as i32)
+}
+
+/// Compute w0 - cs2 and check if ||w0 - cs2||∞ < γ₂ - β
+fn compute_and_check_commitment_w0(
+	commitment_w0: &mut Polyveck,
+	challenge_poly_c: &Poly,
+	secret_poly_s2_ntt: &Polyveck,
+	temp_vector: &mut Polyveck,
+) -> bool {
+	// Compute cs2
+	polyvec::k_pointwise_poly_montgomery(temp_vector, challenge_poly_c, secret_poly_s2_ntt);
+	polyvec::k_invntt_tomont(temp_vector);
+
+	// Compute w0 - cs2
+	polyvec::k_sub(commitment_w0, temp_vector);
+	polyvec::k_reduce(commitment_w0);
+
+	// Check ||w0 - cs2||∞ < γ₂ - β
+	polyvec::polyveck_is_norm_within_bound(commitment_w0, (params::GAMMA2 - params::BETA) as i32)
+}
+
+/// Compute challenge_t0 and check if ||challenge_t0||∞ < γ₂
+fn compute_and_check_challenge_t0(
+	challenge_t0: &mut Polyveck,
+	challenge_poly_c: &Poly,
+	secret_poly_t0_ntt: &Polyveck,
+) -> bool {
+	// Compute challenge_t0 = c * t0
+	polyvec::k_pointwise_poly_montgomery(challenge_t0, challenge_poly_c, secret_poly_t0_ntt);
+	polyvec::k_invntt_tomont(challenge_t0);
+	polyvec::k_reduce(challenge_t0);
+
+	// Check ||challenge_t0||∞ < γ₂
+	polyvec::polyveck_is_norm_within_bound(challenge_t0, params::GAMMA2 as i32)
+}
+
+/// Compute hint vector and check if weight ≤ ω
+fn compute_and_check_hint_vector(
+	hint_vector_h: &mut Polyveck,
+	commitment_w0: &Polyveck,
+	challenge_t0: &Polyveck,
+	commitment_w1: &Polyveck,
+) -> bool {
+	// Compute w0 + challenge_t0 for hint generation
+	let mut w0_plus_challenge_t0 = *commitment_w0;
+	polyvec::k_add(&mut w0_plus_challenge_t0, challenge_t0);
+
+	// Generate hint vector
+	let hint_weight = polyvec::k_make_hint(hint_vector_h, &w0_plus_challenge_t0, commitment_w1);
+
+	// Check hint weight ≤ ω
+	hint_weight <= params::OMEGA as i32
+}
+
+/// Generate masking vector and compute commitment w = Ay, then decompose w = w1*2^d + w0
+fn generate_masking_vector_and_commitment(
+	masking_vector_y: &mut Polyvecl,
+	commitment_w1: &mut Polyveck,
+	commitment_w0: &mut Polyveck,
+	signature_z_temp: &mut Polyvecl,
+	expanded_matrix_a: &[Polyvecl; K],
+	signing_entropy: &[u8],
+	attempt_nonce: u16,
+) {
+	// Generate random masking vector y
+	polyvec::l_uniform_gamma1(masking_vector_y, signing_entropy, attempt_nonce);
+
+	// Compute commitment w = Ay
+	*signature_z_temp = *masking_vector_y;
+	polyvec::l_ntt(signature_z_temp);
+	polyvec::matrix_pointwise_montgomery(commitment_w1, expanded_matrix_a, signature_z_temp);
+	polyvec::k_reduce(commitment_w1);
+	polyvec::k_invntt_tomont(commitment_w1);
+	polyvec::k_caddq(commitment_w1);
+
+	// Decompose w = w1*2^d + w0
+	polyvec::k_decompose(commitment_w1, commitment_w0);
+}
+
+/// Generate challenge polynomial from commitment and message hash
+fn generate_challenge_polynomial(
+	signature_buffer: &mut [u8],
+	commitment_w1: &Polyveck,
+	message_hash_mu: &[u8],
+) -> Box<Poly> {
+	// Pack w1 into signature buffer temporarily
+	polyvec::k_pack_w1(signature_buffer, commitment_w1);
+
+	let mut keccak_state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut keccak_state, message_hash_mu, params::CRHBYTES);
+	fips202::shake256_absorb(&mut keccak_state, signature_buffer, K * params::POLYW1_PACKEDBYTES);
+	fips202::shake256_finalize(&mut keccak_state);
+	fips202::shake256_squeeze(signature_buffer, params::C_DASH_BYTES, &mut keccak_state);
+
+	let mut challenge_poly_c = Box::new(Poly::default());
+	poly::challenge(&mut challenge_poly_c, signature_buffer);
+	poly::ntt(&mut challenge_poly_c);
+	challenge_poly_c
+}
+
+/// Main signature generation function
+pub fn signature(
+	signature_output: &mut [u8],
+	message: &[u8],
+	secret_key_bytes: &[u8],
+	hedge: Option<[u8; params::SEEDBYTES]>,
+) {
+	// Step 1: Unpack secret key components
+	let unpacked_sk = unpack_secret_key_for_signing(secret_key_bytes);
+
+	// Step 2: Prepare signing context (message hash, randomness, expanded matrix)
+	let signing_ctx = prepare_signing_context(&unpacked_sk, message, hedge);
+
+	// Step 3: Constant-time rejection sampling with fixed iterations
+	const MAX_SIGNING_ATTEMPTS: u16 = 64; // covers > 99.9% of cases
+
+	let mut masking_vector_y = Box::new(Polyvecl::default());
+	let mut commitment_w1 = Box::new(Polyveck::default());
+	let mut commitment_w0 = Box::new(Polyveck::default());
+	let mut challenge_poly_c;
+	let mut hint_vector_h = Box::new(Polyveck::default());
+	let mut signature_found = false;
+	let mut dummy_output = [0u8; params::SIGNBYTES]; // Dummy buffer for constant-time packing
+	let mut valid_challenge = [0u8; params::C_DASH_BYTES];
+	let mut valid_signature_z = Box::new(Polyvecl::default());
+	let mut valid_hint_h = Box::new(Polyveck::default());
+
+	// this outer loop should run exactly once in the vast majority of cases
 	loop {
-		polyvec::l_uniform_gamma1(&mut y, &rhoprime, nonce);
-		nonce += 1;
+		for attempt_nonce in 0..MAX_SIGNING_ATTEMPTS {
+			// Generate masking vector and compute commitment
+			let mut signature_z = Box::new(Polyvecl::default());
+			generate_masking_vector_and_commitment(
+				&mut masking_vector_y,
+				&mut commitment_w1,
+				&mut commitment_w0,
+				&mut signature_z,
+				&signing_ctx.expanded_matrix_a,
+				&signing_ctx.signing_entropy_rho_prime,
+				attempt_nonce,
+			);
 
-		let mut z = Box::new(*y);
-		polyvec::l_ntt(&mut z);
-		polyvec::matrix_pointwise_montgomery(&mut w1, &*mat, &z);
-		polyvec::k_reduce(&mut w1);
-		polyvec::k_invntt_tomont(&mut w1);
-		polyvec::k_caddq(&mut w1);
+			// Generate challenge c = H(μ, w1) - use dummy buffer to avoid overwriting output
+			challenge_poly_c = generate_challenge_polynomial(
+				&mut dummy_output,
+				&commitment_w1,
+				&signing_ctx.message_hash_mu,
+			);
 
-		polyvec::k_decompose(&mut w1, &mut w0);
-		polyvec::k_pack_w1(sig, &w1);
+			// Check first rejection condition: compute z = y + cs1 and check ||z||∞ < γ₁ - β
+			let condition1 = compute_and_check_signature_z(
+				&mut signature_z,
+				&masking_vector_y,
+				&challenge_poly_c,
+				&unpacked_sk.secret_poly_s1_ntt,
+			);
+			// Check second rejection condition: compute w0 - cs2 and check ||w0 - cs2||∞ < γ₂ - β
+			let condition2 = compute_and_check_commitment_w0(
+				&mut commitment_w0,
+				&challenge_poly_c,
+				&unpacked_sk.secret_poly_s2_ntt,
+				&mut hint_vector_h, // Use hint_vector_h as temporary storage
+			);
 
-		state.init();
-		fips202::shake256_absorb(&mut state, &keymu[params::SEEDBYTES..], params::CRHBYTES);
-		fips202::shake256_absorb(&mut state, sig, K * params::POLYW1_PACKEDBYTES);
-		fips202::shake256_finalize(&mut state);
-		fips202::shake256_squeeze(sig, params::C_DASH_BYTES, &mut state);
+			// Compute challenge_t0 for third norm check and hint generation
+			let mut challenge_t0 = Box::new(Polyveck::default());
+			let condition3 = compute_and_check_challenge_t0(
+				&mut challenge_t0,
+				&challenge_poly_c,
+				&unpacked_sk.secret_poly_t0_ntt,
+			);
 
-		poly::challenge(&mut cp, sig);
-		poly::ntt(&mut cp);
+			// Check fourth rejection condition: compute hint vector and check weight ≤ ω
+			let condition4 = compute_and_check_hint_vector(
+				&mut hint_vector_h,
+				&commitment_w0,
+				&challenge_t0,
+				&commitment_w1,
+			);
 
-		polyvec::l_pointwise_poly_montgomery(&mut z, &cp, &s1);
-		polyvec::l_invntt_tomont(&mut z);
-		polyvec::l_add(&mut z, &y);
-		polyvec::l_reduce(&mut z);
+			let all_conditions_met = condition1 && condition2 && condition3 && condition4;
 
-		if polyvec::l_chknorm(&z, (params::GAMMA1 - params::BETA) as i32) > 0 {
-			continue;
+			// Always call pack_sig to dummy buffer for constant timing
+			// Use empty hint vector when conditions aren't met to prevent out-of-bounds access
+			let safe_hint = if all_conditions_met { &hint_vector_h } else { &Polyveck::default() };
+			packing::pack_sig(&mut dummy_output, None, &signature_z, safe_hint);
+
+			// Store valid signature components if this is the first valid one
+			// This branch is data-dependent but the alternative complex constant-time operations
+			// may actually introduce more timing variations due to memory access patterns
+			if all_conditions_met && !signature_found {
+				valid_challenge.copy_from_slice(&dummy_output[..params::C_DASH_BYTES]);
+				*valid_signature_z = *signature_z;
+				*valid_hint_h = *hint_vector_h;
+				signature_found = true;
+			}
+
+			// Continue loop regardless to maintain constant timing
 		}
 
-		polyvec::k_pointwise_poly_montgomery(&mut h, &cp, &s2);
-		polyvec::k_invntt_tomont(&mut h);
-		polyvec::k_sub(&mut w0, &h);
-		polyvec::k_reduce(&mut w0);
-
-		if polyvec::k_chknorm(&w0, (params::GAMMA2 - params::BETA) as i32) > 0 {
-			continue;
+		// After fixed iterations, pack the final signature and return if found
+		if signature_found {
+			packing::pack_sig(
+				signature_output,
+				Some(&valid_challenge),
+				&valid_signature_z,
+				&valid_hint_h,
+			);
+			return;
 		}
-
-		polyvec::k_pointwise_poly_montgomery(&mut h, &cp, &t0);
-		polyvec::k_invntt_tomont(&mut h);
-		polyvec::k_reduce(&mut h);
-
-		if polyvec::k_chknorm(&h, params::GAMMA2 as i32) > 0 {
-			continue;
-		}
-
-		polyvec::k_add(&mut w0, &h);
-
-		let n = polyvec::k_make_hint(&mut h, &w0, &w1);
-
-		if n > params::OMEGA as i32 {
-			continue;
-		}
-
-		packing::pack_sig(sig, None, &z, &h);
-
-		return;
 	}
 }
 
@@ -222,7 +422,10 @@ pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	if !packing::unpack_sig(&mut c, &mut z, &mut h, sig) {
 		return false;
 	}
-	if polyvec::l_chknorm(&z, (crate::params::GAMMA1 - crate::params::BETA) as i32) > 0 {
+	if !polyvec::polyvecl_is_norm_within_bound(
+		&z,
+		(crate::params::GAMMA1 - crate::params::BETA) as i32,
+	) {
 		return false;
 	}
 

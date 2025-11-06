@@ -101,13 +101,13 @@ pub fn l_pointwise_poly_montgomery(r: &mut Polyvecl, a: &Poly, v: &Polyvecl) {
 	}
 }
 
-pub fn l_chknorm(v: &Polyvecl, bound: i32) -> u8 {
+pub fn polyvecl_is_norm_within_bound(v: &Polyvecl, bound: i32) -> bool {
+	let mut result = true;
 	for i in 0..L {
-		if poly::chknorm(&v.vec[i], bound) > 0 {
-			return 1;
-		}
+		let norm_check = poly::check_norm(&v.vec[i], bound);
+		result = result && !norm_check;
 	}
-	0
+	result
 }
 
 //---------------------------------
@@ -187,13 +187,13 @@ pub fn k_pointwise_poly_montgomery(r: &mut Polyveck, a: &Poly, v: &Polyveck) {
 /// Assumes input coefficients to be standard representatives.
 //
 /// Returns 0 if norm of all polynomials are strictly smaller than B and 1 otherwise.
-pub fn k_chknorm(v: &Polyveck, bound: i32) -> u8 {
+pub fn polyveck_is_norm_within_bound(v: &Polyveck, bound: i32) -> bool {
+	let mut result = true;
 	for i in 0..K {
-		if poly::chknorm(&v.vec[i], bound) == 1 {
-			return 1;
-		}
+		let norm_check = poly::check_norm(&v.vec[i], bound);
+		result = result && !norm_check;
 	}
-	0
+	result
 }
 
 /// For all coefficients a of polynomials in vector of length K, compute a0, a1 such that a mod Q =
@@ -468,8 +468,8 @@ mod tests {
 	#[test]
 	fn test_l_chknorm_zero_vector() {
 		let polyvecl = Polyvecl::default(); // All coefficients are 0
-		assert_eq!(l_chknorm(&polyvecl, 1), 0); // Should be within any positive bound
-		assert_eq!(l_chknorm(&polyvecl, 1000), 0);
+		assert!(polyvecl_is_norm_within_bound(&polyvecl, 1)); // Should be within any positive bound
+		assert!(polyvecl_is_norm_within_bound(&polyvecl, 1000));
 	}
 
 	#[test]
@@ -478,16 +478,16 @@ mod tests {
 		polyvecl.vec[0].coeffs[0] = 100;
 		polyvecl.vec[1].coeffs[10] = -150;
 
-		assert_eq!(l_chknorm(&polyvecl, 200), 0); // Within bound
-		assert_eq!(l_chknorm(&polyvecl, 149), 1); // Exceeds bound
-		assert_eq!(l_chknorm(&polyvecl, 99), 1); // Exceeds bound
+		assert!(polyvecl_is_norm_within_bound(&polyvecl, 200)); // Within bound
+		assert!(!polyvecl_is_norm_within_bound(&polyvecl, 149)); // Exceeds bound
+		assert!(!polyvecl_is_norm_within_bound(&polyvecl, 99)); // Exceeds bound
 	}
 
 	#[test]
 	fn test_k_chknorm_zero_vector() {
 		let polyveck = Polyveck::default(); // All coefficients are 0
-		assert_eq!(k_chknorm(&polyveck, 1), 0); // Should be within any positive bound
-		assert_eq!(k_chknorm(&polyveck, 1000), 0);
+		assert!(polyveck_is_norm_within_bound(&polyveck, 1)); // Should be within any positive bound
+		assert!(polyveck_is_norm_within_bound(&polyveck, 1000));
 	}
 
 	#[test]
@@ -496,9 +496,9 @@ mod tests {
 		polyveck.vec[0].coeffs[5] = 200;
 		polyveck.vec[2].coeffs[15] = -250;
 
-		assert_eq!(k_chknorm(&polyveck, 300), 0); // Within bound
-		assert_eq!(k_chknorm(&polyveck, 249), 1); // Exceeds bound
-		assert_eq!(k_chknorm(&polyveck, 199), 1); // Exceeds bound
+		assert!(polyveck_is_norm_within_bound(&polyveck, 300)); // Within bound
+		assert!(!polyveck_is_norm_within_bound(&polyveck, 249)); // Exceeds bound
+		assert!(!polyveck_is_norm_within_bound(&polyveck, 199)); // Exceeds bound
 	}
 
 	#[test]
