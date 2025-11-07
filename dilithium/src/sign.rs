@@ -292,7 +292,7 @@ pub fn signature(
 
 	// Step 3: Make the rejection sampling lumpy to smear out timing signals
 	// Set this to 1 to revert to standard rejection sampling
-	const MAX_SIGNING_ATTEMPTS: u16 = 16; // covers most cases, |max tau| < 0.1, while keeping runtime short (~1ms)
+	const MIN_SIGNING_ATTEMPTS: u16 = 16; // covers most cases, |max tau| < 0.1, while keeping runtime short (~1ms)
 
 	let mut masking_vector_y = Box::new(Polyvecl::default());
 	let mut commitment_w1 = Box::new(Polyveck::default());
@@ -308,7 +308,7 @@ pub fn signature(
 
 	// this outer loop should run exactly once in the vast majority of cases
 	loop {
-		for _ in 0..MAX_SIGNING_ATTEMPTS {
+		for _ in 0..MIN_SIGNING_ATTEMPTS {
 			// Generate masking vector and compute commitment
 			let mut signature_z = Box::new(Polyvecl::default());
 			generate_masking_vector_and_commitment(

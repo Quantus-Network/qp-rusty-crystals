@@ -107,7 +107,7 @@ The implementation uses Welch's t-test to compare timing distributions between t
 
 ### Implementation Strategy
 
-Broadly speaking, we have made the rejection sampling "lumpy", in that a fixed size batch of samples is processed at a time, regardless of which of them satisfy the condition. This approach also allows us to tune the tradeoff of performance to constant-timeness. Those wishing to squeeze more performance out of the library for signing may set MAX_SIGNING_ATTEMPTS to a lower value, like 1, which reduces the amount of extra work done.
+Broadly speaking, we have made the rejection sampling "lumpy", in that a fixed size batch of samples is processed at a time, regardless of which of them satisfy the condition. This approach also allows us to tune the tradeoff of performance to constant-timeness. Those wishing to squeeze more performance out of the library for signing may set MIN_SIGNING_ATTEMPTS to a lower value, like 1, which reduces the amount of extra work done.
 
 ## Security Implications
 
