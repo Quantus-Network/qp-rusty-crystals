@@ -1,46 +1,153 @@
-# Quantus Newtowrk CRYSTALS-Dilithium
+# Quantus Network CRYSTALS-Dilithium
 
-Pure Rust implementation of the ML-DSA (CRYSTALS-Dilithium) post-quantum digital signature scheme.
+Pure Rust implementation of the ML-DSA-87 (CRYSTALS-Dilithium) post-quantum digital signature scheme.
 
 ## Features
 
-- **ML-DSA-44, ML-DSA-65, ML-DSA-87** - All three security levels
+- **ML-DSA-87 Only** - Highest security level implementation (~256-bit security)
 - **Pure Rust** - No unsafe code, memory-safe implementation
+- **NO-STD** - Does not depend on standard library so more portable
 - **NIST Compliant** - Verified against official test vectors
-- **High Performance** - Optimized for speed and efficiency
+- **Reasonably Constant-Time** - [Reasonably constant-time execution for keygen and signing](CONSTANT_TIME_TESTING.md)
+- **Context String Support** - Support for domain separation contexts
+- **Prehashing Support** - Support for SHA-256 and SHA-512 prehashing
 
 ## Usage
 
 Add to your `Cargo.toml`:
 ```toml
 [dependencies]
-qp-rusty-crystals-dilithium = "0.0.2"
+qp-rusty-crystals-dilithium = "2.0.0"
 ```
 
 ### Basic Example
 
 ```rust
-use qp_rusty_crystals_dilithium::{ml_dsa_44, Keypair};
+use qp_rusty_crystals_dilithium::ml_dsa_87;
 
-// Generate a keypair
-let keypair = ml_dsa_44::Keypair::generate(None);
+// Generate a keypair with entropy
+let entropy = b"my_random_seed_exactly_32_bytes!";
+let keypair = ml_dsa_87::Keypair::generate(entropy);
 
 // Sign a message
 let message = b"Hello, post-quantum world!";
-let signature = keypair.sign(message);
+let signature = keypair.sign(message, None, None);
 
 // Verify the signature
-let is_valid = keypair.public_key.verify(message, &signature);
+let is_valid = keypair.verify(message, &signature, None);
 assert!(is_valid);
 ```
 
-## Security Levels
+### Advanced Usage with Context Strings
 
-| Variant | Security Level | Public Key Size | Signature Size |
-|---------|----------------|-----------------|----------------|
-| ML-DSA-44 | ~128 bits | 1,312 bytes | 2,420 bytes |
-| ML-DSA-65 | ~192 bits | 1,952 bytes | 3,309 bytes |
-| ML-DSA-87 | ~256 bits | 2,592 bytes | 4,627 bytes |
+```rust
+use qp_rusty_crystals_dilithium::ml_dsa_87;
+
+let entropy = b"my_random_seed_exactly_32_bytes!";
+let keypair = ml_dsa_87::Keypair::generate(entropy);
+
+let message = b"Important message";
+let context = b"email-signature-v1"; // Domain separation
+
+// Sign with context
+let signature = keypair.sign(message, Some(context), None);
+
+// Verify with context
+let is_valid = keypair.verify(message, &signature, Some(context));
+assert!(is_valid);
+```
+
+### Prehashing Support
+
+```rust
+use qp_rusty_crystals_dilithium::{ml_dsa_87, PH};
+
+let entropy = b"my_random_seed_exactly_32_bytes!";
+let keypair = ml_dsa_87::Keypair::generate(entropy);
+
+let large_message = b"Very large message that we want to hash first...";
+
+// Sign with SHA-256 prehashing
+let signature = keypair.prehash_sign(large_message, None, None, PH::SHA256).unwrap();
+
+// Verify with SHA-256 prehashing
+let is_valid = keypair.prehash_verify(large_message, &signature, None, PH::SHA256);
+assert!(is_valid);
+```
+
+### Hedged Signing (Deterministic with Entropy)
+
+```rust
+use qp_rusty_crystals_dilithium::ml_dsa_87;
+
+let entropy = b"my_random_seed_exactly_32_bytes!";
+let keypair = ml_dsa_87::Keypair::generate(entropy);
+
+let message = b"Message to sign";
+let hedge_entropy = *b"hedge_randomness_32_bytes_long!!";
+
+// Hedged signing provides additional randomness
+let signature = keypair.sign(message, None, Some(hedge_entropy));
+let is_valid = keypair.verify(message, &signature, None);
+assert!(is_valid);
+```
+
+## Security Level
+
+| Variant | Security Level | Public Key Size | Private Key Size | Signature Size |
+|---------|----------------|-----------------|------------------|----------------|
+| ML-DSA-87 | ~256 bits | 2,592 bytes | 4,896 bytes | 4,627 bytes |
+
+**Note**: This implementation only supports ML-DSA-87, the highest security variant. Other variants (ML-DSA-44, ML-DSA-65) are not implemented.
+
+## API Reference
+
+### Keypair Generation
+
+```rust
+pub fn generate(entropy: &[u8]) -> Keypair
+```
+
+Generates a new keypair using the provided entropy. The entropy should be at least 32 bytes for security.
+
+### Signing
+
+```rust
+pub fn sign(&self, msg: &[u8], ctx: Option<&[u8]>, hedge: Option<[u8; 32]>) -> Signature
+```
+
+- `msg`: The message to sign
+- `ctx`: Optional context string for domain separation (max 255 bytes)
+- `hedge`: Optional 32-byte entropy for hedged signing
+
+### Verification
+
+```rust
+pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool
+```
+
+- `msg`: The message that was signed
+- `sig`: The signature to verify
+- `ctx`: Optional context string (must match the one used for signing)
+
+### Prehash Signing/Verification
+
+```rust
+pub fn prehash_sign(&self, msg: &[u8], ctx: Option<&[u8]>, hedge: Option<[u8; 32]>, ph: PH) -> Option<Signature>
+pub fn prehash_verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>, ph: PH) -> bool
+```
+
+Available hash functions: `PH::SHA256`, `PH::SHA512`
+
+## Stack Usage
+
+This implementation is optimized for constrained environments and works with small stack sizes:
+
+- Key generation: ≤36KB stack
+- Signing: ≤36KB stack  
+- Verification: ≤36KB stack
+
+See `examples/stack_usage_demo.rs` for detailed stack usage analysis.
 
 ## Testing
 
@@ -54,6 +161,13 @@ cargo test
 cargo bench
 ```
 
+## Examples
+
+```bash
+# Run the stack usage demonstration
+cargo run --example stack_usage_demo
+```
+
 ## License
 
-GPL-3.0 - See [LICENSE](../LICENSE) for details.
+GPL-3.0 - See [LICENSE](LICENSE) for details.

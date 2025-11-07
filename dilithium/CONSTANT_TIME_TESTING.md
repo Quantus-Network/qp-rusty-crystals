@@ -1,6 +1,6 @@
 # Constant-Time Testing for qp-rusty-crystals-dilithium
 
-This project uses [dudect-bencher](https://github.com/rozbb/dudect-bencher) to test whether the Dilithium ML-DSA-87 digital signature operations execute in constant time, preventing timing side-channel attacks.
+This project uses [dudect-bencher](https://github.com/rozbb/dudect-bencher) to test whether the Dilithium ML-DSA-87 digital signature and key generation operations execute in constant time, resisting timing side-channel attacks.
 
 ## Quick Start
 
@@ -25,8 +25,9 @@ test_keypair_generation_ct        : n == +0.005M, max t = +1.83452, max tau = +0
 
 ### Interpretation Guidelines
 
-- **max tau < 5.0**: ✅ GOOD - No timing leakage detected
-- **max tau ≥ 5.0**: ⚠️ CONCERN - Potential timing side-channel detected
+- **|max t| < 5.0**: ✅ GOOD - No timing leakage detected
+- **|max tau| < 0.1**: ✅ GOOD - No timing leakage detected
+- **|max tau| ≥ 0.1**: ⚠️ CONCERN - Potential timing side-channel detected
 - **Higher (5/tau)² values**: Better security - indicates more measurements would be needed to detect any leakage
 
 ## Tests Included
@@ -52,10 +53,12 @@ The tests use a two-class approach to detect timing differences:
 - **Class A (Left)**: Fixed, deterministic inputs
   - Fixed seeds for key generation
   - Fixed message patterns for signing
+  - Fixed keys for signing
   
 - **Class B (Right)**: Random inputs  
   - Random entropy for key generation
   - Random message content for signing
+  - Random keys for signing
 
 This ensures the input classes are statistically distinguishable before timing analysis begins.
 
@@ -96,28 +99,25 @@ Each measurement includes cache disruption to prevent microarchitectural state f
 - Random memory access patterns to disrupt prefetchers
 - Memory barriers and dummy computations
 
+This makes the tests more realistic as a real world user will not typically sign thousands of messages in a row without doing something else. 
+
 ### Statistical Analysis
+
 The implementation uses Welch's t-test to compare timing distributions between the two input classes. The test is designed to detect even small timing differences that could be exploited by attackers.
+
+### Implementation Strategy
+
+Broadly speaking, we have made the rejection sampling "lumpy", in that a fixed size batch of samples is processed at a time, regardless of which of them satisfy the condition. This approach also allows us to tune the tradeoff of performance to constant-timeness. Those wishing to squeeze more performance out of the library for signing may set MAX_SIGNING_ATTEMPTS to a lower value, like 1, which reduces the amount of extra work done.
 
 ## Security Implications
 
-Constant-time execution is critical for Dilithium because:
+Constant-time execution may not be critical for Dilithium due to the rejection sampling and the liberal use of hash functions in the algorithm. Nevertheless, we have chosen to implement constant-time operations for keygen and signing as an extra layer of protection for those who desire it. We note that adding a hedge to signing was specifically added by NIST to account for fault injection attacks. 
 
 1. **Key Generation**: Timing attacks could reveal information about the secret key material
 2. **Signing Process**: Non-constant-time operations could leak private key bits
-3. **Message Processing**: Input-dependent timing could reveal message patterns
-
-## Development Guidelines
-
-When modifying the Dilithium implementation:
-
-1. **Avoid data-dependent branches**: Use conditional moves instead of if/else on secret data
-2. **Consistent memory access**: Access the same memory locations regardless of secret values  
-3. **Test regularly**: Run constant-time tests after any cryptographic changes
-4. **Review assembly**: Check generated assembly for timing-sensitive operations
 
 ## Further Reading
 
-- [Timing Attacks on Implementations of Diffie-Hellman, RSA, DSS, and Other Systems](https://www.paulkocher.com/TimingAttacks.pdf)
+- [Timing Attacks on Implementations of Diffie-Hellman, RSA, DSS, and Other Systems](https://www.paulkocher.com/doc/TimingAttacks.pdf)
 - [dudect: dude, is my code constant time?](https://github.com/oreparaz/dudect)
-- [NIST SP 800-208: Recommendation for Stateful Hash-Based Signature Schemes](https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-208.pdf)
+- [Extracting Trezor's Private Key with $80 Oscilloscope](https://jochen-hoenicke.de/crypto/trezor-power-analysis/)
