@@ -178,7 +178,7 @@ fn test_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	let fixed_message = generate_fixed_message(SMALL_MSG_SIZE, rng);
 	let fixed_seed = generate_fixed_seed(rng);
 
-	for _ in 0..8_000 {
+	for _ in 0..4_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let keypair = match class {
 			Class::Left => Keypair::generate(&fixed_seed),

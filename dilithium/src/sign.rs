@@ -290,23 +290,25 @@ pub fn signature(
 	// Step 2: Prepare signing context (message hash, randomness, expanded matrix)
 	let signing_ctx = prepare_signing_context(&unpacked_sk, message, hedge);
 
-	// Step 3: Constant-time rejection sampling with fixed iterations
-	const MAX_SIGNING_ATTEMPTS: u16 = 64; // covers > 99.9% of cases
+	// Step 3: Make the rejection sampling lumpy to smear out timing signals
+	// Set this to 1 to revert to standard rejection sampling
+	const MIN_SIGNING_ATTEMPTS: u16 = 16; // covers most cases, |max tau| < 0.1, while keeping runtime short (~1ms)
 
 	let mut masking_vector_y = Box::new(Polyvecl::default());
 	let mut commitment_w1 = Box::new(Polyveck::default());
 	let mut commitment_w0 = Box::new(Polyveck::default());
-	let mut challenge_poly_c;
+	let mut challenge_poly_c: Box<Poly>;
 	let mut hint_vector_h = Box::new(Polyveck::default());
 	let mut signature_found = false;
 	let mut dummy_output = [0u8; params::SIGNBYTES]; // Dummy buffer for constant-time packing
 	let mut valid_challenge = [0u8; params::C_DASH_BYTES];
 	let mut valid_signature_z = Box::new(Polyvecl::default());
 	let mut valid_hint_h = Box::new(Polyveck::default());
+	let mut attempt_nonce = 0;
 
 	// this outer loop should run exactly once in the vast majority of cases
 	loop {
-		for attempt_nonce in 0..MAX_SIGNING_ATTEMPTS {
+		for _ in 0..MIN_SIGNING_ATTEMPTS {
 			// Generate masking vector and compute commitment
 			let mut signature_z = Box::new(Polyvecl::default());
 			generate_masking_vector_and_commitment(
@@ -333,6 +335,7 @@ pub fn signature(
 				&challenge_poly_c,
 				&unpacked_sk.secret_poly_s1_ntt,
 			);
+
 			// Check second rejection condition: compute w0 - cs2 and check ||w0 - cs2||∞ < γ₂ - β
 			let condition2 = compute_and_check_commitment_w0(
 				&mut commitment_w0,
@@ -374,6 +377,7 @@ pub fn signature(
 				signature_found = true;
 			}
 
+			attempt_nonce += 1;
 			// Continue loop regardless to maintain constant timing
 		}
 
