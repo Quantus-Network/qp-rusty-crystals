@@ -904,7 +904,6 @@ dependencies = [
  "criterion",
  "dudect-bencher",
  "rand 0.7.3",
- "sha2",
  "subtle",
  "zeroize",
 ]

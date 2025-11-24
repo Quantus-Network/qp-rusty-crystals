@@ -129,11 +129,10 @@ impl HDLattice {
 	}
 }
 
-/// Generate a new random mnemonic of the specified word count
+/// Generate a new random mnemonic with 24 words
 pub fn generate_mnemonic(seed: [u8; 32]) -> Result<String, HDLatticeError> {
 	// Calculate entropy bytes needed (24 words = 32 bytes)
 	let bits = 256;
-	let word_count = 24;
 	let entropy_bytes = bits / 8;
 
 	// Use seed to initiate chacha stream and fill it
