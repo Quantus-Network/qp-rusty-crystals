@@ -4,6 +4,7 @@ use crate::{
 	polyvec,
 	polyvec::{Polyveck, Polyvecl},
 };
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const K: usize = params::K;
 const L: usize = params::L;
@@ -66,6 +67,12 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: &[u8]) {
 	fips202::shake256(&mut tr, params::TR_BYTES, pk, params::PUBLICKEYBYTES);
 
 	packing::pack_sk(sk, &rho, &tr, &key, &t0, &s1, &s2);
+
+	// Zeroize sensitive intermediate seed material
+	seedbuf.zeroize();
+	preimage.zeroize();
+	rhoprime.zeroize();
+	key.zeroize();
 }
 
 /// Compute a signature for a given message from a private (secret) key.
@@ -93,6 +100,13 @@ struct SigningContext {
 	expanded_matrix_a: Box<[Polyvecl; K]>,
 	message_hash_mu: [u8; params::CRHBYTES],
 	signing_entropy_rho_prime: [u8; params::CRHBYTES],
+}
+
+impl Drop for SigningContext {
+	fn drop(&mut self) {
+		// Only zeroize the sensitive entropy, not the polynomial matrix or message hash
+		self.signing_entropy_rho_prime.zeroize();
+	}
 }
 
 /// Unpack secret key and prepare for signing
@@ -146,7 +160,7 @@ fn prepare_signing_context(
 	fips202::shake256_squeeze(&mut message_hash_mu, params::CRHBYTES, &mut keccak_state);
 
 	// Generate signing randomness ρ' = H(K || rnd || μ)
-	let hedge_bytes = hedge_randomness.unwrap_or([0u8; params::SEEDBYTES]);
+	let mut hedge_bytes = hedge_randomness.unwrap_or([0u8; params::SEEDBYTES]);
 	keccak_state.init();
 	fips202::shake256_absorb(&mut keccak_state, &unpacked_sk.private_key_seed, params::SEEDBYTES);
 	fips202::shake256_absorb(&mut keccak_state, &hedge_bytes, params::SEEDBYTES);
@@ -154,6 +168,9 @@ fn prepare_signing_context(
 	fips202::shake256_finalize(&mut keccak_state);
 	let mut signing_entropy_rho_prime = [0u8; params::CRHBYTES];
 	fips202::shake256_squeeze(&mut signing_entropy_rho_prime, params::CRHBYTES, &mut keccak_state);
+
+	// Zeroize sensitive hedge bytes after use
+	hedge_bytes.zeroize();
 
 	// Expand matrix A from public seed
 	let mut expanded_matrix_a = Box::new([Polyvecl::default(); K]);

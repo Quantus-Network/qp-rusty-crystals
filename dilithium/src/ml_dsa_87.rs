@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256, Sha512};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	errors::{KeyParsingError, KeyParsingError::BadSecretKey},
@@ -33,10 +34,12 @@ impl Keypair {
 		let mut pk = [0u8; PUBLICKEYBYTES];
 		let mut sk = [0u8; SECRETKEYBYTES];
 		crate::sign::keypair(&mut pk, &mut sk, entropy);
-		Keypair {
+		let keypair = Keypair {
 			secret: SecretKey::from_bytes(&sk).expect("Should never fail"),
 			public: PublicKey::from_bytes(&pk).expect("Should never fail"),
-		}
+		};
+		sk.zeroize(); // Clear the temporary secret key buffer
+		keypair
 	}
 
 	/// Convert a Keypair to a bytes array.
@@ -137,7 +140,7 @@ impl fmt::Debug for Keypair {
 }
 
 /// Private key.
-#[derive(Clone)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct SecretKey {
 	pub bytes: [u8; SECRETKEYBYTES],
 }
