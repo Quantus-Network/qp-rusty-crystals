@@ -17,28 +17,35 @@ This workspace contains two independent crates:
 
 ```toml
 [dependencies]
-qp-rusty-crystals-dilithium = "0.0.2"
+qp-rusty-crystals-dilithium = "2.0.0"
+getrandom = "0.2"  # For secure entropy generation if needed
 ```
 
+**Security Note**: When generating entropy for cryptographic operations, always use cryptographically secure random sources. Never use predictable strings, timestamps, or user input as entropy.
+
 ```rust
-use qp_rusty_crystals_dilithium::{ml_dsa_44, Keypair};
+use qp_rusty_crystals_dilithium::ml_dsa_87;
+
+// Generate secure entropy
+let mut entropy = [0u8; 32];
+getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
 
 // Generate keypair
-let keypair = ml_dsa_44::Keypair::generate(None);
+let keypair = ml_dsa_87::Keypair::generate(&entropy).expect("Failed to generate keypair");
 
 // Sign message
 let message = b"Hello, post-quantum world!";
-let signature = keypair.sign(message);
+let signature = keypair.sign(message, None, None);
 
 // Verify signature
-let is_valid = keypair.public_key.verify(message, &signature);
+let is_valid = keypair.verify(message, &signature, None);
 ```
 
 ### HD Wallet
 
 ```toml
 [dependencies]
-qp-rusty-crystals-hdwallet = "0.0.2"
+qp-rusty-crystals-hdwallet = "1.0.0"
 ```
 
 ```rust

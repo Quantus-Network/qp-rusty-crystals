@@ -10,7 +10,7 @@ Pure Rust implementation of the ML-DSA-87 (CRYSTALS-Dilithium) post-quantum digi
 - **NIST Compliant** - Verified against official test vectors
 - **Reasonably Constant-Time** - [Reasonably constant-time execution for keygen and signing](CONSTANT_TIME_TESTING.md)
 - **Context String Support** - Support for domain separation contexts
-- **Prehashing Support** - Support for SHA-256 and SHA-512 prehashing
+- **Prehashing Support** - Support for SHA-512 prehashing
 
 ## Usage
 
@@ -25,9 +25,13 @@ qp-rusty-crystals-dilithium = "2.0.0"
 ```rust
 use qp_rusty_crystals_dilithium::ml_dsa_87;
 
-// Generate a keypair with entropy
-let entropy = b"my_random_seed_exactly_32_bytes!";
-let keypair = ml_dsa_87::Keypair::generate(entropy);
+// Generate a keypair with secure random entropy
+let mut entropy = [0u8; 32];
+getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
+let keypair = ml_dsa_87::Keypair::generate(&entropy);
+
+// Alternative: you could also use a different secure entropy source
+// let keypair = ml_dsa_87::Keypair::generate(&other_secure_entropy);
 
 // Sign a message
 let message = b"Hello, post-quantum world!";
@@ -43,8 +47,10 @@ assert!(is_valid);
 ```rust
 use qp_rusty_crystals_dilithium::ml_dsa_87;
 
-let entropy = b"my_random_seed_exactly_32_bytes!";
-let keypair = ml_dsa_87::Keypair::generate(entropy);
+// Generate secure entropy
+let mut entropy = [0u8; 32];
+getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
+let keypair = ml_dsa_87::Keypair::generate(&entropy);
 
 let message = b"Important message";
 let context = b"email-signature-v1"; // Domain separation
@@ -62,8 +68,10 @@ assert!(is_valid);
 ```rust
 use qp_rusty_crystals_dilithium::{ml_dsa_87, PH};
 
-let entropy = b"my_random_seed_exactly_32_bytes!";
-let keypair = ml_dsa_87::Keypair::generate(entropy);
+// Generate secure entropy
+let mut entropy = [0u8; 32];
+getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
+let keypair = ml_dsa_87::Keypair::generate(&entropy);
 
 let large_message = b"Very large message that we want to hash first...";
 
@@ -80,11 +88,16 @@ assert!(is_valid);
 ```rust
 use qp_rusty_crystals_dilithium::ml_dsa_87;
 
-let entropy = b"my_random_seed_exactly_32_bytes!";
-let keypair = ml_dsa_87::Keypair::generate(entropy);
+// Generate secure entropy for keypair
+let mut entropy = [0u8; 32];
+getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
+let keypair = ml_dsa_87::Keypair::generate(&entropy);
 
 let message = b"Message to sign";
-let hedge_entropy = *b"hedge_randomness_32_bytes_long!!";
+
+// Generate secure hedge entropy
+let mut hedge_entropy = [0u8; 32];
+getrandom::getrandom(&mut hedge_entropy).expect("Failed to generate hedge entropy");
 
 // Hedged signing provides additional randomness
 let signature = keypair.sign(message, None, Some(hedge_entropy));
@@ -108,7 +121,15 @@ assert!(is_valid);
 pub fn generate(entropy: &[u8]) -> Keypair
 ```
 
-Generates a new keypair using the provided entropy. The entropy should be at least 32 bytes for security.
+Generates a new keypair using the provided entropy. The entropy must be at least 32 bytes of cryptographically secure random data (e.g., from `getrandom::getrandom()`).
+
+**⚠️ Security Warning**: Never use predictable or human-readable strings as entropy. This includes:
+- Hardcoded strings like `b"my_seed"`
+- User passwords or passphrases
+- Timestamps or counters
+- Any deterministic data
+
+Always use a cryptographically secure random number generator.
 
 ### Signing
 
