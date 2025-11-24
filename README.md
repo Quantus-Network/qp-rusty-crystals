@@ -51,8 +51,12 @@ qp-rusty-crystals-hdwallet = "1.0.0"
 ```rust
 use qp_rusty_crystals_hdwallet::{generate_mnemonic, HDLattice};
 
+// Generate secure seed for mnemonic
+let mut seed = [0u8; 32];
+getrandom::getrandom(&mut seed).expect("Failed to generate seed");
+
 // Generate mnemonic
-let mnemonic = generate_mnemonic(24)?;
+let mnemonic = generate_mnemonic(seed)?;
 
 // Create HD wallet
 let hd_wallet = HDLattice::from_mnemonic(&mnemonic, None)?;

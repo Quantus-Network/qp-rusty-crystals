@@ -26,8 +26,7 @@ mod hdwallet_tests {
 	use core::str::FromStr;
 	use nam_tiny_hderive::{bip32::ExtendedPrivKey, bip44::ChildNumber};
 	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
-	use rand_chacha::ChaCha20Rng;
-	use rand_core::{RngCore, SeedableRng};
+	use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 	// For test-only functionality that needs std
 	#[cfg(test)]
@@ -105,7 +104,7 @@ mod hdwallet_tests {
 		let mut seed = [0u8; 32];
 		(0..n)
 			.map(|_| {
-				let mut rng = ChaCha20Rng::from_seed(seed);
+				let mut rng = StdRng::from_seed(seed);
 				rng.fill_bytes(&mut seed);
 				let mnemonic = generate_mnemonic(seed).unwrap();
 				let hd = HDLattice::from_mnemonic(&mnemonic, None).unwrap();
@@ -145,12 +144,12 @@ mod hdwallet_tests {
 	#[allow(dead_code)]
 	fn generate_random_path() -> String {
 		let seed = [11u8; 32];
-		let mut rng = ChaCha20Rng::from_seed(seed);
+		let mut rng = StdRng::from_seed(seed);
 		// Generate length between 5 and 15 using RngCore
 		let length = (rng.next_u32() % 10) + 5;
 
-		"m/".to_owned() +
-			&(0..length)
+		"m/".to_owned()
+			+ &(0..length)
 				.map(|_| (rng.next_u32() % 99) + 1) // Generate number between 1 and 99
 				.map(|num| num.to_string() + "\'")
 				.collect::<Vec<_>>()
@@ -182,7 +181,7 @@ mod hdwallet_tests {
 	fn test_generate_mnemonic_valid_length() {
 		// Use a deterministic seed for testing
 		let mut seed = [42u8; 32];
-		let mut rng = ChaCha20Rng::from_seed(seed);
+		let mut rng = StdRng::from_seed(seed);
 		rng.fill_bytes(&mut seed);
 		let mnemonic = generate_mnemonic(seed)
 			.unwrap_or_else(|_| panic!("Failed to generate mnemonic for 24 words"));
@@ -191,10 +190,7 @@ mod hdwallet_tests {
 		let word_count_result = mnemonic.split_whitespace().count();
 
 		// Assert the word count matches the expected
-		assert_eq!(
-			word_count_result, 24,
-			"Expected 24 words, but got {word_count_result}"
-		);
+		assert_eq!(word_count_result, 24, "Expected 24 words, but got {word_count_result}");
 	}
 
 	#[test]

@@ -3,17 +3,12 @@ extern crate alloc;
 
 use alloc::{
 	string::{String, ToString},
-	vec,
 	vec::Vec,
 };
 use bip39::{Language, Mnemonic};
 use core::str::FromStr;
 use nam_tiny_hderive::{bip32::ExtendedPrivKey, Error};
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
-use rand_chacha::{
-	rand_core::{RngCore as ChaChaCore, SeedableRng},
-	ChaCha20Rng,
-};
 
 #[cfg(test)]
 mod test_vectors;
@@ -129,23 +124,10 @@ impl HDLattice {
 	}
 }
 
-/// Generate a new random mnemonic with 24 words
+/// Generate a new random mnemonic with 24 words = 32 bytes
 pub fn generate_mnemonic(seed: [u8; 32]) -> Result<String, HDLatticeError> {
-	// Calculate entropy bytes needed (24 words = 32 bytes)
-	let bits = 256;
-	let entropy_bytes = bits / 8;
-
-	// Use seed to initiate chacha stream and fill it
-	// NOTE: chacha will "whiten" the entropy provided by the os
-	// if an attacker does not 100% control the os entropy, chacha
-	// will provide full entropy, due to avalanche effects
-	let mut chacha_rng = ChaCha20Rng::from_seed(seed);
-
-	let mut entropy = vec![0u8; entropy_bytes];
-	chacha_rng.fill_bytes(&mut entropy);
-
-	// Create mnemonic from entropy
-	let mnemonic = Mnemonic::from_entropy(&entropy)
+	// Create mnemonic from seed
+	let mnemonic = Mnemonic::from_entropy(&seed)
 		.map_err(|e| HDLatticeError::MnemonicDerivationFailed(e.to_string()))?;
 
 	Ok(mnemonic.words().collect::<Vec<&str>>().join(" "))
