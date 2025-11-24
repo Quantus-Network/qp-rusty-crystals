@@ -138,7 +138,7 @@ fn main() {
 
 	// Pre-generate test data for all variants
 	let entropy = get_random_bytes();
-	let ml87_keypair = ml_dsa_87::Keypair::generate(&entropy);
+	let ml87_keypair = ml_dsa_87::Keypair::generate(&entropy).unwrap();
 
 	let test_msg = b"stack usage test message";
 

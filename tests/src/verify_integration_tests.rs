@@ -47,7 +47,7 @@ fn verify_test_vector(test: &TestVector) {
 	let mut entropy = [0u8; 32];
 	let res = drbg.randombytes(&mut entropy, 32);
 	assert!(res.is_ok());
-	let generated_keypair = Keypair::generate(&entropy);
+	let generated_keypair = Keypair::generate(&entropy).expect("Should never fail");
 	let generated_pk = generated_keypair.public.to_bytes();
 	let generated_sk = generated_keypair.secret.to_bytes();
 	assert_eq!(
@@ -170,9 +170,9 @@ fn test_verify_invalid_signature() {
 	let entropy1 = get_random_bytes();
 	let entropy2 = get_random_bytes();
 	let entropy3 = get_random_bytes();
-	let keys_1 = Keypair::generate(&entropy1);
-	let keys_2 = Keypair::generate(&entropy2);
-	let keys_3 = Keypair::generate(&entropy3);
+	let keys_1 = Keypair::generate(&entropy1).unwrap();
+	let keys_2 = Keypair::generate(&entropy2).unwrap();
+	let keys_3 = Keypair::generate(&entropy3).unwrap();
 
 	// Message to sign
 	let message = b"Hello, Resonance!";
