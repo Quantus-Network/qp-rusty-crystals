@@ -1,4 +1,4 @@
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Digest, Sha512};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{

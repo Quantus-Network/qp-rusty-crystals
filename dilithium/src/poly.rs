@@ -453,8 +453,11 @@ pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
 		ctr += store_upper.unwrap_u8() as usize;
 	}
 
-	// Prevent compiler from optimizing away dummy_value
-	core::hint::black_box(dummy_value);
+	// Use volatile read to ensure dummy_value operations are not optimized away
+	unsafe {
+		core::ptr::read_volatile(&dummy_value as *const i32);
+	}
+	
 	ctr
 }
 

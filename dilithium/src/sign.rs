@@ -4,7 +4,7 @@ use crate::{
 	polyvec,
 	polyvec::{Polyveck, Polyvecl},
 };
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize};
 
 const K: usize = params::K;
 const L: usize = params::L;

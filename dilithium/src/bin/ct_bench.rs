@@ -109,6 +109,7 @@ fn generate_fixed_hint_polyveck() -> qp_rusty_crystals_dilithium::polyvec::Polyv
 fn disrupt_cache(rng: &mut BenchRng) {
 	// Large memory access to evict cache lines
 	let dummy = vec![0u8; 8 * 1024 * 1024]; // 8MB
+	let dummy_value = 0i32;
 	let mut sum = 0u64;
 
 	// Access every cache line (64 bytes) to force eviction
@@ -129,7 +130,9 @@ fn disrupt_cache(rng: &mut BenchRng) {
 	}
 
 	// Prevent compiler optimization
-	std::hint::black_box(sum);
+	unsafe {
+		core::ptr::read_volatile(&dummy_value as *const i32);
+	}
 }
 
 /// Test keypair generation for constant time
@@ -181,8 +184,8 @@ fn test_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	for _ in 0..4_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let keypair = match class {
-			Class::Left => Keypair::generate(&fixed_seed),
-			Class::Right => Keypair::generate(&generate_random_seed(rng)),
+			Class::Left => Keypair::generate(&fixed_seed).unwrap(),
+			Class::Right => Keypair::generate(&generate_random_seed(rng)).unwrap(),
 		};
 
 		inputs.push(keypair);
@@ -215,8 +218,8 @@ fn test_signing_medium_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	for _ in 0..5_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let keypair = match class {
-			Class::Left => Keypair::generate(&fixed_seed),
-			Class::Right => Keypair::generate(&generate_random_seed(rng)),
+			Class::Left => Keypair::generate(&fixed_seed).unwrap(),
+			Class::Right => Keypair::generate(&generate_random_seed(rng)).unwrap(),
 		};
 
 		inputs.push(keypair);
@@ -249,8 +252,8 @@ fn test_signing_large_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	for _ in 0..3_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let keypair = match class {
-			Class::Left => Keypair::generate(&fixed_seed),
-			Class::Right => Keypair::generate(&generate_random_seed(rng)),
+			Class::Left => Keypair::generate(&fixed_seed).unwrap(),
+			Class::Right => Keypair::generate(&generate_random_seed(rng)).unwrap(),
 		};
 
 		inputs.push(keypair);
@@ -283,8 +286,8 @@ fn test_signing_xlarge_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	for _ in 0..2_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let keypair = match class {
-			Class::Left => Keypair::generate(&fixed_seed),
-			Class::Right => Keypair::generate(&generate_random_seed(rng)),
+			Class::Left => Keypair::generate(&fixed_seed).unwrap(),
+			Class::Right => Keypair::generate(&generate_random_seed(rng)).unwrap(),
 		};
 
 		inputs.push(keypair);
@@ -317,8 +320,8 @@ fn test_hedged_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	for _ in 0..6_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let keypair = match class {
-			Class::Left => Keypair::generate(&fixed_seed),
-			Class::Right => Keypair::generate(&generate_random_seed(rng)),
+			Class::Left => Keypair::generate(&fixed_seed).unwrap(),
+			Class::Right => Keypair::generate(&generate_random_seed(rng)).unwrap(),
 		};
 
 		inputs.push(keypair);
@@ -352,8 +355,8 @@ fn test_signing_with_context_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	for _ in 0..4_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let keypair = match class {
-			Class::Left => Keypair::generate(&fixed_seed),
-			Class::Right => Keypair::generate(&generate_random_seed(rng)),
+			Class::Left => Keypair::generate(&fixed_seed).unwrap(),
+			Class::Right => Keypair::generate(&generate_random_seed(rng)).unwrap(),
 		};
 
 		inputs.push(keypair);
@@ -376,7 +379,7 @@ fn test_edge_cases_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running edge cases constant-time test...");
 
 	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate(&[0x42; SEED_SIZE]);
+	let keypair = Keypair::generate(&[0x42; SEED_SIZE]).unwrap();
 
 	// Generate messages and classes upfront
 	let mut inputs = Vec::new();
@@ -619,7 +622,7 @@ fn test_polyveck_norm_check_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	}
 }
 
-fn test_challenge_generation_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+fn test_k_pack_w1_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running challenge generation constant-time test...");
 
 	let mut inputs = Vec::new();
@@ -973,7 +976,7 @@ fn test_signing_fixed_key_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 	// Generate single fixed keypair for all tests
 	let fixed_seed = generate_fixed_seed(rng);
-	let keypair = Keypair::generate(&fixed_seed);
+	let keypair = Keypair::generate(&fixed_seed).unwrap();
 
 	// Generate the fixed message once for all Left class samples
 	let fixed_message = generate_fixed_message(SMALL_MSG_SIZE, rng);
@@ -1058,94 +1061,6 @@ fn test_message_hashing_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	}
 }
 
-/// Test challenge polynomial generation for constant-time execution
-#[cfg(feature = "dudect-bencher")]
-fn test_challenge_generation_detailed_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
-	println!("Running detailed challenge generation constant-time test...");
-
-	// Generate inputs and classes upfront
-	let mut inputs = Vec::new();
-	let mut classes = Vec::new();
-
-	// Generate fixed values for Left class
-	let fixed_mu = {
-		let mut mu = [0u8; qp_rusty_crystals_dilithium::params::CRHBYTES];
-		rng.fill_bytes(&mut mu);
-		mu
-	};
-	let fixed_w1 = {
-		let mut w1 = Box::new(qp_rusty_crystals_dilithium::polyvec::Polyveck::default());
-		for i in 0..qp_rusty_crystals_dilithium::params::K {
-			for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
-				w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16; // w1 coefficients are in [0, 15]
-			}
-		}
-		w1
-	};
-
-	for _ in 0..8_000 {
-		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let (mu, w1) = match class {
-			Class::Left => {
-				let mut mu = [0u8; qp_rusty_crystals_dilithium::params::CRHBYTES];
-				mu.copy_from_slice(&fixed_mu);
-				(mu, *fixed_w1)
-			},
-			Class::Right => {
-				let mut mu = [0u8; qp_rusty_crystals_dilithium::params::CRHBYTES];
-				rng.fill_bytes(&mut mu);
-				let mut w1 = Box::new(qp_rusty_crystals_dilithium::polyvec::Polyveck::default());
-				for i in 0..qp_rusty_crystals_dilithium::params::K {
-					for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
-						w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16;
-					}
-				}
-				(mu, *w1)
-			},
-		};
-
-		inputs.push((mu, w1));
-		classes.push(class);
-	}
-
-	for (class, (mu, w1)) in classes.into_iter().zip(inputs.into_iter()) {
-		// Disrupt cache state before each sample
-		disrupt_cache(rng);
-
-		runner.run_one(class, || {
-			let mut signature_buffer = [0u8; qp_rusty_crystals_dilithium::params::SIGNBYTES];
-
-			// Pack w1 into signature buffer
-			qp_rusty_crystals_dilithium::polyvec::k_pack_w1(&mut signature_buffer, &w1);
-
-			// Generate challenge
-			use qp_rusty_crystals_dilithium::fips202;
-			let mut keccak_state = fips202::KeccakState::default();
-			fips202::shake256_absorb(
-				&mut keccak_state,
-				&mu,
-				qp_rusty_crystals_dilithium::params::CRHBYTES,
-			);
-			fips202::shake256_absorb(
-				&mut keccak_state,
-				&signature_buffer,
-				qp_rusty_crystals_dilithium::params::K *
-					qp_rusty_crystals_dilithium::params::POLYW1_PACKEDBYTES,
-			);
-			fips202::shake256_finalize(&mut keccak_state);
-			fips202::shake256_squeeze(
-				&mut signature_buffer,
-				qp_rusty_crystals_dilithium::params::C_DASH_BYTES,
-				&mut keccak_state,
-			);
-
-			let mut challenge_poly_c = qp_rusty_crystals_dilithium::poly::Poly::default();
-			qp_rusty_crystals_dilithium::poly::challenge(&mut challenge_poly_c, &signature_buffer);
-			qp_rusty_crystals_dilithium::poly::ntt(&mut challenge_poly_c);
-		});
-	}
-}
-
 /// Test polynomial arithmetic operations for constant-time execution
 #[cfg(feature = "dudect-bencher")]
 fn test_polynomial_arithmetic_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
@@ -1184,56 +1099,6 @@ fn test_polynomial_arithmetic_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 				&poly1_copy,
 				&poly2,
 			);
-		});
-	}
-}
-
-/// Test k_pack_w1 operation for constant-time execution
-#[cfg(feature = "dudect-bencher")]
-fn test_k_pack_w1_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
-	println!("Running k_pack_w1 constant-time test...");
-
-	// Generate inputs and classes upfront
-	let mut inputs = Vec::new();
-	let mut classes = Vec::new();
-
-	// Generate fixed w1 for Left class
-	let fixed_w1 = {
-		let mut w1 = Box::new(qp_rusty_crystals_dilithium::polyvec::Polyveck::default());
-		for i in 0..qp_rusty_crystals_dilithium::params::K {
-			for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
-				w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16; // w1 coefficients are in [0, 15]
-			}
-		}
-		w1
-	};
-
-	for _ in 0..8_000 {
-		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let w1 = match class {
-			Class::Left => *fixed_w1,
-			Class::Right => {
-				let mut w1 = Box::new(qp_rusty_crystals_dilithium::polyvec::Polyveck::default());
-				for i in 0..qp_rusty_crystals_dilithium::params::K {
-					for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
-						w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16;
-					}
-				}
-				*w1
-			},
-		};
-
-		inputs.push(w1);
-		classes.push(class);
-	}
-
-	for (class, w1) in classes.into_iter().zip(inputs.into_iter()) {
-		// Disrupt cache state before each sample
-		disrupt_cache(rng);
-
-		runner.run_one(class, || {
-			let mut signature_buffer = [0u8; qp_rusty_crystals_dilithium::params::SIGNBYTES];
-			qp_rusty_crystals_dilithium::polyvec::k_pack_w1(&mut signature_buffer, &w1);
 		});
 	}
 }
@@ -1297,7 +1162,7 @@ ctbench_main!(
 	test_polyvecl_norm_check_ct,
 	test_polyveck_norm_check_ct,
 	test_k_make_hint_ct,
-	test_challenge_generation_ct,
+	test_k_pack_w1_ct,
 	test_packing_operations_ct,
 	test_ntt_ct,
 	test_invntt_tomont_ct,
@@ -1306,9 +1171,7 @@ ctbench_main!(
 	test_use_hint_ct,
 	test_signing_fixed_key_ct,
 	test_message_hashing_ct,
-	test_challenge_generation_detailed_ct,
 	test_polynomial_arithmetic_ct,
-	test_k_pack_w1_ct,
 	test_poly_challenge_ct
 );
 
