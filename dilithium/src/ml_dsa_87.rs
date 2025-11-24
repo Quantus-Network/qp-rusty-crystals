@@ -107,10 +107,9 @@ impl Keypair {
 		&self,
 		msg: &[u8],
 		ctx: Option<&[u8]>,
-		hedge: Option<[u8; params::SEEDBYTES]>,
-		ph: crate::PH,
+		hedge: Option<[u8; params::SEEDBYTES]>
 	) -> Option<Signature> {
-		self.secret.prehash_sign(msg, ctx, hedge, ph)
+		self.secret.prehash_sign(msg, ctx, hedge)
 	}
 
 	/// Verify a signature for a given message with a public key.
@@ -125,10 +124,9 @@ impl Keypair {
 		&self,
 		msg: &[u8],
 		sig: &[u8],
-		ctx: Option<&[u8]>,
-		ph: crate::PH,
+		ctx: Option<&[u8]>
 	) -> bool {
-		self.public.prehash_verify(msg, sig, ctx, ph)
+		self.public.prehash_verify(msg, sig, ctx)
 	}
 }
 
@@ -218,24 +216,15 @@ impl SecretKey {
 		msg: &[u8],
 		ctx: Option<&[u8]>,
 		hedge: Option<[u8; params::SEEDBYTES]>,
-		ph: crate::PH,
 	) -> Option<Signature> {
-		let mut oid = [0u8; 11];
+	    		let mut oid = [0u8; 11];
+		oid.copy_from_slice(&[
+			0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
+		]);
+		
 		let mut phm: Vec<u8> = Vec::new();
-		match ph {
-			crate::PH::SHA256 => {
-				oid.copy_from_slice(&[
-					0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
-				]);
-				phm.extend_from_slice(Sha256::digest(msg).as_slice());
-			},
-			crate::PH::SHA512 => {
-				oid.copy_from_slice(&[
-					0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
-				]);
-				phm.extend_from_slice(Sha512::digest(msg).as_slice());
-			},
-		}
+		// prehash with SHA512
+		phm.extend_from_slice(Sha512::digest(msg).as_slice());
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
@@ -330,35 +319,26 @@ impl PublicKey {
 	/// * 'msg' - message that is claimed to be signed
 	/// * 'sig' - signature to verify
 	/// * 'ctx' - context string
-	/// * 'ph' - pre-hash function
 	///
 	/// Returns 'true' if the verification process was successful, 'false' otherwise
 	pub fn prehash_verify(
 		&self,
 		msg: &[u8],
 		sig: &[u8],
-		ctx: Option<&[u8]>,
-		ph: crate::PH,
+		ctx: Option<&[u8]>
 	) -> bool {
 		if sig.len() != SIGNBYTES {
 			return false;
 		}
 		let mut oid = [0u8; 11];
+		
 		let mut phm: Vec<u8> = Vec::new();
-		match ph {
-			crate::PH::SHA256 => {
-				oid.copy_from_slice(&[
-					0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
-				]);
-				phm.extend_from_slice(Sha256::digest(msg).as_slice());
-			},
-			crate::PH::SHA512 => {
-				oid.copy_from_slice(&[
-					0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
-				]);
-				phm.extend_from_slice(Sha512::digest(msg).as_slice());
-			},
-		}
+		// prehash with SHA512
+		oid.copy_from_slice(&[
+			0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
+		]);
+		phm.extend_from_slice(Sha512::digest(msg).as_slice());
+
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
@@ -430,16 +410,16 @@ mod tests {
 		let entropy = get_random_bytes();
 		let keys = Keypair::generate(&entropy);
 		let hedge = get_random_bytes();
-		let sig = keys.prehash_sign(&msg, None, Some(hedge), crate::PH::SHA256);
-		assert!(keys.prehash_verify(&msg, &sig.unwrap(), None, crate::PH::SHA256));
+		let sig = keys.prehash_sign(&msg, None, Some(hedge));
+		assert!(keys.prehash_verify(&msg, &sig.unwrap(), None));
 	}
 	#[test]
 	fn self_verify_prehash() {
 		let msg = get_random_msg();
 		let entropy = get_random_bytes();
 		let keys = Keypair::generate(&entropy);
-		let sig = keys.prehash_sign(&msg, None, None, crate::PH::SHA256);
-		assert!(keys.prehash_verify(&msg, &sig.unwrap(), None, crate::PH::SHA256));
+		let sig = keys.prehash_sign(&msg, None, None);
+		assert!(keys.prehash_verify(&msg, &sig.unwrap(), None));
 	}
 	
 	#[test]

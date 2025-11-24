@@ -20,11 +20,6 @@ pub mod reduce;
 pub mod rounding;
 pub mod sign;
 
-pub enum PH {
-	SHA256,
-	SHA512,
-}
-
 #[cfg(test)]
 mod tests {
 	#[test]
