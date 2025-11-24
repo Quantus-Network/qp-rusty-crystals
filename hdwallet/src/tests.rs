@@ -51,8 +51,8 @@ mod hdwallet_tests {
 		let seed = [43u8; 32];
 
 		// Test generating new mnemonic
-		let mnemonic = dbg!(generate_mnemonic(12, seed).unwrap());
-		assert_eq!(mnemonic.split_whitespace().count(), 12);
+		let mnemonic = dbg!(generate_mnemonic(seed).unwrap());
+		assert_eq!(mnemonic.split_whitespace().count(), 24);
 		// println!("Generated mnemonic: {}", mnemonic);
 		// Test creating HDEntropy from mnemonic
 		let hd = HDLattice::from_mnemonic(&mnemonic, None).unwrap();
@@ -107,7 +107,7 @@ mod hdwallet_tests {
 			.map(|_| {
 				let mut rng = ChaCha20Rng::from_seed(seed);
 				rng.fill_bytes(&mut seed);
-				let mnemonic = generate_mnemonic(12, seed).unwrap();
+				let mnemonic = generate_mnemonic(seed).unwrap();
 				let hd = HDLattice::from_mnemonic(&mnemonic, None).unwrap();
 				let path = generate_random_path();
 				let k = hd.generate_derived_keys(&path).unwrap();
@@ -179,53 +179,22 @@ mod hdwallet_tests {
 	}
 
 	#[test]
-	fn test_generate_mnemonic_valid_lengths() {
-		let valid_lengths = [12, 15, 18, 21, 24];
+	fn test_generate_mnemonic_valid_length() {
 		// Use a deterministic seed for testing
 		let mut seed = [42u8; 32];
-		for &word_count in &valid_lengths {
-			let mut rng = ChaCha20Rng::from_seed(seed);
-			rng.fill_bytes(&mut seed);
-			let mnemonic = generate_mnemonic(word_count, seed)
-				.unwrap_or_else(|_| panic!("Failed to generate mnemonic for {word_count} words"));
+		let mut rng = ChaCha20Rng::from_seed(seed);
+		rng.fill_bytes(&mut seed);
+		let mnemonic = generate_mnemonic(seed)
+			.unwrap_or_else(|_| panic!("Failed to generate mnemonic for 24 words"));
 
-			// Split mnemonic into words and count them
-			let word_count_result = mnemonic.split_whitespace().count();
+		// Split mnemonic into words and count them
+		let word_count_result = mnemonic.split_whitespace().count();
 
-			// Assert the word count matches the expected
-			assert_eq!(
-				word_count_result, word_count,
-				"Expected {word_count} words, but got {word_count_result}"
-			);
-		}
-	}
-
-	#[test]
-	fn test_generate_mnemonic_invalid_length() {
-		let invalid_lengths = [10, 14, 19, 25]; // Invalid word counts not allowed by BIP-39
-										  // Use a deterministic seed for testing
-		let test_seed = [43u8; 32];
-		let mut rng = ChaCha20Rng::from_seed(test_seed);
-		for &word_count in &invalid_lengths {
-			// Generate a random 32-byte seed
-			let mut seed = [0u8; 32];
-			rng.fill_bytes(&mut seed);
-			let result = generate_mnemonic(word_count, seed);
-
-			// Assert that the result is an error
-			assert!(
-				result.is_err(),
-				"Expected an error for invalid word count {word_count}, but got Ok()"
-			);
-
-			// Check the specific error type
-			if let Err(err) = result {
-				assert!(
-					matches!(err, HDLatticeError::BadEntropyBitCount(_)),
-					"Unexpected error type for word count {word_count}: {err:?}"
-				);
-			}
-		}
+		// Assert the word count matches the expected
+		assert_eq!(
+			word_count_result, 24,
+			"Expected 24 words, but got {word_count_result}"
+		);
 	}
 
 	#[test]
