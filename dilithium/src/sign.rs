@@ -278,7 +278,7 @@ fn generate_challenge_polynomial(
 }
 
 /// Main signature generation function
-pub fn signature(
+pub(crate) fn signature(
 	signature_output: &mut [u8],
 	message: &[u8],
 	secret_key_bytes: &[u8],
@@ -403,7 +403,7 @@ pub fn signature(
 /// * 'pk' - public key
 ///
 /// Returns 'true' if the verification process was successful, 'false' otherwise
-pub fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
+pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	let mut buf = [0u8; K * crate::params::POLYW1_PACKEDBYTES];
 	let mut rho = [0u8; params::SEEDBYTES];
 	let mut mu = [0u8; params::CRHBYTES];

@@ -441,4 +441,23 @@ mod tests {
 		let sig = keys.prehash_sign(&msg, None, None, crate::PH::SHA256);
 		assert!(keys.prehash_verify(&msg, &sig.unwrap(), None, crate::PH::SHA256));
 	}
+	
+	#[test]
+	fn verify_fails_with_different_context() {
+		let msg = get_random_msg();
+		let entropy = get_random_bytes();
+		let keys = Keypair::generate(&entropy);
+		let hedge = get_random_bytes();
+
+		// Sign with context "test1"
+		let ctx1 = b"test1";
+		let sig = keys.sign(&msg, Some(ctx1), Some(hedge));
+
+		// Try to verify with different context "test2" - should fail
+		let ctx2 = b"test2";
+		assert!(!keys.verify(&msg, &sig, Some(ctx2)));
+
+		// Verify with correct context should still work
+		assert!(keys.verify(&msg, &sig, Some(ctx1)));
+	}
 }
