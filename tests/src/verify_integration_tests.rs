@@ -85,7 +85,7 @@ fn verify_test_vector(test: &TestVector) {
 	let mut hedge = [0u8; 32];
 	let res = drbg.randombytes(&mut hedge, 32);
 	assert!(res.is_ok());
-	let our_signature = keypair.sign(&test.msg, None, Some(hedge));
+	let our_signature = keypair.sign(&test.msg, None, Some(hedge)).unwrap();
 	assert_eq!(
 		our_signature.as_slice(),
 		nist_signature,
@@ -177,7 +177,7 @@ fn test_verify_invalid_signature() {
 	// Message to sign
 	let message = b"Hello, Resonance!";
 	// Sign the message
-	let signature = keys_2.sign(message, None, None);
+	let signature = keys_2.sign(message, None, None).unwrap();
 
 	// Verify the signature with wrong key
 	let result = keys_1.verify(&signature, message, None);

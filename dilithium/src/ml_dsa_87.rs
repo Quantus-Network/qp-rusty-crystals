@@ -1,7 +1,7 @@
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
-	errors::{DrbgError, KeyParsingError, KeyParsingError::BadSecretKey},
+	errors::{DrbgError, KeyParsingError, KeyParsingError::BadSecretKey, SignatureError},
 	params,
 };
 use alloc::{vec};
@@ -80,13 +80,13 @@ impl Keypair {
 	///
 	/// * 'msg' - message to sign
 	///
-	/// Returns Option<Signature>
+	/// Returns Result<Signature, SignatureError>
 	pub fn sign(
 		&self,
 		msg: &[u8],
 		ctx: Option<&[u8]>,
 		hedge: Option<[u8; params::SEEDBYTES]>,
-	) -> Signature {
+	) -> Result<Signature, SignatureError> {
 		self.secret.sign(msg, ctx, hedge)
 	}
 
@@ -150,11 +150,11 @@ impl SecretKey {
 		msg: &[u8],
 		ctx: Option<&[u8]>,
 		hedge: Option<[u8; params::SEEDBYTES]>,
-	) -> Signature {
+	) -> Result<Signature, SignatureError> {
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
-					panic!("ctx length must not be larger than 255");
+				    return Err(SignatureError::ContextTooLong);
 				}
 				let x_len = x.len();
 				let msg_len = msg.len();
@@ -164,12 +164,12 @@ impl SecretKey {
 				m[2 + x_len..].copy_from_slice(msg);
 				let mut sig: Signature = [0u8; SIGNBYTES];
 				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
-				sig
+				Ok(sig)
 			},
 			None => {
 				let mut sig: Signature = [0u8; SIGNBYTES];
 				crate::sign::signature(&mut sig, msg, &self.bytes, hedge);
-				sig
+				Ok(sig)
 			},
 		}
 	}
@@ -258,7 +258,7 @@ mod tests {
 		let entropy = get_random_bytes();
 		let keys = Keypair::generate(&entropy).unwrap();
 		let hedge = get_random_bytes();
-		let sig = keys.sign(&msg, None, Some(hedge));
+		let sig = keys.sign(&msg, None, Some(hedge)).unwrap();
 		assert!(keys.verify(&msg, &sig, None));
 	}
 
@@ -268,7 +268,7 @@ mod tests {
 		let entropy = get_random_bytes();
 		let keys = Keypair::generate(&entropy).unwrap();
 		let hedge = get_random_bytes();
-		let sig = keys.sign(&msg, None, Some(hedge));
+		let sig = keys.sign(&msg, None, Some(hedge)).unwrap();
 		assert!(keys.verify(&msg, &sig, None));
 	}
 	
@@ -281,7 +281,7 @@ mod tests {
 
 		// Sign with context "test1"
 		let ctx1 = b"test1";
-		let sig = keys.sign(&msg, Some(ctx1), Some(hedge));
+		let sig = keys.sign(&msg, Some(ctx1), Some(hedge)).unwrap();
 
 		// Try to verify with different context "test2" - should fail
 		let ctx2 = b"test2";

@@ -55,7 +55,7 @@ pub struct WormholePair {
 }
 
 impl WormholePair {
-	/// Generates a new `WormholePair` using secure system entropy (only available with `std`).
+	/// Generates a new `WormholePair` from user-supplied entropy.
 	///
 	/// # Errors
 	/// Returns `WormholeError::InvalidSecretFormat` if entropy collection fails.

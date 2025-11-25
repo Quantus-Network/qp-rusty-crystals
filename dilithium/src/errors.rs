@@ -33,3 +33,18 @@ impl Display for DrbgError {
 		write!(f, "{str}")
 	}
 }
+
+
+#[derive(Debug)]
+pub enum SignatureError {
+	ContextTooLong,
+}
+
+impl Display for SignatureError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let str = match self {
+			SignatureError::ContextTooLong => "ContextTooLong",
+		};
+		write!(f, "{str}")
+	}
+}

@@ -25,7 +25,7 @@ fn test_sign() {
 	let message = b"Hello, Dilithium!";
 
 	// Step 3: Sign the message using the secret key
-	let signature = dilithium_keypair.sign(message, None, None);
+	let signature = dilithium_keypair.sign(message, None, None).unwrap();
 
 	// Step 4: Verify the signature using the public key
 	let verify_result = dilithium_keypair.verify(message, &signature, None);
@@ -53,7 +53,7 @@ fn test_sign_multiple_messages() {
 	];
 
 	for (i, message) in messages.iter().enumerate() {
-		let signature = dilithium_keypair.sign(message, None, None);
+		let signature = dilithium_keypair.sign(message, None, None).unwrap();
 		let verify_result = dilithium_keypair.verify(message, &signature, None);
 		assert!(verify_result, "Signature verification failed for message {}", i);
 	}
@@ -72,8 +72,8 @@ fn test_hedged_vs_deterministic_signing() {
 	let message = b"Test message for hedged vs deterministic";
 
 	// Test deterministic signing
-	let sig1_det = dilithium_keypair.sign(message, None, None);
-	let sig2_det = dilithium_keypair.sign(message, None, None);
+	let sig1_det = dilithium_keypair.sign(message, None, None).unwrap();
+	let sig2_det = dilithium_keypair.sign(message, None, None).unwrap();
 
 	// Deterministic signatures should be identical
 	assert_eq!(sig1_det, sig2_det, "Deterministic signatures should be identical");
@@ -81,8 +81,8 @@ fn test_hedged_vs_deterministic_signing() {
 	// Test hedged signing
 	let hedge1 = get_random_bytes();
 	let hedge2 = get_random_bytes();
-	let sig1_hedge = dilithium_keypair.sign(message, None, Some(hedge1));
-	let sig2_hedge = dilithium_keypair.sign(message, None, Some(hedge2));
+	let sig1_hedge = dilithium_keypair.sign(message, None, Some(hedge1)).unwrap();
+	let sig2_hedge = dilithium_keypair.sign(message, None, Some(hedge2)).unwrap();
 
 	// Hedged signatures should be different (with very high probability)
 	assert_ne!(sig1_hedge, sig2_hedge, "Hedged signatures should be different");
@@ -114,8 +114,8 @@ fn test_cross_keypair_verification_fails() {
 
 	let message = b"Cross-verification test message";
 
-	let signature1 = keypair1.sign(message, None, None);
-	let signature2 = keypair2.sign(message, None, None);
+	let signature1 = keypair1.sign(message, None, None).unwrap();
+	let signature2 = keypair2.sign(message, None, None).unwrap();
 
 	// Each signature should verify with its own keypair
 	assert!(keypair1.verify(message, &signature1, None));
@@ -137,7 +137,7 @@ fn test_corrupted_signature_fails() {
 	let dilithium_keypair = hd_lattice.generate_keys();
 
 	let message = b"Message for corruption test";
-	let mut signature = dilithium_keypair.sign(message, None, None);
+	let mut signature = dilithium_keypair.sign(message, None, None).unwrap();
 
 	// Original signature should verify
 	assert!(dilithium_keypair.verify(message, &signature, None));
@@ -185,8 +185,8 @@ fn test_same_seed_produces_same_keypair() {
 
 	// Same mnemonic should produce same keypair
 	let message = b"Test message";
-	let sig1 = keypair1.sign(message, None, None);
-	let sig2 = keypair2.sign(message, None, None);
+	let sig1 = keypair1.sign(message, None, None).unwrap();
+	let sig2 = keypair2.sign(message, None, None).unwrap();
 
 	// Deterministic signatures should be identical
 	assert_eq!(sig1, sig2);
@@ -209,7 +209,7 @@ fn test_stress_multiple_signatures() {
 	// Sign and verify many messages
 	for i in 0..50 {
 		let message = format!("Message number {}", i);
-		let signature = dilithium_keypair.sign(message.as_bytes(), None, None);
+		let signature = dilithium_keypair.sign(message.as_bytes(), None, None).unwrap();
 		let verify_result = dilithium_keypair.verify(message.as_bytes(), &signature, None);
 		assert!(verify_result, "Failed to verify signature for message {}", i);
 	}
