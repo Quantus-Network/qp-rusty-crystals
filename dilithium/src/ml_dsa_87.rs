@@ -2,9 +2,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	errors::{KeyParsingError, KeyParsingError::BadSecretKey, SignatureError},
-	params,
+	params, SensitiveBytes32,
 };
-use alloc::{vec};
+use alloc::vec;
 use core::fmt;
 
 pub const SECRETKEYBYTES: usize = crate::params::SECRETKEYBYTES;
@@ -29,7 +29,7 @@ impl Keypair {
 	/// * 'entropy' - bytes for determining the generation process (must be at least 32 bytes)
 	///
 	/// Note: The entropy is moved here and zeroized after use, along with the derived secret key.
-	pub fn generate(mut entropy: [u8; 32]) -> Keypair {
+	pub fn generate(entropy: SensitiveBytes32) -> Keypair {
 		let mut pk = [0u8; PUBLICKEYBYTES];
 		let mut sk = [0u8; SECRETKEYBYTES];
 		crate::sign::keypair(&mut pk, &mut sk, entropy);
@@ -37,8 +37,8 @@ impl Keypair {
 			secret: SecretKey::from_bytes(&sk).expect("Should never fail"),
 			public: PublicKey::from_bytes(&pk).expect("Should never fail"),
 		};
-		sk.zeroize(); 
-		entropy.zeroize();
+		sk.zeroize();
+		// entropy is automatically zeroized when it drops (ZeroizeOnDrop)
 		keypair
 	}
 
@@ -151,7 +151,7 @@ impl SecretKey {
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
-				    return Err(SignatureError::ContextTooLong);
+					return Err(SignatureError::ContextTooLong);
 				}
 				let x_len = x.len();
 				let msg_len = msg.len();
@@ -232,14 +232,14 @@ impl PublicKey {
 #[cfg(test)]
 mod tests {
 	use super::Keypair;
+	use crate::SensitiveBytes32;
 	use rand::Rng;
-	use crate::errors::DrbgError;
 
-	fn get_random_bytes() -> [u8; 32] {
+	fn get_random_bytes() -> SensitiveBytes32 {
 		let mut rng = rand::thread_rng();
 		let mut bytes = [0u8; 32];
 		rng.fill(&mut bytes);
-		bytes
+		(&mut bytes).into()
 	}
 
 	fn get_random_msg() -> [u8; 128] {
@@ -255,7 +255,7 @@ mod tests {
 		let entropy = get_random_bytes();
 		let keys = Keypair::generate(entropy);
 		let hedge = get_random_bytes();
-		let sig = keys.sign(&msg, None, Some(hedge)).unwrap();
+		let sig = keys.sign(&msg, None, Some(hedge.0)).unwrap();
 		assert!(keys.verify(&msg, &sig, None));
 	}
 
@@ -265,10 +265,10 @@ mod tests {
 		let entropy = get_random_bytes();
 		let keys = Keypair::generate(entropy);
 		let hedge = get_random_bytes();
-		let sig = keys.sign(&msg, None, Some(hedge)).unwrap();
+		let sig = keys.sign(&msg, None, Some(hedge.0)).unwrap();
 		assert!(keys.verify(&msg, &sig, None));
 	}
-	
+
 	#[test]
 	fn verify_fails_with_different_context() {
 		let msg = get_random_msg();
@@ -278,7 +278,7 @@ mod tests {
 
 		// Sign with context "test1"
 		let ctx1 = b"test1";
-		let sig = keys.sign(&msg, Some(ctx1), Some(hedge)).unwrap();
+		let sig = keys.sign(&msg, Some(ctx1), Some(hedge.0)).unwrap();
 
 		// Try to verify with different context "test2" - should fail
 		let ctx2 = b"test2";
@@ -287,5 +287,4 @@ mod tests {
 		// Verify with correct context should still work
 		assert!(keys.verify(&msg, &sig, Some(ctx1)));
 	}
-
 }

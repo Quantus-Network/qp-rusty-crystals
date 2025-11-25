@@ -1,6 +1,6 @@
 // tests/sign_integration_tests.rs
 
-use qp_rusty_crystals_hdwallet::{generate_mnemonic, HDLattice};
+use qp_rusty_crystals_hdwallet::{derive_key_from_seed, generate_mnemonic, mnemonic_to_seed};
 use rand::{rngs::OsRng, Rng, RngCore};
 
 fn get_random_bytes() -> [u8; 32] {
@@ -12,14 +12,13 @@ fn get_random_bytes() -> [u8; 32] {
 
 #[test]
 fn test_sign() {
-	let seed = get_random_bytes();
+	let mut entropy = get_random_bytes();
 
 	// Step 1: Generate a random mnemonic and derive Dilithium keypair
-	let mnemonic = generate_mnemonic(seed).expect("Failed to generate mnemonic");
-	let hd_lattice = HDLattice::from_mnemonic(&mnemonic, None)
-		.expect("Failed to create HDLattice from mnemonic");
-
-	let dilithium_keypair = hd_lattice.generate_keys();
+	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
+	let mut seed = mnemonic_to_seed(mnemonic, None).expect("Failed to create seed from mnemonic");
+	let dilithium_keypair =
+		derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0/0").expect("Failed to derive key");
 
 	// Step 2: Define the message to sign
 	let message = b"Hello, Dilithium!";
@@ -35,13 +34,13 @@ fn test_sign() {
 
 #[test]
 fn test_sign_multiple_messages() {
-	let mut seed = [0u8; 32];
-	OsRng.fill_bytes(&mut seed);
+	let mut entropy = [0u8; 32];
+	OsRng.fill_bytes(&mut entropy);
 
-	let mnemonic = generate_mnemonic(seed).expect("Failed to generate mnemonic");
-	let hd_lattice = HDLattice::from_mnemonic(&mnemonic, None)
-		.expect("Failed to create HDLattice from mnemonic");
-	let dilithium_keypair = hd_lattice.generate_keys();
+	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
+	let mut seed = mnemonic_to_seed(mnemonic, None).expect("Failed to create seed from mnemonic");
+	let dilithium_keypair =
+		derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0/0").expect("Failed to derive key");
 
 	let messages = [
 		b"First message".as_slice(),
@@ -61,13 +60,13 @@ fn test_sign_multiple_messages() {
 
 #[test]
 fn test_hedged_vs_deterministic_signing() {
-	let mut seed = [0u8; 32];
-	OsRng.fill_bytes(&mut seed);
+	let mut entropy = [0u8; 32];
+	OsRng.fill_bytes(&mut entropy);
 
-	let mnemonic = generate_mnemonic(seed).expect("Failed to generate mnemonic");
-	let hd_lattice = HDLattice::from_mnemonic(&mnemonic, None)
-		.expect("Failed to create HDLattice from mnemonic");
-	let dilithium_keypair = hd_lattice.generate_keys();
+	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
+	let mut seed = mnemonic_to_seed(mnemonic, None).expect("Failed to create seed from mnemonic");
+	let dilithium_keypair =
+		derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0/0").expect("Failed to derive key");
 
 	let message = b"Test message for hedged vs deterministic";
 
@@ -96,21 +95,25 @@ fn test_hedged_vs_deterministic_signing() {
 
 #[test]
 fn test_cross_keypair_verification_fails() {
-	let mut seed1 = [0u8; 32];
-	let mut seed2 = [0u8; 32];
-	OsRng.fill_bytes(&mut seed1);
-	OsRng.fill_bytes(&mut seed2);
+	let mut entropy1 = [0u8; 32];
+	let mut entropy2 = [0u8; 32];
+	OsRng.fill_bytes(&mut entropy1);
+	OsRng.fill_bytes(&mut entropy2);
 
-	let mnemonic1 = generate_mnemonic(seed1).expect("Failed to generate mnemonic 1");
-	let mnemonic2 = generate_mnemonic(seed2).expect("Failed to generate mnemonic 2");
+	let mnemonic1 =
+		generate_mnemonic((&mut entropy1).into()).expect("Failed to generate mnemonic 1");
+	let mnemonic2 =
+		generate_mnemonic((&mut entropy2).into()).expect("Failed to generate mnemonic 2");
 
-	let hd_lattice1 =
-		HDLattice::from_mnemonic(&mnemonic1, None).expect("Failed to create HDLattice 1");
-	let hd_lattice2 =
-		HDLattice::from_mnemonic(&mnemonic2, None).expect("Failed to create HDLattice 2");
+	let mut seed1 =
+		mnemonic_to_seed(mnemonic1, None).expect("Failed to create seed from mnemonic 1");
+	let mut seed2 =
+		mnemonic_to_seed(mnemonic2, None).expect("Failed to create seed from mnemonic 2");
 
-	let keypair1 = hd_lattice1.generate_keys();
-	let keypair2 = hd_lattice2.generate_keys();
+	let keypair1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0/0")
+		.expect("Failed to derive key 1");
+	let keypair2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0/0")
+		.expect("Failed to derive key 2");
 
 	let message = b"Cross-verification test message";
 
@@ -128,13 +131,13 @@ fn test_cross_keypair_verification_fails() {
 
 #[test]
 fn test_corrupted_signature_fails() {
-	let mut seed = [0u8; 32];
-	OsRng.fill_bytes(&mut seed);
+	let mut entropy = [0u8; 32];
+	OsRng.fill_bytes(&mut entropy);
 
-	let mnemonic = generate_mnemonic(seed).expect("Failed to generate mnemonic");
-	let hd_lattice = HDLattice::from_mnemonic(&mnemonic, None)
-		.expect("Failed to create HDLattice from mnemonic");
-	let dilithium_keypair = hd_lattice.generate_keys();
+	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
+	let mut seed = mnemonic_to_seed(mnemonic, None).expect("Failed to create seed from mnemonic");
+	let dilithium_keypair =
+		derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0/0").expect("Failed to derive key");
 
 	let message = b"Message for corruption test";
 	let mut signature = dilithium_keypair.sign(message, None, None).unwrap();
@@ -167,21 +170,26 @@ fn test_corrupted_signature_fails() {
 
 #[test]
 fn test_same_seed_produces_same_keypair() {
-	let seed = [0x42u8; 32];
+	let mut entropy1 = [0x42u8; 32];
+	let mut entropy2 = [0x42u8; 32];
 
-	let mnemonic1 = generate_mnemonic(seed).expect("Failed to generate mnemonic 1");
-	let mnemonic2 = generate_mnemonic(seed).expect("Failed to generate mnemonic 2");
+	let mnemonic1 =
+		generate_mnemonic((&mut entropy1).into()).expect("Failed to generate mnemonic 1");
+	let mnemonic2 =
+		generate_mnemonic((&mut entropy2).into()).expect("Failed to generate mnemonic 2");
 
 	// Same seed should produce same mnemonic
 	assert_eq!(mnemonic1, mnemonic2);
 
-	let hd_lattice1 =
-		HDLattice::from_mnemonic(&mnemonic1, None).expect("Failed to create HDLattice 1");
-	let hd_lattice2 =
-		HDLattice::from_mnemonic(&mnemonic2, None).expect("Failed to create HDLattice 2");
+	let mut seed1 =
+		mnemonic_to_seed(mnemonic1, None).expect("Failed to create seed from mnemonic 1");
+	let mut seed2 =
+		mnemonic_to_seed(mnemonic2, None).expect("Failed to create seed from mnemonic 2");
 
-	let keypair1 = hd_lattice1.generate_keys();
-	let keypair2 = hd_lattice2.generate_keys();
+	let keypair1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0/0")
+		.expect("Failed to derive key 1");
+	let keypair2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0/0")
+		.expect("Failed to derive key 2");
 
 	// Same mnemonic should produce same keypair
 	let message = b"Test message";
@@ -198,13 +206,13 @@ fn test_same_seed_produces_same_keypair() {
 
 #[test]
 fn test_stress_multiple_signatures() {
-	let mut seed = [0u8; 32];
-	OsRng.fill_bytes(&mut seed);
+	let mut entropy = [0u8; 32];
+	OsRng.fill_bytes(&mut entropy);
 
-	let mnemonic = generate_mnemonic(seed).expect("Failed to generate mnemonic");
-	let hd_lattice = HDLattice::from_mnemonic(&mnemonic, None)
-		.expect("Failed to create HDLattice from mnemonic");
-	let dilithium_keypair = hd_lattice.generate_keys();
+	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
+	let mut seed = mnemonic_to_seed(mnemonic, None).expect("Failed to create seed from mnemonic");
+	let dilithium_keypair =
+		derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0/0").expect("Failed to derive key");
 
 	// Sign and verify many messages
 	for i in 0..50 {

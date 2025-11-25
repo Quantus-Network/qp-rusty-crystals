@@ -4,6 +4,25 @@ A Rust implementation of the ML-DSA (CRYSTALS-Dilithium) post-quantum digital si
 
 This workspace provides post-quantum cryptographic primitives and HD wallet functionality compatible with BIP-32, BIP-39, and BIP-44 standards.
 
+## Security Features
+
+This implementation provides enterprise-grade memory security through `SensitiveBytes*` wrapper types that:
+
+- **Prevent accidental copying** - Compile-time enforcement ensures sensitive data can only be moved, never copied
+- **Automatic memory zeroization** - Both source arrays and wrapper contents are automatically cleared when dropped
+- **Explicit sensitive data handling** - API requires `(&mut entropy).into()` syntax, making sensitive operations obvious
+- **Move-only semantics** - Functions take `SensitiveBytes32`/`SensitiveBytes64` directly, preventing silent reference copying
+
+```rust
+// Secure by design - entropy is zeroized after conversion
+let mut entropy = [0u8; 32];
+getrandom::getrandom(&mut entropy).unwrap();
+let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
+// entropy is now [0,0,0,...] - no sensitive data left in memory
+```
+
+This eliminates entire classes of security vulnerabilities related to sensitive data handling in cryptographic applications.
+
 ## Overview
 
 This workspace contains two independent crates:
@@ -31,7 +50,7 @@ let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
 
 // Generate keypair
-let keypair = ml_dsa_87::Keypair::generate(&entropy).expect("Failed to generate keypair");
+let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into()).expect("Failed to generate keypair");
 
 // Sign message
 let message = b"Hello, post-quantum world!";
@@ -56,7 +75,7 @@ let mut seed = [0u8; 32];
 getrandom::getrandom(&mut seed).expect("Failed to generate seed");
 
 // Generate mnemonic
-let mnemonic = generate_mnemonic(seed)?;
+let mnemonic = generate_mnemonic((&mut seed).into())?;
 
 // Create HD wallet
 let hd_wallet = HDLattice::from_mnemonic(&mnemonic, None)?;

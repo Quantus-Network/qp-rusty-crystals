@@ -7,6 +7,80 @@
 
 extern crate alloc;
 
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// Wrapper for sensitive 32-byte data that enforces move semantics and automatic zeroization
+///
+/// Both `new()` and `from()` take mutable references and zeroize the input data,
+/// ensuring no copies of sensitive data remain in memory.
+///
+/// ```rust
+/// use qp_rusty_crystals_dilithium::SensitiveBytes32;
+/// let mut entropy = [42u8; 32];
+/// let sensitive = SensitiveBytes32::new(&mut entropy); // entropy is now zeroed
+/// // or
+/// let sensitive = SensitiveBytes32::from(&mut entropy); // same behavior
+/// ```
+#[derive(Clone, ZeroizeOnDrop)]
+pub struct SensitiveBytes32([u8; 32]);
+
+impl SensitiveBytes32 {
+	// Note this zeroizes the input bytes so that the struct takes practical ownership of the input.
+	pub fn new(bytes: &mut [u8; 32]) -> Self {
+		let result = Self(*bytes);
+		bytes.zeroize();
+		result
+	}
+
+	pub fn as_bytes(&self) -> &[u8; 32] {
+		&self.0
+	}
+
+	pub fn into_bytes(self) -> [u8; 32] {
+		self.0
+	}
+}
+
+impl From<&mut [u8; 32]> for SensitiveBytes32 {
+	fn from(bytes: &mut [u8; 32]) -> Self {
+		let result = Self(*bytes);
+		bytes.zeroize();
+		result
+	}
+}
+
+/// Wrapper for sensitive 64-byte data that enforces move semantics and automatic zeroization
+///
+/// Both `new()` and `from()` take mutable references and zeroize the input data,
+/// ensuring no copies of sensitive data remain in memory.
+#[derive(Clone, ZeroizeOnDrop)]
+pub struct SensitiveBytes64([u8; 64]);
+
+impl SensitiveBytes64 {
+	// Note this zeroizes the input bytes so that the struct takes practical ownership of the input.
+	pub fn new(bytes: &mut [u8; 64]) -> Self {
+		let result = Self(*bytes);
+		bytes.zeroize();
+		result
+	}
+
+	pub fn as_bytes(&self) -> &[u8; 64] {
+		&self.0
+	}
+
+	pub fn into_bytes(self) -> [u8; 64] {
+		self.0
+	}
+}
+
+impl From<&mut [u8; 64]> for SensitiveBytes64 {
+	fn from(bytes: &mut [u8; 64]) -> Self {
+		let result = Self(*bytes);
+		bytes.zeroize();
+		result
+	}
+}
+
 pub mod drbg;
 mod errors;
 pub mod fips202;

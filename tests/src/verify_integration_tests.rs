@@ -5,6 +5,7 @@ use qp_rusty_crystals_dilithium::{
 	drbg,
 	ml_dsa_87::{Keypair, PUBLICKEYBYTES},
 };
+use qp_rusty_crystals_hdwallet::SensitiveBytes32;
 use rand::{thread_rng, Rng};
 
 fn keypair_from_test(test: &TestVector) -> Keypair {
@@ -24,11 +25,11 @@ fn test_nist_kat() {
 	}
 }
 
-fn get_random_bytes() -> [u8; 32] {
+fn get_random_bytes() -> SensitiveBytes32 {
 	let mut rng = rand::thread_rng();
 	let mut bytes = [0u8; 32];
 	rng.fill(&mut bytes);
-	bytes
+	(&mut bytes).into()
 }
 
 /// Verifies a single test vector for Falcon-1024 (padded).
@@ -46,8 +47,9 @@ fn verify_test_vector(test: &TestVector) {
 	let mut drbg = drbg::DRBG::new(&test.seed, None).unwrap();
 	let mut entropy = [0u8; 32];
 	let res = drbg.randombytes(&mut entropy, 32);
+	let entropy_s = SensitiveBytes32::new(&mut entropy);
 	assert!(res.is_ok());
-	let generated_keypair = Keypair::generate(entropy);
+	let generated_keypair = Keypair::generate(entropy_s);
 	let generated_pk = generated_keypair.public.to_bytes();
 	let generated_sk = generated_keypair.secret.to_bytes();
 	assert_eq!(

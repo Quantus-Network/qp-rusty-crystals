@@ -28,7 +28,7 @@ use qp_rusty_crystals_dilithium::ml_dsa_87;
 // Generate a keypair with secure random entropy
 let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
-let keypair = ml_dsa_87::Keypair::generate(&entropy);
+let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
 
 // Alternative: you could also use a different secure entropy source
 // let keypair = ml_dsa_87::Keypair::generate(&other_secure_entropy);
@@ -50,7 +50,7 @@ use qp_rusty_crystals_dilithium::ml_dsa_87;
 // Generate secure entropy
 let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
-let keypair = ml_dsa_87::Keypair::generate(&entropy);
+let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
 
 let message = b"Important message";
 let context = b"email-signature-v1"; // Domain separation
@@ -71,7 +71,7 @@ use qp_rusty_crystals_dilithium::{ml_dsa_87, PH};
 // Generate secure entropy
 let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
-let keypair = ml_dsa_87::Keypair::generate(&entropy);
+let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
 
 let large_message = b"Very large message that we want to hash first...";
 
@@ -91,7 +91,7 @@ use qp_rusty_crystals_dilithium::ml_dsa_87;
 // Generate secure entropy for keypair
 let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
-let keypair = ml_dsa_87::Keypair::generate(&entropy);
+let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
 
 let message = b"Message to sign";
 

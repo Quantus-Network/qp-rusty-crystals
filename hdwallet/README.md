@@ -33,7 +33,7 @@ let mut seed = [0u8; 32];
 getrandom::getrandom(&mut seed).expect("Failed to generate seed");
 
 // Generate a new mnemonic
-let mnemonic = generate_mnemonic(seed)?;
+let mnemonic = generate_mnemonic((&mut seed).into())?;
 println!("Mnemonic: {}", mnemonic);
 
 // Create HD wallet from mnemonic

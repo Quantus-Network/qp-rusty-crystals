@@ -4,16 +4,16 @@
 //! work with very small stack sizes, making them suitable for embedded
 //! systems, blockchain VMs, and other constrained environments.
 
-use qp_rusty_crystals_dilithium::ml_dsa_87;
+use qp_rusty_crystals_dilithium::{ml_dsa_87, SensitiveBytes32};
 use std::{panic, sync::mpsc, thread, time::Duration};
 
 use rand::Rng;
 
-fn get_random_bytes() -> [u8; 32] {
+fn get_random_bytes() -> SensitiveBytes32 {
 	let mut rng = rand::thread_rng();
 	let mut bytes = [0u8; 32];
 	rng.fill(&mut bytes);
-	bytes
+	(&mut bytes).into()
 }
 
 /// Test ML-DSA key generation with a specific stack size
@@ -166,7 +166,7 @@ fn main() {
 	for &size_kb in &stack_sizes {
 		// Test ML-DSA-87
 		let ml87_keygen = test_keygen_with_stack_size(size_kb, "ml-dsa-87", move || {
-			let _kp = ml_dsa_87::Keypair::generate([1u8; 32]);
+			let _kp = ml_dsa_87::Keypair::generate((&mut [1u8; 32]).into());
 			true
 		});
 
@@ -239,7 +239,7 @@ mod tests {
 	fn test_all_variants_4kb_stack() {
 		assert!(
 			test_keygen_with_stack_size(4, "ml-dsa-87", || {
-				let _kp = ml_dsa_87::Keypair::generate(Some(&[1u8; 32]));
+				let _kp = ml_dsa_87::Keypair::generate((&mut [1u8; 32]).into());
 				true
 			}),
 			"ML-DSA-87 key generation should work with 4KB stack"

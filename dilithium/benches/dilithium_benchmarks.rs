@@ -9,19 +9,19 @@ mod dilithium_benches {
 
 	fn key_generation(c: &mut Criterion) {
 		c.bench_function("Dilithium keypair generation", move |b| {
-			b.iter(|| Keypair::generate(&[1u8; 32]));
+			b.iter(|| Keypair::generate((&mut [1u8; 32]).into()));
 		});
 	}
 
 	fn sign(c: &mut Criterion) {
-		let keypair = Keypair::generate(&[2u8; 32]);
+		let keypair = Keypair::generate((&mut [2u8; 32]).into());
 		let msg = b"";
 
 		c.bench_function("Dilithium signing", move |b| b.iter(|| keypair.sign(msg, None, None)));
 	}
 
 	fn verify(c: &mut Criterion) {
-		let keypair = Keypair::generate(&[3u8; 32]);
+		let keypair = Keypair::generate((&mut [3u8; 32]).into());
 		let msg = b"";
 		let sig = keypair.sign(msg, None, None);
 

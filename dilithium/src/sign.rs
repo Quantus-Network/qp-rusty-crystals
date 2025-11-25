@@ -3,8 +3,9 @@ use crate::{
 	poly::Poly,
 	polyvec,
 	polyvec::{Polyveck, Polyvecl},
+	SensitiveBytes32,
 };
-use zeroize::{Zeroize};
+use zeroize::Zeroize;
 
 const K: usize = params::K;
 const L: usize = params::L;
@@ -18,12 +19,13 @@ use alloc::boxed::Box;
 /// * 'pk' - preallocated buffer for public key
 /// * 'sk' - preallocated buffer for private key
 /// * 'seed' - required seed
-pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: &[u8]) {
+pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: SensitiveBytes32) {
+	let mut seed_bytes = seed.into_bytes();
 	const SEEDBUF_LEN: usize = 2 * params::SEEDBYTES + params::CRHBYTES;
 	let mut seedbuf = [0u8; SEEDBUF_LEN];
 	// Build preimage = seed || K || L (accept any seed length when provided)
 	let mut preimage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-	preimage.extend_from_slice(seed);
+	preimage.extend_from_slice(&seed_bytes);
 
 	preimage.push(params::K as u8);
 	preimage.push(params::L as u8);
@@ -70,6 +72,7 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: &[u8]) {
 
 	// Zeroize sensitive intermediate seed material
 	seedbuf.zeroize();
+	seed_bytes.zeroize();
 	preimage.zeroize();
 	rhoprime.zeroize();
 	key.zeroize();
@@ -499,11 +502,13 @@ mod tests {
 	use alloc::{string::String, vec};
 	use rand::Rng;
 
-	fn get_random_bytes() -> [u8; 32] {
+	use crate::SensitiveBytes32;
+
+	fn get_random_bytes() -> SensitiveBytes32 {
 		let mut rng = rand::thread_rng();
 		let mut bytes = [0u8; 32];
 		rng.fill(&mut bytes);
-		bytes
+		(&mut bytes).into()
 	}
 
 	fn get_random_msg() -> [u8; 128] {
@@ -517,11 +522,11 @@ mod tests {
 	fn self_verify_hedged() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-		super::keypair(&mut pk, &mut sk, &get_random_bytes());
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
 		let msg = get_random_msg();
 		let mut sig = [0u8; crate::params::SIGNBYTES];
 		let hedge = get_random_bytes();
-		super::signature(&mut sig, &msg, &sk, Some(hedge));
+		super::signature(&mut sig, &msg, &sk, Some(hedge.0));
 		assert!(super::verify(&sig, &msg, &pk));
 	}
 
@@ -529,7 +534,7 @@ mod tests {
 	fn self_verify() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-		super::keypair(&mut pk, &mut sk, &get_random_bytes());
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
 		let msg = get_random_msg();
 		let mut sig = [0u8; crate::params::SIGNBYTES];
 		super::signature(&mut sig, &msg, &sk, None);
@@ -540,7 +545,7 @@ mod tests {
 	fn test_empty_message() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-		super::keypair(&mut pk, &mut sk, &get_random_bytes());
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
 
 		let empty_msg: &[u8] = &[];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
@@ -552,7 +557,7 @@ mod tests {
 	fn test_single_byte_message() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-		super::keypair(&mut pk, &mut sk, &get_random_bytes());
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
 
 		let msg = [0x42u8];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
@@ -564,7 +569,7 @@ mod tests {
 	fn test_large_message() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-		super::keypair(&mut pk, &mut sk, &get_random_bytes());
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
 
 		let large_msg = vec![0xABu8; 10000];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
@@ -576,7 +581,7 @@ mod tests {
 	fn test_deterministic_signing() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-		super::keypair(&mut pk, &mut sk, &get_random_bytes());
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
 
 		let msg = b"test message for deterministic signing";
 		let mut sig1 = [0u8; crate::params::SIGNBYTES];
@@ -584,8 +589,8 @@ mod tests {
 
 		let hedge = get_random_bytes();
 
-		super::signature(&mut sig1, msg, &sk, Some(hedge));
-		super::signature(&mut sig2, msg, &sk, Some(hedge));
+		super::signature(&mut sig1, msg, &sk, Some(hedge.0));
+		super::signature(&mut sig2, msg, &sk, Some(hedge.0));
 
 		// Deterministic signing should produce identical signatures
 		assert_eq!(sig1, sig2);
@@ -597,7 +602,7 @@ mod tests {
 	fn test_hedged_signing_differs() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-		super::keypair(&mut pk, &mut sk, &get_random_bytes());
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
 
 		let msg = b"test message for hedged signing";
 		let mut sig1 = [0u8; crate::params::SIGNBYTES];
@@ -606,8 +611,8 @@ mod tests {
 		let hedge1 = get_random_bytes();
 		let hedge2 = get_random_bytes();
 
-		super::signature(&mut sig1, msg, &sk, Some(hedge1));
-		super::signature(&mut sig2, msg, &sk, Some(hedge2));
+		super::signature(&mut sig1, msg, &sk, Some(hedge1.0));
+		super::signature(&mut sig2, msg, &sk, Some(hedge2.0));
 
 		// Hedged signing should produce different signatures (with high probability)
 		assert_ne!(sig1, sig2);
@@ -619,7 +624,7 @@ mod tests {
 	fn test_wrong_message_fails() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-		super::keypair(&mut pk, &mut sk, &get_random_bytes());
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
 
 		let msg1 = b"original message";
 		let msg2 = b"different message";
@@ -640,8 +645,8 @@ mod tests {
 		let mut pk2 = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk2 = [0u8; crate::params::SECRETKEYBYTES];
 
-		super::keypair(&mut pk1, &mut sk1, &get_random_bytes());
-		super::keypair(&mut pk2, &mut sk2, &get_random_bytes());
+		super::keypair(&mut pk1, &mut sk1, get_random_bytes());
+		super::keypair(&mut pk2, &mut sk2, get_random_bytes());
 
 		let msg = b"test message";
 		let mut sig = [0u8; crate::params::SIGNBYTES];
@@ -658,7 +663,7 @@ mod tests {
 	fn test_corrupted_signature_fails() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-		super::keypair(&mut pk, &mut sk, &get_random_bytes());
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
 
 		let msg = b"test message";
 		let mut sig = [0u8; crate::params::SIGNBYTES];
@@ -688,7 +693,7 @@ mod tests {
 	fn test_invalid_signature_length() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-		super::keypair(&mut pk, &mut sk, &get_random_bytes());
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
 
 		let msg = b"test message";
 
@@ -710,8 +715,8 @@ mod tests {
 		let mut pk2 = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk2 = [0u8; crate::params::SECRETKEYBYTES];
 
-		super::keypair(&mut pk1, &mut sk1, &seed);
-		super::keypair(&mut pk2, &mut sk2, &seed);
+		super::keypair(&mut pk1, &mut sk1, seed.clone());
+		super::keypair(&mut pk2, &mut sk2, seed);
 
 		// Same seed should produce same keypair
 		assert_eq!(pk1, pk2);
@@ -720,16 +725,16 @@ mod tests {
 
 	#[test]
 	fn test_different_seeds_different_keys() {
-		let seed1 = [0x42u8; crate::params::SEEDBYTES];
-		let seed2 = [0x43u8; crate::params::SEEDBYTES];
+		let mut seed1 = [0x42u8; crate::params::SEEDBYTES];
+		let mut seed2 = [0x43u8; crate::params::SEEDBYTES];
 
 		let mut pk1 = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk1 = [0u8; crate::params::SECRETKEYBYTES];
 		let mut pk2 = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk2 = [0u8; crate::params::SECRETKEYBYTES];
 
-		super::keypair(&mut pk1, &mut sk1, &seed1);
-		super::keypair(&mut pk2, &mut sk2, &seed2);
+		super::keypair(&mut pk1, &mut sk1, (&mut seed1).into());
+		super::keypair(&mut pk2, &mut sk2, (&mut seed2).into());
 
 		// Different seeds should produce different keypairs
 		assert_ne!(pk1, pk2);
@@ -740,7 +745,7 @@ mod tests {
 	fn test_multiple_messages_same_key() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk = [0u8; crate::params::SECRETKEYBYTES];
-		super::keypair(&mut pk, &mut sk, &get_random_bytes());
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
 
 		let messages = [
 			b"message 1".as_slice(),
