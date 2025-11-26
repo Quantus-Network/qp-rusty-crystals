@@ -53,8 +53,8 @@ mod hdwallet_tests {
 		assert_eq!(seed1, seed2);
 
 		// Should be able to derive same keys from same seed
-		let key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0/0").unwrap();
-		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0/0").unwrap();
+		let key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0'/0'").unwrap();
+		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
 		assert_eq!(key1.secret.bytes, key2.secret.bytes);
 	}
 
@@ -78,9 +78,9 @@ mod hdwallet_tests {
 		assert_ne!(seed1, seed3, "password should affect seed");
 
 		// Derive master keys (path "m/44'/0'/0'/0/0")
-		let master_key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0/0").unwrap();
-		let master_key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0/0").unwrap();
-		let master_key3 = derive_key_from_seed((&mut seed3).into(), "m/44'/0'/0'/0/0").unwrap();
+		let master_key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0'/0'").unwrap();
+		let master_key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
+		let master_key3 = derive_key_from_seed((&mut seed3).into(), "m/44'/0'/0'/0'/0'").unwrap();
 
 		// Keys from same seed should be identical
 		assert_eq!(
@@ -104,7 +104,7 @@ mod hdwallet_tests {
 
 	#[test]
 	fn test_same_mnemonic_same_path_deterministic() {
-		let paths = ["m/44'/0'/0'/0/0", "m/0'/2147483647'/1'", "m/44'/60'/0'/0/0", "m/1'/2'/3'"];
+		let paths = ["m/44'/0'/0'/0'/0'", "m/0'/2147483647'/1'", "m/44'/60'/0'/0'/0'", "m/1'/2'/3'"];
 
 		for p in paths {
 			// Show proper mnemonic ownership - each call creates new String
@@ -278,10 +278,10 @@ mod hdwallet_tests {
 		let mut seed = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
 
 		// Test deriving at master path "m"
-		let key1 = derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0/0").unwrap();
+		let key1 = derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0'/0'").unwrap();
 
 		let mut seed2 = mnemonic_to_seed(mnemonic, None).unwrap();
-		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0/0").unwrap();
+		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
 
 		// Keys derived from same path should be identical
 		assert_eq!(
@@ -332,8 +332,8 @@ mod hdwallet_tests {
 		let mut seed2 = mnemonic_to_seed(mnemonic, None).unwrap();
 
 		// Derive keys from master path - should be deterministic
-		let key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0/0").unwrap();
-		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0/0").unwrap();
+		let key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0'/0'").unwrap();
+		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
 
 		assert_eq!(
 			key1.secret.bytes, key2.secret.bytes,
@@ -397,8 +397,8 @@ mod hdwallet_tests {
 			None,
 		)
 		.unwrap();
-		let key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0/0").unwrap();
-		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0/1").unwrap();
+		let key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0'/0'").unwrap();
+		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/1'").unwrap();
 
 		// Keys should be different
 		assert_ne!(key1.secret.bytes, key2.secret.bytes);
@@ -407,7 +407,7 @@ mod hdwallet_tests {
 
 	#[test]
 	fn test_derive_key_deterministic() {
-		let path = "m/44'/0'/0'/0/0";
+		let path = "m/44'/0'/0'/0'/0'";
 
 		let mnemonic1 =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
@@ -473,7 +473,7 @@ mod hdwallet_tests {
 	fn test_seed_centric_api_deterministic() {
 		// Test that API produces deterministic results
 		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
-		let path = "m/44'/0'/0'/0/0";
+		let path = "m/44'/0'/0'/0'/0'";
 
 		// First derivation
 		let mut seed1 = mnemonic_to_seed(mnemonic.to_string(), None).unwrap();
@@ -504,7 +504,7 @@ mod hdwallet_tests {
 		// Use the wrapped data - this should move it
 		let mnemonic = generate_mnemonic(sensitive_entropy).unwrap();
 		let seed_from_mnemonic = mnemonic_to_seed(mnemonic, None).unwrap();
-		let _key = derive_key_from_seed(sensitive_seed, "m/44'/0'/0'/0/0").unwrap();
+		let _key = derive_key_from_seed(sensitive_seed, "m/44'/0'/0'/0'/0'").unwrap();
 
 		// After this point, sensitive_entropy and sensitive_seed should be consumed
 		// The following would not compile if uncommented:
@@ -512,7 +512,7 @@ mod hdwallet_tests {
 
 		// Test that regular arrays still work with auto-conversion
 		let mut raw_seed = [2u8; 64];
-		let _key2 = derive_key_from_seed((&mut raw_seed).into(), "m/44'/0'/0'/0/0").unwrap();
+		let _key2 = derive_key_from_seed((&mut raw_seed).into(), "m/44'/0'/0'/0'/0'").unwrap();
 		// raw_seed was zeroized by the conversion
 
 		assert_eq!(seed_from_mnemonic.len(), 64);
