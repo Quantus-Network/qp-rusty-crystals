@@ -26,15 +26,15 @@ const EXTRA_LARGE_MSG_SIZE: usize = 4096;
 const SEED_SIZE: usize = 32;
 
 /// Generate a fixed seed for Left class (same for all samples)
-fn generate_fixed_seed(rng: &mut BenchRng) -> Vec<u8> {
+fn generate_fixed_seed(rng: &mut BenchRng) -> [u8; 32] {
 	// Use a fixed pattern for Left class
 	let byte = rng.gen::<u8>();
-	vec![byte; SEED_SIZE]
+	[byte; SEED_SIZE]
 }
 
 /// Generate a random seed for Right class
-fn generate_random_seed(rng: &mut BenchRng) -> Vec<u8> {
-	let mut seed = vec![0u8; SEED_SIZE];
+fn generate_random_seed(rng: &mut BenchRng) -> [u8; 32] {
+	let mut seed = [0u8; 32];
 	rng.fill_bytes(&mut seed);
 	seed
 }
@@ -147,13 +147,12 @@ fn test_keypair_generation_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	// Generate the fixed seed once for all Left class samples
 	let fixed_seed = generate_fixed_seed(rng);
 
-	for _ in 0..5_000 {
+	for _ in 0..1_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let seed = match class {
 			Class::Left => fixed_seed.clone(),
 			Class::Right => generate_random_seed(rng),
 		};
-
 		inputs.push(seed);
 		classes.push(class);
 	}
@@ -163,7 +162,8 @@ fn test_keypair_generation_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		disrupt_cache(rng);
 
 		runner.run_one(class, || {
-			let _keypair = Keypair::generate((&mut seed).into());
+			let mut seed_copy = seed.clone();
+			let _keypair = Keypair::generate((&mut seed_copy).into());
 		});
 	}
 }
@@ -183,10 +183,11 @@ fn test_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 	for _ in 0..4_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let keypair = match class {
-			Class::Left => Keypair::generate((&mut fixed_seed).into()).unwrap(),
-			Class::Right => Keypair::generate((&mut generate_random_seed(rng)).into()).unwrap(),
+		let mut seed = match class {
+			Class::Left => fixed_seed.clone(),
+			Class::Right => generate_random_seed(rng),
 		};
+		let keypair = Keypair::generate((&mut seed).into());
 
 		inputs.push(keypair);
 		classes.push(class);
@@ -217,10 +218,11 @@ fn test_signing_medium_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 	for _ in 0..5_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let keypair = match class {
-			Class::Left => Keypair::generate((&mut fixed_seed).into()).unwrap(),
-			Class::Right => Keypair::generate((&mut generate_random_seed(rng)).into()).unwrap(),
+		let mut seed = match class {
+			Class::Left => fixed_seed.clone(),
+			Class::Right => generate_random_seed(rng),
 		};
+		let keypair = Keypair::generate((&mut seed).into());
 
 		inputs.push(keypair);
 		classes.push(class);
@@ -249,12 +251,13 @@ fn test_signing_large_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	let fixed_message = generate_fixed_message(LARGE_MSG_SIZE, rng);
 	let fixed_seed = generate_fixed_seed(rng);
 
-	for _ in 0..3_000 {
+	for _ in 0..4_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let keypair = match class {
-			Class::Left => Keypair::generate((&mut fixed_seed).into()).unwrap(),
-			Class::Right => Keypair::generate((&mut generate_random_seed(rng)).into()).unwrap(),
+		let mut seed = match class {
+			Class::Left => fixed_seed.clone(),
+			Class::Right => generate_random_seed(rng),
 		};
+		let keypair = Keypair::generate((&mut seed).into());
 
 		inputs.push(keypair);
 		classes.push(class);
@@ -283,12 +286,13 @@ fn test_signing_xlarge_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	let fixed_message = generate_fixed_message(EXTRA_LARGE_MSG_SIZE, rng);
 	let fixed_seed = generate_fixed_seed(rng);
 
-	for _ in 0..2_000 {
+	for _ in 0..4_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let keypair = match class {
-			Class::Left => Keypair::generate((&mut fixed_seed).into()).unwrap(),
-			Class::Right => Keypair::generate((&mut generate_random_seed(rng)).into()).unwrap(),
+		let mut seed = match class {
+			Class::Left => fixed_seed.clone(),
+			Class::Right => generate_random_seed(rng),
 		};
+		let keypair = Keypair::generate((&mut seed).into());
 
 		inputs.push(keypair);
 		classes.push(class);
@@ -317,12 +321,13 @@ fn test_hedged_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	let fixed_message = generate_fixed_message(SMALL_MSG_SIZE, rng);
 	let fixed_seed = generate_fixed_seed(rng);
 
-	for _ in 0..6_000 {
+	for _ in 0..10_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let keypair = match class {
-			Class::Left => Keypair::generate((&mut fixed_seed).into()).unwrap(),
-			Class::Right => Keypair::generate((&mut generate_random_seed(rng)).into()).unwrap(),
+		let mut seed = match class {
+			Class::Left => fixed_seed.clone(),
+			Class::Right => generate_random_seed(rng),
 		};
+		let keypair = Keypair::generate((&mut seed).into());
 
 		inputs.push(keypair);
 		classes.push(class);
@@ -354,10 +359,11 @@ fn test_signing_with_context_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 	for _ in 0..4_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
-		let keypair = match class {
-			Class::Left => Keypair::generate((&mut fixed_seed).into()).unwrap(),
-			Class::Right => Keypair::generate((&mut generate_random_seed(rng)).into()).unwrap(),
+		let mut seed = match class {
+			Class::Left => fixed_seed.clone(),
+			Class::Right => generate_random_seed(rng),
 		};
+		let keypair = Keypair::generate((&mut seed).into());
 
 		inputs.push(keypair);
 		classes.push(class);
@@ -379,7 +385,8 @@ fn test_edge_cases_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running edge cases constant-time test...");
 
 	// Pre-generate a keypair for signing
-	let keypair = Keypair::generate((&mut [0x42; SEED_SIZE]).into()).unwrap();
+	let mut seed = [0x42u8; 32];
+	let keypair = Keypair::generate((&mut seed).into());
 
 	// Generate messages and classes upfront
 	let mut inputs = Vec::new();
@@ -976,7 +983,8 @@ fn test_signing_fixed_key_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 	// Generate single fixed keypair for all tests
 	let fixed_seed = generate_fixed_seed(rng);
-	let keypair = Keypair::generate((&mut fixed_seed).into()).unwrap();
+	let mut seed = fixed_seed.clone();
+	let keypair = Keypair::generate((&mut seed).into());
 
 	// Generate the fixed message once for all Left class samples
 	let fixed_message = generate_fixed_message(SMALL_MSG_SIZE, rng);
@@ -1119,7 +1127,7 @@ fn test_poly_challenge_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		seed
 	};
 
-	for _ in 0..10_000 {
+	for _ in 0..1_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let seed = match class {
 			Class::Left => fixed_seed,

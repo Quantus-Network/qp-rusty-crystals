@@ -23,7 +23,7 @@ mod dilithium_benches {
 	fn verify(c: &mut Criterion) {
 		let keypair = Keypair::generate((&mut [3u8; 32]).into());
 		let msg = b"";
-		let sig = keypair.sign(msg, None, None);
+		let sig = keypair.sign(msg, None, None).expect("Signing should succeed");
 
 		c.bench_function("Dilithium signature verification", move |b| {
 			b.iter(|| keypair.verify(msg, sig.as_slice(), None))
