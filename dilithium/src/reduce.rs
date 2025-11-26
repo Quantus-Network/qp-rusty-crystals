@@ -11,7 +11,7 @@ pub fn montgomery_reduce(a: i64) -> i32 {
 }
 
 /// For finite field element a with a <= 2^{31} - 2^{22} - 1,
-/// compute r \equiv a (mod Q) such that -6283009 <= r <= 6283007.
+/// compute r \equiv a (mod Q) such that -6283008 <= r <= 6283008.
 //
 /// Returns r.
 pub fn reduce32(a: i32) -> i32 {

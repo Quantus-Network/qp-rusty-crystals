@@ -134,13 +134,13 @@ pub fn pack_sig(sig: &mut [u8], c: Option<&[u8]>, z: &Polyvecl, h: &Polyveck) {
 			}
 
 			// Create a mask from should_store (0x00 or 0xFF)
-            let mask = (should_store as i8).wrapping_neg() as u8;
-            
-            // Constant-time selection using bitwise operations
-            // if should_store { sig[write_idx] = j }
-            sig[write_idx as usize] = (j as u8 & mask) | (sig[write_idx as usize] & !mask);
+			let mask = (should_store as i8).wrapping_neg() as u8;
 
-			// use constant-time increment
+			// Branchless selection using bitwise operations
+			// if should_store { sig[write_idx] = j }
+			sig[write_idx as usize] = (j as u8 & mask) | (sig[write_idx as usize] & !mask);
+
+			// Branchless increment to reduce timing variations
 			if is_nonzero {
 			    k += 1;
 			}

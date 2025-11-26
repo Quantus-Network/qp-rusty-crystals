@@ -320,7 +320,7 @@ pub(crate) fn signature(
 	let mut challenge_poly_c: Box<Poly>;
 	let mut hint_vector_h = Box::new(Polyveck::default());
 	let mut signature_found = false;
-	let mut dummy_output = [0u8; params::SIGNBYTES]; // Dummy buffer for constant-time packing
+	let mut dummy_output = [0u8; params::SIGNBYTES]; // Dummy buffer for timing countermeasures
 	let mut valid_challenge = [0u8; params::C_DASH_BYTES];
 	let mut valid_signature_z = Box::new(Polyvecl::default());
 	let mut valid_hint_h = Box::new(Polyveck::default());
@@ -388,7 +388,7 @@ pub(crate) fn signature(
 			packing::pack_sig(&mut dummy_output, None, &signature_z, safe_hint);
 
 			// Store valid signature components if this is the first valid one
-			// This branch is data-dependent but the alternative complex constant-time operations
+			// This branch is data-dependent but the alternative complex branchless operations
 			// may actually introduce more timing variations due to memory access patterns
 			if all_conditions_met && !signature_found {
 				valid_challenge.copy_from_slice(&dummy_output[..params::C_DASH_BYTES]);
@@ -490,11 +490,7 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	fips202::shake256_absorb(&mut state, &buf, K * crate::params::POLYW1_PACKEDBYTES);
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut c2, params::C_DASH_BYTES, &mut state);
-	// Doesn't require constant time equality check
-	if c != c2 {
-		return false;
-	}
-	true
+	c == c2
 }
 
 #[cfg(test)]

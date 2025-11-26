@@ -10,14 +10,12 @@ use aes::{
 #[derive(Debug)]
 pub enum DrbgError {
 	InvalidEntropyLength,
-	NotInitialized,
 }
 
 impl Display for DrbgError {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		let str = match self {
 			DrbgError::InvalidEntropyLength => "InvalidEntropyLength",
-			DrbgError::NotInitialized => "NotInitialized",
 		};
 		write!(f, "{str}")
 	}

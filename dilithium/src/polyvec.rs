@@ -67,6 +67,8 @@ pub fn l_uniform_gamma1(v: &mut Polyvecl, seed: &[u8], nonce: u16) {
 		poly::uniform_gamma1(&mut v.vec[i], seed, L as u16 * nonce + i as u16);
 	}
 }
+/// Reduce coefficients of polynomials in vector of length L
+/// to representatives in [-6283008, 6283008].
 pub fn l_reduce(v: &mut Polyvecl) {
 	for i in 0..L {
 		poly::reduce(&mut v.vec[i]);
@@ -101,6 +103,13 @@ pub fn l_pointwise_poly_montgomery(r: &mut Polyvecl, a: &Poly, v: &Polyvecl) {
 	}
 }
 
+/// Check if the infinity norm of a Polyvecl is within the given bound.
+///
+/// # Arguments
+/// * `v` - The polynomial vector to check
+/// * `bound` - The norm bound
+///
+/// Returns true if all polynomials in the vector have infinity norm < bound, false otherwise.
 pub fn polyvecl_is_norm_within_bound(v: &Polyvecl, bound: i32) -> bool {
 	let mut result = true;
 	for i in 0..L {
@@ -120,7 +129,7 @@ pub fn k_uniform_eta(v: &mut Polyveck, seed: &[u8], mut nonce: u16) {
 }
 
 /// Reduce coefficients of polynomials in vector of length K
-/// to representatives in \[0,2*Q\].
+/// to representatives in [-6283008, 6283008].
 pub fn k_reduce(v: &mut Polyveck) {
 	for i in 0..K {
 		poly::reduce(&mut v.vec[i]);
@@ -183,10 +192,13 @@ pub fn k_pointwise_poly_montgomery(r: &mut Polyveck, a: &Poly, v: &Polyveck) {
 	}
 }
 
-/// Check infinity norm of polynomials in vector of length K.
-/// Assumes input coefficients to be standard representatives.
-//
-/// Returns 0 if norm of all polynomials are strictly smaller than B and 1 otherwise.
+/// Check if the infinity norm of a Polyveck is within the given bound.
+///
+/// # Arguments
+/// * `v` - The polynomial vector to check
+/// * `bound` - The norm bound
+///
+/// Returns true if all polynomials in the vector have infinity norm < bound, false otherwise.
 pub fn polyveck_is_norm_within_bound(v: &Polyveck, bound: i32) -> bool {
 	let mut result = true;
 	for i in 0..K {

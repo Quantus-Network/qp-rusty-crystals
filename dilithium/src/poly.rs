@@ -1,6 +1,4 @@
-use crate::{
-	fips202, ntt, params, reduce, rounding,
-};
+use crate::{fips202, ntt, params, reduce, rounding};
 const N: usize = params::N as usize;
 const UNIFORM_NBLOCKS: usize = (767 + fips202::SHAKE128_RATE) / fips202::SHAKE128_RATE;
 const D_SHL: i32 = 1 << (params::D - 1);
@@ -18,13 +16,8 @@ impl Default for Poly {
 	}
 }
 
-/// Inplace reduction of all coefficients of polynomial to representative in [-6283009,6283007].
+/// Inplace reduction of all coefficients of polynomial to representative in [-6283008,6283008].
 pub fn reduce(a: &mut Poly) {
-	// Bad C style
-	// for i in 0..N {
-	//     a.coeffs[i] = reduce::reduce32(a.coeffs[i]);
-	// }
-	// Nice Rust style
 	for coeff in a.coeffs.iter_mut() {
 		*coeff = reduce::reduce32(*coeff);
 	}
@@ -155,16 +148,16 @@ pub fn power2round(a1: &mut Poly, a0: &mut Poly) {
 /// * 'a' - input polynomial
 /// * 'b' - norm bound
 ///
-/// Returns 0 if norm is strictly smaller than B and B <= (Q-1)/8, 1 otherwise.
+/// Returns true if norm exceeds the bound OR if b > (Q-1)/8, false otherwise.
 pub fn check_norm(a: &Poly, b: i32) -> bool {
 	let mut result = false;
 
-	// Check bound condition first - this is a constant-time check
+	// Check bound condition first
 	if b > (params::Q - 1) / 8 {
 		result = true;
 	}
 
-	// Always process all coefficients for constant-time
+	// Always process all coefficients to avoid early returns
 	for i in 0..N {
 		let mut t = a.coeffs[i] >> 31;
 		t = a.coeffs[i] - (t & 2 * a.coeffs[i]);
@@ -431,22 +424,20 @@ pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
 		let has_space_lower = ctr < alen;
 		let store_lower = valid_lower & has_space_lower;
 
-		// Constant-time-ish conditional assignment
-		// Write to output or dummy location based on condition
+		// Conditionally store coefficient based on validity and available space
 		if store_lower {
-    		if ctr < a.len() {
-                a[ctr] = coeff_lower;
-            }
+			if ctr < a.len() {
+				a[ctr] = coeff_lower;
+			}
 			ctr += 1;
 		}
 
 		let has_space_upper = ctr < alen;
 		let store_upper = valid_upper & has_space_upper;
 
-		// Constant-time-ish conditional assignment
-		// Write to output or dummy location based on condition
+		// Conditionally store coefficient based on validity and available space
 		if store_upper {
-		    if ctr < a.len() {
+			if ctr < a.len() {
 				a[ctr] = coeff_upper;
 			}
 			ctr += 1;
@@ -462,15 +453,14 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
-	// Fixed number of rounds for constant-time operation
+	// Fixed number of rounds to reduce timing variations
 	const FIXED_ROUNDS: usize = 2;
 	let mut shake_output_buffer = [0u8; fips202::SHAKE256_RATE];
 	let mut temporary_coefficient_storage = [0i32; 1000]; // Temp storage for all extracted coeffs
 	let mut total_coefficients_collected = 0usize;
 
-	// In case by some freak accident 2 rounds isn't enough, we keep going. This makes it
-	// non-constant time in only a negligible set of cases. The vast majority of cases will run
-	// this outer loop exactly once
+	// In the extremely rare case that 2 rounds isn't enough, we keep going.
+	// The vast majority of cases will run this outer loop exactly once
 	while total_coefficients_collected < N {
 		// Always run exactly FIXED_ROUNDS iterations
 		for _round_number in 0..FIXED_ROUNDS {
@@ -494,7 +484,7 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
 	output_polynomial.coeffs[..N].copy_from_slice(&temporary_coefficient_storage[..N]);
 }
 
-/// Sample polynomial with uniformly random coefficients in [-(GAMMA1 - 1), GAMMA1 - 1] by
+/// Sample polynomial with uniformly random coefficients in [-(GAMMA1 - 1), GAMMA1] by
 /// performing rejection sampling on output stream of SHAKE256(seed|nonce).
 pub fn uniform_gamma1(a: &mut Poly, seed: &[u8], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
@@ -507,6 +497,8 @@ pub fn uniform_gamma1(a: &mut Poly, seed: &[u8], nonce: u16) {
 
 /// Implementation of H. Samples polynomial with TAU nonzero coefficients in {-1,1} using the output
 /// stream of SHAKE256(seed).
+///
+/// Includes timing countermeasures using dummy operations to reduce side-channel leakage
 pub fn challenge(c: &mut Poly, seed: &[u8]) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, seed, params::C_DASH_BYTES);
@@ -520,7 +512,7 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 		signs |= (byte as u64) << 8 * i;
 	}
 
-	// Create dummy state for constant-time padding
+	// Create dummy state for timing countermeasures
 	let mut dummy_state = fips202::KeccakState::default();
 	let mut dummy_buf = [0u8; fips202::SHAKE256_RATE];
 
@@ -534,7 +526,7 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 
 		// in vast majority of cases this outer loop will run exactly once
 		while !found {
-			// do 8 iterations no matter what for constant time
+			// do 8 iterations no matter what to reduce timing variations
 			for _ in 0..8 {
 				if !found {
 					if pos >= fips202::SHAKE256_RATE {
@@ -546,11 +538,11 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 					}
 					b = buf[pos] as usize;
 					pos += 1;
-					// Use constant-time selection to update found flag
+					// Update found flag without branching
 					let is_valid = ((b <= i) as u8) != 0;
 					found = found | is_valid;
 				} else {
-					// Dummy operations when already found to maintain constant timing
+					// Dummy operations when already found to reduce timing variations
 					fips202::shake256_squeezeblocks(&mut dummy_buf, 1, &mut dummy_state);
 				}
 			}
@@ -606,7 +598,7 @@ pub fn eta_unpack(r: &mut Poly, a: &[u8]) {
 }
 
 /// Bit-pack polynomial z with coefficients in [-(GAMMA1 - 1), GAMMA1 - 1].
-/// Input coefficients are assumed to be standard representatives.*
+/// Input coefficients are assumed to be standard representatives.
 pub fn z_pack(r: &mut [u8], a: &Poly) {
 	let mut t = [0i32; 2];
 
@@ -635,7 +627,7 @@ pub fn z_unpack(r: &mut Poly, a: &[u8]) {
 		r.coeffs[2 * i + 1] = (a[5 * i + 2] as i32) >> 4;
 		r.coeffs[2 * i + 1] |= (a[5 * i + 3] as i32) << 4;
 		r.coeffs[2 * i + 1] |= (a[5 * i + 4] as i32) << 12;
-		r.coeffs[2 * i + 0] &= 0xFFFFF;
+		r.coeffs[2 * i + 1] &= 0xFFFFF;
 
 		r.coeffs[2 * i + 0] = params::GAMMA1 as i32 - r.coeffs[2 * i + 0];
 		r.coeffs[2 * i + 1] = params::GAMMA1 as i32 - r.coeffs[2 * i + 1];
