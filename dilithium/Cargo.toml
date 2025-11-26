@@ -21,26 +21,19 @@ name = "stack_usage_demo"
 path = "examples/stack_usage_demo.rs"
 
 [dependencies]
-subtle = { version = "2.4.1", default-features = false }
 zeroize = { workspace = true }
-
-# Constant-time testing (optional for binaries)
-dudect-bencher = { version = "0.6", optional = true }
-aes = "0.8"
-cipher = "0.4"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
 rand = { version = "0.7.3" }
+dudect-bencher = { version = "0.6" }
 
 [[bench]]
 name = "dilithium_benchmarks"
 harness = false
 
-[[bin]]
+[[example]]
 name = "ct_bench"
-required-features = ["ct-testing"]
 
 [features]
 default = []
-ct-testing = ["dudect-bencher"]
