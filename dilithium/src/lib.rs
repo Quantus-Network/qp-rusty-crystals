@@ -81,7 +81,6 @@ impl From<&mut [u8; 64]> for SensitiveBytes64 {
 	}
 }
 
-pub mod drbg;
 mod errors;
 pub mod fips202;
 pub mod ml_dsa_87;

@@ -1,5 +1,6 @@
-use crate::{fips202, ntt, params, reduce, rounding};
-use subtle::{Choice, ConditionallySelectable};
+use crate::{
+	fips202, ntt, params, reduce, rounding,
+};
 const N: usize = params::N as usize;
 const UNIFORM_NBLOCKS: usize = (767 + fips202::SHAKE128_RATE) / fips202::SHAKE128_RATE;
 const D_SHL: i32 = 1 << (params::D - 1);
@@ -410,7 +411,6 @@ pub fn use_hint_ip(a: &mut Poly, hint: &Poly) {
 /// given
 pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
 	let mut ctr = 0usize;
-	let mut dummy_value = 0i32; // For dummy writes
 
 	// Always process exactly buflen bytes
 	for pos in 0..buflen {
@@ -425,39 +425,34 @@ pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
 		let coeff_upper = 2 - reduced_upper as i32;
 
 		// Nibbles valid?
-		let valid_lower = Choice::from((lower_nibble < 15) as u8);
-		let valid_upper = Choice::from((upper_nibble < 15) as u8);
+		let valid_lower = lower_nibble < 15;
+		let valid_upper = upper_nibble < 15;
 
-		let has_space_lower = Choice::from((ctr < alen) as u8);
+		let has_space_lower = ctr < alen;
 		let store_lower = valid_lower & has_space_lower;
 
 		// Constant-time-ish conditional assignment
 		// Write to output or dummy location based on condition
-		if ctr < a.len() {
-			a[ctr] = i32::conditional_select(&a[ctr], &coeff_lower, store_lower);
-		} else {
-			dummy_value = i32::conditional_select(&coeff_lower, &dummy_value, store_lower);
+		if store_lower {
+    		if ctr < a.len() {
+                a[ctr] = coeff_lower;
+            }
+			ctr += 1;
 		}
-		ctr += store_lower.unwrap_u8() as usize;
 
-		let has_space_upper = Choice::from((ctr < alen) as u8);
+		let has_space_upper = ctr < alen;
 		let store_upper = valid_upper & has_space_upper;
 
 		// Constant-time-ish conditional assignment
 		// Write to output or dummy location based on condition
-		if ctr < a.len() {
-			a[ctr] = i32::conditional_select(&a[ctr], &coeff_upper, store_upper);
-		} else {
-			dummy_value = i32::conditional_select(&coeff_upper, &dummy_value, store_upper);
+		if store_upper {
+		    if ctr < a.len() {
+				a[ctr] = coeff_upper;
+			}
+			ctr += 1;
 		}
-		ctr += store_upper.unwrap_u8() as usize;
 	}
 
-	// Use volatile read to ensure dummy_value operations are not optimized away
-	unsafe {
-		core::ptr::read_volatile(&dummy_value as *const i32);
-	}
-	
 	ctr
 }
 
@@ -528,36 +523,35 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 	// Create dummy state for constant-time padding
 	let mut dummy_state = fips202::KeccakState::default();
 	let mut dummy_buf = [0u8; fips202::SHAKE256_RATE];
-	let mut dummy_pos = 0;
 
 	let mut pos: usize = 8;
 	c.coeffs.fill(0);
+
+	// For each position from N-TAU to N-1, we need to find a valid index
 	for i in (N - params::TAU)..N {
 		let mut b: usize = 0;
 		let mut found = false;
 
 		// in vast majority of cases this outer loop will run exactly once
 		while !found {
-			// do 16 iterations no matter what for constant time
-			for _ in 0..16 {
+			// do 8 iterations no matter what for constant time
+			for _ in 0..8 {
 				if !found {
 					if pos >= fips202::SHAKE256_RATE {
 						fips202::shake256_squeezeblocks(&mut buf, 1, &mut state);
 						pos = 0;
+					} else {
+						// dummy operation
+						fips202::shake256_squeezeblocks(&mut dummy_buf, 1, &mut dummy_state);
 					}
 					b = buf[pos] as usize;
 					pos += 1;
-					if b <= i {
-						found = true;
-					}
+					// Use constant-time selection to update found flag
+					let is_valid = ((b <= i) as u8) != 0;
+					found = found | is_valid;
 				} else {
 					// Dummy operations when already found to maintain constant timing
-					if dummy_pos >= fips202::SHAKE256_RATE {
-						fips202::shake256_squeezeblocks(&mut dummy_buf, 1, &mut dummy_state);
-						dummy_pos = 0;
-					}
-					let _dummy = dummy_buf[dummy_pos] as usize;
-					dummy_pos += 1;
+					fips202::shake256_squeezeblocks(&mut dummy_buf, 1, &mut dummy_state);
 				}
 			}
 		}

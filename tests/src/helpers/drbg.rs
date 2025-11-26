@@ -1,11 +1,27 @@
 //! Wrapper for DRBG (Deterministic Random Bit Generator) to match C reference implementation
 //! Implements the exact same AES256_CTR_DRBG as the C reference code
 
-use crate::errors::DrbgError;
+use core::{fmt, fmt::Display};
 use aes::{
 	cipher::{BlockEncrypt, KeyInit},
 	Aes256, Block,
 };
+
+#[derive(Debug)]
+pub enum DrbgError {
+	InvalidEntropyLength,
+	NotInitialized,
+}
+
+impl Display for DrbgError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let str = match self {
+			DrbgError::InvalidEntropyLength => "InvalidEntropyLength",
+			DrbgError::NotInitialized => "NotInitialized",
+		};
+		write!(f, "{str}")
+	}
+}
 
 pub struct DRBG {
 	key: [u8; 32],

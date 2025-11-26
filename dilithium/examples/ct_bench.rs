@@ -9,9 +9,7 @@
 //!
 //! This ensures the two classes are distinguishable before timing analysis begins.
 
-#[cfg(feature = "dudect-bencher")]
 use dudect_bencher::rand::{Rng, RngCore};
-#[cfg(feature = "dudect-bencher")]
 use dudect_bencher::{ctbench_main, BenchRng, Class, CtRunner};
 
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
@@ -136,7 +134,6 @@ fn disrupt_cache(rng: &mut BenchRng) {
 }
 
 /// Test keypair generation for constant time
-#[cfg(feature = "dudect-bencher")]
 fn test_keypair_generation_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running keypair generation constant-time test...");
 
@@ -169,7 +166,6 @@ fn test_keypair_generation_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test signing with small messages for constant time
-#[cfg(feature = "dudect-bencher")]
 fn test_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running small message signing constant-time test...");
 
@@ -204,7 +200,6 @@ fn test_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test signing with medium messages for constant time
-#[cfg(feature = "dudect-bencher")]
 fn test_signing_medium_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running medium message signing constant-time test...");
 
@@ -239,7 +234,6 @@ fn test_signing_medium_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test signing with large messages for constant time
-#[cfg(feature = "dudect-bencher")]
 fn test_signing_large_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running large message signing constant-time test...");
 
@@ -274,7 +268,6 @@ fn test_signing_large_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test signing with extra large messages for constant time
-#[cfg(feature = "dudect-bencher")]
 fn test_signing_xlarge_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running extra large message signing constant-time test...");
 
@@ -309,7 +302,6 @@ fn test_signing_xlarge_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test hedged signing (randomized) with small messages for constant time
-#[cfg(feature = "dudect-bencher")]
 fn test_hedged_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running hedged signing constant-time test...");
 
@@ -344,7 +336,6 @@ fn test_hedged_signing_small_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test signing with context strings for constant time
-#[cfg(feature = "dudect-bencher")]
 fn test_signing_with_context_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running context signing constant-time test...");
 
@@ -380,7 +371,6 @@ fn test_signing_with_context_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test edge cases with single-byte and small messages
-#[cfg(feature = "dudect-bencher")]
 fn test_edge_cases_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running edge cases constant-time test...");
 
@@ -421,7 +411,6 @@ fn test_edge_cases_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test uniform_eta function for constant time
-#[cfg(feature = "dudect-bencher")]
 fn test_uniform_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running uniform_eta constant-time test...");
 
@@ -455,7 +444,6 @@ fn test_uniform_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test rej_eta function for constant time with different buffer contents
-#[cfg(feature = "dudect-bencher")]
 fn test_rej_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running rej_eta constant-time test...");
 
@@ -489,7 +477,6 @@ fn test_rej_eta_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test uniform_eta with different nonce values to check for timing differences
-#[cfg(feature = "dudect-bencher")]
 fn test_uniform_eta_nonce_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running uniform_eta nonce constant-time test...");
 
@@ -530,7 +517,6 @@ fn test_uniform_eta_nonce_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test l_uniform_gamma1 function for constant time
-#[cfg(feature = "dudect-bencher")]
 fn test_l_uniform_gamma1_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running l_uniform_gamma1 constant-time test...");
 
@@ -558,7 +544,6 @@ fn test_l_uniform_gamma1_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test polyvecl_is_norm_within_bound function for constant time
-#[cfg(feature = "dudect-bencher")]
 fn test_polyvecl_norm_check_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running polyvecl norm check constant-time test...");
 
@@ -594,7 +579,6 @@ fn test_polyvecl_norm_check_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test polyveck_is_norm_within_bound function for constant time
-#[cfg(feature = "dudect-bencher")]
 fn test_polyveck_norm_check_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running polyveck norm check constant-time test...");
 
@@ -667,7 +651,7 @@ fn test_k_pack_w1_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	}
 }
 
-fn test_packing_operations_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
+fn test_pack_sig_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running packing operations constant-time test...");
 
 	// Generate fixed signature components upfront
@@ -746,7 +730,6 @@ fn test_k_make_hint_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test NTT (Number Theoretic Transform) for constant-time execution
-#[cfg(feature = "dudect-bencher")]
 fn test_ntt_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running NTT constant-time test...");
 
@@ -780,7 +763,6 @@ fn test_ntt_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Generate a fixed polynomial array for Left class (deterministic pattern)
-#[cfg(feature = "dudect-bencher")]
 fn generate_fixed_polynomial_array(rng: &mut BenchRng) -> Vec<i32> {
 	// Use a deterministic pattern based on a single random byte
 	let pattern = rng.gen::<u8>() as i32;
@@ -794,7 +776,6 @@ fn generate_fixed_polynomial_array(rng: &mut BenchRng) -> Vec<i32> {
 }
 
 /// Generate a random polynomial array for Right class
-#[cfg(feature = "dudect-bencher")]
 fn generate_random_polynomial_array(rng: &mut BenchRng) -> Vec<i32> {
 	let mut array = Vec::with_capacity(qp_rusty_crystals_dilithium::params::N as usize);
 
@@ -806,7 +787,6 @@ fn generate_random_polynomial_array(rng: &mut BenchRng) -> Vec<i32> {
 }
 
 /// Test inverse NTT for constant-time execution
-#[cfg(feature = "dudect-bencher")]
 fn test_invntt_tomont_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running inverse NTT constant-time test...");
 
@@ -840,7 +820,6 @@ fn test_invntt_tomont_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test check_norm function for constant-time execution
-#[cfg(feature = "dudect-bencher")]
 fn test_check_norm_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running check_norm constant-time test...");
 
@@ -876,7 +855,6 @@ fn test_check_norm_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Generate a fixed polynomial for Left class (deterministic pattern)
-#[cfg(feature = "dudect-bencher")]
 fn generate_fixed_polynomial(rng: &mut BenchRng) -> qp_rusty_crystals_dilithium::poly::Poly {
 	use qp_rusty_crystals_dilithium::poly::Poly;
 
@@ -891,7 +869,6 @@ fn generate_fixed_polynomial(rng: &mut BenchRng) -> qp_rusty_crystals_dilithium:
 }
 
 /// Generate a random polynomial for Right class
-#[cfg(feature = "dudect-bencher")]
 fn generate_random_polynomial(rng: &mut BenchRng) -> qp_rusty_crystals_dilithium::poly::Poly {
 	use qp_rusty_crystals_dilithium::poly::Poly;
 
@@ -905,7 +882,6 @@ fn generate_random_polynomial(rng: &mut BenchRng) -> qp_rusty_crystals_dilithium
 }
 
 /// Test make_hint function for constant-time execution
-#[cfg(feature = "dudect-bencher")]
 fn test_make_hint_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running make_hint constant-time test...");
 
@@ -939,7 +915,6 @@ fn test_make_hint_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test use_hint function for constant-time execution
-#[cfg(feature = "dudect-bencher")]
 fn test_use_hint_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running use_hint constant-time test...");
 
@@ -973,7 +948,6 @@ fn test_use_hint_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test signing with fixed keypair but different messages for constant-time
-#[cfg(feature = "dudect-bencher")]
 fn test_signing_fixed_key_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running signing with fixed key constant-time test...");
 
@@ -1011,7 +985,6 @@ fn test_signing_fixed_key_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test message hashing specifically for constant-time
-#[cfg(feature = "dudect-bencher")]
 fn test_message_hashing_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running message hashing constant-time test...");
 
@@ -1070,7 +1043,6 @@ fn test_message_hashing_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test polynomial arithmetic operations for constant-time execution
-#[cfg(feature = "dudect-bencher")]
 fn test_polynomial_arithmetic_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running polynomial arithmetic constant-time test...");
 
@@ -1112,7 +1084,6 @@ fn test_polynomial_arithmetic_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 /// Test poly::challenge function for constant-time execution
-#[cfg(feature = "dudect-bencher")]
 fn test_poly_challenge_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	println!("Running poly::challenge constant-time test...");
 
@@ -1153,7 +1124,6 @@ fn test_poly_challenge_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	}
 }
 
-#[cfg(feature = "dudect-bencher")]
 ctbench_main!(
 	test_keypair_generation_ct,
 	test_signing_small_ct,
@@ -1171,7 +1141,7 @@ ctbench_main!(
 	test_polyveck_norm_check_ct,
 	test_k_make_hint_ct,
 	test_k_pack_w1_ct,
-	test_packing_operations_ct,
+	test_pack_sig_ct,
 	test_ntt_ct,
 	test_invntt_tomont_ct,
 	test_check_norm_ct,
@@ -1183,20 +1153,13 @@ ctbench_main!(
 	test_poly_challenge_ct
 );
 
-#[cfg(not(feature = "dudect-bencher"))]
-fn main() {
-	println!("Constant-time testing requires the 'ct-testing' feature.");
-	println!("Run with: cacargo run --release --features ct-testing --bin ct_bench");
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	#[test]
 	fn test_input_generation_distinguishable() {
-		#[cfg(feature = "dudect-bencher")]
-		{
+				{
 			use dudect_bencher::rand::SeedableRng;
 			let mut rng = BenchRng::seed_from_u64(42);
 
