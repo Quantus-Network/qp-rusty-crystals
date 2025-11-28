@@ -155,8 +155,6 @@ fn prepare_signing_context(
 	// Compute message hash μ = H(tr || pre || msg) where pre = (0, 0) for pure signatures
 	let mut keccak_state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut keccak_state, &unpacked_sk.public_key_hash_tr, params::TR_BYTES);
-	let context_prefix = [0u8, 0u8]; // (domain_sep=0, context_len=0) for pure signatures
-	fips202::shake256_absorb(&mut keccak_state, &context_prefix, 2);
 	fips202::shake256_absorb(&mut keccak_state, message, message.len());
 	fips202::shake256_finalize(&mut keccak_state);
 	let mut message_hash_mu = [0u8; params::CRHBYTES];
@@ -456,8 +454,6 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	// Compute CRH(H(rho, t1), pre, msg) with pre=(0,0)
 	fips202::shake256(&mut mu, params::CRHBYTES, pk, crate::params::PUBLICKEYBYTES);
 	fips202::shake256_absorb(&mut state, &mu, params::CRHBYTES);
-	let pre = [0u8, 0u8];
-	fips202::shake256_absorb(&mut state, &pre, 2);
 	fips202::shake256_absorb(&mut state, m, m.len());
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut mu, params::CRHBYTES, &mut state);
