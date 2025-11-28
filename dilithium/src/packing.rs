@@ -128,9 +128,9 @@ pub fn pack_sig(sig: &mut [u8], c: Option<&[u8]>, z: &Polyvecl, h: &Polyveck) {
 			let has_space_choice = k < params::OMEGA;
 			let write_idx: u32;
 			if has_space_choice {
-			    write_idx = in_bounds_idx;
+				write_idx = in_bounds_idx;
 			} else {
-			    write_idx = out_bounds_idx;
+				write_idx = out_bounds_idx;
 			}
 
 			// Create a mask from should_store (0x00 or 0xFF)
@@ -142,7 +142,7 @@ pub fn pack_sig(sig: &mut [u8], c: Option<&[u8]>, z: &Polyvecl, h: &Polyveck) {
 
 			// Branchless increment to reduce timing variations
 			if is_nonzero {
-			    k += 1;
+				k += 1;
 			}
 		}
 		sig[idx + params::OMEGA + i] = k as u8;

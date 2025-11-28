@@ -411,15 +411,15 @@ pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
 		let upper_nibble = (buf[pos] >> 4) as u32;
 
 		for nibble in [lower_nibble, upper_nibble] {
-                    let reduced = nibble - (205 * nibble >> 10) * 5;
-                    let coeff = 2 - reduced as i32;
-                    let nibble_valid = nibble < 15;
-                    let has_space = ctr < alen;
-                    let inc_ctr = nibble_valid & has_space;
-                    let store_mask = -((inc_ctr & has_space) as i32);
-                    // assign coeff to a[ctr] if store_mask == true 
-                    a[ctr % alen] = (coeff & store_mask) | (a[ctr % alen] & !store_mask);
-                    ctr += inc_ctr as usize;
+			let reduced = nibble - (205 * nibble >> 10) * 5;
+			let coeff = 2 - reduced as i32;
+			let nibble_valid = nibble < 15;
+			let has_space = ctr < alen;
+			let inc_ctr = nibble_valid & has_space;
+			let store_mask = -((inc_ctr & has_space) as i32);
+			// assign coeff to a[ctr] if store_mask == true
+			a[ctr % alen] = (coeff & store_mask) | (a[ctr % alen] & !store_mask);
+			ctr += inc_ctr as usize;
 		}
 	}
 

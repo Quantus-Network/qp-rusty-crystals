@@ -104,7 +104,8 @@ mod hdwallet_tests {
 
 	#[test]
 	fn test_same_mnemonic_same_path_deterministic() {
-		let paths = ["m/44'/0'/0'/0'/0'", "m/0'/2147483647'/1'", "m/44'/60'/0'/0'/0'", "m/1'/2'/3'"];
+		let paths =
+			["m/44'/0'/0'/0'/0'", "m/0'/2147483647'/1'", "m/44'/60'/0'/0'/0'", "m/1'/2'/3'"];
 
 		for p in paths {
 			// Show proper mnemonic ownership - each call creates new String
@@ -176,8 +177,8 @@ mod hdwallet_tests {
 		// Generate length between 5 and 15 using RngCore
 		let length = (rng.next_u32() % 10) + 5;
 
-		"m/".to_owned()
-			+ &(0..length)
+		"m/".to_owned() +
+			&(0..length)
 				.map(|_| (rng.next_u32() % 99) + 1) // Generate number between 1 and 99
 				.map(|num| num.to_string() + "\'")
 				.collect::<Vec<_>>()
@@ -508,7 +509,7 @@ mod hdwallet_tests {
 
 		// After this point, sensitive_entropy and sensitive_seed should be consumed
 		// The following would not compile if uncommented:
-		// let _another_key = derive_key_from_seed(sensitive_seed, "m/44'/0'/0'/0/1"); // ERROR: use after move
+		// let _another_key = derive_key_from_seed(sensitive_seed, "m/44'/0'/0'/0/1"); 
 
 		// Test that regular arrays still work with auto-conversion
 		let mut raw_seed = [2u8; 64];

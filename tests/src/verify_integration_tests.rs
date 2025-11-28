@@ -1,9 +1,10 @@
 // tests/verify_integration_test.rs
 
-use crate::helpers::{kat::{parse_test_vectors, TestVector}, drbg::DRBG};
-use qp_rusty_crystals_dilithium::{
-	ml_dsa_87::{Keypair, PUBLICKEYBYTES},
+use crate::helpers::{
+	drbg::DRBG,
+	kat::{parse_test_vectors, TestVector},
 };
+use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, PUBLICKEYBYTES};
 use qp_rusty_crystals_hdwallet::SensitiveBytes32;
 use rand::{thread_rng, Rng};
 

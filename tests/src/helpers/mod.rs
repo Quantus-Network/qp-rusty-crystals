@@ -1,2 +1,2 @@
-pub mod kat;
 pub mod drbg;
+pub mod kat;

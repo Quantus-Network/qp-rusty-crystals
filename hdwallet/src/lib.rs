@@ -152,7 +152,7 @@ fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 	let p = nam_tiny_hderive::bip44::DerivationPath::from_str(path)
 		.map_err(HDLatticeError::GenericError)?;
 	for element in p.iter() {
-		// Enforce hardened for all indices as per BIP44 standard. 
+		// Enforce hardened for all indices as per BIP44 standard.
 		// The reason being, we do not have derivable public keys anyway, it
 		// does not work for dilithium key pairs.
 		if !element.is_hardened() {

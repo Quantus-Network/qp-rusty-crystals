@@ -1,11 +1,11 @@
 //! Wrapper for DRBG (Deterministic Random Bit Generator) to match C reference implementation
 //! Implements the exact same AES256_CTR_DRBG as the C reference code
 
-use core::{fmt, fmt::Display};
 use aes::{
 	cipher::{BlockEncrypt, KeyInit},
 	Aes256, Block,
 };
+use core::{fmt, fmt::Display};
 
 #[derive(Debug)]
 pub enum DrbgError {
