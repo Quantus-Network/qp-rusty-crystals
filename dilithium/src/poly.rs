@@ -410,37 +410,16 @@ pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
 		let lower_nibble = (buf[pos] & 0x0F) as u32;
 		let upper_nibble = (buf[pos] >> 4) as u32;
 
-		// Compute all arithmetic operations upfront to avoid data-dependent timing
-		// the following operations are a fast way to do % 5 (205 ~= 1024/5)
-		let reduced_lower = lower_nibble - (205 * lower_nibble >> 10) * 5;
-		let reduced_upper = upper_nibble - (205 * upper_nibble >> 10) * 5;
-		let coeff_lower = 2 - reduced_lower as i32;
-		let coeff_upper = 2 - reduced_upper as i32;
-
-		// Nibbles valid?
-		let valid_lower = lower_nibble < 15;
-		let valid_upper = upper_nibble < 15;
-
-		let has_space_lower = ctr < alen;
-		let store_lower = valid_lower & has_space_lower;
-
-		// Conditionally store coefficient based on validity and available space
-		if store_lower {
-			if ctr < a.len() {
-				a[ctr] = coeff_lower;
-			}
-			ctr += 1;
-		}
-
-		let has_space_upper = ctr < alen;
-		let store_upper = valid_upper & has_space_upper;
-
-		// Conditionally store coefficient based on validity and available space
-		if store_upper {
-			if ctr < a.len() {
-				a[ctr] = coeff_upper;
-			}
-			ctr += 1;
+		for nibble in [lower_nibble, upper_nibble] {
+                    let reduced = nibble - (205 * nibble >> 10) * 5;
+                    let coeff = 2 - reduced as i32;
+                    let nibble_valid = nibble < 15;
+                    let has_space = ctr < alen;
+                    let inc_ctr = nibble_valid & has_space;
+                    let store_mask = -((inc_ctr & has_space) as i32);
+                    // assign coeff to a[ctr] if store_mask == true 
+                    a[ctr % alen] = (coeff & store_mask) | (a[ctr % alen] & !store_mask);
+                    ctr += inc_ctr as usize;
 		}
 	}
 
