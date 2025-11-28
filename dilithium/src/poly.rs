@@ -519,7 +519,7 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 					pos += 1;
 					// Update found flag without branching
 					let is_valid = ((b <= i) as u8) != 0;
-					found = found | is_valid;
+					found |= is_valid;
 				} else {
 					// Dummy operations when already found to reduce timing variations
 					fips202::shake256_squeezeblocks(&mut dummy_buf, 1, &mut dummy_state);

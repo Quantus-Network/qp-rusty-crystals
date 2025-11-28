@@ -1,7 +1,7 @@
 // tests/verify_integration_test.rs
 
 use crate::helpers::{
-	drbg::DRBG,
+	drbg::Drbg,
 	kat::{parse_test_vectors, TestVector},
 };
 use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, PUBLICKEYBYTES};
@@ -44,7 +44,7 @@ fn verify_test_vector(test: &TestVector) {
 	// rng changes the next rng output.
 	//
 	// Initialize DRBG with seed - same as KAT file
-	let mut drbg = DRBG::new(&test.seed, None).unwrap();
+	let mut drbg = Drbg::new(&test.seed, None).unwrap();
 	let mut entropy = [0u8; 32];
 	let res = drbg.randombytes(&mut entropy, 32);
 	let entropy_s = SensitiveBytes32::new(&mut entropy);

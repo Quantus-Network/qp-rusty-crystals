@@ -117,6 +117,7 @@ pub fn pack_sig(sig: &mut [u8], c: Option<&[u8]>, z: &Polyvecl, h: &Polyveck) {
 	sig[idx..idx + params::OMEGA + K].copy_from_slice(&[0u8; params::OMEGA + K]);
 
 	let mut k = 0;
+	let mut write_idx: u32;
 	for i in 0..K {
 		for j in 0..N {
 			let is_nonzero = h.vec[i].coeffs[j] != 0;
@@ -126,7 +127,6 @@ pub fn pack_sig(sig: &mut [u8], c: Option<&[u8]>, z: &Polyvecl, h: &Polyveck) {
 			let in_bounds_idx = (idx + k) as u32;
 			let out_bounds_idx = (idx + params::OMEGA - 1) as u32;
 			let has_space_choice = k < params::OMEGA;
-			let write_idx: u32;
 			if has_space_choice {
 				write_idx = in_bounds_idx;
 			} else {

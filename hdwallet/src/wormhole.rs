@@ -80,7 +80,7 @@ impl WormholePair {
 	/// # Returns
 	/// `true` if the address matches the derived one, `false` otherwise.
 	pub fn verify(address: [u8; 32], secret: SensitiveBytes32) -> bool {
-		let generated_address = Self::generate_pair_from_secret(secret.into()).address;
+		let generated_address = Self::generate_pair_from_secret(secret).address;
 		// Note: secret is automatically zeroized when the SensitiveBytes32 wrapper drops
 		generated_address == address
 	}
