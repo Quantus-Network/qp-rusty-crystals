@@ -509,7 +509,7 @@ mod hdwallet_tests {
 
 		// After this point, sensitive_entropy and sensitive_seed should be consumed
 		// The following would not compile if uncommented:
-		// let _another_key = derive_key_from_seed(sensitive_seed, "m/44'/0'/0'/0/1"); 
+		// let _another_key = derive_key_from_seed(sensitive_seed, "m/44'/0'/0'/0/1");
 
 		// Test that regular arrays still work with auto-conversion
 		let mut raw_seed = [2u8; 64];
