@@ -10,8 +10,6 @@ use zeroize::Zeroize;
 const K: usize = params::K;
 const L: usize = params::L;
 
-extern crate alloc;
-use alloc::boxed::Box;
 /// Generate public and private key.
 ///
 /// # Arguments
@@ -40,27 +38,27 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: SensitiveBytes32) {
 	let mut key = [0u8; params::SEEDBYTES];
 	key.copy_from_slice(&seedbuf[params::SEEDBYTES + params::CRHBYTES..]);
 
-	// Move large polynomial structures to heap to reduce stack usage
-	let mut mat = Box::new([Polyvecl::default(); K]);
-	polyvec::matrix_expand(&mut *mat, &rho);
+	// Allocate polynomial structures
+	let mut mat = [Polyvecl::default(); K];
+	polyvec::matrix_expand(&mut mat, &rho);
 
-	let mut s1 = Box::new(Polyvecl::default());
+	let mut s1 = Polyvecl::default();
 	polyvec::l_uniform_eta(&mut s1, &rhoprime, 0);
 
-	let mut s2 = Box::new(Polyveck::default());
+	let mut s2 = Polyveck::default();
 	polyvec::k_uniform_eta(&mut s2, &rhoprime, L as u16);
 
-	let mut s1hat = Box::new(*s1);
+	let mut s1hat = s1;
 	polyvec::l_ntt(&mut s1hat);
 
-	let mut t1 = Box::new(Polyveck::default());
-	polyvec::matrix_pointwise_montgomery(&mut t1, &*mat, &s1hat);
+	let mut t1 = Polyveck::default();
+	polyvec::matrix_pointwise_montgomery(&mut t1, &mat, &s1hat);
 	polyvec::k_reduce(&mut t1);
 	polyvec::k_invntt_tomont(&mut t1);
 	polyvec::k_add(&mut t1, &s2);
 	polyvec::k_caddq(&mut t1);
 
-	let mut t0 = Box::new(Polyveck::default());
+	let mut t0 = Polyveck::default();
 	polyvec::k_power2round(&mut t1, &mut t0);
 
 	packing::pack_pk(pk, &rho, &t1);
@@ -93,14 +91,14 @@ struct UnpackedSecretKey {
 	public_seed_rho: [u8; params::SEEDBYTES],
 	public_key_hash_tr: [u8; params::TR_BYTES],
 	private_key_seed: [u8; params::SEEDBYTES],
-	secret_poly_t0_ntt: Box<Polyveck>,
-	secret_poly_s1_ntt: Box<Polyvecl>,
-	secret_poly_s2_ntt: Box<Polyveck>,
+	secret_poly_t0_ntt: Polyveck,
+	secret_poly_s1_ntt: Polyvecl,
+	secret_poly_s2_ntt: Polyveck,
 }
 
 /// Signing context containing precomputed values
 struct SigningContext {
-	expanded_matrix_a: Box<[Polyvecl; K]>,
+	expanded_matrix_a: [Polyvecl; K],
 	message_hash_mu: [u8; params::CRHBYTES],
 	signing_entropy_rho_prime: [u8; params::CRHBYTES],
 }
@@ -117,9 +115,9 @@ fn unpack_secret_key_for_signing(secret_key_bytes: &[u8]) -> UnpackedSecretKey {
 	let mut public_seed_rho = [0u8; params::SEEDBYTES];
 	let mut public_key_hash_tr = [0u8; params::TR_BYTES];
 	let mut private_key_seed = [0u8; params::SEEDBYTES];
-	let mut secret_poly_t0 = Box::new(Polyveck::default());
-	let mut secret_poly_s1 = Box::new(Polyvecl::default());
-	let mut secret_poly_s2 = Box::new(Polyveck::default());
+	let mut secret_poly_t0 = Polyveck::default();
+	let mut secret_poly_s1 = Polyvecl::default();
+	let mut secret_poly_s2 = Polyveck::default();
 
 	packing::unpack_sk(
 		&mut public_seed_rho,
@@ -174,8 +172,8 @@ fn prepare_signing_context(
 	hedge_bytes.zeroize();
 
 	// Expand matrix A from public seed
-	let mut expanded_matrix_a = Box::new([Polyvecl::default(); K]);
-	polyvec::matrix_expand(&mut *expanded_matrix_a, &unpacked_sk.public_seed_rho);
+	let mut expanded_matrix_a = [Polyvecl::default(); K];
+	polyvec::matrix_expand(&mut expanded_matrix_a, &unpacked_sk.public_seed_rho);
 
 	SigningContext { expanded_matrix_a, message_hash_mu, signing_entropy_rho_prime }
 }
@@ -279,7 +277,7 @@ fn generate_challenge_polynomial(
 	signature_buffer: &mut [u8],
 	commitment_w1: &Polyveck,
 	message_hash_mu: &[u8],
-) -> Box<Poly> {
+) -> Poly {
 	// Pack w1 into signature buffer temporarily
 	polyvec::k_pack_w1(signature_buffer, commitment_w1);
 
@@ -289,7 +287,7 @@ fn generate_challenge_polynomial(
 	fips202::shake256_finalize(&mut keccak_state);
 	fips202::shake256_squeeze(signature_buffer, params::C_DASH_BYTES, &mut keccak_state);
 
-	let mut challenge_poly_c = Box::new(Poly::default());
+	let mut challenge_poly_c = Poly::default();
 	poly::challenge(&mut challenge_poly_c, signature_buffer);
 	poly::ntt(&mut challenge_poly_c);
 	challenge_poly_c
@@ -312,23 +310,23 @@ pub(crate) fn signature(
 	// Set this to 1 to revert to standard rejection sampling
 	const MIN_SIGNING_ATTEMPTS: u16 = 16; // covers most cases, |max tau| < 0.1, while keeping runtime short (~1ms)
 
-	let mut masking_vector_y = Box::new(Polyvecl::default());
-	let mut commitment_w1 = Box::new(Polyveck::default());
-	let mut commitment_w0 = Box::new(Polyveck::default());
-	let mut challenge_poly_c: Box<Poly>;
-	let mut hint_vector_h = Box::new(Polyveck::default());
+	let mut masking_vector_y = Polyvecl::default();
+	let mut commitment_w1 = Polyveck::default();
+	let mut commitment_w0 = Polyveck::default();
+	let mut challenge_poly_c: Poly;
+	let mut hint_vector_h = Polyveck::default();
 	let mut signature_found = false;
 	let mut dummy_output = [0u8; params::SIGNBYTES]; // Dummy buffer for timing countermeasures
 	let mut valid_challenge = [0u8; params::C_DASH_BYTES];
-	let mut valid_signature_z = Box::new(Polyvecl::default());
-	let mut valid_hint_h = Box::new(Polyveck::default());
+	let mut valid_signature_z = Polyvecl::default();
+	let mut valid_hint_h = Polyveck::default();
 	let mut attempt_nonce = 0;
 
 	// this outer loop should run exactly once in the vast majority of cases
 	loop {
 		for _ in 0..MIN_SIGNING_ATTEMPTS {
 			// Generate masking vector and compute commitment
-			let mut signature_z = Box::new(Polyvecl::default());
+			let mut signature_z = Polyvecl::default();
 			generate_masking_vector_and_commitment(
 				&mut masking_vector_y,
 				&mut commitment_w1,
@@ -363,7 +361,7 @@ pub(crate) fn signature(
 			);
 
 			// Compute challenge_t0 for third norm check and hint generation
-			let mut challenge_t0 = Box::new(Polyveck::default());
+			let mut challenge_t0 = Polyveck::default();
 			let condition3 = compute_and_check_challenge_t0(
 				&mut challenge_t0,
 				&challenge_poly_c,
@@ -390,8 +388,8 @@ pub(crate) fn signature(
 			// may actually introduce more timing variations due to memory access patterns
 			if all_conditions_met && !signature_found {
 				valid_challenge.copy_from_slice(&dummy_output[..params::C_DASH_BYTES]);
-				*valid_signature_z = *signature_z;
-				*valid_hint_h = *hint_vector_h;
+				valid_signature_z = signature_z;
+				valid_hint_h = hint_vector_h;
 				signature_found = true;
 			}
 
@@ -427,13 +425,13 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	let mut mu = [0u8; params::CRHBYTES];
 	let mut c = [0u8; params::C_DASH_BYTES];
 	let mut c2 = [0u8; params::C_DASH_BYTES];
-	// Move large polynomial structures to heap to reduce stack usage
-	let mut cp = Box::new(Poly::default());
-	let mut mat = Box::new([Polyvecl::default(); K]);
-	let mut z = Box::new(Polyvecl::default());
-	let mut t1 = Box::new(Polyveck::default());
-	let mut w1 = Box::new(Polyveck::default());
-	let mut h = Box::new(Polyveck::default());
+	// Allocate polynomial structures
+	let mut cp = Poly::default();
+	let mut mat = [Polyvecl::default(); K];
+	let mut z = Polyvecl::default();
+	let mut t1 = Polyveck::default();
+	let mut w1 = Polyveck::default();
+	let mut h = Polyveck::default();
 	let mut state = fips202::KeccakState::default(); // shake256_init()
 
 	if sig.len() != crate::params::SIGNBYTES {
@@ -460,15 +458,15 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 
 	// Matrix-vector multiplication; compute Az - c2^dt1
 	poly::challenge(&mut cp, &c);
-	polyvec::matrix_expand(&mut *mat, &rho);
+	polyvec::matrix_expand(&mut mat, &rho);
 
 	polyvec::l_ntt(&mut z);
-	polyvec::matrix_pointwise_montgomery(&mut w1, &*mat, &z);
+	polyvec::matrix_pointwise_montgomery(&mut w1, &mat, &z);
 
 	poly::ntt(&mut cp);
 	polyvec::k_shiftl(&mut t1);
 	polyvec::k_ntt(&mut t1);
-	let t1_2 = Box::new(*t1);
+	let t1_2 = t1;
 	polyvec::k_pointwise_poly_montgomery(&mut t1, &cp, &t1_2);
 
 	polyvec::k_sub(&mut w1, &t1);
