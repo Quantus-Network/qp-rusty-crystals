@@ -164,7 +164,6 @@ impl SecretKey {
 				Ok(sig)
 			},
 			None => {
-				let empty_context = [0u8, 0u8];
 				let mut sig: Signature = [0u8; SIGNBYTES];
 				// Prefix 2 zero bytes (domain_sep=0, context_len=0) for pure signatures
 				let mut m = vec![0u8; msg.len() + 2];

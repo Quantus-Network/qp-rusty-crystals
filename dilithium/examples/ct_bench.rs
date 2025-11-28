@@ -622,11 +622,18 @@ fn test_k_pack_w1_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	let mut inputs = Vec::new();
 	let mut classes = Vec::new();
 
+	let mut fixed_w1 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+	for i in 0..qp_rusty_crystals_dilithium::params::K {
+		for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
+			fixed_w1.vec[i].coeffs[j] = rng.gen::<i32>() % 16; // w1 coefficients are in [0, 15]
+		}
+	}
+
 	for _ in 0..5_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 
 		let w1 = match class {
-			Class::Left => qp_rusty_crystals_dilithium::polyvec::Polyveck::default(),
+			Class::Left => fixed_w1,
 			Class::Right => {
 				let mut w1 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
 				// Fill w1 with random data

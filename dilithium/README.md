@@ -10,7 +10,6 @@ Pure Rust implementation of the ML-DSA-87 (CRYSTALS-Dilithium) post-quantum digi
 - **NIST Compliant** - Verified against official test vectors
 - **Reasonably Constant-Time** - [Reasonably constant-time execution for keygen and signing](CONSTANT_TIME_TESTING.md)
 - **Context String Support** - Support for domain separation contexts
-- **Prehashing Support** - Support for SHA-512 prehashing
 
 ## Usage
 
@@ -60,26 +59,6 @@ let signature = keypair.sign(message, Some(context), None);
 
 // Verify with context
 let is_valid = keypair.verify(message, &signature, Some(context));
-assert!(is_valid);
-```
-
-### Prehashing Support
-
-```rust
-use qp_rusty_crystals_dilithium::{ml_dsa_87, PH};
-
-// Generate secure entropy
-let mut entropy = [0u8; 32];
-getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
-let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
-
-let large_message = b"Very large message that we want to hash first...";
-
-// Sign with SHA-256 prehashing
-let signature = keypair.prehash_sign(large_message, None, None, PH::SHA256).unwrap();
-
-// Verify with SHA-256 prehashing
-let is_valid = keypair.prehash_verify(large_message, &signature, None, PH::SHA256);
 assert!(is_valid);
 ```
 
@@ -151,22 +130,13 @@ pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool
 - `sig`: The signature to verify
 - `ctx`: Optional context string (must match the one used for signing)
 
-### Prehash Signing/Verification
-
-```rust
-pub fn prehash_sign(&self, msg: &[u8], ctx: Option<&[u8]>, hedge: Option<[u8; 32]>, ph: PH) -> Option<Signature>
-pub fn prehash_verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>, ph: PH) -> bool
-```
-
-Available hash functions: `PH::SHA256`, `PH::SHA512`
-
 ## Stack Usage
 
-This implementation is optimized for constrained environments and works with small stack sizes:
+This implementation is not optimized for constrained environments and may not work with small stack sizes:
 
-- Key generation: ≤36KB stack
-- Signing: ≤36KB stack  
-- Verification: ≤36KB stack
+- Key generation: ≤256KB stack
+- Signing: ≤256KB stack  
+- Verification: ≤256KB stack
 
 See `examples/stack_usage_demo.rs` for detailed stack usage analysis.
 

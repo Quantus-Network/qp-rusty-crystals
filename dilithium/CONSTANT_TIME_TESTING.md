@@ -28,7 +28,7 @@ test_keypair_generation_ct        : n == +0.005M, max t = +1.83452, max tau = +0
 - **|max t| < 5.0**: ✅ GOOD - No timing leakage detected
 - **|max tau| < 0.1**: ✅ GOOD - No timing leakage detected
 - **|max tau| ≥ 0.1**: ⚠️ CONCERN - Potential timing side-channel detected
-- **Higher (5/tau)² values**: Better security - indicates more measurements would be needed to detect any leakage
+- **Higher (5/tau)² values**: ✅ GOOD - Higher numbers indicates more measurements would be needed to detect any leakage
 
 ## Tests Included
 
@@ -76,7 +76,6 @@ If you see inconsistent results:
 1. **Check system load**: Ensure CPU is not under heavy load
 2. **Disable frequency scaling**: Set CPU governor to 'performance' mode
 3. **Increase sample size**: Modify iteration counts in the test functions
-4. **Run longer**: Let tests run for more iterations
 
 ### Example: Disabling CPU Frequency Scaling (Linux)
 ```bash
@@ -111,7 +110,13 @@ Broadly speaking, we have made the rejection sampling "lumpy", in that a fixed s
 
 ## Security Implications
 
-Constant-time execution may not be critical for Dilithium due to the rejection sampling and the liberal use of hash functions in the algorithm. Nevertheless, we have chosen to implement constant-time operations for keygen and signing as an extra layer of protection for those who desire it. We note that adding a hedge to signing was specifically added by NIST to account for fault injection attacks. 
+This implementation is described as "reasonably constant-time" because
+
+- Both keygen and signing have low tau values 
+- Rejection sampling makes it difficult to be perfectly constant time
+- There is a natural tenstion between constant-timeness and readability and performance
+
+Anyone wishing to fully protect against side channel attacks should test on specific hardware relative to a specific threat vector. 
 
 1. **Key Generation**: Timing attacks could reveal information about the secret key material
 2. **Signing Process**: Non-constant-time operations could leak private key bits
