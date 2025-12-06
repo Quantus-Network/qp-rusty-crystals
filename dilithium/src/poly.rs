@@ -1,10 +1,11 @@
 use crate::{fips202, ntt, params, reduce, rounding};
+use zeroize::ZeroizeOnDrop;
 const N: usize = params::N as usize;
 const UNIFORM_NBLOCKS: usize = (767 + fips202::SHAKE128_RATE) / fips202::SHAKE128_RATE;
 const D_SHL: i32 = 1 << (params::D - 1);
 
 /// Represents a polynomial
-#[derive(Clone, Copy)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct Poly {
 	pub coeffs: [i32; N],
 }
@@ -698,7 +699,7 @@ mod tests {
 			b.coeffs[i] = (i * 3) as i32;
 		}
 
-		let original_a = a;
+		let original_a = a.clone();
 		add_ip(&mut a, &b);
 
 		for i in 0..N {
@@ -733,7 +734,7 @@ mod tests {
 			b.coeffs[i] = (i * 2) as i32;
 		}
 
-		let original_a = a;
+		let original_a = a.clone();
 		sub_ip(&mut a, &b);
 
 		for i in 0..N {
@@ -748,7 +749,7 @@ mod tests {
 		poly.coeffs[1] = 3;
 		poly.coeffs[2] = 7;
 
-		let original = poly;
+		let original = poly.clone();
 		shiftl(&mut poly);
 
 		for i in 0..N {
@@ -765,7 +766,7 @@ mod tests {
 			poly.coeffs[i] = ((i * 123 + 456) % 1000) as i32;
 		}
 
-		let original = poly;
+		let original = poly.clone();
 		ntt(&mut poly);
 		invntt_tomont(&mut poly);
 
@@ -850,7 +851,7 @@ mod tests {
 		a.coeffs[1] = 2500;
 		a.coeffs[2] = -500;
 
-		let original = a;
+		let original = a.clone();
 		power2round(&mut a, &mut a0);
 
 		// Check that the decomposition is correct: original = a * 2^D + a0

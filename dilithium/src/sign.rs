@@ -5,7 +5,8 @@ use crate::{
 	polyvec::{Polyveck, Polyvecl},
 	SensitiveBytes32,
 };
-use zeroize::Zeroize;
+use core::array;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const K: usize = params::K;
 const L: usize = params::L;
@@ -39,7 +40,7 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: SensitiveBytes32) {
 	key.copy_from_slice(&seedbuf[params::SEEDBYTES + params::CRHBYTES..]);
 
 	// Allocate polynomial structures
-	let mut mat = [Polyvecl::default(); K];
+	let mut mat: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
 	polyvec::matrix_expand(&mut mat, &rho);
 
 	let mut s1 = Polyvecl::default();
@@ -48,7 +49,7 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: SensitiveBytes32) {
 	let mut s2 = Polyveck::default();
 	polyvec::k_uniform_eta(&mut s2, &rhoprime, L as u16);
 
-	let mut s1hat = s1;
+	let mut s1hat = s1.clone();
 	polyvec::l_ntt(&mut s1hat);
 
 	let mut t1 = Polyveck::default();
@@ -87,6 +88,7 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: SensitiveBytes32) {
 ///
 /// Note signature depends on std because k_decompose depends on swap which depends on std
 /// Unpacked secret key components
+#[derive(ZeroizeOnDrop)]
 struct UnpackedSecretKey {
 	public_seed_rho: [u8; params::SEEDBYTES],
 	public_key_hash_tr: [u8; params::TR_BYTES],
@@ -172,7 +174,7 @@ fn prepare_signing_context(
 	hedge_bytes.zeroize();
 
 	// Expand matrix A from public seed
-	let mut expanded_matrix_a = [Polyvecl::default(); K];
+	let mut expanded_matrix_a: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
 	polyvec::matrix_expand(&mut expanded_matrix_a, &unpacked_sk.public_seed_rho);
 
 	SigningContext { expanded_matrix_a, message_hash_mu, signing_entropy_rho_prime }
@@ -200,14 +202,15 @@ fn compute_and_check_commitment_w0(
 	commitment_w0: &mut Polyveck,
 	challenge_poly_c: &Poly,
 	secret_poly_s2_ntt: &Polyveck,
-	temp_vector: &mut Polyveck,
 ) -> bool {
+	let mut temp_vector = Polyveck::default();
+
 	// Compute cs2
-	polyvec::k_pointwise_poly_montgomery(temp_vector, challenge_poly_c, secret_poly_s2_ntt);
-	polyvec::k_invntt_tomont(temp_vector);
+	polyvec::k_pointwise_poly_montgomery(&mut temp_vector, challenge_poly_c, secret_poly_s2_ntt);
+	polyvec::k_invntt_tomont(&mut temp_vector);
 
 	// Compute w0 - cs2
-	polyvec::k_sub(commitment_w0, temp_vector);
+	polyvec::k_sub(commitment_w0, &mut temp_vector);
 	polyvec::k_reduce(commitment_w0);
 
 	// Check ||w0 - cs2||∞ < γ₂ - β
@@ -237,7 +240,7 @@ fn compute_and_check_hint_vector(
 	commitment_w1: &Polyveck,
 ) -> bool {
 	// Compute w0 + challenge_t0 for hint generation
-	let mut w0_plus_challenge_t0 = *commitment_w0;
+	let mut w0_plus_challenge_t0 = commitment_w0.clone();
 	polyvec::k_add(&mut w0_plus_challenge_t0, challenge_t0);
 
 	// Generate hint vector
@@ -261,7 +264,7 @@ fn generate_masking_vector_and_commitment(
 	polyvec::l_uniform_gamma1(masking_vector_y, signing_entropy, attempt_nonce);
 
 	// Compute commitment w = Ay
-	*signature_z_temp = *masking_vector_y;
+	*signature_z_temp = masking_vector_y.clone();
 	polyvec::l_ntt(signature_z_temp);
 	polyvec::matrix_pointwise_montgomery(commitment_w1, expanded_matrix_a, signature_z_temp);
 	polyvec::k_reduce(commitment_w1);
@@ -357,7 +360,6 @@ pub(crate) fn signature(
 				&mut commitment_w0,
 				&challenge_poly_c,
 				&unpacked_sk.secret_poly_s2_ntt,
-				&mut hint_vector_h, // Use hint_vector_h as temporary storage
 			);
 
 			// Compute challenge_t0 for third norm check and hint generation
@@ -389,7 +391,7 @@ pub(crate) fn signature(
 			if all_conditions_met && !signature_found {
 				valid_challenge.copy_from_slice(&dummy_output[..params::C_DASH_BYTES]);
 				valid_signature_z = signature_z;
-				valid_hint_h = hint_vector_h;
+				valid_hint_h = hint_vector_h.clone();
 				signature_found = true;
 			}
 
@@ -427,7 +429,7 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	let mut c2 = [0u8; params::C_DASH_BYTES];
 	// Allocate polynomial structures
 	let mut cp = Poly::default();
-	let mut mat = [Polyvecl::default(); K];
+	let mut mat: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
 	let mut z = Polyvecl::default();
 	let mut t1 = Polyveck::default();
 	let mut w1 = Polyveck::default();
@@ -466,7 +468,7 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	poly::ntt(&mut cp);
 	polyvec::k_shiftl(&mut t1);
 	polyvec::k_ntt(&mut t1);
-	let t1_2 = t1;
+	let t1_2 = t1.clone();
 	polyvec::k_pointwise_poly_montgomery(&mut t1, &cp, &t1_2);
 
 	polyvec::k_sub(&mut w1, &t1);

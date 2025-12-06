@@ -146,9 +146,8 @@ fn main() {
 
 	// Test with progressively smaller stack sizes
 	let stack_sizes = [
-		512, // 512KB - should definitely work
-		444, 333, 290, // Currently all three functions fit in this stack size
-		256, // 256KB - typical small embedded system
+		1024, 800, 700, 512, // 512KB
+		444, 333, 290, 256, // 256KB - typical small embedded system
 		200, 160, 150, 140, 128, // 128KB - typical small embedded system
 		100, 88, 64, // 64KB - large microcontroller
 		50, 40, 36, 34, 33, 32, // 32KB - medium microcontroller

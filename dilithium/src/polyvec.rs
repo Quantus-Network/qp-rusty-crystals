@@ -1,29 +1,29 @@
-use core::mem::swap;
-
 use crate::{params, poly, poly::Poly};
+use core::{array, mem::swap};
+use zeroize::ZeroizeOnDrop;
 
 const K: usize = params::K;
 const L: usize = params::L;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct Polyveck {
 	pub vec: [Poly; K],
 }
 
 impl Default for Polyveck {
 	fn default() -> Self {
-		Polyveck { vec: [Poly::default(); K] }
+		Polyveck { vec: array::from_fn(|_| Poly::default()) }
 	}
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct Polyvecl {
 	pub vec: [Poly; L],
 }
 
 impl Default for Polyvecl {
 	fn default() -> Self {
-		Polyvecl { vec: [Poly::default(); L] }
+		Polyvecl { vec: array::from_fn(|_| Poly::default()) }
 	}
 }
 
@@ -338,7 +338,7 @@ mod tests {
 			}
 		}
 
-		let original_a = a;
+		let original_a = a.clone();
 		l_add(&mut a, &b);
 
 		// Check addition was performed correctly
@@ -368,7 +368,7 @@ mod tests {
 			}
 		}
 
-		let original_a = a;
+		let original_a = a.clone();
 		k_add(&mut a, &b);
 
 		// Check addition was performed correctly
@@ -398,7 +398,7 @@ mod tests {
 			}
 		}
 
-		let original_a = a;
+		let original_a = a.clone();
 		k_sub(&mut a, &b);
 
 		// Check subtraction was performed correctly
@@ -426,7 +426,7 @@ mod tests {
 			}
 		}
 
-		let original = polyvecl;
+		let original = polyvecl.clone();
 		l_ntt(&mut polyvecl);
 		l_invntt_tomont(&mut polyvecl);
 
@@ -457,7 +457,7 @@ mod tests {
 			}
 		}
 
-		let original = polyveck;
+		let original = polyveck.clone();
 		k_ntt(&mut polyveck);
 		k_invntt_tomont(&mut polyveck);
 
@@ -524,7 +524,7 @@ mod tests {
 			}
 		}
 
-		let original = polyveck;
+		let original = polyveck.clone();
 		k_shiftl(&mut polyveck);
 
 		// Check that all coefficients were left-shifted by D
@@ -546,8 +546,8 @@ mod tests {
 		let rho1 = [0x42u8; params::SEEDBYTES];
 		let rho2 = [0x43u8; params::SEEDBYTES];
 
-		let mut mat1 = [Polyvecl::default(); K];
-		let mut mat2 = [Polyvecl::default(); K];
+		let mut mat1: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
+		let mut mat2: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
 
 		matrix_expand(&mut mat1, &rho1);
 		matrix_expand(&mut mat2, &rho2);
@@ -569,7 +569,7 @@ mod tests {
 
 	#[test]
 	fn test_matrix_pointwise_montgomery() {
-		let mut mat = [Polyvecl::default(); K];
+		let mut mat: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
 		let mut v = Polyvecl::default();
 		let mut result = Polyveck::default();
 
@@ -662,7 +662,7 @@ mod tests {
 		h.vec[1].coeffs[10] = 1;
 		h.vec[2].coeffs[50] = 1;
 
-		let _original_w = w;
+		let _original_w = w.clone();
 		k_use_hint(&mut w, &h);
 
 		// Values with hints should potentially be modified

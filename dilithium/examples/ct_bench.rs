@@ -557,7 +557,7 @@ fn test_polyvecl_norm_check_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	for _ in 0..8_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let poly = match class {
-			Class::Left => fixed_polyvec,
+			Class::Left => fixed_polyvec.clone(),
 			Class::Right => {
 				let mut p = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
 				for i in 0..7 {
@@ -592,7 +592,7 @@ fn test_polyveck_norm_check_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	for _ in 0..8_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let poly = match class {
-			Class::Left => fixed_polyvec,
+			Class::Left => fixed_polyvec.clone(),
 			Class::Right => {
 				let mut p = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
 				for i in 0..8 {
@@ -633,7 +633,7 @@ fn test_k_pack_w1_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 
 		let w1 = match class {
-			Class::Left => fixed_w1,
+			Class::Left => fixed_w1.clone(),
 			Class::Right => {
 				let mut w1 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
 				// Fill w1 with random data
@@ -677,7 +677,7 @@ fn test_pack_sig_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 		let (z_vec, h_vec) = match class {
 			Class::Left => {
 				// Use the fixed signature components
-				(fixed_z, fixed_h)
+				(fixed_z.clone(), fixed_h.clone())
 			},
 			Class::Right => {
 				// Generate random signature components
@@ -713,7 +713,7 @@ fn test_k_make_hint_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	for _ in 0..6_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let (w0, w1) = match class {
-			Class::Left => (fixed_w0, fixed_w1),
+			Class::Left => (fixed_w0.clone(), fixed_w1.clone()),
 			Class::Right => {
 				let mut w0 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
 				let mut w1 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
@@ -843,7 +843,7 @@ fn test_check_norm_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	for _ in 0..5_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let poly = match class {
-			Class::Left => fixed_poly,
+			Class::Left => fixed_poly.clone(),
 			Class::Right => generate_random_polynomial(rng),
 		};
 
@@ -1067,7 +1067,7 @@ fn test_polynomial_arithmetic_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 	for _ in 0..8_000 {
 		let class = if rng.gen::<bool>() { Class::Left } else { Class::Right };
 		let (poly1, poly2) = match class {
-			Class::Left => (fixed_poly1, fixed_poly2),
+			Class::Left => (fixed_poly1.clone(), fixed_poly2.clone()),
 			Class::Right => (generate_random_polynomial(rng), generate_random_polynomial(rng)),
 		};
 
@@ -1081,7 +1081,7 @@ fn test_polynomial_arithmetic_ct(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 		runner.run_one(class, || {
 			// Test various polynomial operations that happen during signing
-			let mut poly1_copy = poly1;
+			let mut poly1_copy = poly1.clone();
 			qp_rusty_crystals_dilithium::poly::ntt(&mut poly1_copy);
 			let mut result = qp_rusty_crystals_dilithium::poly::Poly::default();
 			qp_rusty_crystals_dilithium::poly::pointwise_montgomery(
