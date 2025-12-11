@@ -210,7 +210,7 @@ fn compute_and_check_commitment_w0(
 	polyvec::k_invntt_tomont(&mut temp_vector);
 
 	// Compute w0 - cs2
-	polyvec::k_sub(commitment_w0, &mut temp_vector);
+	polyvec::k_sub(commitment_w0, &temp_vector);
 	polyvec::k_reduce(commitment_w0);
 
 	// Check ||w0 - cs2||∞ < γ₂ - β
