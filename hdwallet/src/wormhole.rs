@@ -32,6 +32,8 @@ use qp_poseidon_core::{
 };
 extern crate alloc;
 use alloc::vec::Vec;
+use qp_rusty_crystals_dilithium::SensitiveBytes32;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Salt used when deriving wormhole addresses.
 pub const ADDRESS_SALT: &str = "wormhole";
@@ -44,7 +46,7 @@ pub enum WormholeError {
 }
 
 /// A struct representing a wormhole identity pair: address + secret.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, ZeroizeOnDrop)]
 pub struct WormholePair {
 	/// Deterministic Poseidon-derived address.
 	pub address: [u8; 32],
@@ -55,14 +57,18 @@ pub struct WormholePair {
 }
 
 impl WormholePair {
-	/// Generates a new `WormholePair` using secure system entropy (only available with `std`).
+	/// Generates a new `WormholePair` from user-supplied entropy.
 	///
 	/// # Errors
 	/// Returns `WormholeError::InvalidSecretFormat` if entropy collection fails.
-	pub fn generate_new(seed: [u8; 32]) -> Result<WormholePair, WormholeError> {
-		let secret = hash_variable_length_bytes(&seed);
+	pub fn generate_new(seed: SensitiveBytes32) -> Result<WormholePair, WormholeError> {
+		let mut hashed_seed = hash_variable_length_bytes(seed.as_bytes());
+		let secret = SensitiveBytes32::new(&mut hashed_seed);
+		let result = Self::generate_pair_from_secret(secret);
 
-		Ok(Self::generate_pair_from_secret(&secret))
+		// seed and secret are automatically zeroized when it drops
+
+		Ok(result)
 	}
 
 	/// Verifies whether the given raw secret generates the specified wormhole address.
@@ -73,8 +79,9 @@ impl WormholePair {
 	///
 	/// # Returns
 	/// `true` if the address matches the derived one, `false` otherwise.
-	pub fn verify(address: [u8; 32], secret: &[u8; 32]) -> bool {
+	pub fn verify(address: [u8; 32], secret: SensitiveBytes32) -> bool {
 		let generated_address = Self::generate_pair_from_secret(secret).address;
+		// Note: secret is automatically zeroized when the SensitiveBytes32 wrapper drops
 		generated_address == address
 	}
 
@@ -82,15 +89,34 @@ impl WormholePair {
 	///
 	/// This function performs a secondary Poseidon hash over the salt + hashed secret
 	/// to derive the wormhole address.
-	pub fn generate_pair_from_secret(secret: &[u8; 32]) -> WormholePair {
+	///
+	/// # Security Note
+	/// This function takes ownership of the secret for security (move semantics).
+	/// The secret parameter is zeroized before returning.
+	pub fn generate_pair_from_secret(secret: SensitiveBytes32) -> WormholePair {
+		let mut secret_bytes = secret.into_bytes();
 		let mut preimage_felts = Vec::new();
 		let salt_felt = injective_string_to_felts(ADDRESS_SALT);
-		let secret_felt = unsafe_digest_bytes_to_felts(secret);
+		let mut secret_felt = unsafe_digest_bytes_to_felts(&secret_bytes);
 		preimage_felts.extend_from_slice(&salt_felt);
 		preimage_felts.extend_from_slice(&secret_felt);
 		let inner_hash = hash_variable_length(preimage_felts.clone());
-		let second_hash = double_hash_variable_length(preimage_felts);
-		WormholePair { address: second_hash, first_hash: inner_hash, secret: *secret }
+		let second_hash = double_hash_variable_length(preimage_felts.clone());
+
+		// Create result with copy of secret before zeroizing
+		let result =
+			WormholePair { address: second_hash, first_hash: inner_hash, secret: secret_bytes };
+
+		// Manually clear intermediate sensitive data
+		for elem in secret_felt.iter_mut() {
+			*elem = Default::default();
+		}
+		preimage_felts.clear();
+
+		// Zeroize the input secret parameter
+		secret_bytes.zeroize();
+
+		result
 	}
 }
 
@@ -103,13 +129,14 @@ mod tests {
 	#[test]
 	fn test_generate_pair_from_secret() {
 		// Arrange
-		let secret = [42u8; 32];
+		let mut secret = [42u8; 32];
 
 		// Act
-		let pair = WormholePair::generate_pair_from_secret(&secret);
+		let pair = WormholePair::generate_pair_from_secret((&mut secret).into());
 
-		// Assert
-		assert_eq!(pair.secret, secret);
+		// Assert secret was zeroized and pair.secret was not zeroized
+		assert_eq!(secret, [0u8; 32]);
+		assert_eq!(pair.secret, [42u8; 32]);
 
 		// We can't easily predict the exact hash output without mocking Poseidon2Core,
 		// but we can verify that it's not zero and that it's deterministic
@@ -117,18 +144,20 @@ mod tests {
 		assert_ne!(pair.address, [0u8; 32]);
 
 		// Verify determinism
-		let pair2 = WormholePair::generate_pair_from_secret(&secret);
+		let mut secret2 = [42u8; 32];
+		let pair2 = WormholePair::generate_pair_from_secret((&mut secret2).into());
 		assert_eq!(pair.address, pair2.address);
 	}
 
 	#[test]
 	fn test_verify_valid_secret() {
 		// Arrange
-		let secret = [1u8; 32];
-		let pair = WormholePair::generate_pair_from_secret(&secret);
+		let mut secret = [1u8; 32];
+		let pair = WormholePair::generate_pair_from_secret((&mut secret).into());
 
 		// Act
-		let result = WormholePair::verify(pair.address, &secret);
+		let mut secret_for_verify = [1u8; 32];
+		let result = WormholePair::verify(pair.address, (&mut secret_for_verify).into());
 
 		// Assert
 		assert!(result);
@@ -137,12 +166,12 @@ mod tests {
 	#[test]
 	fn test_verify_invalid_secret() {
 		// Arrange
-		let secret = [1u8; 32];
-		let wrong_secret = [2u8; 32];
-		let pair = WormholePair::generate_pair_from_secret(&secret);
+		let mut secret = [1u8; 32];
+		let mut wrong_secret = [2u8; 32];
+		let pair = WormholePair::generate_pair_from_secret((&mut secret).into());
 
 		// Act
-		let result = WormholePair::verify(pair.address, &wrong_secret);
+		let result = WormholePair::verify(pair.address, (&mut wrong_secret).into());
 
 		// Assert
 		assert!(!result);
@@ -155,19 +184,21 @@ mod tests {
 		let secret_felts = unsafe_digest_bytes_to_felts(&secret);
 
 		// Act - Generate the pair
-		let pair = WormholePair::generate_pair_from_secret(&secret);
+		let mut secret_copy = secret;
+		let pair = WormholePair::generate_pair_from_secret((&mut secret_copy).into());
 
 		// Assert
 		// 1. Verify that the secret is stored correctly
 		assert_eq!(pair.secret, secret);
 
 		// 2. Verify that the derived address is consistent with our verification method
-		assert!(WormholePair::verify(pair.address, &secret));
+		let mut secret_for_verify = secret;
+		assert!(WormholePair::verify(pair.address, (&mut secret_for_verify).into()));
 
 		// 3. Verify that even a small change in the secret produces a different address
 		let mut altered_secret = secret;
 		altered_secret[0] ^= 1; // Flip one bit in the first byte
-		let altered_pair = WormholePair::generate_pair_from_secret(&altered_secret);
+		let altered_pair = WormholePair::generate_pair_from_secret((&mut altered_secret).into());
 		assert_ne!(pair.address, altered_pair.address);
 
 		// 4. Verify that the process uses the salt
@@ -188,12 +219,12 @@ mod tests {
 	#[test]
 	fn test_different_secrets_produce_different_addresses() {
 		// Arrange
-		let secret1 = [5u8; 32];
-		let secret2 = [6u8; 32];
+		let mut secret1 = [5u8; 32];
+		let mut secret2 = [6u8; 32];
 
 		// Act
-		let pair1 = WormholePair::generate_pair_from_secret(&secret1);
-		let pair2 = WormholePair::generate_pair_from_secret(&secret2);
+		let pair1 = WormholePair::generate_pair_from_secret((&mut secret1).into());
+		let pair2 = WormholePair::generate_pair_from_secret((&mut secret2).into());
 
 		// Assert
 		assert_ne!(pair1.address, pair2.address);
@@ -201,9 +232,9 @@ mod tests {
 
 	#[test]
 	fn test_generate_new_produces_valid_pair() {
-		let seed = [55u8; 32];
+		let mut seed = [55u8; 32];
 		// Act
-		let result = WormholePair::generate_new(seed);
+		let result = WormholePair::generate_new((&mut seed).into());
 
 		// Assert
 		assert!(result.is_ok());
@@ -216,7 +247,8 @@ mod tests {
 		assert_ne!(pair.address, [0u8; 32]);
 
 		// Verification should work with the generated secret
-		let verification = WormholePair::verify(pair.address, &pair.secret);
+		let mut secret_for_verify = pair.secret;
+		let verification = WormholePair::verify(pair.address, (&mut secret_for_verify).into());
 		assert!(verification);
 	}
 
@@ -230,7 +262,8 @@ mod tests {
 		let secret_felts = unsafe_digest_bytes_to_felts(&secret);
 
 		// Generate a pair normally (with salt)
-		let pair_with_salt = WormholePair::generate_pair_from_secret(&secret);
+		let mut secret_copy = secret;
+		let pair_with_salt = WormholePair::generate_pair_from_secret((&mut secret_copy).into());
 
 		// Simulate address generation without salt or with different salt
 		let different_salt = b"diffrent";

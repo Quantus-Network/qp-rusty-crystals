@@ -19,16 +19,14 @@ impl Display for KeyParsingError {
 }
 
 #[derive(Debug)]
-pub enum DrbgError {
-	InvalidEntropyLength,
-	NotInitialized,
+pub enum SignatureError {
+	ContextTooLong,
 }
 
-impl Display for DrbgError {
+impl Display for SignatureError {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		let str = match self {
-			DrbgError::InvalidEntropyLength => "InvalidEntropyLength",
-			DrbgError::NotInitialized => "NotInitialized",
+			SignatureError::ContextTooLong => "ContextTooLong",
 		};
 		write!(f, "{str}")
 	}

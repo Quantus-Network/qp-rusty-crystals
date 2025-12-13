@@ -4,6 +4,25 @@ A Rust implementation of the ML-DSA (CRYSTALS-Dilithium) post-quantum digital si
 
 This workspace provides post-quantum cryptographic primitives and HD wallet functionality compatible with BIP-32, BIP-39, and BIP-44 standards.
 
+## Security Features
+
+This implementation provides enterprise-grade memory security through `SensitiveBytes*` wrapper types that:
+
+- **Prevent accidental copying** - Compile-time enforcement ensures sensitive data can only be moved, never copied
+- **Automatic memory zeroization** - Both source arrays and wrapper contents are automatically cleared when dropped
+- **Explicit sensitive data handling** - API requires `(&mut entropy).into()` syntax, making sensitive operations obvious
+- **Move-only semantics** - Functions take `SensitiveBytes32`/`SensitiveBytes64` directly, preventing silent reference copying
+
+```rust
+// Secure by design - entropy is zeroized after conversion
+let mut entropy = [0u8; 32];
+getrandom::getrandom(&mut entropy).unwrap();
+let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
+// entropy is now [0,0,0,...] - no sensitive data left in memory
+```
+
+This eliminates entire classes of security vulnerabilities related to sensitive data handling in cryptographic applications.
+
 ## Overview
 
 This workspace contains two independent crates:
@@ -17,35 +36,46 @@ This workspace contains two independent crates:
 
 ```toml
 [dependencies]
-qp-rusty-crystals-dilithium = "0.0.2"
+qp-rusty-crystals-dilithium = "2.0.0"
+getrandom = "0.2"  # For secure entropy generation if needed
 ```
 
+**Security Note**: When generating entropy for cryptographic operations, always use cryptographically secure random sources. Never use predictable strings, timestamps, or user input as entropy.
+
 ```rust
-use qp_rusty_crystals_dilithium::{ml_dsa_44, Keypair};
+use qp_rusty_crystals_dilithium::ml_dsa_87;
+
+// Generate secure entropy
+let mut entropy = [0u8; 32];
+getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
 
 // Generate keypair
-let keypair = ml_dsa_44::Keypair::generate(None);
+let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into()).expect("Failed to generate keypair");
 
 // Sign message
 let message = b"Hello, post-quantum world!";
-let signature = keypair.sign(message);
+let signature = keypair.sign(message, None, None);
 
 // Verify signature
-let is_valid = keypair.public_key.verify(message, &signature);
+let is_valid = keypair.verify(message, &signature, None);
 ```
 
 ### HD Wallet
 
 ```toml
 [dependencies]
-qp-rusty-crystals-hdwallet = "0.0.2"
+qp-rusty-crystals-hdwallet = "1.0.0"
 ```
 
 ```rust
 use qp_rusty_crystals_hdwallet::{generate_mnemonic, HDLattice};
 
+// Generate secure seed for mnemonic
+let mut seed = [0u8; 32];
+getrandom::getrandom(&mut seed).expect("Failed to generate seed");
+
 // Generate mnemonic
-let mnemonic = generate_mnemonic(24)?;
+let mnemonic = generate_mnemonic((&mut seed).into())?;
 
 // Create HD wallet
 let hd_wallet = HDLattice::from_mnemonic(&mnemonic, None)?;

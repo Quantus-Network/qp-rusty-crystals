@@ -10,7 +10,6 @@ Pure Rust implementation of the ML-DSA-87 (CRYSTALS-Dilithium) post-quantum digi
 - **NIST Compliant** - Verified against official test vectors
 - **Reasonably Constant-Time** - [Reasonably constant-time execution for keygen and signing](CONSTANT_TIME_TESTING.md)
 - **Context String Support** - Support for domain separation contexts
-- **Prehashing Support** - Support for SHA-256 and SHA-512 prehashing
 
 ## Usage
 
@@ -25,9 +24,13 @@ qp-rusty-crystals-dilithium = "2.0.0"
 ```rust
 use qp_rusty_crystals_dilithium::ml_dsa_87;
 
-// Generate a keypair with entropy
-let entropy = b"my_random_seed_exactly_32_bytes!";
-let keypair = ml_dsa_87::Keypair::generate(entropy);
+// Generate a keypair with secure random entropy
+let mut entropy = [0u8; 32];
+getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
+let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
+
+// Alternative: you could also use a different secure entropy source
+// let keypair = ml_dsa_87::Keypair::generate(&other_secure_entropy);
 
 // Sign a message
 let message = b"Hello, post-quantum world!";
@@ -43,8 +46,10 @@ assert!(is_valid);
 ```rust
 use qp_rusty_crystals_dilithium::ml_dsa_87;
 
-let entropy = b"my_random_seed_exactly_32_bytes!";
-let keypair = ml_dsa_87::Keypair::generate(entropy);
+// Generate secure entropy
+let mut entropy = [0u8; 32];
+getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
+let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
 
 let message = b"Important message";
 let context = b"email-signature-v1"; // Domain separation
@@ -57,34 +62,21 @@ let is_valid = keypair.verify(message, &signature, Some(context));
 assert!(is_valid);
 ```
 
-### Prehashing Support
-
-```rust
-use qp_rusty_crystals_dilithium::{ml_dsa_87, PH};
-
-let entropy = b"my_random_seed_exactly_32_bytes!";
-let keypair = ml_dsa_87::Keypair::generate(entropy);
-
-let large_message = b"Very large message that we want to hash first...";
-
-// Sign with SHA-256 prehashing
-let signature = keypair.prehash_sign(large_message, None, None, PH::SHA256).unwrap();
-
-// Verify with SHA-256 prehashing
-let is_valid = keypair.prehash_verify(large_message, &signature, None, PH::SHA256);
-assert!(is_valid);
-```
-
 ### Hedged Signing (Deterministic with Entropy)
 
 ```rust
 use qp_rusty_crystals_dilithium::ml_dsa_87;
 
-let entropy = b"my_random_seed_exactly_32_bytes!";
-let keypair = ml_dsa_87::Keypair::generate(entropy);
+// Generate secure entropy for keypair
+let mut entropy = [0u8; 32];
+getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
+let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
 
 let message = b"Message to sign";
-let hedge_entropy = *b"hedge_randomness_32_bytes_long!!";
+
+// Generate secure hedge entropy
+let mut hedge_entropy = [0u8; 32];
+getrandom::getrandom(&mut hedge_entropy).expect("Failed to generate hedge entropy");
 
 // Hedged signing provides additional randomness
 let signature = keypair.sign(message, None, Some(hedge_entropy));
@@ -108,7 +100,15 @@ assert!(is_valid);
 pub fn generate(entropy: &[u8]) -> Keypair
 ```
 
-Generates a new keypair using the provided entropy. The entropy should be at least 32 bytes for security.
+Generates a new keypair using the provided entropy. The entropy must be at least 32 bytes of cryptographically secure random data (e.g., from `getrandom::getrandom()`).
+
+**⚠️ Security Warning**: Never use predictable or human-readable strings as entropy. This includes:
+- Hardcoded strings like `b"my_seed"`
+- User passwords or passphrases
+- Timestamps or counters
+- Any deterministic data
+
+Always use a cryptographically secure random number generator.
 
 ### Signing
 
@@ -130,22 +130,13 @@ pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool
 - `sig`: The signature to verify
 - `ctx`: Optional context string (must match the one used for signing)
 
-### Prehash Signing/Verification
-
-```rust
-pub fn prehash_sign(&self, msg: &[u8], ctx: Option<&[u8]>, hedge: Option<[u8; 32]>, ph: PH) -> Option<Signature>
-pub fn prehash_verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>, ph: PH) -> bool
-```
-
-Available hash functions: `PH::SHA256`, `PH::SHA512`
-
 ## Stack Usage
 
-This implementation is optimized for constrained environments and works with small stack sizes:
+This implementation is not optimized for constrained environments and may not work with small stack sizes:
 
-- Key generation: ≤36KB stack
-- Signing: ≤36KB stack  
-- Verification: ≤36KB stack
+- Key generation: ≤256KB stack
+- Signing: ≤256KB stack  
+- Verification: ≤256KB stack
 
 See `examples/stack_usage_demo.rs` for detailed stack usage analysis.
 

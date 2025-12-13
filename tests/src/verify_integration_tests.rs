@@ -1,10 +1,11 @@
 // tests/verify_integration_test.rs
 
-use crate::helpers::kat::{parse_test_vectors, TestVector};
-use qp_rusty_crystals_dilithium::{
-	drbg,
-	ml_dsa_87::{Keypair, PUBLICKEYBYTES},
+use crate::helpers::{
+	drbg::Drbg,
+	kat::{parse_test_vectors, TestVector},
 };
+use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, PUBLICKEYBYTES};
+use qp_rusty_crystals_hdwallet::SensitiveBytes32;
 use rand::{thread_rng, Rng};
 
 fn keypair_from_test(test: &TestVector) -> Keypair {
@@ -24,11 +25,11 @@ fn test_nist_kat() {
 	}
 }
 
-fn get_random_bytes() -> [u8; 32] {
+fn get_random_bytes() -> SensitiveBytes32 {
 	let mut rng = rand::thread_rng();
 	let mut bytes = [0u8; 32];
 	rng.fill(&mut bytes);
-	bytes
+	(&mut bytes).into()
 }
 
 /// Verifies a single test vector for Falcon-1024 (padded).
@@ -43,11 +44,12 @@ fn verify_test_vector(test: &TestVector) {
 	// rng changes the next rng output.
 	//
 	// Initialize DRBG with seed - same as KAT file
-	let mut drbg = drbg::DRBG::new(&test.seed, None).unwrap();
+	let mut drbg = Drbg::new(&test.seed, None).unwrap();
 	let mut entropy = [0u8; 32];
 	let res = drbg.randombytes(&mut entropy, 32);
+	let entropy_s = SensitiveBytes32::new(&mut entropy);
 	assert!(res.is_ok());
-	let generated_keypair = Keypair::generate(&entropy);
+	let generated_keypair = Keypair::generate(entropy_s);
 	let generated_pk = generated_keypair.public.to_bytes();
 	let generated_sk = generated_keypair.secret.to_bytes();
 	assert_eq!(
@@ -85,7 +87,7 @@ fn verify_test_vector(test: &TestVector) {
 	let mut hedge = [0u8; 32];
 	let res = drbg.randombytes(&mut hedge, 32);
 	assert!(res.is_ok());
-	let our_signature = keypair.sign(&test.msg, None, Some(hedge));
+	let our_signature = keypair.sign(&test.msg, None, Some(hedge)).unwrap();
 	assert_eq!(
 		our_signature.as_slice(),
 		nist_signature,
@@ -170,14 +172,14 @@ fn test_verify_invalid_signature() {
 	let entropy1 = get_random_bytes();
 	let entropy2 = get_random_bytes();
 	let entropy3 = get_random_bytes();
-	let keys_1 = Keypair::generate(&entropy1);
-	let keys_2 = Keypair::generate(&entropy2);
-	let keys_3 = Keypair::generate(&entropy3);
+	let keys_1 = Keypair::generate(entropy1);
+	let keys_2 = Keypair::generate(entropy2);
+	let keys_3 = Keypair::generate(entropy3);
 
 	// Message to sign
 	let message = b"Hello, Resonance!";
 	// Sign the message
-	let signature = keys_2.sign(message, None, None);
+	let signature = keys_2.sign(message, None, None).unwrap();
 
 	// Verify the signature with wrong key
 	let result = keys_1.verify(&signature, message, None);

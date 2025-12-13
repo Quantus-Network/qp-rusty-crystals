@@ -4,16 +4,16 @@
 //! work with very small stack sizes, making them suitable for embedded
 //! systems, blockchain VMs, and other constrained environments.
 
-use qp_rusty_crystals_dilithium::ml_dsa_87;
+use qp_rusty_crystals_dilithium::{ml_dsa_87, SensitiveBytes32};
 use std::{panic, sync::mpsc, thread, time::Duration};
 
 use rand::Rng;
 
-fn get_random_bytes() -> [u8; 32] {
-	let mut rng = rand::thread_rng();
+fn get_random_bytes() -> SensitiveBytes32 {
+	let mut rng = rand::rng();
 	let mut bytes = [0u8; 32];
 	rng.fill(&mut bytes);
-	bytes
+	(&mut bytes).into()
 }
 
 /// Test ML-DSA key generation with a specific stack size
@@ -138,17 +138,16 @@ fn main() {
 
 	// Pre-generate test data for all variants
 	let entropy = get_random_bytes();
-	let ml87_keypair = ml_dsa_87::Keypair::generate(&entropy);
+	let ml87_keypair = ml_dsa_87::Keypair::generate(entropy);
 
 	let test_msg = b"stack usage test message";
 
-	let ml87_sig = ml87_keypair.sign(test_msg, None, None);
+	let ml87_sig = ml87_keypair.sign(test_msg, None, None).unwrap();
 
 	// Test with progressively smaller stack sizes
 	let stack_sizes = [
-		512, // 512KB - should definitely work
-		444, 333, 290, // Currently all three functions fit in this stack size
-		256, // 256KB - typical small embedded system
+		1024, 800, 700, 512, // 512KB
+		444, 333, 290, 256, // 256KB - typical small embedded system
 		200, 160, 150, 140, 128, // 128KB - typical small embedded system
 		100, 88, 64, // 64KB - large microcontroller
 		50, 40, 36, 34, 33, 32, // 32KB - medium microcontroller
@@ -166,7 +165,7 @@ fn main() {
 	for &size_kb in &stack_sizes {
 		// Test ML-DSA-87
 		let ml87_keygen = test_keygen_with_stack_size(size_kb, "ml-dsa-87", move || {
-			let _kp = ml_dsa_87::Keypair::generate(&[1u8; 32]);
+			let _kp = ml_dsa_87::Keypair::generate((&mut [1u8; 32]).into());
 			true
 		});
 
@@ -239,7 +238,7 @@ mod tests {
 	fn test_all_variants_4kb_stack() {
 		assert!(
 			test_keygen_with_stack_size(4, "ml-dsa-87", || {
-				let _kp = ml_dsa_87::Keypair::generate(Some(&[1u8; 32]));
+				let _kp = ml_dsa_87::Keypair::generate((&mut [1u8; 32]).into());
 				true
 			}),
 			"ML-DSA-87 key generation should work with 4KB stack"

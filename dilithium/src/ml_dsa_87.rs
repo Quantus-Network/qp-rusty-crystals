@@ -1,10 +1,10 @@
-use sha2::{Digest, Sha256, Sha512};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
-	errors::{KeyParsingError, KeyParsingError::BadSecretKey},
-	params,
+	errors::{KeyParsingError, KeyParsingError::BadSecretKey, SignatureError},
+	params, SensitiveBytes32,
 };
-use alloc::{vec, vec::Vec};
+use alloc::vec;
 use core::fmt;
 
 pub const SECRETKEYBYTES: usize = crate::params::SECRETKEYBYTES;
@@ -26,17 +26,20 @@ impl Keypair {
 	///
 	/// # Arguments
 	///
-	/// * 'entropy' - optional bytes for determining the generation process
+	/// * 'entropy' - bytes for determining the generation process (must be at least 32 bytes)
 	///
-	/// Returns an instance of Keypair
-	pub fn generate(entropy: &[u8]) -> Keypair {
+	/// Note: The entropy is moved here and zeroized after use, along with the derived secret key.
+	pub fn generate(entropy: SensitiveBytes32) -> Keypair {
 		let mut pk = [0u8; PUBLICKEYBYTES];
 		let mut sk = [0u8; SECRETKEYBYTES];
 		crate::sign::keypair(&mut pk, &mut sk, entropy);
-		Keypair {
+		let keypair = Keypair {
 			secret: SecretKey::from_bytes(&sk).expect("Should never fail"),
 			public: PublicKey::from_bytes(&pk).expect("Should never fail"),
-		}
+		};
+		sk.zeroize();
+		// entropy is automatically zeroized when it drops (ZeroizeOnDrop)
+		keypair
 	}
 
 	/// Convert a Keypair to a bytes array.
@@ -74,13 +77,13 @@ impl Keypair {
 	///
 	/// * 'msg' - message to sign
 	///
-	/// Returns Option<Signature>
+	/// Returns Result<Signature, SignatureError>
 	pub fn sign(
 		&self,
 		msg: &[u8],
 		ctx: Option<&[u8]>,
 		hedge: Option<[u8; params::SEEDBYTES]>,
-	) -> Signature {
+	) -> Result<Signature, SignatureError> {
 		self.secret.sign(msg, ctx, hedge)
 	}
 
@@ -95,41 +98,6 @@ impl Keypair {
 	pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool {
 		self.public.verify(msg, sig, ctx)
 	}
-
-	/// Compute a signature for a given message.
-	///
-	/// # Arguments
-	///
-	/// * 'msg' - message to sign
-	///
-	/// Returns Option<Signature>
-	pub fn prehash_sign(
-		&self,
-		msg: &[u8],
-		ctx: Option<&[u8]>,
-		hedge: Option<[u8; params::SEEDBYTES]>,
-		ph: crate::PH,
-	) -> Option<Signature> {
-		self.secret.prehash_sign(msg, ctx, hedge, ph)
-	}
-
-	/// Verify a signature for a given message with a public key.
-	///
-	/// # Arguments
-	///
-	/// * 'msg' - message that is claimed to be signed
-	/// * 'sig' - signature to verify
-	///
-	/// Returns 'true' if the verification process was successful, 'false' otherwise
-	pub fn prehash_verify(
-		&self,
-		msg: &[u8],
-		sig: &[u8],
-		ctx: Option<&[u8]>,
-		ph: crate::PH,
-	) -> bool {
-		self.public.prehash_verify(msg, sig, ctx, ph)
-	}
 }
 
 impl fmt::Debug for Keypair {
@@ -139,7 +107,7 @@ impl fmt::Debug for Keypair {
 }
 
 /// Private key.
-#[derive(Clone)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct SecretKey {
 	pub bytes: [u8; SECRETKEYBYTES],
 }
@@ -179,11 +147,11 @@ impl SecretKey {
 		msg: &[u8],
 		ctx: Option<&[u8]>,
 		hedge: Option<[u8; params::SEEDBYTES]>,
-	) -> Signature {
+	) -> Result<Signature, SignatureError> {
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
-					panic!("ctx length must not be larger than 255");
+					return Err(SignatureError::ContextTooLong);
 				}
 				let x_len = x.len();
 				let msg_len = msg.len();
@@ -193,75 +161,15 @@ impl SecretKey {
 				m[2 + x_len..].copy_from_slice(msg);
 				let mut sig: Signature = [0u8; SIGNBYTES];
 				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
-				sig
+				Ok(sig)
 			},
 			None => {
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, msg, &self.bytes, hedge);
-				sig
-			},
-		}
-	}
-
-	/// Compute a signature for a given message.
-	///
-	/// # Arguments
-	///
-	/// * 'msg' - message to sign
-	/// * 'ctx' - context string
-	/// * 'hedged' - wether to use RNG or not
-	/// * 'ph' - pre-hash function
-	///
-	/// Returns Option<Signature>
-	pub fn prehash_sign(
-		&self,
-		msg: &[u8],
-		ctx: Option<&[u8]>,
-		hedge: Option<[u8; params::SEEDBYTES]>,
-		ph: crate::PH,
-	) -> Option<Signature> {
-		let mut oid = [0u8; 11];
-		let mut phm: Vec<u8> = Vec::new();
-		match ph {
-			crate::PH::SHA256 => {
-				oid.copy_from_slice(&[
-					0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
-				]);
-				phm.extend_from_slice(Sha256::digest(msg).as_slice());
-			},
-			crate::PH::SHA512 => {
-				oid.copy_from_slice(&[
-					0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
-				]);
-				phm.extend_from_slice(Sha512::digest(msg).as_slice());
-			},
-		}
-		match ctx {
-			Some(x) => {
-				if x.len() > 255 {
-					return None;
-				}
-				let x_len = x.len();
-				let phm_len = phm.len();
-				let mut m = vec![0; 2 + x_len + 11 + phm_len];
-				m[0] = 1;
-				m[1] = x_len as u8;
-				m[2..2 + x_len].copy_from_slice(x);
-				m[2 + x_len..2 + x_len + 11].copy_from_slice(&oid);
-				m[2 + x_len + 11..].copy_from_slice(phm.as_slice());
-				let mut sig: Signature = [0u8; SIGNBYTES];
+				// Prefix 2 zero bytes (domain_sep=0, context_len=0) for pure signatures
+				let mut m = vec![0u8; msg.len() + 2];
+				m[2..2 + msg.len()].copy_from_slice(msg);
 				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
-				Some(sig)
-			},
-			None => {
-				let phm_len = phm.len();
-				let mut m = vec![0; 2 + 11 + phm_len];
-				m[0] = 1;
-				m[2..2 + 11].copy_from_slice(&oid);
-				m[2 + 11..].copy_from_slice(phm.as_slice());
-				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
-				Some(sig)
+				Ok(sig)
 			},
 		}
 	}
@@ -319,67 +227,9 @@ impl PublicKey {
 				m[2 + x_len..].copy_from_slice(msg);
 				crate::sign::verify(sig, m.as_slice(), &self.bytes)
 			},
-			None => crate::sign::verify(sig, msg, &self.bytes),
-		}
-	}
-
-	/// Verify a signature for a given message with a public key.
-	///
-	/// # Arguments
-	///
-	/// * 'msg' - message that is claimed to be signed
-	/// * 'sig' - signature to verify
-	/// * 'ctx' - context string
-	/// * 'ph' - pre-hash function
-	///
-	/// Returns 'true' if the verification process was successful, 'false' otherwise
-	pub fn prehash_verify(
-		&self,
-		msg: &[u8],
-		sig: &[u8],
-		ctx: Option<&[u8]>,
-		ph: crate::PH,
-	) -> bool {
-		if sig.len() != SIGNBYTES {
-			return false;
-		}
-		let mut oid = [0u8; 11];
-		let mut phm: Vec<u8> = Vec::new();
-		match ph {
-			crate::PH::SHA256 => {
-				oid.copy_from_slice(&[
-					0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
-				]);
-				phm.extend_from_slice(Sha256::digest(msg).as_slice());
-			},
-			crate::PH::SHA512 => {
-				oid.copy_from_slice(&[
-					0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
-				]);
-				phm.extend_from_slice(Sha512::digest(msg).as_slice());
-			},
-		}
-		match ctx {
-			Some(x) => {
-				if x.len() > 255 {
-					return false;
-				}
-				let x_len = x.len();
-				let phm_len = phm.len();
-				let mut m = vec![0; 2 + x_len + 11 + phm_len];
-				m[0] = 1;
-				m[1] = x_len as u8;
-				m[2..2 + x_len].copy_from_slice(x);
-				m[2 + x_len..2 + x_len + 11].copy_from_slice(&oid);
-				m[2 + x_len + 11..].copy_from_slice(phm.as_slice());
-				crate::sign::verify(sig, m.as_slice(), &self.bytes)
-			},
 			None => {
-				let phm_len = phm.len();
-				let mut m = vec![0; 2 + 11 + phm_len];
-				m[0] = 1;
-				m[2..2 + 11].copy_from_slice(&oid);
-				m[2 + 11..].copy_from_slice(phm.as_slice());
+				let mut m = vec![0; msg.len() + 2];
+				m[2..2 + msg.len()].copy_from_slice(msg);
 				crate::sign::verify(sig, m.as_slice(), &self.bytes)
 			},
 		}
@@ -389,17 +239,18 @@ impl PublicKey {
 #[cfg(test)]
 mod tests {
 	use super::Keypair;
+	use crate::SensitiveBytes32;
 	use rand::Rng;
 
-	fn get_random_bytes() -> [u8; 32] {
-		let mut rng = rand::thread_rng();
+	fn get_random_bytes() -> SensitiveBytes32 {
+		let mut rng = rand::rng();
 		let mut bytes = [0u8; 32];
 		rng.fill(&mut bytes);
-		bytes
+		(&mut bytes).into()
 	}
 
 	fn get_random_msg() -> [u8; 128] {
-		let mut rng = rand::thread_rng();
+		let mut rng = rand::rng();
 		let mut bytes = [0u8; 128];
 		rng.fill(&mut bytes);
 		bytes
@@ -409,9 +260,9 @@ mod tests {
 	fn self_verify_hedged() {
 		let msg = get_random_msg();
 		let entropy = get_random_bytes();
-		let keys = Keypair::generate(&entropy);
+		let keys = Keypair::generate(entropy);
 		let hedge = get_random_bytes();
-		let sig = keys.sign(&msg, None, Some(hedge));
+		let sig = keys.sign(&msg, None, Some(hedge.0)).unwrap();
 		assert!(keys.verify(&msg, &sig, None));
 	}
 
@@ -419,26 +270,28 @@ mod tests {
 	fn self_verify() {
 		let msg = get_random_msg();
 		let entropy = get_random_bytes();
-		let keys = Keypair::generate(&entropy);
+		let keys = Keypair::generate(entropy);
 		let hedge = get_random_bytes();
-		let sig = keys.sign(&msg, None, Some(hedge));
+		let sig = keys.sign(&msg, None, Some(hedge.0)).unwrap();
 		assert!(keys.verify(&msg, &sig, None));
 	}
+
 	#[test]
-	fn self_verify_prehash_hedged() {
+	fn verify_fails_with_different_context() {
 		let msg = get_random_msg();
 		let entropy = get_random_bytes();
-		let keys = Keypair::generate(&entropy);
+		let keys = Keypair::generate(entropy);
 		let hedge = get_random_bytes();
-		let sig = keys.prehash_sign(&msg, None, Some(hedge), crate::PH::SHA256);
-		assert!(keys.prehash_verify(&msg, &sig.unwrap(), None, crate::PH::SHA256));
-	}
-	#[test]
-	fn self_verify_prehash() {
-		let msg = get_random_msg();
-		let entropy = get_random_bytes();
-		let keys = Keypair::generate(&entropy);
-		let sig = keys.prehash_sign(&msg, None, None, crate::PH::SHA256);
-		assert!(keys.prehash_verify(&msg, &sig.unwrap(), None, crate::PH::SHA256));
+
+		// Sign with context "test1"
+		let ctx1 = b"test1";
+		let sig = keys.sign(&msg, Some(ctx1), Some(hedge.0)).unwrap();
+
+		// Try to verify with different context "test2" - should fail
+		let ctx2 = b"test2";
+		assert!(!keys.verify(&msg, &sig, Some(ctx2)));
+
+		// Verify with correct context should still work
+		assert!(keys.verify(&msg, &sig, Some(ctx1)));
 	}
 }

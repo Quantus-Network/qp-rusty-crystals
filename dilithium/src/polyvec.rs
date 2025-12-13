@@ -1,29 +1,29 @@
-use core::mem::swap;
-
 use crate::{params, poly, poly::Poly};
+use core::{array, mem::swap};
+use zeroize::ZeroizeOnDrop;
 
 const K: usize = params::K;
 const L: usize = params::L;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct Polyveck {
 	pub vec: [Poly; K],
 }
 
 impl Default for Polyveck {
 	fn default() -> Self {
-		Polyveck { vec: [Poly::default(); K] }
+		Polyveck { vec: array::from_fn(|_| Poly::default()) }
 	}
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct Polyvecl {
 	pub vec: [Poly; L],
 }
 
 impl Default for Polyvecl {
 	fn default() -> Self {
-		Polyvecl { vec: [Poly::default(); L] }
+		Polyvecl { vec: array::from_fn(|_| Poly::default()) }
 	}
 }
 
@@ -67,6 +67,8 @@ pub fn l_uniform_gamma1(v: &mut Polyvecl, seed: &[u8], nonce: u16) {
 		poly::uniform_gamma1(&mut v.vec[i], seed, L as u16 * nonce + i as u16);
 	}
 }
+/// Reduce coefficients of polynomials in vector of length L
+/// to representatives in [-6283008, 6283008].
 pub fn l_reduce(v: &mut Polyvecl) {
 	for i in 0..L {
 		poly::reduce(&mut v.vec[i]);
@@ -101,6 +103,13 @@ pub fn l_pointwise_poly_montgomery(r: &mut Polyvecl, a: &Poly, v: &Polyvecl) {
 	}
 }
 
+/// Check if the infinity norm of a Polyvecl is within the given bound.
+///
+/// # Arguments
+/// * `v` - The polynomial vector to check
+/// * `bound` - The norm bound
+///
+/// Returns true if all polynomials in the vector have infinity norm < bound, false otherwise.
 pub fn polyvecl_is_norm_within_bound(v: &Polyvecl, bound: i32) -> bool {
 	let mut result = true;
 	for i in 0..L {
@@ -120,7 +129,7 @@ pub fn k_uniform_eta(v: &mut Polyveck, seed: &[u8], mut nonce: u16) {
 }
 
 /// Reduce coefficients of polynomials in vector of length K
-/// to representatives in \[0,2*Q\].
+/// to representatives in [-6283008, 6283008].
 pub fn k_reduce(v: &mut Polyveck) {
 	for i in 0..K {
 		poly::reduce(&mut v.vec[i]);
@@ -183,10 +192,13 @@ pub fn k_pointwise_poly_montgomery(r: &mut Polyveck, a: &Poly, v: &Polyveck) {
 	}
 }
 
-/// Check infinity norm of polynomials in vector of length K.
-/// Assumes input coefficients to be standard representatives.
-//
-/// Returns 0 if norm of all polynomials are strictly smaller than B and 1 otherwise.
+/// Check if the infinity norm of a Polyveck is within the given bound.
+///
+/// # Arguments
+/// * `v` - The polynomial vector to check
+/// * `bound` - The norm bound
+///
+/// Returns true if all polynomials in the vector have infinity norm < bound, false otherwise.
 pub fn polyveck_is_norm_within_bound(v: &Polyveck, bound: i32) -> bool {
 	let mut result = true;
 	for i in 0..K {
@@ -326,7 +338,7 @@ mod tests {
 			}
 		}
 
-		let original_a = a;
+		let original_a = a.clone();
 		l_add(&mut a, &b);
 
 		// Check addition was performed correctly
@@ -356,7 +368,7 @@ mod tests {
 			}
 		}
 
-		let original_a = a;
+		let original_a = a.clone();
 		k_add(&mut a, &b);
 
 		// Check addition was performed correctly
@@ -386,7 +398,7 @@ mod tests {
 			}
 		}
 
-		let original_a = a;
+		let original_a = a.clone();
 		k_sub(&mut a, &b);
 
 		// Check subtraction was performed correctly
@@ -414,7 +426,7 @@ mod tests {
 			}
 		}
 
-		let original = polyvecl;
+		let original = polyvecl.clone();
 		l_ntt(&mut polyvecl);
 		l_invntt_tomont(&mut polyvecl);
 
@@ -445,7 +457,7 @@ mod tests {
 			}
 		}
 
-		let original = polyveck;
+		let original = polyveck.clone();
 		k_ntt(&mut polyveck);
 		k_invntt_tomont(&mut polyveck);
 
@@ -512,7 +524,7 @@ mod tests {
 			}
 		}
 
-		let original = polyveck;
+		let original = polyveck.clone();
 		k_shiftl(&mut polyveck);
 
 		// Check that all coefficients were left-shifted by D
@@ -534,8 +546,8 @@ mod tests {
 		let rho1 = [0x42u8; params::SEEDBYTES];
 		let rho2 = [0x43u8; params::SEEDBYTES];
 
-		let mut mat1 = [Polyvecl::default(); K];
-		let mut mat2 = [Polyvecl::default(); K];
+		let mut mat1: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
+		let mut mat2: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
 
 		matrix_expand(&mut mat1, &rho1);
 		matrix_expand(&mut mat2, &rho2);
@@ -557,7 +569,7 @@ mod tests {
 
 	#[test]
 	fn test_matrix_pointwise_montgomery() {
-		let mut mat = [Polyvecl::default(); K];
+		let mut mat: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
 		let mut v = Polyvecl::default();
 		let mut result = Polyveck::default();
 
@@ -650,7 +662,7 @@ mod tests {
 		h.vec[1].coeffs[10] = 1;
 		h.vec[2].coeffs[50] = 1;
 
-		let _original_w = w;
+		let _original_w = w.clone();
 		k_use_hint(&mut w, &h);
 
 		// Values with hints should potentially be modified

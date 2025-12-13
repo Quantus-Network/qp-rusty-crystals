@@ -28,8 +28,12 @@ qp-rusty-crystals-dilithium = "0.0.2"
 ```rust
 use qp_rusty_crystals_hdwallet::{generate_mnemonic, HDLattice};
 
+// Generate secure seed for mnemonic
+let mut seed = [0u8; 32];
+getrandom::getrandom(&mut seed).expect("Failed to generate seed");
+
 // Generate a new mnemonic
-let mnemonic = generate_mnemonic(24)?;
+let mnemonic = generate_mnemonic((&mut seed).into())?;
 println!("Mnemonic: {}", mnemonic);
 
 // Create HD wallet from mnemonic
