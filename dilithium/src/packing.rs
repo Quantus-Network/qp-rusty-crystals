@@ -140,7 +140,6 @@ pub fn pack_sig(sig: &mut [u8], c: Option<&[u8]>, z: &Polyvecl, h: &Polyveck) {
 			// if should_store { sig[write_idx] = j }
 			sig[write_idx as usize] = (j as u8 & mask) | (sig[write_idx as usize] & !mask);
 
-			// Branchless increment to reduce timing variations
 			if is_nonzero {
 				k += 1;
 			}
