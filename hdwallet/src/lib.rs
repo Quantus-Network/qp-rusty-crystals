@@ -116,16 +116,16 @@ pub fn derive_key_from_seed(seed: SensitiveBytes64, path: &str) -> Result<Keypai
 	Ok(keypair)
 }
 
-
-/// Keypair derivation from mnemonic without passphrase
-pub fn derive_key_from_mnemonic(mnemonic: &str, path: &str) -> Result<Keypair, HDLatticeError> {
-	derive_key_from_mnemonic(mnemonic, None, path);
-}
-
 /// Keypair derivation from mnemonic with passphrase
 pub fn derive_key_from_mnemonic(mnemonic: &str, passphrase: Option<&str>, path: &str) -> Result<Keypair, HDLatticeError> {
-	let seed = mnemonic_to_seed(mnemonic.to_string(), passphrase)?;
-	derive_key_from_seed(seed, path)
+	let mut seed = mnemonic_to_seed(mnemonic.to_string(), passphrase)?;
+	derive_key_from_seed(SensitiveBytes64::from(&mut seed), path)
+}
+
+/// Wormhole pair derivation from mnemonic with passphrase
+pub fn derive_wormhole_from_mnemonic(mnemonic: &str, passphrase: Option<&str>, path: &str) -> Result<WormholePair, HDLatticeError> {
+	let mut seed = mnemonic_to_seed(mnemonic.to_string(), passphrase)?;
+	generate_wormhole_from_seed(SensitiveBytes64::from(&mut seed), path)
 }
 
 /// Generate a wormhole pair from a seed at the given path
