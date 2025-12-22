@@ -44,7 +44,8 @@ rand_core.workspace = true
 [features]
 default = ["std"]
 std = [
-	"serde/std",
-	"serde_json/std",
-	"thiserror/std",
+    "serde/std",
+    "serde_json/std",
+    "thiserror/std",
 ]
+quantus_v1 = []

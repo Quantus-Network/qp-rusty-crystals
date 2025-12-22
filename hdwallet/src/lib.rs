@@ -162,17 +162,23 @@ pub fn generate_wormhole_from_seed(
 /// Validate a BIP44 derivation path
 ///
 /// Enforces hardened derivation for all indices
-/// as required for post-quantum security.
+/// In quantus_v1 feature, allows the last 2 indices to be non-hardened.
 fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 	let p = crate::hderive::DerivationPath::from_str(path)
 		.map_err(HDLatticeError::GenericError)?;
+
+	#[cfg(feature = "quantus_v1")]
+	let hardened_check_count = p.iter().count().saturating_sub(2);
+	#[cfg(not(feature = "quantus_v1"))]
+	let hardened_check_count = p.iter().count();
+
+	let mut index = 0;
 	for element in p.iter() {
-		// Enforce hardened for all indices as per BIP44 standard.
-		// The reason being, we do not have derivable public keys anyway, it
-		// does not work for dilithium key pairs.
-		if !element.is_hardened() {
+		// In quantus_v1, skip hardened check for the last 2 elements
+		if index < hardened_check_count && !element.is_hardened() {
 			return Err(HDLatticeError::HardenedPathsOnly());
 		}
+		index += 1;
 	}
 	Ok(())
 }
