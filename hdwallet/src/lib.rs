@@ -1,13 +1,15 @@
 //! # Quantus Network HD Wallet
 //!
 //! This crate provides hierarchical deterministic (HD) wallet functionality for post-quantum
-//! ML-DSA (Dilithium) keys, compatible[no_std]
+//! ML-DSA (Dilithium) keys, compatible
+#![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use bip39::{Language, Mnemonic};
 use core::str::FromStr;
-use nam_tiny_hderive::{bip32::ExtendedPrivKey, Error};
+use crate::hderive::ExtendedPrivKey;
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 
 use zeroize::Zeroize;
@@ -18,6 +20,7 @@ mod test_vectors;
 mod tests;
 
 pub mod wormhole;
+pub mod hderive;
 
 pub use wormhole::{WormholeError, WormholePair};
 
@@ -40,8 +43,8 @@ pub enum HDLatticeError {
 	InvalidWormholePath(String),
 	#[error("Invalid BIP44 path: {0}")]
 	InvalidPath(String),
-	#[error("nam-tinyhderive error")]
-	GenericError(Error),
+	#[error("hderive error: {0:?}")]
+	GenericError(hderive::Error),
 }
 
 pub const ROOT_PATH: &str = "m";
@@ -149,7 +152,7 @@ pub fn generate_wormhole_from_seed(
 /// Enforces hardened derivation for all indices
 /// as required for post-quantum security.
 fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
-	let p = nam_tiny_hderive::bip44::DerivationPath::from_str(path)
+	let p = crate::hderive::DerivationPath::from_str(path)
 		.map_err(HDLatticeError::GenericError)?;
 	for element in p.iter() {
 		// Enforce hardened for all indices as per BIP44 standard.

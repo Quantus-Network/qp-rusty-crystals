@@ -10,22 +10,22 @@ pub struct TestVector {
 
 #[cfg(test)]
 mod hdwallet_tests {
-	use crate::{
-		derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed, mnemonic_to_seed,
-		test_vectors::{
-			get_test_vectors, load_known_private_keys, str_to_32_bytes, str_to_64_bytes,
-		},
-		HDLatticeError,
-	};
-	use alloc::{
-		borrow::ToOwned,
-		format,
-		string::{String, ToString},
-		vec::Vec,
-	};
-	use core::str::FromStr;
-	use nam_tiny_hderive::{bip32::ExtendedPrivKey, bip44::ChildNumber};
-	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
+    use crate::{
+        derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed, mnemonic_to_seed,
+        test_vectors::{
+            get_test_vectors, load_known_private_keys, str_to_32_bytes, str_to_64_bytes,
+        },
+        HDLatticeError,
+    };
+    use crate::hderive::{ExtendedPrivKey, ChildNumber, Error};
+    use alloc::{
+        borrow::ToOwned,
+        format,
+        string::{String, ToString},
+        vec::Vec,
+    };
+    use core::str::FromStr;
+    use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 	use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 	// For test-only functionality that needs std
@@ -228,49 +228,49 @@ mod hdwallet_tests {
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
 		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
 
-		// Attempt to derive a key with an invalid path
-		let result = derive_key_from_seed((&mut seed).into(), "abc");
+        // Attempt to derive a key with an invalid path
+        let result = derive_key_from_seed((&mut seed).into(), "abc");
 
-		assert_eq!(
-			result.err().unwrap(),
-			HDLatticeError::GenericError(nam_tiny_hderive::Error::InvalidDerivationPath),
-			"Expected InvalidChildNumber error"
-		);
-	}
+        assert_eq!(
+            result.err().unwrap(),
+            HDLatticeError::GenericError(Error::InvalidDerivationPath),
+            "Expected InvalidDerivationPath error"
+        );
+    }
 
-	#[test]
-	fn test_derive_invalid_index() {
-		let mnemonic =
-			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
+    #[test]
+    fn test_derive_invalid_index() {
+        let mnemonic =
+            "rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
+        let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
 
-		// Attempt to derive a key with an invalid index
-		let result = derive_key_from_seed((&mut seed).into(), "m/2147483648'"); // Index exceeds HARDENED_OFFSET (2^31)
+        // Attempt to derive a key with an invalid index
+        let result = derive_key_from_seed((&mut seed).into(), "m/2147483648'"); // Index exceeds HARDENED_OFFSET (2^31)
 
-		assert!(result.is_err());
-		assert_eq!(
-			result.err().unwrap(),
-			HDLatticeError::GenericError(nam_tiny_hderive::Error::InvalidChildNumber),
-			"Expected InvalidChildNumber error"
-		);
-	}
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap(),
+            HDLatticeError::GenericError(Error::InvalidChildNumber),
+            "Expected InvalidChildNumber error"
+        );
+    }
 
-	#[test]
-	fn test_derive_with_non_integer_path() {
-		let mnemonic =
-			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
+    #[test]
+    fn test_derive_with_non_integer_path() {
+        let mnemonic =
+            "rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
+        let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
 
-		// Invalid derivation path with non-integer components
-		let result = derive_key_from_seed((&mut seed).into(), "1/a/2");
+        // Invalid derivation path with non-integer components
+        let result = derive_key_from_seed((&mut seed).into(), "1/a/2");
 
-		assert!(result.is_err());
-		assert_eq!(
-			result.err().unwrap(),
-			HDLatticeError::GenericError(nam_tiny_hderive::Error::InvalidDerivationPath),
-			"Expected InvalidChildNumber error"
-		);
-	}
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap(),
+            HDLatticeError::GenericError(Error::InvalidDerivationPath),
+            "Expected InvalidDerivationPath error"
+        );
+    }
 
 	#[test]
 	fn test_derive_master_path() {

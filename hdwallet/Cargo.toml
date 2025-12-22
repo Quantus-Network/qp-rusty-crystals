@@ -18,17 +18,34 @@ categories = ["cryptography"]
 
 [dependencies]
 qp-rusty-crystals-dilithium.workspace = true
-rand_core.workspace = true
+# rand_core.workspace = true # Seems unused in library code, only in tests or via transitive deps
 bip39.workspace = true
 thiserror.workspace = true
 qp-poseidon-core.workspace = true
 hex-literal.workspace = true
-nam-tiny-hderive.workspace = true
 serde_json.workspace = true
 hex.workspace = true
 serde.workspace = true
 zeroize.workspace = true
 
+# Dependencies for hderive module (ported from nam-tiny-hderive)
+hmac = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+k256 = { version = "0.13", default-features = false, features = ["arithmetic"] } 
+bs58 = { version = "0.5", default-features = false, features = ["alloc"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+
 [dev-dependencies]
 hex-literal.workspace = true
 rand.workspace = true
+rand_core.workspace = true
+
+[features]
+default = ["std"]
+std = [
+    "serde/std",
+    "serde_json/std",
+    "thiserror/std",
+]
