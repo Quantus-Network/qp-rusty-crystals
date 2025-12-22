@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+default = ["std"]
+std = []
+
 [dev-dependencies]
 getrandom.workspace = true
 qp-rusty-crystals-dilithium = { workspace = true, default-features = true }
