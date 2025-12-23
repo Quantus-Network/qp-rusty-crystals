@@ -10,22 +10,23 @@ pub struct TestVector {
 
 #[cfg(test)]
 mod hdwallet_tests {
-    use crate::{
-        derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed, mnemonic_to_seed,
-        test_vectors::{
-            get_test_vectors, load_known_private_keys, str_to_32_bytes, str_to_64_bytes,
-        },
-        HDLatticeError,
-    };
-    use crate::hderive::{ExtendedPrivKey, ChildNumber};
-    use alloc::{
-        borrow::ToOwned,
-        format,
-        string::{String, ToString},
-        vec::Vec,
-    };
-    use core::str::FromStr;
-    use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
+	use crate::{
+		derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed,
+		hderive::{ChildNumber, ExtendedPrivKey},
+		mnemonic_to_seed,
+		test_vectors::{
+			get_test_vectors, load_known_private_keys, str_to_32_bytes, str_to_64_bytes,
+		},
+		HDLatticeError,
+	};
+	use alloc::{
+		borrow::ToOwned,
+		format,
+		string::{String, ToString},
+		vec::Vec,
+	};
+	use core::str::FromStr;
+	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 	use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 	// For test-only functionality that needs std

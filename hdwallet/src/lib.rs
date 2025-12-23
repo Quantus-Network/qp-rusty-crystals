@@ -5,11 +5,13 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
+use crate::hderive::ExtendedPrivKey;
+use alloc::{
+	string::{String, ToString},
+	vec::Vec,
+};
 use bip39::{Language, Mnemonic};
 use core::str::FromStr;
-use crate::hderive::ExtendedPrivKey;
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 
 use zeroize::Zeroize;
@@ -19,8 +21,8 @@ mod test_vectors;
 #[cfg(test)]
 mod tests;
 
-pub mod wormhole;
 pub mod hderive;
+pub mod wormhole;
 
 pub use wormhole::{WormholeError, WormholePair};
 
@@ -117,13 +119,21 @@ pub fn derive_key_from_seed(seed: SensitiveBytes64, path: &str) -> Result<Keypai
 }
 
 /// Keypair derivation from mnemonic with passphrase
-pub fn derive_key_from_mnemonic(mnemonic: &str, passphrase: Option<&str>, path: &str) -> Result<Keypair, HDLatticeError> {
+pub fn derive_key_from_mnemonic(
+	mnemonic: &str,
+	passphrase: Option<&str>,
+	path: &str,
+) -> Result<Keypair, HDLatticeError> {
 	let mut seed = mnemonic_to_seed(mnemonic.to_string(), passphrase)?;
 	derive_key_from_seed(SensitiveBytes64::from(&mut seed), path)
 }
 
 /// Wormhole pair derivation from mnemonic with passphrase
-pub fn derive_wormhole_from_mnemonic(mnemonic: &str, passphrase: Option<&str>, path: &str) -> Result<WormholePair, HDLatticeError> {
+pub fn derive_wormhole_from_mnemonic(
+	mnemonic: &str,
+	passphrase: Option<&str>,
+	path: &str,
+) -> Result<WormholePair, HDLatticeError> {
 	let mut seed = mnemonic_to_seed(mnemonic.to_string(), passphrase)?;
 	generate_wormhole_from_seed(SensitiveBytes64::from(&mut seed), path)
 }
@@ -164,8 +174,7 @@ pub fn generate_wormhole_from_seed(
 /// Enforces hardened derivation for all indices
 /// In quantus_v1 feature, allows the last 2 indices to be non-hardened.
 fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
-	let p = crate::hderive::DerivationPath::from_str(path)
-		.map_err(HDLatticeError::GenericError)?;
+	let p = crate::hderive::DerivationPath::from_str(path).map_err(HDLatticeError::GenericError)?;
 
 	#[cfg(feature = "quantus_v1")]
 	let hardened_check_count = p.iter().count().saturating_sub(2);
