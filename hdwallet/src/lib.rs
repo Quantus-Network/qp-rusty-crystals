@@ -172,18 +172,18 @@ pub fn generate_wormhole_from_seed(
 /// Validate a BIP44 derivation path
 ///
 /// Enforces hardened derivation for all indices
-/// In quantus_v1 feature, allows the last 2 indices to be non-hardened.
+/// In quantus_v1 feature, enforces hardened keys for the first 3 levels, allows subsequent levels
+/// to be non-hardened.
 fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 	let p = crate::hderive::DerivationPath::from_str(path).map_err(HDLatticeError::GenericError)?;
 
 	#[cfg(feature = "quantus_v1")]
-	let hardened_check_count = p.iter().count().saturating_sub(2);
+	let hardened_check_count = core::cmp::min(p.iter().count(), 3);
 	#[cfg(not(feature = "quantus_v1"))]
 	let hardened_check_count = p.iter().count();
 
 	let mut index = 0;
 	for element in p.iter() {
-		// In quantus_v1, skip hardened check for the last 2 elements
 		if index < hardened_check_count && !element.is_hardened() {
 			return Err(HDLatticeError::HardenedPathsOnly());
 		}
