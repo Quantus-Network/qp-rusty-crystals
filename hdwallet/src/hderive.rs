@@ -257,7 +257,7 @@ mod tests {
 				path: vec![
 					ChildNumber(44 | HARDENED_BIT),
 					ChildNumber(60 | HARDENED_BIT),
-					ChildNumber(0 | HARDENED_BIT),
+					ChildNumber(HARDENED_BIT),
 					ChildNumber(0),
 				],
 			}
