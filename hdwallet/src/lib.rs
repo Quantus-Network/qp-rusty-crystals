@@ -182,12 +182,10 @@ fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 	#[cfg(not(feature = "quantus_v1"))]
 	let hardened_check_count = p.iter().count();
 
-	let mut index = 0;
-	for element in p.iter() {
+	for (index, element) in p.iter().enumerate() {
 		if index < hardened_check_count && !element.is_hardened() {
 			return Err(HDLatticeError::HardenedPathsOnly());
 		}
-		index += 1;
 	}
 	Ok(())
 }
