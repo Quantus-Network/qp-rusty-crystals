@@ -88,6 +88,10 @@ pub enum ThresholdError {
 	InvalidConfiguration(String),
 	/// Rejection sampling failed (signature attempt rejected due to bounds)
 	RejectionSampling,
+	/// Constraint violation during signature combination
+	ConstraintViolation,
+	/// Invalid data format or structure
+	InvalidData(String),
 }
 
 impl fmt::Display for ThresholdError {
@@ -145,6 +149,12 @@ impl fmt::Display for ThresholdError {
 			},
 			ThresholdError::RejectionSampling => {
 				write!(f, "Rejection sampling failed - signature attempt rejected")
+			},
+			ThresholdError::ConstraintViolation => {
+				write!(f, "Constraint violation during signature combination")
+			},
+			ThresholdError::InvalidData(msg) => {
+				write!(f, "Invalid data: {}", msg)
 			},
 		}
 	}

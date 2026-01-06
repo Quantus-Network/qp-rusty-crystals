@@ -119,7 +119,9 @@ pub struct ThresholdParams {
 	/// Total number of parties
 	pub n: u8,
 	/// Number of active parties participating in signing
-	pub k: u16,
+	pub k: u8,
+	/// Canonical K parameter (number of iterations per party)
+	pub canonical_k: u16,
 }
 
 impl ThresholdParams {
@@ -128,7 +130,7 @@ impl ThresholdParams {
 		validate_threshold_params(t, n)?;
 		// Get the canonical K parameter from ThresholdConfig
 		let canonical_k = Self::get_canonical_k(t, n)?;
-		Ok(Self { t, n, k: canonical_k })
+		Ok(Self { t, n, k: n, canonical_k })
 	}
 
 	/// Create threshold parameters for a signing session with specific active parties
@@ -150,17 +152,19 @@ impl ThresholdParams {
 			});
 		}
 
-		Ok(Self { t, n, k: active_parties as u16 })
+		// Get the canonical K parameter
+		let canonical_k = Self::get_canonical_k(t, n)?;
+		Ok(Self { t, n, k: active_parties, canonical_k })
 	}
 
 	/// Get response size for this threshold configuration
 	pub fn response_size<P: MlDsaParams>(&self) -> usize {
-		self.k as usize * P::SINGLE_RESPONSE_SIZE
+		self.canonical_k as usize * P::SINGLE_RESPONSE_SIZE
 	}
 
 	/// Get commitment size for this threshold configuration
 	pub fn commitment_size<P: MlDsaParams>(&self) -> usize {
-		self.k as usize * P::SINGLE_COMMITMENT_SIZE
+		self.canonical_k as usize * P::SINGLE_COMMITMENT_SIZE
 	}
 
 	/// Check if enough parties are participating for threshold
@@ -180,12 +184,12 @@ impl ThresholdParams {
 
 	/// Get the number of active parties
 	pub fn active_parties(&self) -> u8 {
-		self.n
+		self.k
 	}
 
 	/// Get the canonical K parameter (number of iterations per party)
 	pub fn canonical_k(&self) -> u16 {
-		self.k
+		self.canonical_k
 	}
 
 	/// Get the canonical K parameter for given threshold parameters
@@ -277,7 +281,8 @@ mod tests {
 		let response_size = params.response_size::<MlDsa87Params>();
 		let commitment_size = params.commitment_size::<MlDsa87Params>();
 
-		assert_eq!(response_size, 5 * MlDsa87Params::SINGLE_RESPONSE_SIZE);
-		assert_eq!(commitment_size, 5 * MlDsa87Params::SINGLE_COMMITMENT_SIZE);
+		// For (3, 5) threshold, canonical K = 26
+		assert_eq!(response_size, 26 * MlDsa87Params::SINGLE_RESPONSE_SIZE);
+		assert_eq!(commitment_size, 26 * MlDsa87Params::SINGLE_COMMITMENT_SIZE);
 	}
 }
