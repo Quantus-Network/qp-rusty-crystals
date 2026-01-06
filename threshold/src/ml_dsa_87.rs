@@ -1227,22 +1227,38 @@ fn create_mldsa_signature_dilithium(
 		poly::decompose(&mut w1.vec[i], &mut w0.vec[i]);
 	}
 
+	// Generate challenge polynomial using exact dilithium process
+	let mut signature_buffer = vec![0u8; dilithium_params::SIGNBYTES];
+
 	// Pack w1 for challenge generation using dilithium packing
-	let mut w1_packed = [0u8; dilithium_params::POLYW1_PACKEDBYTES * dilithium_params::K];
-	for i in 0..dilithium_params::K {
-		let start_idx = i * dilithium_params::POLYW1_PACKEDBYTES;
-		let end_idx = start_idx + dilithium_params::POLYW1_PACKEDBYTES;
-		poly::w1_pack(&mut w1_packed[start_idx..end_idx], &w1.vec[i]);
-	}
+	polyvec::k_pack_w1(&mut signature_buffer, &w1);
 
-	// Compute challenge c = H(μ || w1)
-	let mut shake = Shake256::default();
-	shake.update(&mu);
-	shake.update(&w1_packed);
+	// Generate challenge using dilithium's exact process: c = H(μ || w1)
+	let mut keccak_state = qp_rusty_crystals_dilithium::fips202::KeccakState::default();
+	qp_rusty_crystals_dilithium::fips202::shake256_absorb(
+		&mut keccak_state,
+		&mu,
+		dilithium_params::CRHBYTES,
+	);
+	qp_rusty_crystals_dilithium::fips202::shake256_absorb(
+		&mut keccak_state,
+		&signature_buffer,
+		dilithium_params::K * dilithium_params::POLYW1_PACKEDBYTES,
+	);
+	qp_rusty_crystals_dilithium::fips202::shake256_finalize(&mut keccak_state);
+	qp_rusty_crystals_dilithium::fips202::shake256_squeeze(
+		&mut signature_buffer,
+		dilithium_params::C_DASH_BYTES,
+		&mut keccak_state,
+	);
 
-	let mut c_bytes = [0u8; 64]; // ML-DSA challenge is 64 bytes
-	let mut reader = shake.finalize_xof();
-	reader.read(&mut c_bytes);
+	// Create challenge polynomial using dilithium's challenge function
+	let mut challenge_poly = qp_rusty_crystals_dilithium::poly::Poly::default();
+	poly::challenge(&mut challenge_poly, &signature_buffer[..dilithium_params::C_DASH_BYTES]);
+
+	// Use the challenge bytes for signature packing
+	let mut c_bytes = [0u8; dilithium_params::C_DASH_BYTES];
+	c_bytes.copy_from_slice(&signature_buffer[..dilithium_params::C_DASH_BYTES]);
 
 	// Check constraints and create signature
 	println!("Checking signature constraints...");
