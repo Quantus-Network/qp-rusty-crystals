@@ -119,14 +119,16 @@ pub struct ThresholdParams {
 	/// Total number of parties
 	pub n: u8,
 	/// Number of active parties participating in signing
-	pub k: u8,
+	pub k: u16,
 }
 
 impl ThresholdParams {
 	/// Create new threshold parameters with validation
 	pub fn new(t: u8, n: u8) -> ThresholdResult<Self> {
 		validate_threshold_params(t, n)?;
-		Ok(Self { t, n, k: n })
+		// Get the canonical K parameter from ThresholdConfig
+		let canonical_k = Self::get_canonical_k(t, n)?;
+		Ok(Self { t, n, k: canonical_k })
 	}
 
 	/// Create threshold parameters for a signing session with specific active parties
@@ -148,7 +150,7 @@ impl ThresholdParams {
 			});
 		}
 
-		Ok(Self { t, n, k: active_parties })
+		Ok(Self { t, n, k: active_parties as u16 })
 	}
 
 	/// Get response size for this threshold configuration
@@ -178,7 +180,43 @@ impl ThresholdParams {
 
 	/// Get the number of active parties
 	pub fn active_parties(&self) -> u8 {
+		self.n
+	}
+
+	/// Get the canonical K parameter (number of iterations per party)
+	pub fn canonical_k(&self) -> u16 {
 		self.k
+	}
+
+	/// Get the canonical K parameter for given threshold parameters
+	fn get_canonical_k(t: u8, n: u8) -> ThresholdResult<u16> {
+		// These values match the canonical Golang implementation
+		// from Threshold-ML-DSA/implementation/sign/thmldsa/thmldsa87/internal/dilithium.go
+		let k = match (t, n) {
+			(2, 2) => 3,
+			(2, 3) => 4,
+			(3, 3) => 6,
+			(2, 4) => 4,
+			(3, 4) => 11,
+			(4, 4) => 14,
+			(2, 5) => 5,
+			(3, 5) => 26,
+			(4, 5) => 70,
+			(5, 5) => 35,
+			(2, 6) => 5,
+			(3, 6) => 39,
+			(4, 6) => 208,
+			(5, 6) => 295,
+			(6, 6) => 87,
+			_ => {
+				return Err(crate::common::ThresholdError::InvalidParameters {
+					threshold: t,
+					parties: n,
+					reason: "unsupported threshold configuration",
+				})
+			},
+		};
+		Ok(k)
 	}
 }
 

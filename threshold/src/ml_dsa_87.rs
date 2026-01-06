@@ -1682,8 +1682,8 @@ impl Round3State {
 		zf.round(&mut z_response, &mut z2_temp);
 
 		// Step 9: Pack response in the format expected by canonical implementation
-		// Each party generates one response containing threshold number of packed VecL responses
-		let k = config.base.threshold() as usize;
+		// Each party generates one response containing canonical K number of packed VecL responses
+		let k = config.base.canonical_k() as usize;
 		let packed_size = dilithium_params::L * dilithium_params::POLYZ_PACKEDBYTES;
 		let mut response = vec![0u8; k * packed_size];
 

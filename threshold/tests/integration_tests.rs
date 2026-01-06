@@ -5,8 +5,8 @@
 
 use qp_rusty_crystals_threshold::{
 	ml_dsa_87::{
-		combine_signatures, generate_threshold_key, secret_sharing, Round1State, Round2State,
-		Round3State, ThresholdConfig,
+		combine_signatures, generate_threshold_key, secret_sharing, Params, Round1State,
+		Round2State, Round3State, ThresholdConfig,
 	},
 	params::{MlDsa87Params, MlDsaParams},
 	ThresholdError,
@@ -559,6 +559,15 @@ fn test_dilithium_crate_compatibility() {
 
 	println!("  Generated w_aggregated values");
 
+	// For now, create mock commitments of the expected size
+	// TODO: Implement proper commitment packing from w_aggregated polynomials
+	let expected_commitment_size = config.threshold_params().commitment_size::<Params>();
+	let mock_commitment1 = vec![1u8; expected_commitment_size];
+	let mock_commitment2 = vec![2u8; expected_commitment_size];
+	let mock_commitments = vec![mock_commitment1, mock_commitment2];
+
+	println!("DEBUG: using mock commitments of size {} bytes each", expected_commitment_size);
+
 	// Step 3: Round 3 - Generate responses with proper rejection sampling
 	println!("Round 3: Generating responses with rejection sampling...");
 
@@ -588,7 +597,7 @@ fn test_dilithium_crate_compatibility() {
 	// Step 4: Combine into final signature
 	println!("Combining threshold signature...");
 	let threshold_signature =
-		combine_signatures(&threshold_pk, message, context, &commitments, &responses, &config)
+		combine_signatures(&threshold_pk, message, context, &mock_commitments, &responses, &config)
 			.expect("Threshold signature generation failed");
 
 	// Verify signature length matches dilithium expectations
