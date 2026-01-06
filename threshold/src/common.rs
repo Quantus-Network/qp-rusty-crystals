@@ -86,6 +86,8 @@ pub enum ThresholdError {
 	},
 	/// Invalid configuration
 	InvalidConfiguration(String),
+	/// Rejection sampling failed (signature attempt rejected due to bounds)
+	RejectionSampling,
 }
 
 impl fmt::Display for ThresholdError {
@@ -140,6 +142,9 @@ impl fmt::Display for ThresholdError {
 			},
 			ThresholdError::InvalidConfiguration(msg) => {
 				write!(f, "Invalid configuration: {}", msg)
+			},
+			ThresholdError::RejectionSampling => {
+				write!(f, "Rejection sampling failed - signature attempt rejected")
 			},
 		}
 	}

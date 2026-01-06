@@ -4,7 +4,10 @@
 //! including secret sharing, key generation, threshold signing, and signature verification.
 
 use qp_rusty_crystals_threshold::{
-	ml_dsa_87::{combine_signatures, generate_threshold_key, secret_sharing, ThresholdConfig},
+	ml_dsa_87::{
+		combine_signatures, generate_threshold_key, secret_sharing, Round1State, Round2State,
+		Round3State, ThresholdConfig,
+	},
 	params::{MlDsa87Params, MlDsaParams},
 	ThresholdError,
 };
@@ -499,46 +502,91 @@ fn test_dilithium_crate_compatibility() {
 
 	// Generate threshold keys using proper seed format
 	let seed = [33u8; 32];
-	let (threshold_pk, _sks) =
+	let (threshold_pk, threshold_sks) =
 		generate_threshold_key(&seed, &config).expect("Key generation failed");
 
 	let message = b"Dilithium compatibility test message";
 	let context = b"dilithium_compat_test";
 
-	// Generate mock commitment and response data that satisfies constraints
-	let commitment_size = config.threshold_params().commitment_size::<MlDsa87Params>();
-	let response_size = config.threshold_params().response_size::<MlDsa87Params>();
+	println!("Starting proper threshold signing protocol...");
 
-	// Create realistic mock data for 2-party threshold
-	let mut rng = TestRng::new(12345);
-	let mut commitments = Vec::new();
-	let mut responses = Vec::new();
+	// Use the real threshold signing protocol instead of mock data
+	// Step 1: Round 1 - Generate commitments from parties 0 and 1
+	println!("Round 1: Generating commitments...");
 
-	for i in 0..2 {
-		// Generate commitment with small random values
-		let mut commitment = vec![0u8; commitment_size];
-		rng.fill_bytes(&mut commitment);
-		// Keep values small to avoid constraint violations
-		for byte in commitment.iter_mut() {
-			*byte = *byte % 64; // Keep bytes small
-		}
-		commitments.push(commitment);
+	let mut rng1 = TestRng::new(12345);
+	let mut rng2 = TestRng::new(67890);
 
-		// Generate response with small coefficients
-		let mut response = vec![0u8; response_size];
-		for j in 0..(response.len() / 4) {
-			let idx = j * 4;
-			if idx + 4 <= response.len() {
-				// Small coefficient values that satisfy ML-DSA constraints
-				let coeff = (i + 1) as i32 * 50 + (j % 100) as i32;
-				let bytes = coeff.to_le_bytes();
-				response[idx..idx + 4].copy_from_slice(&bytes);
-			}
-		}
-		responses.push(response);
-	}
+	// Generate masking polynomials and commitments for each party
+	let seed1 = [100u8; 32];
+	let seed2 = [101u8; 32];
 
-	// Generate threshold signature
+	let (commitment1, round1_state1) =
+		Round1State::new(&threshold_sks[0], &config, &seed1).expect("Round 1 party 1 failed");
+	let (commitment2, round1_state2) =
+		Round1State::new(&threshold_sks[1], &config, &seed2).expect("Round 1 party 2 failed");
+
+	let commitments = vec![commitment1, commitment2];
+	println!("  Generated {} commitments", commitments.len());
+
+	// Step 2: Round 2 - Process commitments and generate challenge
+	println!("Round 2: Processing commitments and generating challenge...");
+
+	// Simulate message hash computation like in regular Dilithium
+	let active_parties = vec![0u8, 1u8]; // Parties 0 and 1 are active
+
+	let (w_aggregated1, round2_state1) = Round2State::new(
+		&threshold_sks[0],
+		0b11, // active parties bitmask: parties 0 and 1
+		message,
+		context,
+		&commitments,
+		&[], // no other parties' w values yet
+		&round1_state1,
+	)
+	.expect("Round 2 party 1 failed");
+
+	let (w_aggregated2, round2_state2) = Round2State::new(
+		&threshold_sks[1],
+		0b11, // active parties bitmask: parties 0 and 1
+		message,
+		context,
+		&commitments,
+		&[], // no other parties' w values yet
+		&round1_state2,
+	)
+	.expect("Round 2 party 2 failed");
+
+	println!("  Generated w_aggregated values");
+
+	// Step 3: Round 3 - Generate responses with proper rejection sampling
+	println!("Round 3: Generating responses with rejection sampling...");
+
+	let round2_commitments = vec![w_aggregated1, w_aggregated2];
+
+	let (response1, _round3_state1) = Round3State::new(
+		&threshold_sks[0],
+		&config,
+		&round2_commitments,
+		&round1_state1,
+		&round2_state1,
+	)
+	.expect("Round 3 party 1 failed");
+
+	let (response2, _round3_state2) = Round3State::new(
+		&threshold_sks[1],
+		&config,
+		&round2_commitments,
+		&round1_state2,
+		&round2_state2,
+	)
+	.expect("Round 3 party 2 failed");
+
+	let responses = vec![response1, response2];
+	println!("  Generated {} responses", responses.len());
+
+	// Step 4: Combine into final signature
+	println!("Combining threshold signature...");
 	let threshold_signature =
 		combine_signatures(&threshold_pk, message, context, &commitments, &responses, &config)
 			.expect("Threshold signature generation failed");
@@ -566,7 +614,7 @@ fn test_dilithium_crate_compatibility() {
 		println!(
 			"📋 EXPECTED STATUS: Threshold signatures not yet compatible with standard dilithium"
 		);
-		println!("   This is expected because cryptographic operations are currently simplified.");
+		println!("   This is expected because rejection sampling implementation is being refined.");
 
 		// Create a reference signature for comparison and validation
 		let keypair = qp_rusty_crystals_dilithium::ml_dsa_87::Keypair::generate(
@@ -589,16 +637,16 @@ fn test_dilithium_crate_compatibility() {
 		);
 		println!("   2. ✅ COMPLETED: Real hint computation using ML-DSA make_hint algorithm");
 		println!("   3. ✅ COMPLETED: Round 2 w value aggregation for multi-party protocol");
-		println!("   4. 🚧 TODO: Use cryptographically correct polynomial sampling");
+		println!("   4. ✅ IN PROGRESS: Integer-based rejection sampling implementation");
 		println!("   5. 🚧 TODO: Ensure verification equation: Az - c*t1*2^d = w1 - c*t0 (mod q)");
-		println!("   6. 🚧 TODO: Replace any remaining simplified operations");
+		println!("   6. 🚧 TODO: Debug and fix remaining verification issues");
 
-		// This test currently expects failure - when cryptographic operations are fixed,
+		// This test currently expects failure - when rejection sampling is fully working,
 		// change this to: assert!(is_valid, "Threshold signatures should verify with dilithium crate")
 		assert!(
 			!is_valid,
-			"Expected: Threshold signatures currently use simplified crypto operations. \
-			 When proper NTT, sampling, and challenges are implemented, this test should pass."
+			"Expected: Threshold signatures are using proper protocol but rejection sampling needs refinement. \
+			 When verification equation issues are resolved, this test should pass."
 		);
 	}
 }

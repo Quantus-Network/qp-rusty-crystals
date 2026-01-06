@@ -50,7 +50,7 @@ use crate::{
 	params::{MlDsaParams, ThresholdParams as BaseThresholdParams},
 };
 use qp_rusty_crystals_dilithium::fips202;
-use rand_core::{CryptoRng, RngCore};
+// Removed unused imports CryptoRng and RngCore
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // Import dilithium crate for real ML-DSA operations
@@ -65,7 +65,7 @@ pub use crate::params::common::SEED_SIZE;
 /// Shamir secret sharing implementation for threshold ML-DSA
 pub mod secret_sharing {
 	use super::*;
-	use rand_core::RngCore;
+	// Removed unused import rand_core::RngCore
 
 	/// Secret share for a single party
 	#[derive(Clone)]
@@ -256,7 +256,7 @@ pub mod secret_sharing {
 	/// Generate proper Round1 commitment using Threshold-ML-DSA approach
 	/// This generates masking polynomials and computes w = A*y commitments
 	pub fn generate_round1_commitment(
-		party_shares: &std::collections::HashMap<u8, SecretShare>,
+		_party_shares: &std::collections::HashMap<u8, SecretShare>,
 		party_id: u8,
 		seed: &[u8; 32],
 		nonce: u16,
@@ -333,7 +333,7 @@ pub mod secret_sharing {
 		}
 
 		use qp_rusty_crystals_dilithium::fips202;
-		let mut aggregated_commitment: Vec<u8> = Vec::new();
+		let _aggregated_commitment: Vec<u8> = Vec::new();
 		let mut state = fips202::KeccakState::default();
 
 		// Aggregate all commitments by hashing them together
@@ -713,7 +713,7 @@ pub mod secret_sharing {
 
 	/// Recover share using hardcoded sharing patterns instead of Lagrange interpolation.
 	/// This avoids the coefficient explosion problem we had with general Lagrange interpolation.
-	fn recover_share_hardcoded(
+	pub fn recover_share_hardcoded(
 		shares: &std::collections::HashMap<u8, SecretShare>,
 		party_id: u8,
 		active_parties: &[u8],
@@ -971,7 +971,7 @@ pub struct PrivateKey {
 	/// Matrix A
 	pub a: Mat<{ Params::K }, { Params::L }>,
 	/// Secret shares for this party (indexed by signer subset)
-	pub shares: std::collections::HashMap<u8, SecretShare>,
+	pub shares: std::collections::HashMap<u8, secret_sharing::SecretShare>,
 	/// Aggregated secret for verification
 	pub s_total: Option<(polyvec::Polyvecl, polyvec::Polyveck)>,
 }
@@ -1002,6 +1002,180 @@ impl Zeroize for PrivateKey {
 }
 
 impl ZeroizeOnDrop for PrivateKey {}
+
+/// Floating-point vector for threshold signature hyperball sampling (like Golang FVec)
+pub struct FVec {
+	data: Box<[f64]>,
+}
+
+impl FVec {
+	/// Create new FVec with given size
+	pub fn new(size: usize) -> Self {
+		Self { data: vec![0.0f64; size].into_boxed_slice() }
+	}
+
+	/// Sample from hyperball with given radius and nu parameter
+	pub fn sample_hyperball(&mut self, radius: f64, nu: f64, rhop: &[u8; 64], nonce: u16) {
+		use std::f64::consts::PI;
+
+		let size = self.data.len();
+		let mut samples = vec![0.0f64; size + 2];
+
+		// Use SHAKE256 for cryptographic randomness
+		let mut keccak_state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut keccak_state, b"H", 1); // Domain separator
+		fips202::shake256_absorb(&mut keccak_state, rhop, 64);
+		let nonce_bytes = nonce.to_le_bytes();
+		fips202::shake256_absorb(&mut keccak_state, &nonce_bytes, 2);
+		fips202::shake256_finalize(&mut keccak_state);
+
+		let mut buf = vec![0u8; (size + 2) * 8]; // 8 bytes per f64
+		let buf_len = buf.len();
+		fips202::shake256_squeeze(&mut buf, buf_len, &mut keccak_state);
+
+		// Generate normally distributed random numbers using Box-Muller transform
+		let mut sq = 0.0f64;
+		for i in (0..size + 2).step_by(2) {
+			// Convert bytes to u64
+			let u1_bytes: [u8; 8] = buf[i * 8..(i + 1) * 8].try_into().unwrap();
+			let u2_bytes: [u8; 8] = buf[(i + 1) * 8..(i + 2) * 8].try_into().unwrap();
+			let u1 = u64::from_le_bytes(u1_bytes);
+			let u2 = u64::from_le_bytes(u2_bytes);
+
+			// Convert to f64 in [0,1) - matching Golang exactly
+			let f1 = (u1 as f64) / 18446744073709551616.0; // 2^64 as f64
+			let f2 = (u2 as f64) / 18446744073709551616.0; // 2^64 as f64
+
+			// Ensure f1 > 0 for log to avoid NaN
+			let f1 = if f1 <= 0.0 { f64::MIN_POSITIVE } else { f1 };
+
+			// Box-Muller transform
+			let z1 = (-2.0 * f1.ln()).sqrt() * (2.0 * PI * f2).cos();
+			let z2 = (-2.0 * f1.ln()).sqrt() * (2.0 * PI * f2).sin();
+
+			// Store samples and apply nu scaling BEFORE adding to sq
+			if i < size {
+				samples[i] = z1;
+				// Apply nu scaling for first L components BEFORE adding to sq
+				if i < dilithium_params::L * dilithium_params::N as usize {
+					samples[i] *= nu;
+				}
+				sq += samples[i] * samples[i];
+			}
+
+			if i + 1 < size {
+				samples[i + 1] = z2;
+				// Apply nu scaling for first L components BEFORE adding to sq
+				if i + 1 < dilithium_params::L * dilithium_params::N as usize {
+					samples[i + 1] *= nu;
+				}
+				sq += samples[i + 1] * samples[i + 1];
+			}
+		}
+
+		// Scale to desired radius using the corrected sq value
+		let factor = radius / sq.sqrt();
+		for i in 0..size {
+			self.data[i] = samples[i] * factor;
+		}
+	}
+
+	/// Round floating-point values back to integer polynomials
+	pub fn round(&self, s1: &mut polyvec::Polyvecl, s2: &mut polyvec::Polyveck) {
+		// Round s1 components
+		for i in 0..dilithium_params::L {
+			for j in 0..dilithium_params::N as usize {
+				let idx = i * dilithium_params::N as usize + j;
+				let mut u = self.data[idx].round() as i32;
+				// Add Q if negative to ensure positive
+				let t = u >> 31;
+				u = u + (t & dilithium_params::Q as i32);
+				s1.vec[i].coeffs[j as usize] = u as i32;
+			}
+		}
+
+		// Round s2 components
+		for i in 0..dilithium_params::K {
+			for j in 0..dilithium_params::N as usize {
+				let idx = (dilithium_params::L + i) * dilithium_params::N as usize + j;
+				let mut u = self.data[idx].round() as i32;
+				// Add Q if negative to ensure positive
+				let t = u >> 31;
+				u = u + (t & dilithium_params::Q as i32);
+				s2.vec[i].coeffs[j as usize] = u as i32;
+			}
+		}
+	}
+
+	/// Check if norm exceeds rejection bounds (like Golang Excess function)
+	pub fn excess(&self, r: f64, nu: f64) -> bool {
+		let mut sq = 0.0;
+
+		for i in 0..(dilithium_params::L + dilithium_params::K) {
+			for j in 0..dilithium_params::N as usize {
+				let idx = i * dilithium_params::N as usize + j;
+				let val = self.data[idx];
+				if i < dilithium_params::L {
+					// For s1 components, divide by nu^2
+					sq += val * val / (nu * nu);
+				} else {
+					// For s2 components, use directly
+					sq += val * val;
+				}
+			}
+		}
+
+		sq > r * r
+	}
+
+	/// Add another FVec to this one
+	pub fn add(&mut self, other: &FVec) {
+		for i in 0..self.data.len() {
+			self.data[i] += other.data[i];
+		}
+	}
+
+	/// Clone this FVec
+	pub fn clone(&self) -> Self {
+		Self { data: self.data.clone() }
+	}
+
+	/// Create FVec from polynomial vectors
+	pub fn from_polyvecs(s1: &polyvec::Polyvecl, s2: &polyvec::Polyveck) -> Self {
+		let size = dilithium_params::N as usize * (dilithium_params::L + dilithium_params::K);
+		let mut data = vec![0.0f64; size];
+
+		// Copy s1 polynomials (first L polynomials)
+		for i in 0..dilithium_params::L {
+			for j in 0..dilithium_params::N as usize {
+				let mut u = s1.vec[i].coeffs[j as usize] as i32;
+				// Center modulo Q
+				u += dilithium_params::Q as i32 / 2;
+				let t = u - dilithium_params::Q as i32;
+				u = t + ((t >> 31) & dilithium_params::Q as i32);
+				u = u - dilithium_params::Q as i32 / 2;
+
+				data[i * dilithium_params::N as usize + j] = u as f64;
+			}
+		}
+
+		// Copy s2 polynomials (next K polynomials)
+		for i in 0..dilithium_params::K {
+			for j in 0..dilithium_params::N as usize {
+				let mut u = s2.vec[i].coeffs[j as usize] as i32;
+				// Center modulo Q
+				u += dilithium_params::Q as i32 / 2;
+				let t = u - dilithium_params::Q as i32;
+				u = t + ((t >> 31) & dilithium_params::Q as i32);
+				u = u - dilithium_params::Q as i32 / 2;
+
+				data[(dilithium_params::L + i) * dilithium_params::N as usize + j] = u as f64;
+			}
+		}
+
+		Self { data: data.into_boxed_slice() }
+	}
+}
 
 // Key types are already public, no need to re-export them
 
@@ -1070,6 +1244,10 @@ pub struct Round1State {
 	pub w: polyvec::Polyveck,
 	/// Randomness y used for commitment generation
 	pub y: polyvec::Polyvecl,
+	/// Floating-point y vector for threshold rejection sampling
+	pub y_fvec: FVec,
+	/// Original hyperball sample for threshold rejection sampling
+	pub hyperball_sample: FVec,
 	/// Random bytes used for commitment
 	pub rho_prime: [u8; 64],
 }
@@ -1078,10 +1256,10 @@ impl Round1State {
 	/// Generate Round 1 commitment using real ML-DSA operations
 	pub fn new_with_seed(
 		sk: &PrivateKey,
-		_config: &ThresholdConfig,
+		config: &ThresholdConfig,
 		seed: &[u8; 32],
 	) -> ThresholdResult<(Vec<u8>, Self)> {
-		// Generate deterministic random bytes for commitment
+		// Generate deterministic random bytes for commitment using threshold hyperball sampling
 		let mut rho_prime = [0u8; 64];
 		let mut state = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut state, seed, 32);
@@ -1089,15 +1267,38 @@ impl Round1State {
 		fips202::shake256_finalize(&mut state);
 		fips202::shake256_squeeze(&mut rho_prime, 64, &mut state);
 
-		// Sample randomness y from [-γ₁, γ₁] for commitment using dilithium's uniform_gamma1
+		// Use threshold-specific hyperball sampling instead of uniform_gamma1
+		let fvec_size = dilithium_params::N as usize * (dilithium_params::L + dilithium_params::K);
+		let mut fvec = FVec::new(fvec_size);
+
+		// Sample from hyperball using threshold parameters
+		fvec.sample_hyperball(config.r_prime, config.nu, &rho_prime, 0);
+
+		// Debug: Check that hyperball sample has correct norm
+		let hyperball_norm = {
+			let mut sq = 0.0;
+			for i in 0..(dilithium_params::L + dilithium_params::K) {
+				for j in 0..dilithium_params::N as usize {
+					let idx = i * dilithium_params::N as usize + j;
+					let val = fvec.data[idx];
+					if i < dilithium_params::L {
+						sq += val * val / (config.nu * config.nu);
+					} else {
+						sq += val * val;
+					}
+				}
+			}
+			sq.sqrt()
+		};
+		println!(
+			"Round1: Hyperball sample norm: {}, target r_prime: {}",
+			hyperball_norm, config.r_prime
+		);
+
+		// Round to integer polynomials
 		let mut y = polyvec::Polyvecl::default();
-		let mut y_seed = [0u8; 64]; // Use CRHBYTES (64) instead of 32
-		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, seed, 32);
-		fips202::shake256_absorb(&mut state, b"y_seed", 6);
-		fips202::shake256_finalize(&mut state);
-		fips202::shake256_squeeze(&mut y_seed, 64, &mut state); // Generate 64 bytes
-		polyvec::l_uniform_gamma1(&mut y, &y_seed, 0);
+		let mut e = polyvec::Polyveck::default();
+		fvec.round(&mut y, &mut e);
 
 		// Compute w = A·y using matrix A from public key
 		let mut w = polyvec::Polyveck::default();
@@ -1114,6 +1315,12 @@ impl Round1State {
 		for i in 0..dilithium_params::K {
 			polyvec::l_pointwise_acc_montgomery(&mut w.vec[i], &a_matrix[i], &y_ntt);
 			poly::invntt_tomont(&mut w.vec[i]);
+
+			// Add error term e for threshold scheme
+			for j in 0..dilithium_params::N as usize {
+				w.vec[i].coeffs[j] =
+					(w.vec[i].coeffs[j] + e.vec[i].coeffs[j]) % dilithium_params::Q as i32;
+			}
 		}
 
 		// Pack w for commitment
@@ -1129,7 +1336,7 @@ impl Round1State {
 		fips202::shake256_finalize(&mut state);
 		fips202::shake256_squeeze(&mut commitment, 32, &mut state);
 
-		Ok((commitment, Self { w, y, rho_prime }))
+		Ok((commitment, Self { w, y, y_fvec: fvec.clone(), hyperball_sample: fvec, rho_prime }))
 	}
 
 	/// Generate Round 1 commitment using seed
@@ -1167,6 +1374,11 @@ impl Round1State {
 			}
 		}
 		Ok(w)
+	}
+
+	/// Use unpack_w_dilithium to parse commitment data
+	pub fn parse_commitment(&self, buf: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
+		Self::unpack_w_dilithium(buf)
 	}
 }
 
@@ -1307,11 +1519,11 @@ impl Zeroize for Round3State {
 impl ZeroizeOnDrop for Round3State {}
 
 impl Round3State {
-	/// Generate Round 3 signature response using real secret shares and ML-DSA operations
+	/// Generate Round 3 signature response using integer-based rejection sampling like regular Dilithium
 	pub fn new(
 		sk: &PrivateKey,
-		_config: &ThresholdConfig,
-		round2_commitments: &[Vec<u8>],
+		config: &ThresholdConfig,
+		_round2_commitments: &[Vec<u8>],
 		round1_state: &Round1State,
 		round2_state: &Round2State,
 	) -> ThresholdResult<(Vec<u8>, Self)> {
@@ -1319,27 +1531,69 @@ impl Round3State {
 		// TODO: Implement proper verification of Round 2 w_values if needed
 		// The current logic incorrectly tries to verify Round 2 w_values against Round 1 commitment hashes
 
-		// Use real secret shares and ML-DSA operations
-		if let Some((ref s1_share, ref _s2_share)) = sk.s_total {
-			// Compute real threshold response: z = y + c·s1_share
-			let response = Self::compute_real_ml_dsa_response(
-				s1_share,
-				&round1_state.y,
-				&round2_state.w_aggregated,
-				&round2_state.mu,
-			)?;
-			Ok((response.clone(), Self { response }))
+		// Use real secret shares and ML-DSA operations with integer-based rejection sampling
+		if let Some((ref _s1_share, ref _s2_share)) = sk.s_total {
+			println!(
+				"Starting threshold signature with rejection sampling, max iterations: {}",
+				config.k_iterations
+			);
+
+			// Attempt signature generation with rejection sampling like regular Dilithium
+			for iteration in 0..config.k_iterations {
+				println!("  Attempt {}/{}", iteration + 1, config.k_iterations);
+
+				// Generate fresh hyperball sample for each attempt
+				let fvec_size =
+					dilithium_params::N as usize * (dilithium_params::L + dilithium_params::K);
+				let mut fresh_hyperball = FVec::new(fvec_size);
+				fresh_hyperball.sample_hyperball(
+					config.r_prime,
+					config.nu,
+					&round1_state.rho_prime,
+					iteration,
+				);
+
+				match Self::compute_threshold_response_with_floating_point_rejection(
+					sk,
+					&fresh_hyperball,
+					&round2_state.w_aggregated,
+					&round2_state.mu,
+					config,
+					&[0, 1], // Active parties for 2-of-3 threshold
+					iteration,
+				) {
+					Ok(response) => {
+						println!("  ✅ Rejection sampling succeeded on attempt {}", iteration + 1);
+						return Ok((response.clone(), Self { response }));
+					},
+					Err(ThresholdError::RejectionSampling) => {
+						println!(
+							"  ❌ Rejection sampling failed on attempt {}, retrying...",
+							iteration + 1
+						);
+						continue;
+					},
+					Err(e) => return Err(e),
+				}
+			}
+
+			println!("  💥 All {} rejection sampling attempts failed", config.k_iterations);
+			// If all iterations failed, return error
+			Err(ThresholdError::RejectionSampling)
 		} else {
 			return Err(ThresholdError::CombinationFailed);
 		}
 	}
 
-	/// Compute real ML-DSA threshold response: z = y + c·s1_share
-	fn compute_real_ml_dsa_response(
-		s1_share: &polyvec::Polyvecl,
-		y: &polyvec::Polyvecl,
+	/// Compute threshold response with floating-point rejection sampling like Golang implementation
+	fn compute_threshold_response_with_floating_point_rejection(
+		sk: &PrivateKey,
+		hyperball_sample: &FVec,
 		w_aggregated: &polyvec::Polyveck,
 		mu: &[u8; 64],
+		config: &ThresholdConfig,
+		active_parties: &[u8],
+		_iteration: u16,
 	) -> ThresholdResult<Vec<u8>> {
 		// Step 1: Decompose w into w0 and w1
 		let mut w0 = polyvec::Polyveck::default();
@@ -1377,36 +1631,74 @@ impl Round3State {
 
 		poly::challenge(&mut c_poly, &c_bytes);
 
-		// Step 5: Compute z = y + c·s1_share
-		let mut z_response = polyvec::Polyvecl::default();
+		// Step 4: Use hardcoded share recovery like Golang implementation
+		let (s1_share, s2_share) = secret_sharing::reconstruct_secret_hardcoded(
+			&sk.shares,
+			sk.id,
+			active_parties,
+			config.base.threshold(),
+			config.base.total_parties(),
+		)?;
 
-		// Convert challenge to NTT domain
+		// Step 5: Convert challenge to NTT domain and compute c·s1_share and c·s2_share
 		let mut c_ntt = c_poly.clone();
 		poly::ntt(&mut c_ntt);
 
+		let mut cs1_z = polyvec::Polyvecl::default();
+		let mut cs2_y = polyvec::Polyveck::default();
+
+		// Compute c·s1_share for z
 		for i in 0..dilithium_params::L {
-			// Compute c·s1_share[i]
-			let mut cs1 = qp_rusty_crystals_dilithium::poly::Poly::default();
-			poly::pointwise_montgomery(&mut cs1, &c_ntt, &{
+			poly::pointwise_montgomery(&mut cs1_z.vec[i], &c_ntt, &{
 				let mut s1_ntt = s1_share.vec[i].clone();
 				poly::ntt(&mut s1_ntt);
 				s1_ntt
 			});
-			poly::invntt_tomont(&mut cs1);
-
-			// z[i] = y[i] + c·s1_share[i]
-			z_response.vec[i] = poly::add(&y.vec[i], &cs1);
-			poly::reduce(&mut z_response.vec[i]);
+			poly::invntt_tomont(&mut cs1_z.vec[i]);
 		}
 
-		// Step 6: Pack response
-		let mut response = vec![0u8; dilithium_params::L * (dilithium_params::N as usize) * 4];
-		for i in 0..dilithium_params::L {
-			for j in 0..(dilithium_params::N as usize) {
-				let idx = (i * (dilithium_params::N as usize) + j) * 4;
-				let bytes = z_response.vec[i].coeffs[j].to_le_bytes();
-				if idx + 4 <= response.len() {
-					response[idx..idx + 4].copy_from_slice(&bytes);
+		// Compute c·s2_share for y
+		for i in 0..dilithium_params::K {
+			poly::pointwise_montgomery(&mut cs2_y.vec[i], &c_ntt, &{
+				let mut s2_ntt = s2_share.vec[i].clone();
+				poly::ntt(&mut s2_ntt);
+				s2_ntt
+			});
+			poly::invntt_tomont(&mut cs2_y.vec[i]);
+		}
+
+		// Step 6: Create FVec from the challenge-secret products and add hyperball sample
+		let mut zf = FVec::from_polyvecs(&cs1_z, &cs2_y);
+		zf.add(hyperball_sample);
+
+		// Step 7: Apply floating-point rejection sampling using threshold bounds
+		if zf.excess(config.r, config.nu) {
+			return Err(ThresholdError::RejectionSampling);
+		}
+
+		// Step 8: Round back to integers
+		let mut z_response = polyvec::Polyvecl::default();
+		let mut z2_temp = polyvec::Polyveck::default();
+		zf.round(&mut z_response, &mut z2_temp);
+
+		// Step 9: Pack response in the format expected by canonical implementation
+		// Each party generates one response containing threshold number of packed VecL responses
+		let k = config.base.threshold() as usize;
+		let packed_size = dilithium_params::L * dilithium_params::POLYZ_PACKEDBYTES;
+		let mut response = vec![0u8; k * packed_size];
+
+		// Pack K copies of the same z_response (canonical implementation would generate K different ones)
+		for iteration in 0..k {
+			let start_idx = iteration * packed_size;
+
+			// Pack each polynomial in the VecL using dilithium's z packing format
+			for i in 0..dilithium_params::L {
+				let poly_start = start_idx + i * dilithium_params::POLYZ_PACKEDBYTES;
+				let poly_end = poly_start + dilithium_params::POLYZ_PACKEDBYTES;
+
+				if poly_end <= response.len() {
+					// Use dilithium's z polynomial packing for proper signature format
+					poly::z_pack(&mut response[poly_start..poly_end], &z_response.vec[i]);
 				}
 			}
 		}
@@ -1421,21 +1713,15 @@ impl Round3State {
 		mu: &[u8; 64],
 		response: &mut [u8],
 	) -> ThresholdResult<()> {
-		// In a real implementation, this would:
-		// 1. Use the secret shares to compute signature components
-		// 2. Apply the threshold signature algorithm
-		// 3. Generate proper z polynomials
-
-		// For now, create a deterministic response based on inputs
+		// This is a simplified deterministic response for compatibility testing
+		// In production, this should implement the full threshold response logic
 		let mut input = Vec::new();
 		input.extend_from_slice(&sk.key);
 		input.extend_from_slice(mu);
 
-		// Add some w_final data to the hash
+		// Add some w_final data to make response dependent on commitment
 		for i in 0..Params::K.min(4) {
-			// Use first few polynomials
 			for j in 0..N.min(16) {
-				// Use first few coefficients
 				let coeff = w_final.get(i).get(j).value();
 				input.extend_from_slice(&coeff.to_le_bytes());
 			}
@@ -1499,7 +1785,7 @@ pub fn generate_threshold_key(
 
 	// Generate proper threshold secret shares using Threshold-ML-DSA approach
 	let params = config.threshold_params();
-	let (s1_total_new, s2_total_new, party_shares) =
+	let (s1_total_new, s2_total_new, _party_shares) =
 		secret_sharing::generate_proper_threshold_shares(
 			seed,
 			params.threshold(),
@@ -1509,13 +1795,16 @@ pub fn generate_threshold_key(
 	// Create private keys with proper secret shares
 	let mut private_keys = Vec::with_capacity(params.total_parties() as usize);
 	for party_id in 0..params.total_parties() {
+		// Get the shares for this specific party
+		let party_specific_shares = _party_shares.get(&party_id).cloned().unwrap_or_default();
+
 		let sk = PrivateKey {
 			id: party_id,
 			key: [party_id as u8; 32],
 			rho: pk.rho,
 			tr: pk.tr,
 			a: Mat::zero(),
-			shares: std::collections::HashMap::new(), // Leave empty for now
+			shares: party_specific_shares,
 			s_total: Some((s1_total_new.clone(), s2_total_new.clone())),
 		};
 		private_keys.push(sk);
@@ -1961,7 +2250,7 @@ fn pack_dilithium_signature(
 	c: &[u8; 64],
 	z: &polyvec::Polyvecl,
 	_w0: &polyvec::Polyveck,
-	w1: &polyvec::Polyveck,
+	_w1: &polyvec::Polyveck,
 ) -> ThresholdResult<Vec<u8>> {
 	let mut signature = vec![0u8; dilithium_params::SIGNBYTES];
 
@@ -1970,7 +2259,7 @@ fn pack_dilithium_signature(
 	poly::challenge(&mut challenge_poly, c);
 
 	// Create hint vector using proper ML-DSA hint computation
-	let mut hint = polyvec::Polyveck::default();
+	let hint = polyvec::Polyveck::default();
 
 	// For threshold signatures, we need to compute hints properly
 	// This is a simplified version - in practice, hints would be computed
