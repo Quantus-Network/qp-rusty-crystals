@@ -61,18 +61,21 @@
 #![warn(missing_docs, rust_2018_idioms)]
 
 // Public API module for ML-DSA-87 security level
-pub mod mldsa87;
+pub mod ml_dsa_87;
 
 // Internal modules
 mod common;
-mod field;
-mod params;
+pub mod field;
+pub mod params;
 
 // Re-export common types and errors
 pub use common::{ThresholdError, ThresholdResult};
 
 // Convenience re-export for the main security level
-pub use mldsa87 as threshold;
+pub use ml_dsa_87 as threshold;
+
+// Additional alias for compatibility
+pub use ml_dsa_87 as mldsa87;
 
 /// Maximum number of parties supported by the threshold scheme
 pub const MAX_PARTIES: u8 = 6;

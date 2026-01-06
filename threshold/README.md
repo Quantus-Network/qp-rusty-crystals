@@ -41,7 +41,7 @@ let (commitment, round1_state) = Round1State::new(&secret_keys[0], &config, &mut
 // Round 2: Exchange commitments and compute challenge
 let (packed_commitment, round2_state) = Round2State::new(
     &secret_keys[0], active_parties, message, context, 
-    &all_commitments, &round1_state
+    &all_commitments, &other_parties_w_values, &round1_state
 )?;
 
 // Round 3: Generate responses
