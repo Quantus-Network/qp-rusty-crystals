@@ -1710,26 +1710,69 @@ impl Round3State {
 		let mut z2_temp = polyvec::Polyveck::default();
 		zf.round(&mut z_response, &mut z2_temp);
 
-		// Step 9: Pack response in the format expected by canonical implementation
-		// Each party generates one response containing canonical K number of packed VecL responses
+		// Step 9: Generate K different responses with proper rejection sampling
 		let k = config.base.canonical_k() as usize;
 		let packed_size = dilithium_params::L * dilithium_params::POLYZ_PACKEDBYTES;
 		let mut response = vec![0u8; k * packed_size];
+		let mut successful_iterations = 0;
 
-		// Pack K copies of the same z_response (canonical implementation would generate K different ones)
+		// Generate K different responses with different randomness for each iteration
 		for iteration in 0..k {
-			let start_idx = iteration * packed_size;
+			// Use iteration-specific seed for different randomness
+			let mut iteration_seed = [0u8; 64];
+			iteration_seed[0..4].copy_from_slice(&(iteration as u32).to_le_bytes());
+			iteration_seed[4..5].copy_from_slice(&[sk.id]);
 
-			// Pack each polynomial in the VecL using dilithium's z packing format
-			for i in 0..dilithium_params::L {
-				let poly_start = start_idx + i * dilithium_params::POLYZ_PACKEDBYTES;
-				let poly_end = poly_start + dilithium_params::POLYZ_PACKEDBYTES;
+			// Generate new hyperball sample for this iteration
+			let size = dilithium_params::N as usize * (dilithium_params::L + dilithium_params::K);
+			let mut iteration_hyperball = FVec::new(size);
+			iteration_hyperball.sample_hyperball(
+				config.r as f64,
+				config.nu as f64,
+				&iteration_seed,
+				iteration as u16,
+			);
 
-				if poly_end <= response.len() {
-					// Use dilithium's z polynomial packing for proper signature format
-					poly::z_pack(&mut response[poly_start..poly_end], &z_response.vec[i]);
+			// Create FVec from challenge-secret products and add iteration-specific sample
+			let mut zf_iter = FVec::from_polyvecs(&cs1_z, &cs2_y);
+			zf_iter.add(&iteration_hyperball);
+
+			// Apply rejection sampling for this specific iteration
+			if !zf_iter.excess(config.r, config.nu) {
+				// Round to integers
+				let mut z_iter = polyvec::Polyvecl::default();
+				let mut z2_temp = polyvec::Polyveck::default();
+				zf_iter.round(&mut z_iter, &mut z2_temp);
+
+				// Pack this iteration's response
+				let start_idx = iteration * packed_size;
+				for i in 0..dilithium_params::L {
+					let poly_start = start_idx + i * dilithium_params::POLYZ_PACKEDBYTES;
+					let poly_end = poly_start + dilithium_params::POLYZ_PACKEDBYTES;
+
+					if poly_end <= response.len() {
+						poly::z_pack(&mut response[poly_start..poly_end], &z_iter.vec[i]);
+					}
+				}
+				successful_iterations += 1;
+			} else {
+				// If rejection sampling fails, pack zeros for this iteration
+				let start_idx = iteration * packed_size;
+				for i in 0..dilithium_params::L {
+					let poly_start = start_idx + i * dilithium_params::POLYZ_PACKEDBYTES;
+					let poly_end = poly_start + dilithium_params::POLYZ_PACKEDBYTES;
+
+					if poly_end <= response.len() {
+						let zero_poly = qp_rusty_crystals_dilithium::poly::Poly::default();
+						poly::z_pack(&mut response[poly_start..poly_end], &zero_poly);
+					}
 				}
 			}
+		}
+
+		// Require at least one successful iteration
+		if successful_iterations == 0 {
+			return Err(ThresholdError::RejectionSampling);
 		}
 
 		Ok(response)
