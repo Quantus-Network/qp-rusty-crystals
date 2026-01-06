@@ -2011,74 +2011,155 @@ fn aggregate_threshold_signature(
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut mu, 64, &mut state);
 
-	// Unpack commitments and responses for each K iteration
-	let mut wfinals = Vec::new();
-	let mut zs = Vec::new();
-
 	let k_canonical = params.canonical_k();
+	println!("Using canonical K = {} for threshold aggregation", k_canonical);
 
-	// Collect all commitment iterations from all parties
-	let mut all_wfinals = Vec::new();
-	for (party_idx, commitment) in commitments.iter().take(params.threshold() as usize).enumerate()
-	{
-		let w_iterations = unpack_commitment_to_k_iterations(commitment, k_canonical as usize)?;
-		println!("    Party {} provided {} commitment iterations", party_idx, w_iterations.len());
-		all_wfinals.extend(w_iterations);
-	}
+	// Proper threshold signature aggregation using Lagrange interpolation
+	// For each of the K canonical iterations, try to reconstruct and verify
+	for k in 0..(k_canonical as usize) {
+		println!("  Trying canonical iteration {}/{}", k + 1, k_canonical);
 
-	// Collect all response iterations from all parties (don't sum them - use individually)
-	let mut all_zs = Vec::new();
-	for (party_idx, response) in responses.iter().take(params.threshold() as usize).enumerate() {
-		let z_iterations = unpack_response_to_k_iterations(response, k_canonical as usize)?;
+		// Extract the k-th iteration from each party's commitment and response
+		let mut iter_commitments = Vec::new();
+		let mut iter_responses = Vec::new();
 
-		// Debug individual party's z coefficients
-		let mut party_z_max = 0i32;
-		for k in 0..(k_canonical as usize).min(3).min(z_iterations.len()) {
-			for i in 0..dilithium_params::L {
-				for j in 0..(dilithium_params::N as usize).min(10) {
-					let coeff = z_iterations[k as usize].vec[i].coeffs[j];
-					party_z_max = party_z_max.max(coeff.abs());
+		// Extract k-th iteration from each party
+		for party_idx in 0..params.threshold() as usize {
+			if party_idx < commitments.len() && party_idx < responses.len() {
+				// Extract k-th commitment iteration
+				if let Ok(w_iterations) =
+					unpack_commitment_to_k_iterations(&commitments[party_idx], k_canonical as usize)
+				{
+					if k < w_iterations.len() {
+						iter_commitments.push(w_iterations[k].clone());
+					} else {
+						iter_commitments.push(polyvec::Polyveck::default());
+					}
+				}
+
+				// Extract k-th response iteration
+				if let Ok(z_iterations) =
+					unpack_response_to_k_iterations(&responses[party_idx], k_canonical as usize)
+				{
+					if k < z_iterations.len() {
+						iter_responses.push(z_iterations[k].clone());
+					} else {
+						iter_responses.push(polyvec::Polyvecl::default());
+					}
 				}
 			}
 		}
-		println!(
-			"    Party {} provided {} response iterations, sample z_max: {}",
-			party_idx,
-			z_iterations.len(),
-			party_z_max
-		);
 
-		all_zs.extend(z_iterations);
-	}
+		// Now aggregate this specific iteration using Lagrange interpolation
+		if iter_commitments.len() >= params.threshold() as usize
+			&& iter_responses.len() >= params.threshold() as usize
+		{
+			// Aggregate commitments (w values) using simple summation
+			// In the threshold protocol, w values are typically just summed
+			let mut w_aggregated = polyvec::Polyveck::default();
+			for w in &iter_commitments[..params.threshold() as usize] {
+				for i in 0..dilithium_params::K {
+					for j in 0..dilithium_params::N as usize {
+						let sum = w_aggregated.vec[i].coeffs[j] + w.vec[i].coeffs[j];
+						// Reduce to centered representation [-q/2, q/2]
+						let reduced = sum.rem_euclid(dilithium_params::Q as i32);
+						w_aggregated.vec[i].coeffs[j] =
+							if reduced > (dilithium_params::Q as i32) / 2 {
+								reduced - (dilithium_params::Q as i32)
+							} else {
+								reduced
+							};
+					}
+				}
+			}
 
-	// Now we have individual iterations from each party, not aggregated sums
-	wfinals = all_wfinals;
-	zs = all_zs;
+			// Aggregate responses (z values) using Lagrange interpolation
+			let mut z_aggregated = polyvec::Polyvecl::default();
+			let active_parties: Vec<u8> = (1..=params.threshold()).collect();
 
-	// Ensure we have enough iterations to try
-	let total_iterations = wfinals.len().min(zs.len());
-	println!("    Total {} commitment/response pairs available for combination", total_iterations);
+			for (party_idx, z) in
+				iter_responses.iter().take(params.threshold() as usize).enumerate()
+			{
+				let party_id = active_parties[party_idx];
+				let lagrange_coeff = secret_sharing::compute_lagrange_coefficient(
+					party_id,
+					&active_parties,
+					dilithium_params::Q as i32,
+				);
 
-	// Follow Threshold-ML-DSA Combine logic: try each (wfinal, z) pair until one passes constraints
-	println!("Trying {} commitment/response pairs for signature combination", total_iterations);
+				// Apply Lagrange coefficient to this party's z values
+				for i in 0..dilithium_params::L {
+					for j in 0..dilithium_params::N as usize {
+						let scaled_coeff = ((z.vec[i].coeffs[j] as i64 * lagrange_coeff as i64)
+							.rem_euclid(dilithium_params::Q as i64)) as i32;
+						let sum = z_aggregated.vec[i].coeffs[j] + scaled_coeff;
+						// Reduce to centered representation [-q/2, q/2]
+						let reduced = sum.rem_euclid(dilithium_params::Q as i32);
+						z_aggregated.vec[i].coeffs[j] =
+							if reduced > (dilithium_params::Q as i32) / 2 {
+								reduced - (dilithium_params::Q as i32)
+							} else {
+								reduced
+							};
+					}
+				}
+			}
 
-	for k in 0..total_iterations {
-		println!("  Trying iteration {}/{}", k + 1, total_iterations);
+			// Debug coefficient values before trying signature creation
+			let mut z_max = 0i32;
+			let mut z_min = 0i32;
+			let mut w_max = 0i32;
+			let mut w_min = 0i32;
 
-		match create_signature_from_pair(pk, &mu, &wfinals[k], &zs[k]) {
-			Ok(signature) => {
-				println!("  ✅ Success: Found valid signature at iteration {}", k + 1);
-				return Ok(signature);
-			},
-			Err(ThresholdError::ConstraintViolation) => {
-				println!("  ❌ Iteration {} failed constraint check, trying next...", k + 1);
-				continue;
-			},
-			Err(e) => return Err(e),
+			for i in 0..dilithium_params::L {
+				for j in 0..dilithium_params::N as usize {
+					let coeff = z_aggregated.vec[i].coeffs[j];
+					z_max = z_max.max(coeff);
+					z_min = z_min.min(coeff);
+				}
+			}
+
+			for i in 0..dilithium_params::K {
+				for j in 0..dilithium_params::N as usize {
+					let coeff = w_aggregated.vec[i].coeffs[j];
+					w_max = w_max.max(coeff);
+					w_min = w_min.min(coeff);
+				}
+			}
+
+			println!(
+				"    Debug: z_aggregated range: [{}, {}], max_abs: {}",
+				z_min,
+				z_max,
+				z_max.max(z_min.abs())
+			);
+			println!(
+				"    Debug: w_aggregated range: [{}, {}], max_abs: {}",
+				w_min,
+				w_max,
+				w_max.max(w_min.abs())
+			);
+			println!(
+				"    Debug: γ₁ - β limit: {}",
+				(dilithium_params::GAMMA1 - dilithium_params::BETA) as i32
+			);
+
+			// Try to create signature with this aggregated iteration
+			match create_signature_from_pair(pk, &mu, &w_aggregated, &z_aggregated) {
+				Ok(signature) => {
+					println!("  ✅ Success: Found valid signature at iteration {}", k + 1);
+					return Ok(signature);
+				},
+				Err(ThresholdError::ConstraintViolation) => {
+					println!("  ❌ Iteration {} failed constraint check, trying next...", k + 1);
+					continue;
+				},
+				Err(e) => return Err(e),
+			}
 		}
 	}
 
-	println!("❌ All {} iterations failed - no valid signature found", total_iterations);
+	println!("❌ All {} canonical iterations failed - no valid signature found", k_canonical);
 	Err(ThresholdError::CombinationFailed)
 }
 

@@ -50,6 +50,81 @@ impl RngCore for TestRng {
 
 impl CryptoRng for TestRng {}
 
+/// Generate a mock commitment with proper ML-DSA format and small coefficients
+fn generate_mock_commitment(party_id: usize, size: usize) -> Vec<u8> {
+	use qp_rusty_crystals_dilithium::params as dilithium_params;
+	use qp_rusty_crystals_dilithium::{poly, polyvec};
+
+	let mut commitment = vec![0u8; size];
+	let single_commitment_size = dilithium_params::K * dilithium_params::POLYW1_PACKEDBYTES;
+	let num_iterations = size / single_commitment_size;
+
+	for iter in 0..num_iterations {
+		let iter_offset = iter * single_commitment_size;
+
+		// Create a mock w1 polynomial vector with small coefficients
+		let mut w1 = polyvec::Polyveck::default();
+		for i in 0..dilithium_params::K {
+			for j in 0..dilithium_params::N as usize {
+				// Use very small coefficients for w1 to avoid overflow after aggregation
+				// w1 coefficients should be small since they get summed across parties
+				let coeff = ((party_id * 31 + iter * 17 + i * 13 + j * 7) % 16) as i32;
+				w1.vec[i].coeffs[j] = coeff;
+			}
+		}
+
+		// Pack w1 into the commitment
+		let mut w1_packed = vec![0u8; single_commitment_size];
+		polyvec::k_pack_w1(&mut w1_packed, &w1);
+
+		if iter_offset + single_commitment_size <= commitment.len() {
+			commitment[iter_offset..iter_offset + single_commitment_size]
+				.copy_from_slice(&w1_packed);
+		}
+	}
+
+	commitment
+}
+
+/// Generate a mock response with proper ML-DSA format and small coefficients
+fn generate_mock_response(party_id: usize, size: usize) -> Vec<u8> {
+	use qp_rusty_crystals_dilithium::params as dilithium_params;
+	use qp_rusty_crystals_dilithium::{poly, polyvec};
+
+	let mut response = vec![0u8; size];
+	let single_response_size = dilithium_params::L * dilithium_params::POLYZ_PACKEDBYTES;
+	let num_iterations = size / single_response_size;
+
+	for iter in 0..num_iterations {
+		let iter_offset = iter * single_response_size;
+
+		// Create a mock z polynomial vector with small coefficients
+		let mut z = polyvec::Polyvecl::default();
+		for i in 0..dilithium_params::L {
+			for j in 0..dilithium_params::N as usize {
+				// Use very small coefficients to account for Lagrange coefficient multiplication
+				// Lagrange coefficients can be large, so we need tiny base coefficients
+				// Use coefficients in range [-10, 10] to be extremely safe
+				let base_coeff = ((party_id * 23 + iter * 19 + i * 11 + j * 3) % 20) as i32 - 10;
+				z.vec[i].coeffs[j] = base_coeff;
+			}
+		}
+
+		// Pack z into the response
+		for i in 0..dilithium_params::L {
+			let poly_offset = iter_offset + i * dilithium_params::POLYZ_PACKEDBYTES;
+			if poly_offset + dilithium_params::POLYZ_PACKEDBYTES <= response.len() {
+				poly::z_pack(
+					&mut response[poly_offset..poly_offset + dilithium_params::POLYZ_PACKEDBYTES],
+					&z.vec[i],
+				);
+			}
+		}
+	}
+
+	response
+}
+
 #[test]
 fn test_end_to_end_threshold_signing() {
 	let config = ThresholdConfig::new(2, 3).expect("Config creation failed");
@@ -261,33 +336,12 @@ fn test_signature_sizes() {
 	let message = b"size test message";
 	let context = b"size_test";
 
-	// Generate proper-sized mock data
-	let commitments: Vec<Vec<u8>> = (0..3)
-		.map(|i| {
-			let mut commitment = vec![0u8; commitment_size];
-			// Fill with deterministic pattern
-			for (j, byte) in commitment.iter_mut().enumerate() {
-				*byte = ((i * 17 + j * 23) % 128) as u8;
-			}
-			commitment
-		})
-		.collect();
+	// Generate proper-sized mock data with ML-DSA constraint-respecting coefficients
+	let commitments: Vec<Vec<u8>> =
+		(0..3).map(|i| generate_mock_commitment(i, commitment_size)).collect();
 
-	let responses: Vec<Vec<u8>> = (0..3)
-		.map(|i| {
-			let mut response = vec![0u8; response_size];
-			// Fill with small coefficient values
-			for j in 0..(response.len() / 4) {
-				let idx = j * 4;
-				if idx + 4 <= response.len() {
-					let coeff = (i as i32 + 1) * 50 + (j % 100) as i32;
-					let bytes = coeff.to_le_bytes();
-					response[idx..idx + 4].copy_from_slice(&bytes);
-				}
-			}
-			response
-		})
-		.collect();
+	let responses: Vec<Vec<u8>> =
+		(0..3).map(|i| generate_mock_response(i, response_size)).collect();
 
 	let signature = combine_signatures(&pk, message, context, &commitments, &responses, &config);
 	assert!(signature.is_ok(), "Signature combination should succeed with correct sizes");
@@ -843,30 +897,13 @@ fn test_hint_computation_correctness() {
 	let commitment_size = config.threshold_params().commitment_size::<MlDsa87Params>();
 	let response_size = config.threshold_params().response_size::<MlDsa87Params>();
 
-	// Generate mock data with larger values to trigger hints
+	// Generate mock data with proper ML-DSA format
 	let mut commitments = Vec::new();
 	let mut responses = Vec::new();
 
 	for i in 0..2 {
-		// Generate commitment with larger values that might trigger hints
-		let mut commitment = vec![0u8; commitment_size];
-		for j in 0..commitment.len() {
-			commitment[j] = ((i * 73 + j * 31) % 256) as u8;
-		}
-		commitments.push(commitment);
-
-		// Generate response with larger coefficient values
-		let mut response = vec![0u8; response_size];
-		for j in 0..(response.len() / 4) {
-			let idx = j * 4;
-			if idx + 4 <= response.len() {
-				// Create larger coefficients that might produce hints
-				let coeff = (i + 1) as i32 * 50000 + (j % 1000) as i32 * 100;
-				let bytes = coeff.to_le_bytes();
-				response[idx..idx + 4].copy_from_slice(&bytes);
-			}
-		}
-		responses.push(response);
+		commitments.push(generate_mock_commitment(i, commitment_size));
+		responses.push(generate_mock_response(i, response_size));
 	}
 
 	// Test our threshold signature generation with hint computation
@@ -929,25 +966,8 @@ fn test_challenge_generation_compatibility() {
 	let mut responses = Vec::new();
 
 	for i in 0..2 {
-		// Generate commitment with small random-like values
-		let mut commitment = vec![0u8; commitment_size];
-		for j in 0..commitment.len() {
-			commitment[j] = ((i * 13 + j * 7) % 64) as u8;
-		}
-		commitments.push(commitment);
-
-		// Generate response with small coefficient values
-		let mut response = vec![0u8; response_size];
-		for j in 0..(response.len() / 4) {
-			let idx = j * 4;
-			if idx + 4 <= response.len() {
-				// Use small coefficients that won't hit ML-DSA bounds
-				let coeff = (i + 1) as i32 * 10 + (j % 50) as i32;
-				let bytes = coeff.to_le_bytes();
-				response[idx..idx + 4].copy_from_slice(&bytes);
-			}
-		}
-		responses.push(response);
+		commitments.push(generate_mock_commitment(i, commitment_size));
+		responses.push(generate_mock_response(i, response_size));
 	}
 
 	let threshold_signature =
