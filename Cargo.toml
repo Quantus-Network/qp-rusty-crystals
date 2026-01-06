@@ -1,5 +1,5 @@
 [workspace]
-members = ["dilithium", "hdwallet", "tests"]
+members = ["dilithium", "hdwallet", "threshold", "tests"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -12,6 +12,7 @@ nam-tiny-hderive = { version = "=0.3.1-nam.0", default-features = false }
 qp-poseidon-core = { version = "=1.0.1" }
 qp-rusty-crystals-dilithium = { path = "./dilithium", version = "2.0.0", default-features = false }
 qp-rusty-crystals-hdwallet = { path = "./hdwallet", version = "1.0.0", default-features = false }
+qp-rusty-crystals-threshold = { path = "./threshold", version = "1.0.0", default-features = false }
 rand = { version = "=0.8", default-features = false, features = ["std_rng"] }
 rand_core = { version = "=0.9.3", default-features = false }
 rusty-crystals-integration-tests = { path = "./tests" }

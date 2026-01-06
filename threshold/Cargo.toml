@@ -1,0 +1,38 @@
+[package]
+name = "qp-rusty-crystals-threshold"
+version = "1.0.0"
+edition = "2021"
+authors = ["Quantum Resistant Ledger"]
+license = "MIT"
+description = "Threshold ML-DSA signature scheme implementation"
+repository = "https://github.com/quantum-resistant-ledger/qp-rusty-crystals"
+keywords = ["cryptography", "post-quantum", "threshold", "signatures", "ml-dsa"]
+categories = ["cryptography"]
+
+[dependencies]
+# Core dependencies
+rand = { workspace = true }
+rand_core = { workspace = true }
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true, optional = true }
+
+# Local dependencies - reuse dilithium implementation
+qp-rusty-crystals-dilithium = { workspace = true }
+
+# Cryptographic utilities
+sha3 = "0.10"
+subtle = { version = "2.5", default-features = false }
+
+[dev-dependencies]
+criterion = { workspace = true }
+hex = { workspace = true }
+hex-literal = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = ["std"]
+std = ["rand/std", "rand_core/std"]
+serde = ["dep:serde"]
