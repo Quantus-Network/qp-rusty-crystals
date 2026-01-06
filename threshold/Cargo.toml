@@ -23,7 +23,6 @@ serde = { workspace = true, optional = true }
 qp-rusty-crystals-dilithium = { workspace = true }
 
 # Cryptographic utilities
-sha3 = "0.10"
 subtle = { version = "2.5", default-features = false }
 
 [dev-dependencies]

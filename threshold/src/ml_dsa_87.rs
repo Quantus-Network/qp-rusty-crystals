@@ -49,8 +49,8 @@ use crate::{
 	field::{FieldElement, Polynomial, VecK, VecL},
 	params::{MlDsaParams, ThresholdParams as BaseThresholdParams},
 };
+use qp_rusty_crystals_dilithium::fips202;
 use rand_core::{CryptoRng, RngCore};
-use sha3::{digest::ExtendableOutput, digest::Update, digest::XofReader, Shake256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // Import dilithium crate for real ML-DSA operations
@@ -101,19 +101,18 @@ pub mod secret_sharing {
 		nonce: u32,
 		modulus: i32,
 	) -> Vec<i32> {
-		// Generate deterministic random polynomial coefficients using SHAKE256
+		// Generate deterministic random polynomial coefficients using FIPS202
 		let mut coeffs = vec![secret]; // a_0 = secret
 
 		for i in 1..threshold {
-			// Use SHAKE256 to generate deterministic randomness
-			let mut shake = Shake256::default();
-			shake.update(seed);
-			shake.update(&nonce.to_le_bytes());
-			shake.update(&i.to_le_bytes());
-
+			// Use FIPS202 SHAKE256 to generate deterministic randomness
 			let mut random_bytes = [0u8; 4];
-			let mut reader = shake.finalize_xof();
-			reader.read(&mut random_bytes);
+			let mut state = fips202::KeccakState::default();
+			fips202::shake256_absorb(&mut state, seed, 32);
+			fips202::shake256_absorb(&mut state, &nonce.to_le_bytes(), 4);
+			fips202::shake256_absorb(&mut state, &i.to_le_bytes(), 1);
+			fips202::shake256_finalize(&mut state);
+			fips202::shake256_squeeze(&mut random_bytes, 4, &mut state);
 
 			let coeff = (u32::from_le_bytes(random_bytes) % (modulus as u32)) as i32;
 			coeffs.push(coeff);
@@ -452,34 +451,23 @@ impl<const K: usize, const L: usize> Mat<K, L> {
 	pub fn derive_from_seed(&mut self, rho: &[u8; 32]) {
 		for i in 0..K {
 			for j in 0..L {
-				let mut shake = Shake256::default();
-				shake.update(rho);
-				shake.update(&[i as u8, j as u8]);
-				let mut reader = shake.finalize_xof();
+				// Use dilithium's uniform polynomial sampling directly
+				let mut dilithium_poly = qp_rusty_crystals_dilithium::poly::Poly::default();
+				poly::uniform(&mut dilithium_poly, rho, ((i << 8) + j) as u16);
 
-				// Sample polynomial uniformly from the ring
+				// Convert to threshold polynomial format
 				let mut poly = Polynomial::zero();
-				self.sample_uniform_polynomial(&mut reader, &mut poly);
+				for k in 0..N {
+					if k < dilithium_params::N as usize {
+						poly.set(k, FieldElement::new(dilithium_poly.coeffs[k] as u32));
+					}
+				}
 				self.0[i][j] = poly;
 			}
 		}
 	}
 
-	/// Sample a uniform polynomial from XOF
-	fn sample_uniform_polynomial<R: XofReader>(&self, reader: &mut R, poly: &mut Polynomial) {
-		let mut buf = [0u8; 3];
-		let mut coeffs_written = 0;
-
-		while coeffs_written < N {
-			reader.read(&mut buf);
-
-			let coeff = u32::from_le_bytes([buf[0], buf[1], buf[2], 0]) & 0x7FFFFF;
-			if coeff < Q {
-				poly.set(coeffs_written, FieldElement::new(coeff));
-				coeffs_written += 1;
-			}
-		}
-	}
+	// Note: Removed sample_uniform_polynomial function as we now use dilithium's uniform function directly
 
 	/// Get polynomial at position (i, j)
 	pub fn get(&self, i: usize, j: usize) -> &Polynomial {
@@ -512,20 +500,20 @@ impl Round1State {
 	) -> ThresholdResult<(Vec<u8>, Self)> {
 		// Generate deterministic random bytes for commitment
 		let mut rho_prime = [0u8; 64];
-		let mut shake = Shake256::default();
-		shake.update(seed);
-		shake.update(b"rho_prime");
-		let mut reader = shake.finalize_xof();
-		reader.read(&mut rho_prime);
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, seed, 32);
+		fips202::shake256_absorb(&mut state, b"rho_prime", 9);
+		fips202::shake256_finalize(&mut state);
+		fips202::shake256_squeeze(&mut rho_prime, 64, &mut state);
 
 		// Sample randomness y from [-γ₁, γ₁] for commitment using dilithium's uniform_gamma1
 		let mut y = polyvec::Polyvecl::default();
-		let mut y_seed = [0u8; 32];
-		let mut shake2 = Shake256::default();
-		shake2.update(seed);
-		shake2.update(b"y_seed");
-		let mut reader2 = shake2.finalize_xof();
-		reader2.read(&mut y_seed);
+		let mut y_seed = [0u8; 64]; // Use CRHBYTES (64) instead of 32
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, seed, 32);
+		fips202::shake256_absorb(&mut state, b"y_seed", 6);
+		fips202::shake256_finalize(&mut state);
+		fips202::shake256_squeeze(&mut y_seed, 64, &mut state); // Generate 64 bytes
 		polyvec::l_uniform_gamma1(&mut y, &y_seed, 0);
 
 		// Compute w = A·y using matrix A from public key
@@ -551,13 +539,12 @@ impl Round1State {
 
 		// Generate commitment hash
 		let mut commitment = vec![0u8; 32];
-		let mut shake = Shake256::default();
-		shake.update(&sk.tr);
-		shake.update(&[sk.id]);
-		shake.update(&w_packed);
-
-		let mut reader = shake.finalize_xof();
-		reader.read(&mut commitment);
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, &sk.tr, sk.tr.len());
+		fips202::shake256_absorb(&mut state, &[sk.id], 1);
+		fips202::shake256_absorb(&mut state, &w_packed, w_packed.len());
+		fips202::shake256_finalize(&mut state);
+		fips202::shake256_squeeze(&mut commitment, 32, &mut state);
 
 		Ok((commitment, Self { w, y, rho_prime }))
 	}
@@ -703,18 +690,20 @@ impl Round2State {
 
 	/// Compute message hash μ using ML-DSA specification
 	fn compute_mu(sk: &PrivateKey, message: &[u8], context: &[u8]) -> [u8; 64] {
-		let mut shake = Shake256::default();
-		shake.update(&sk.tr);
-		shake.update(&[0u8]); // Domain separator for pure signatures
-		shake.update(&[context.len() as u8]);
+		let mut input = Vec::new();
+		input.extend_from_slice(&sk.tr);
+		input.push(0u8); // Domain separator for pure signatures
+		input.push(context.len() as u8);
 		if !context.is_empty() {
-			shake.update(context);
+			input.extend_from_slice(context);
 		}
-		shake.update(message);
+		input.extend_from_slice(message);
 
 		let mut mu = [0u8; 64];
-		let mut reader = shake.finalize_xof();
-		reader.read(&mut mu);
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, &input, input.len());
+		fips202::shake256_finalize(&mut state);
+		fips202::shake256_squeeze(&mut mu, 64, &mut state);
 		mu
 	}
 }
@@ -746,14 +735,13 @@ impl Round3State {
 		// Verify Round 2 commitments match Round 1 hashes
 		for (i, commitment) in round2_commitments.iter().enumerate() {
 			if i < round2_state.commitment_hashes.len() {
-				let mut shake = Shake256::default();
-				shake.update(&sk.tr);
-				shake.update(&[sk.id]);
-				shake.update(commitment);
-
 				let mut computed_hash = [0u8; 32];
-				let mut reader = shake.finalize_xof();
-				reader.read(&mut computed_hash);
+				let mut state = fips202::KeccakState::default();
+				fips202::shake256_absorb(&mut state, &sk.tr, sk.tr.len());
+				fips202::shake256_absorb(&mut state, &[sk.id], 1);
+				fips202::shake256_absorb(&mut state, commitment, commitment.len());
+				fips202::shake256_finalize(&mut state);
+				fips202::shake256_squeeze(&mut computed_hash, 32, &mut state);
 
 				if computed_hash != round2_state.commitment_hashes[i] {
 					return Err(ThresholdError::CommitmentVerificationFailed { party_id: i as u8 });
@@ -801,22 +789,23 @@ impl Round3State {
 			poly::w1_pack(&mut w1_packed[start_idx..end_idx], &w1.vec[i]);
 		}
 
-		// Step 3: Compute challenge c = H(μ || w1)
-		let mut shake = Shake256::default();
-		shake.update(mu);
-		shake.update(&w1_packed);
-
-		let mut c_bytes = [0u8; 64];
-		let mut reader = shake.finalize_xof();
-		reader.read(&mut c_bytes);
-
-		// Step 4: Generate challenge polynomial using dilithium's challenge function
+		// Step 3: Generate challenge polynomial using dilithium's exact approach
 		let mut c_poly = qp_rusty_crystals_dilithium::poly::Poly::default();
-		// Use proper challenge generation with mu||w1 as input
-		let mut challenge_input = [0u8; 64];
-		challenge_input[..32].copy_from_slice(&mu[..32]);
-		challenge_input[32..64].copy_from_slice(&w1_packed[..32]);
-		poly::challenge(&mut c_poly, &challenge_input);
+
+		// Use streaming SHAKE256 interface like dilithium does
+		let mut keccak_state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut keccak_state, mu, dilithium_params::CRHBYTES);
+		fips202::shake256_absorb(
+			&mut keccak_state,
+			&w1_packed,
+			dilithium_params::K * dilithium_params::POLYW1_PACKEDBYTES,
+		);
+		fips202::shake256_finalize(&mut keccak_state);
+
+		let mut c_bytes = [0u8; dilithium_params::C_DASH_BYTES];
+		fips202::shake256_squeeze(&mut c_bytes, dilithium_params::C_DASH_BYTES, &mut keccak_state);
+
+		poly::challenge(&mut c_poly, &c_bytes);
 
 		// Step 5: Compute z = y + c·s1_share
 		let mut z_response = polyvec::Polyvecl::default();
@@ -868,9 +857,9 @@ impl Round3State {
 		// 3. Generate proper z polynomials
 
 		// For now, create a deterministic response based on inputs
-		let mut shake = Shake256::default();
-		shake.update(&sk.key);
-		shake.update(mu);
+		let mut input = Vec::new();
+		input.extend_from_slice(&sk.key);
+		input.extend_from_slice(mu);
 
 		// Add some w_final data to the hash
 		for i in 0..Params::K.min(4) {
@@ -878,12 +867,14 @@ impl Round3State {
 			for j in 0..N.min(16) {
 				// Use first few coefficients
 				let coeff = w_final.get(i).get(j).value();
-				shake.update(&coeff.to_le_bytes());
+				input.extend_from_slice(&coeff.to_le_bytes());
 			}
 		}
 
-		let mut reader = shake.finalize_xof();
-		reader.read(response);
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, &input, input.len());
+		fips202::shake256_finalize(&mut state);
+		fips202::shake256_squeeze(response, response.len(), &mut state);
 
 		Ok(())
 	}
@@ -1165,19 +1156,20 @@ fn create_mldsa_signature_dilithium(
 ) -> ThresholdResult<Vec<u8>> {
 	// Compute μ = H(tr || msg) following ML-DSA specification
 	let mut mu = [0u8; 64];
-	let mut shake = Shake256::default();
-	shake.update(&pk.tr);
-
 	// Add context encoding as per ML-DSA specification
-	shake.update(&[0u8]); // Domain separator
-	shake.update(&[context.len() as u8]); // Context length
+	let mut input = Vec::new();
+	input.extend_from_slice(&pk.tr);
+	input.push(0u8); // Domain separator
+	input.push(context.len() as u8); // Context length
 	if !context.is_empty() {
-		shake.update(context);
+		input.extend_from_slice(context);
 	}
-	shake.update(message);
+	input.extend_from_slice(message);
 
-	let mut reader = shake.finalize_xof();
-	reader.read(&mut mu);
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, &input, input.len());
+	fips202::shake256_finalize(&mut state);
+	fips202::shake256_squeeze(&mut mu, 64, &mut state);
 
 	// Decompose w_final into w0 and w1 using dilithium rounding
 	let mut w0 = polyvec::Polyveck::default();
@@ -1335,7 +1327,7 @@ pub fn verify_signature(pk: &PublicKey, message: &[u8], context: &[u8], signatur
 		return false;
 	}
 
-	// Check signature length
+	// Check signature length - use dilithium's SIGNBYTES constant
 	if signature.len() != dilithium_params::SIGNBYTES {
 		return false;
 	}
@@ -1390,7 +1382,7 @@ fn pack_dilithium_signature(
 	Ok(signature)
 }
 
-// Helper trait for XofReader to read u32
+// Helper functions for tests
 
 /// Test-only function that converts u64 to seed
 #[cfg(any(test, doc))]
@@ -1499,12 +1491,17 @@ mod tests {
 		let config = ThresholdConfig::new(2, 3).unwrap();
 
 		let (_pk, sks) = test_generate_threshold_key(42, &config).unwrap();
+		println!("Generated {} private keys", sks.len());
 
 		let result = test_round1_new(&sks[0], &config, 42);
-		assert!(result.is_ok());
+		if let Err(ref e) = result {
+			println!("Round1State::new failed: {:?}", e);
+		}
+		assert!(result.is_ok(), "Round1State creation should succeed");
 
 		let (commitment, _state) = result.unwrap();
-		assert_eq!(commitment.len(), 32);
+		println!("Commitment length: {}", commitment.len());
+		assert_eq!(commitment.len(), 32, "Commitment should be 32 bytes");
 	}
 
 	#[test]
@@ -1512,11 +1509,18 @@ mod tests {
 		let config = ThresholdConfig::new(2, 3).unwrap();
 
 		let (_pk, sks) = test_generate_threshold_key(42, &config).unwrap();
-		let (commitment1, state1) = test_round1_new(&sks[0], &config, 42).unwrap();
+		println!("Generated private keys for Round2 test");
+
+		let round1_result = test_round1_new(&sks[0], &config, 42);
+		assert!(round1_result.is_ok(), "Round1 should succeed");
+
+		let (commitment1, state1) = round1_result.unwrap();
+		println!("Round1 commitment length: {}", commitment1.len());
 
 		let message = b"test message";
-		let context = b"test context";
+		let context = b"test";
 		let round1_commitments = vec![commitment1];
+		println!("Context length: {}", context.len());
 
 		// For testing, create mock w values from other parties
 		let other_parties_w_values = vec![];
@@ -1529,9 +1533,14 @@ mod tests {
 			&other_parties_w_values,
 			&state1,
 		);
-		assert!(result.is_ok());
+
+		if let Err(ref e) = result {
+			println!("Round2State::new failed: {:?}", e);
+		}
+		assert!(result.is_ok(), "Round2State creation should succeed");
 
 		let (_w_packed, _state2) = result.unwrap();
+		println!("Round2 processing completed successfully");
 	}
 
 	#[test]
@@ -1590,7 +1599,7 @@ mod tests {
 		let (commitment3, state3) = Round1State::new(&sks[2], &config, &seed3).unwrap();
 
 		let message = b"test aggregation message";
-		let context = b"test_aggregation";
+		let context = b"test";
 		let round1_commitments = vec![commitment1, commitment2, commitment3];
 
 		// Pack w values from each party
@@ -1609,6 +1618,8 @@ mod tests {
 
 		// Test aggregation: Party 0 aggregates with parties 1 and 2
 		let other_parties_w_values = vec![w2_packed.clone(), w3_packed.clone()];
+		println!("Testing aggregation with {} other party values", other_parties_w_values.len());
+
 		let result = Round2State::new(
 			&sks[0],
 			3,
@@ -1618,9 +1629,14 @@ mod tests {
 			&other_parties_w_values,
 			&state1,
 		);
+
+		if let Err(ref e) = result {
+			println!("Round2State aggregation failed: {:?}", e);
+		}
 		assert!(result.is_ok(), "Round 2 aggregation should succeed");
 
 		let (_w_packed_result, state2_result) = result.unwrap();
+		println!("Round2 aggregation completed");
 
 		// Verify aggregation by manually computing expected result
 		let mut expected_w_aggregated = state1.w.clone();
@@ -1646,6 +1662,9 @@ mod tests {
 			.flat_map(|poly| poly.coeffs.iter())
 			.map(|&coeff| coeff as i64)
 			.sum();
+
+		println!("Original w1 sum: {}", original_w1_sum);
+		println!("Aggregated w sum: {}", aggregated_w_sum);
 
 		assert_ne!(
 			original_w1_sum, aggregated_w_sum,
@@ -1727,7 +1746,28 @@ mod tests {
 		assert!(result.is_ok());
 
 		let signature = result.unwrap();
-		assert_eq!(signature.len(), Params::SIGNATURE_SIZE);
+		assert_eq!(signature.len(), dilithium_params::SIGNBYTES);
+	}
+
+	#[test]
+	fn test_debug_key_generation() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let result = test_generate_threshold_key(42, &config);
+		assert!(result.is_ok(), "Key generation should succeed");
+
+		let (pk, sks) = result.unwrap();
+		assert_eq!(sks.len(), 3, "Should have 3 private keys");
+		assert!(!pk.rho.iter().all(|&x| x == 0), "rho should not be all zeros");
+		assert!(!pk.tr.iter().all(|&x| x == 0), "tr should not be all zeros");
+
+		// Verify private keys have proper data
+		for (i, sk) in sks.iter().enumerate() {
+			assert_eq!(sk.id, i as u8, "Private key ID should match index");
+			assert_eq!(sk.rho, pk.rho, "Private key rho should match public key");
+			assert_eq!(sk.tr, pk.tr, "Private key tr should match public key");
+			assert!(sk.s_total.is_some(), "Private key should have secret shares");
+		}
+		println!("✅ Debug key generation test passed");
 	}
 
 	#[test]
@@ -1737,10 +1777,10 @@ mod tests {
 		let (pk, _sks) = test_generate_threshold_key(42, &config).unwrap();
 
 		let message = b"test message";
-		let context = b"test context";
+		let context = b"test";
 
 		// Create a properly formatted mock signature with reasonable values
-		let mut signature = vec![0u8; Params::SIGNATURE_SIZE];
+		let mut signature = vec![0u8; dilithium_params::SIGNBYTES];
 
 		// Fill c_tilde section (first 64 bytes) with reasonable values
 		for i in 0..dilithium_params::C_DASH_BYTES {
@@ -1761,17 +1801,22 @@ mod tests {
 			}
 		}
 
-		// Fill remaining hint section
+		// Fill remaining hint section with zeros (valid hint format)
 		for i in (c_tilde_end + z_section_len)..signature.len() {
-			signature[i] = ((i * 23 + 77) % 100) as u8 + 10;
+			signature[i] = 0; // Hints should be mostly zero for valid format
 		}
 
-		// Should pass basic format validation
-		assert!(verify_signature(&pk, message, context, &signature));
+		// NOTE: Mock signatures will fail dilithium's verification since they're not real
+		// This is expected behavior - we're testing the verification function works
+		assert!(!verify_signature(&pk, message, context, &signature));
 
-		// Test with invalid signature (all zeros)
-		let invalid_signature = vec![0u8; Params::SIGNATURE_SIZE];
+		// Test with invalid signature (all zeros) should also fail
+		let invalid_signature = vec![0u8; dilithium_params::SIGNBYTES];
 		assert!(!verify_signature(&pk, message, context, &invalid_signature));
+
+		// Test that function handles different signature sizes correctly
+		let wrong_size_signature = vec![0u8; 100];
+		assert!(!verify_signature(&pk, message, context, &wrong_size_signature));
 	}
 
 	#[test]
@@ -1782,7 +1827,7 @@ mod tests {
 
 		let message = b"test message";
 		let long_context = vec![0u8; 256]; // Too long
-		let signature = vec![0u8; Params::SIGNATURE_SIZE];
+		let signature = vec![0u8; dilithium_params::SIGNBYTES];
 
 		// Should fail due to context being too long
 		assert!(!verify_signature(&pk, message, &long_context, &signature));
