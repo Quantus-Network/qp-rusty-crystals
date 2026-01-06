@@ -1354,8 +1354,8 @@ fn lagrange_interpolate_responses(
 fn pack_dilithium_signature(
 	c: &[u8; 64],
 	z: &polyvec::Polyvecl,
-	_w0: &polyvec::Polyveck,
-	_w1: &polyvec::Polyveck,
+	w0: &polyvec::Polyveck,
+	w1: &polyvec::Polyveck,
 ) -> ThresholdResult<Vec<u8>> {
 	let mut signature = vec![0u8; dilithium_params::SIGNBYTES];
 
@@ -1363,16 +1363,16 @@ fn pack_dilithium_signature(
 	let mut challenge_poly = qp_rusty_crystals_dilithium::poly::Poly::default();
 	poly::challenge(&mut challenge_poly, c);
 
-	// Create hint vector by checking w0 and w1 relationships
+	// Create hint vector using proper ML-DSA hint computation
 	let mut hint = polyvec::Polyveck::default();
-	let _hint_bits = 0;
 
-	// Simplified hint computation - in full implementation would compute proper hints
-	// For now, create empty hint to maintain signature format
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			hint.vec[i].coeffs[j] = 0;
-		}
+	// For threshold signatures, we compute hints based on the aggregated w0 and w1
+	// This follows ML-DSA specification: hints help reconstruct w1 from modified w values
+	let hint_weight = polyvec::k_make_hint(&mut hint, w0, w1);
+
+	// Verify hint weight doesn't exceed ω (maximum allowed hints)
+	if hint_weight > dilithium_params::OMEGA as i32 {
+		return Err(ThresholdError::CombinationFailed);
 	}
 
 	// Pack signature using dilithium packing
