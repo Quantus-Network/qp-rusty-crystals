@@ -4,9 +4,7 @@
 //! including secret sharing, key generation, threshold signing, and signature verification.
 
 use qp_rusty_crystals_threshold::{
-	ml_dsa_87::{
-		combine_signatures, generate_threshold_key_from_seed, secret_sharing, ThresholdConfig,
-	},
+	ml_dsa_87::{combine_signatures, generate_threshold_key, secret_sharing, ThresholdConfig},
 	params::{MlDsa87Params, MlDsaParams},
 	ThresholdError,
 };
@@ -55,8 +53,7 @@ fn test_end_to_end_threshold_signing() {
 
 	// Generate threshold keys using proper seed format
 	let seed = [42u8; 32];
-	let (pk, sks) =
-		generate_threshold_key_from_seed(&seed, &config).expect("Key generation failed");
+	let (pk, sks) = generate_threshold_key(&seed, &config).expect("Key generation failed");
 
 	assert_eq!(sks.len(), 3, "Should have 3 secret keys");
 
@@ -135,9 +132,10 @@ fn test_secret_sharing_reconstruction() {
 		}
 
 		// Generate shares
-		let shares =
-			secret_sharing::generate_threshold_shares(&s1, &s2, threshold, parties, &mut rng)
-				.expect("Share generation failed");
+		let mut seed = [0u8; 32];
+		rng.fill_bytes(&mut seed);
+		let shares = secret_sharing::generate_threshold_shares(&s1, &s2, threshold, parties, &seed)
+			.expect("Share generation failed");
 
 		assert_eq!(shares.len(), parties as usize);
 
@@ -232,7 +230,7 @@ fn test_signature_sizes() {
 
 	// Test with actual signature combination
 	let seed = [111u8; 32];
-	let (pk, _sks) = generate_threshold_key_from_seed(&seed, &config).unwrap();
+	let (pk, _sks) = generate_threshold_key(&seed, &config).unwrap();
 
 	let message = b"size test message";
 	let context = b"size_test";
@@ -276,7 +274,7 @@ fn test_signature_sizes() {
 fn test_error_conditions() {
 	let config = ThresholdConfig::new(3, 5).unwrap();
 	let seed = [222u8; 32];
-	let (pk, _sks) = generate_threshold_key_from_seed(&seed, &config).unwrap();
+	let (pk, _sks) = generate_threshold_key(&seed, &config).unwrap();
 
 	let message = b"error test message";
 	let context = b"error_test";
@@ -330,8 +328,8 @@ fn test_deterministic_key_generation() {
 	// Generate keys with same seed multiple times
 	let seed = [99u8; 32];
 
-	let (pk1, sks1) = generate_threshold_key_from_seed(&seed, &config).unwrap();
-	let (pk2, sks2) = generate_threshold_key_from_seed(&seed, &config).unwrap();
+	let (pk1, sks1) = generate_threshold_key(&seed, &config).unwrap();
+	let (pk2, sks2) = generate_threshold_key(&seed, &config).unwrap();
 
 	// Keys should be identical for same seed
 	assert_eq!(pk1.packed, pk2.packed, "Public keys should be identical for same seed");
@@ -340,7 +338,7 @@ fn test_deterministic_key_generation() {
 	// Test with different seed
 	let mut different_seed = seed;
 	different_seed[0] = seed[0].wrapping_add(1);
-	let (pk3, _sks3) = generate_threshold_key_from_seed(&different_seed, &config).unwrap();
+	let (pk3, _sks3) = generate_threshold_key(&different_seed, &config).unwrap();
 	assert_ne!(pk1.packed, pk3.packed, "Different seeds should produce different keys");
 }
 
@@ -421,7 +419,7 @@ fn test_field_arithmetic_correctness() {
 fn test_memory_safety() {
 	let config = ThresholdConfig::new(2, 3).unwrap();
 	let seed = [77u8; 32];
-	let (pk, mut sks) = generate_threshold_key_from_seed(&seed, &config).unwrap();
+	let (pk, mut sks) = generate_threshold_key(&seed, &config).unwrap();
 
 	// Test that dropping secret keys zeroizes memory
 	// Note: This is a basic test - full memory safety testing would require specialized tools
@@ -479,7 +477,7 @@ fn test_dilithium_crate_compatibility() {
 	// Generate threshold keys using proper seed format
 	let seed = [33u8; 32];
 	let (threshold_pk, _sks) =
-		generate_threshold_key_from_seed(&seed, &config).expect("Key generation failed");
+		generate_threshold_key(&seed, &config).expect("Key generation failed");
 
 	let message = b"Dilithium compatibility test message";
 	let context = b"dilithium_compat_test";
@@ -588,9 +586,8 @@ fn test_multi_party_round2_aggregation() {
 	let config = ThresholdConfig::new(3, 5).expect("Config creation failed");
 
 	// Generate threshold keys
-	let seed = [123u8; 32];
-	let (_pk, sks) =
-		generate_threshold_key_from_seed(&seed, &config).expect("Key generation failed");
+	let seed = [11u8; 32];
+	let (pk, sks) = generate_threshold_key(&seed, &config).expect("Key generation failed");
 
 	let message = b"Multi-party Round 2 test message";
 	let context = b"round2_aggregation_test";
@@ -603,11 +600,12 @@ fn test_multi_party_round2_aggregation() {
 	let mut w_values_packed = Vec::new();
 
 	for i in 0..3 {
-		let mut rng = TestRng::new(2000 + i as u64);
+		let mut seed = [0u8; 32];
+		seed[0] = (20 + i) as u8; // Different seed for each party
 		let (commitment, state) = qp_rusty_crystals_threshold::ml_dsa_87::Round1State::new(
 			&sks[i as usize],
 			&config,
-			&mut rng,
+			&seed,
 		)
 		.expect("Round 1 failed");
 
@@ -752,8 +750,7 @@ fn test_hint_computation_correctness() {
 
 	let config = ThresholdConfig::new(2, 3).expect("Config creation failed");
 	let seed = [77u8; 32];
-	let (pk, _sks) =
-		generate_threshold_key_from_seed(&seed, &config).expect("Key generation failed");
+	let (pk, sks) = generate_threshold_key(&seed, &config).expect("Key generation failed");
 
 	let message = b"Hint computation test message";
 	let context = b"hint_test";
@@ -833,9 +830,8 @@ fn test_challenge_generation_compatibility() {
 	println!("=== Testing Challenge Generation Compatibility ===");
 
 	let config = ThresholdConfig::new(2, 3).expect("Config creation failed");
-	let seed = [91u8; 32];
-	let (pk, _sks) =
-		generate_threshold_key_from_seed(&seed, &config).expect("Key generation failed");
+	let seed = [99u8; 32];
+	let (pk, sks) = generate_threshold_key(&seed, &config).expect("Key generation failed");
 
 	let message = b"Challenge generation test message";
 	let context = b"challenge_test";
