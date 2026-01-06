@@ -84,6 +84,8 @@ pub enum ThresholdError {
 		/// Actual size
 		actual: usize,
 	},
+	/// Invalid configuration
+	InvalidConfiguration(String),
 }
 
 impl fmt::Display for ThresholdError {
@@ -135,6 +137,9 @@ impl fmt::Display for ThresholdError {
 			},
 			ThresholdError::BufferSizeMismatch { expected, actual } => {
 				write!(f, "Buffer size mismatch: expected {}, got {}", expected, actual)
+			},
+			ThresholdError::InvalidConfiguration(msg) => {
+				write!(f, "Invalid configuration: {}", msg)
 			},
 		}
 	}
