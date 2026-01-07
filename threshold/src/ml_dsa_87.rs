@@ -1,4 +1,4 @@
-//! ML-DSA-87 threshold signature scheme implementation
+//! ML-DSA-87 Threshold Signature Implementation
 //!
 //! This module implements the threshold variant of ML-DSA-87 (256-bit security level).
 //! The threshold scheme allows up to 6 parties to collectively sign messages without
@@ -66,6 +66,68 @@
 //!
 //! The protocol is secure against up to t-1 malicious parties where t is the threshold.
 
+// Reference NTT implementation constants (ported from Go reference)
+const ZETAS: [u32; 256] = [
+	4193792, 25847, 5771523, 7861508, 237124, 7602457, 7504169, 466468, 1826347, 2353451, 8021166,
+	6288512, 3119733, 5495562, 3111497, 2680103, 2725464, 1024112, 7300517, 3585928, 7830929,
+	7260833, 2619752, 6271868, 6262231, 4520680, 6980856, 5102745, 1757237, 8360995, 4010497,
+	280005, 2706023, 95776, 3077325, 3530437, 6718724, 4788269, 5842901, 3915439, 4519302, 5336701,
+	3574422, 5512770, 3539968, 8079950, 2348700, 7841118, 6681150, 6736599, 3505694, 4558682,
+	3507263, 6239768, 6779997, 3699596, 811944, 531354, 954230, 3881043, 3900724, 5823537, 2071892,
+	5582638, 4450022, 6851714, 4702672, 5339162, 6927966, 3475950, 2176455, 6795196, 7122806,
+	1939314, 4296819, 7380215, 5190273, 5223087, 4747489, 126922, 3412210, 7396998, 2147896,
+	2715295, 5412772, 4686924, 7969390, 5903370, 7709315, 7151892, 8357436, 7072248, 7998430,
+	1349076, 1852771, 6949987, 5037034, 264944, 508951, 3097992, 44288, 7280319, 904516, 3958618,
+	4656075, 8371839, 1653064, 5130689, 2389356, 8169440, 759969, 7063561, 189548, 4827145,
+	3159746, 6529015, 5971092, 8202977, 1315589, 1341330, 1285669, 6795489, 7567685, 6940675,
+	5361315, 4499357, 4751448, 3839961, 2091667, 3407706, 2316500, 3817976, 5037939, 2244091,
+	5933984, 4817955, 266997, 2434439, 7144689, 3513181, 4860065, 4621053, 7183191, 5187039,
+	900702, 1859098, 909542, 819034, 495491, 6767243, 8337157, 7857917, 7725090, 5257975, 2031748,
+	3207046, 4823422, 7855319, 7611795, 4784579, 342297, 286988, 5942594, 4108315, 3437287,
+	5038140, 1735879, 203044, 2842341, 2691481, 5790267, 1265009, 4055324, 1247620, 2486353,
+	1595974, 4613401, 1250494, 2635921, 4832145, 5386378, 1869119, 1903435, 7329447, 7047359,
+	1237275, 5062207, 6950192, 7929317, 1312455, 3306115, 6417775, 7100756, 1917081, 5834105,
+	7005614, 1500165, 777191, 2235880, 3406031, 7838005, 5548557, 6709241, 6533464, 5796124,
+	4656147, 594136, 4603424, 6366809, 2432395, 2454455, 8215696, 1957272, 3369112, 185531,
+	7173032, 5196991, 162844, 1616392, 3014001, 810149, 1652634, 4686184, 6581310, 5341501,
+	3523897, 3866901, 269760, 2213111, 7404533, 1717735, 472078, 7953734, 1723600, 6577327,
+	1910376, 6712985, 7276084, 8119771, 4546524, 5441381, 6144432, 7959518, 6094090, 183443,
+	7403526, 1612842, 4834730, 7826001, 3919660, 8332111, 7018208, 3937738, 1400424, 7534263,
+	1976782,
+];
+
+const INV_ZETAS: [u32; 256] = [
+	6403635, 846154, 6979993, 4442679, 1362209, 48306, 4460757, 554416, 3545687, 6767575, 976891,
+	8196974, 2286327, 420899, 2235985, 2939036, 3833893, 260646, 1104333, 1667432, 6470041,
+	1803090, 6656817, 426683, 7908339, 6662682, 975884, 6167306, 8110657, 4513516, 4856520,
+	3038916, 1799107, 3694233, 6727783, 7570268, 5366416, 6764025, 8217573, 3183426, 1207385,
+	8194886, 5011305, 6423145, 164721, 5925962, 5948022, 2013608, 3776993, 7786281, 3724270,
+	2584293, 1846953, 1671176, 2831860, 542412, 4974386, 6144537, 7603226, 6880252, 1374803,
+	2546312, 6463336, 1279661, 1962642, 5074302, 7067962, 451100, 1430225, 3318210, 7143142,
+	1333058, 1050970, 6476982, 6511298, 2994039, 3548272, 5744496, 7129923, 3767016, 6784443,
+	5894064, 7132797, 4325093, 7115408, 2590150, 5688936, 5538076, 8177373, 6644538, 3342277,
+	4943130, 4272102, 2437823, 8093429, 8038120, 3595838, 768622, 525098, 3556995, 5173371,
+	6348669, 3122442, 655327, 522500, 43260, 1613174, 7884926, 7561383, 7470875, 6521319, 7479715,
+	3193378, 1197226, 3759364, 3520352, 4867236, 1235728, 5945978, 8113420, 3562462, 2446433,
+	6136326, 3342478, 4562441, 6063917, 4972711, 6288750, 4540456, 3628969, 3881060, 3019102,
+	1439742, 812732, 1584928, 7094748, 7039087, 7064828, 177440, 2409325, 1851402, 5220671,
+	3553272, 8190869, 1316856, 7620448, 210977, 5991061, 3249728, 6727353, 8578, 3724342, 4421799,
+	7475901, 1100098, 8336129, 5282425, 7871466, 8115473, 3343383, 1430430, 6527646, 7031341,
+	381987, 1308169, 22981, 1228525, 671102, 2477047, 411027, 3693493, 2967645, 5665122, 6232521,
+	983419, 4968207, 8253495, 3632928, 3157330, 3190144, 1000202, 4083598, 6441103, 1257611,
+	1585221, 6203962, 4904467, 1452451, 3041255, 3677745, 1528703, 3930395, 2797779, 6308525,
+	2556880, 4479693, 4499374, 7426187, 7849063, 7568473, 4680821, 1600420, 2140649, 4873154,
+	3821735, 4874723, 1643818, 1699267, 539299, 6031717, 300467, 4840449, 2867647, 4805995,
+	3043716, 3861115, 4464978, 2537516, 3592148, 1661693, 4849980, 5303092, 8284641, 5674394,
+	8100412, 4369920, 19422, 6623180, 3277672, 1399561, 3859737, 2118186, 2108549, 5760665,
+	1119584, 549488, 4794489, 1079900, 7356305, 5654953, 5700314, 5268920, 2884855, 5260684,
+	2091905, 359251, 6026966, 6554070, 7913949, 876248, 777960, 8143293, 518909, 2608894, 8354570,
+	4186625,
+];
+
+const R_OVER_256: u64 = 41978; // (256)⁻¹ R² where R = 2³² mod Q
+const Q_INV: u64 = 4236238847; // -(q⁻¹) mod 2³²
+
 use crate::{
 	common::{ThresholdError, ThresholdResult},
 	field::{FieldElement, Polynomial, VecK, VecL},
@@ -86,6 +148,14 @@ pub use crate::params::common::SEED_SIZE;
 
 /// Reduces coefficient to be ≤ 2Q following reference implementation
 /// Equivalent to dilithium common::ReduceLe2Q
+/// Montgomery reduction that returns a value ≤ 2Q
+/// For x R ≤ q 2³², find y ≤ 2q with y = x mod q
+fn mont_reduce_le2q(x: u64) -> u32 {
+	let m = (x.wrapping_mul(Q_INV)) & 0xffffffff;
+	((x.wrapping_add(m * dilithium_params::Q as u64)) >> 32) as u32
+}
+
+/// Reduces x to a value ≤ 2Q following ML-DSA reference implementation
 fn reduce_le2q(x: u32) -> u32 {
 	// Note 2²³ = 2¹³ - 1 mod q. So, writing x = x₁ 2²³ + x₂ with x₂ < 2²³
 	// and x₁ < 2⁹, we have x = y (mod q) where
@@ -93,6 +163,76 @@ fn reduce_le2q(x: u32) -> u32 {
 	let x1 = x >> 23;
 	let x2 = x & 0x7FFFFF; // 2²³-1
 	x2 + (x1 << 13) - x1
+}
+
+/// Execute an in-place forward NTT (ported from Go reference)
+/// Assumes coefficients are in [0, 2Q) and produces coefficients bounded by 18Q
+fn ntt_ref(p: &mut [u32; 256]) {
+	let mut k = 0usize; // Index into ZETAS
+	let mut l = 128usize; // Half the height of a row group
+
+	while l > 0 {
+		let mut offset = 0usize;
+		while offset < 256 - l {
+			k += 1;
+			let zeta = ZETAS[k] as u64;
+
+			for j in offset..offset + l {
+				let t = mont_reduce_le2q(zeta * p[j + l] as u64);
+				p[j + l] = p[j] + (2 * dilithium_params::Q as u32) - t;
+				p[j] += t;
+			}
+
+			offset += 2 * l;
+		}
+		l >>= 1;
+	}
+}
+
+/// Execute an in-place inverse NTT and multiply by Montgomery factor R (ported from Go reference)
+/// Assumes coefficients are in [0, 2Q) and produces coefficients bounded by 2Q
+fn inv_ntt_ref(p: &mut [u32; 256]) {
+	let mut k = 0usize; // Index into INV_ZETAS
+	let mut l = 1usize;
+
+	while l < 256 {
+		let mut offset = 0usize;
+		while offset < 256 - l {
+			let zeta = INV_ZETAS[k] as u64;
+			k += 1;
+
+			for j in offset..offset + l {
+				let t = p[j];
+				p[j] = t + p[j + l];
+				let temp = t + (256 * dilithium_params::Q as u32) - p[j + l];
+				p[j + l] = mont_reduce_le2q(zeta * temp as u64);
+			}
+
+			offset += 2 * l;
+		}
+		l <<= 1;
+	}
+
+	for j in 0..256 {
+		p[j] = mont_reduce_le2q(R_OVER_256 * p[j] as u64);
+	}
+}
+
+/// Convert dilithium poly to array for NTT operations
+fn poly_to_array(p: &poly::Poly) -> [u32; 256] {
+	let mut arr = [0u32; 256];
+	for i in 0..256 {
+		// Convert i32 to u32, handling negative values via wrapping
+		arr[i] = p.coeffs[i] as u32;
+	}
+	arr
+}
+
+/// Convert array back to dilithium poly
+fn array_to_poly(arr: &[u32; 256], p: &mut poly::Poly) {
+	for i in 0..256 {
+		p.coeffs[i] = arr[i] as i32;
+	}
 }
 
 /// Normalizes coefficients assuming they're ≤ 2Q following reference implementation
@@ -3607,6 +3747,204 @@ mod tests {
 		);
 
 		println!("✅ t1 effective magnitude test passed");
+	}
+
+	/// Run this test to output NTT intermediate values for comparison with Go reference.
+	///
+	/// To create the Go comparison test, add this to dilithium_test.go:
+	/// ```go
+	/// func TestNTTComparison(t *testing.T) {
+	///     seed := [32]byte{} // All zeros
+	///
+	///     // Generate A matrix
+	///     var A Mat
+	///     A.Derive(&seed)
+	///
+	///     // Create simple y vector with known values
+	///     var y VecL
+	///     for i := 0; i < L; i++ {
+	///         for j := 0; j < common.N; j++ {
+	///             y[i][j] = uint32((i*common.N + j) % 100 + 1)
+	///         }
+	///     }
+	///
+	///     fmt.Printf("Input y[0] first 5: %v\n", y[0][:5])
+	///
+	///     // NTT transform y
+	///     yNTT := y
+	///     yNTT.NTT()
+	///     fmt.Printf("After NTT y[0] first 5: %v\n", yNTT[0][:5])
+	///
+	///     // Compute A[0]·y
+	///     var w0 common.Poly
+	///     PolyDotHat(&w0, &A[0], &yNTT)
+	///     fmt.Printf("\nAfter A[0]·y (NTT domain) first 5: %v\n", w0[:5])
+	///
+	///     // ReduceLe2Q
+	///     w0.ReduceLe2Q()
+	///     fmt.Printf("After ReduceLe2Q first 5: %v\n", w0[:5])
+	///
+	///     // InvNTT
+	///     w0.InvNTT()
+	///     fmt.Printf("After InvNTT first 5: %v\n", w0[:5])
+	///
+	///     // Normalize
+	///     w0.NormalizeAssumingLe2Q()
+	///     fmt.Printf("After Normalize first 5: %v\n", w0[:5])
+	/// }
+	/// ```
+	#[test]
+	fn test_ntt_comparison_with_reference() {
+		println!("🧪 Minimal NTT comparison test");
+		println!("Compare output with Go reference implementation\n");
+
+		// Use fixed seed for deterministic results
+		let seed = [0u8; 32];
+
+		// Generate A matrix deterministically
+		let mut rho = [0u8; 32];
+		rho.copy_from_slice(&seed);
+
+		let mut a_matrix: Vec<polyvec::Polyvecl> = Vec::new();
+		for i in 0..dilithium_params::K {
+			let mut row = polyvec::Polyvecl::default();
+			for j in 0..dilithium_params::L {
+				let mut poly_ntt = poly::Poly::default();
+				poly::uniform(&mut poly_ntt, &rho, ((i as u16) << 8) + (j as u16));
+				row.vec[j] = poly_ntt;
+			}
+			a_matrix.push(row);
+		}
+
+		// Create a simple y vector with small known values
+		let mut y = polyvec::Polyvecl::default();
+		for i in 0..dilithium_params::L {
+			for j in 0..dilithium_params::N as usize {
+				// Use small values: 1, 2, 3, ... to make debugging easier
+				y.vec[i].coeffs[j] = ((i * dilithium_params::N as usize + j) % 100) as i32 + 1;
+			}
+		}
+
+		println!("\nInput y coefficients (first 5): {:?}", &y.vec[0].coeffs[0..5]);
+
+		// Compute y in NTT domain using reference implementation
+		let mut y_ntt = y.clone();
+		for i in 0..dilithium_params::L {
+			let mut arr = poly_to_array(&y_ntt.vec[i]);
+			ntt_ref(&mut arr);
+			array_to_poly(&arr, &mut y_ntt.vec[i]);
+		}
+
+		println!("After NTT y_ntt coefficients (first 5): {:?}", &y_ntt.vec[0].coeffs[0..5]);
+		let mut max_y_ntt = 0i32;
+		for i in 0..dilithium_params::L {
+			for j in 0..dilithium_params::N as usize {
+				max_y_ntt = max_y_ntt.max(y_ntt.vec[i].coeffs[j].abs());
+			}
+		}
+		println!("Max |y_ntt| = {}", max_y_ntt);
+
+		// Compute A·y for first row only
+		let mut w0 = poly::Poly::default();
+		polyvec::l_pointwise_acc_montgomery(&mut w0, &a_matrix[0], &y_ntt);
+
+		println!("\nAfter A[0]·y_ntt (in NTT domain):");
+		println!("  First 5 coeffs: {:?}", &w0.coeffs[0..5]);
+		let mut max_w0_ntt = 0i32;
+		for j in 0..dilithium_params::N as usize {
+			max_w0_ntt = max_w0_ntt.max(w0.coeffs[j].abs());
+		}
+		println!("  Max |w0_ntt| = {}", max_w0_ntt);
+
+		// Apply ReduceLe2Q in NTT domain
+		for j in 0..dilithium_params::N as usize {
+			w0.coeffs[j] = reduce_le2q(w0.coeffs[j] as u32) as i32;
+		}
+
+		println!("\nAfter ReduceLe2Q (still in NTT domain):");
+		println!("  First 5 coeffs: {:?}", &w0.coeffs[0..5]);
+		let mut max_w0_reduced = 0i32;
+		let mut max_w0_reduced_centered = 0i32;
+		for j in 0..dilithium_params::N as usize {
+			max_w0_reduced = max_w0_reduced.max(w0.coeffs[j].abs());
+
+			let coeff_u32 = w0.coeffs[j] as u32;
+			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
+			x ^= x >> 31;
+			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
+			max_w0_reduced_centered = max_w0_reduced_centered.max(x);
+		}
+		println!("  Max |w0_reduced| = {}", max_w0_reduced);
+		println!("  Max centered = {}", max_w0_reduced_centered);
+
+		// Apply InvNTT using reference implementation
+		let mut arr = poly_to_array(&w0);
+		inv_ntt_ref(&mut arr);
+		array_to_poly(&arr, &mut w0);
+
+		println!("\nAfter InvNTT (normal domain):");
+		println!("  First 5 coeffs: {:?}", &w0.coeffs[0..5]);
+		let mut max_w0_normal = 0i32;
+		let mut max_w0_normal_centered = 0i32;
+		for j in 0..dilithium_params::N as usize {
+			max_w0_normal = max_w0_normal.max(w0.coeffs[j].abs());
+
+			let coeff_u32 = w0.coeffs[j] as u32;
+			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
+			x ^= x >> 31;
+			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
+			max_w0_normal_centered = max_w0_normal_centered.max(x);
+		}
+		println!("  Max |w0_normal| = {}", max_w0_normal);
+		println!("  Max centered = {}", max_w0_normal_centered);
+
+		// Apply second ReduceLe2Q
+		for j in 0..dilithium_params::N as usize {
+			w0.coeffs[j] = reduce_le2q(w0.coeffs[j] as u32) as i32;
+		}
+
+		println!("\nAfter 2nd ReduceLe2Q:");
+		println!("  First 5 coeffs: {:?}", &w0.coeffs[0..5]);
+		let mut max_w0_reduced2 = 0i32;
+		for j in 0..dilithium_params::N as usize {
+			max_w0_reduced2 = max_w0_reduced2.max(w0.coeffs[j].abs());
+		}
+		println!("  Max |w0| = {}", max_w0_reduced2);
+
+		// Apply NormalizeAssumingLe2Q
+		normalize_assuming_le2q(&mut w0);
+
+		println!("\nAfter NormalizeAssumingLe2Q:");
+		println!("  First 5 coeffs: {:?}", &w0.coeffs[0..5]);
+		let mut max_w0_final = 0i32;
+		let mut max_w0_final_centered = 0i32;
+		for j in 0..dilithium_params::N as usize {
+			max_w0_final = max_w0_final.max(w0.coeffs[j].abs());
+
+			let coeff_u32 = w0.coeffs[j] as u32;
+			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
+			x ^= x >> 31;
+			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
+			max_w0_final_centered = max_w0_final_centered.max(x);
+		}
+		println!("  Max |w0| = {}", max_w0_final);
+		println!("  Max centered = {}", max_w0_final_centered);
+		println!(
+			"  Centered/Q ratio = {:.2}%",
+			max_w0_final_centered as f64 / dilithium_params::Q as f64 * 100.0
+		);
+
+		// Expected: centered magnitude should be much smaller than Q/2
+		// If it's close to Q/2, there's a problem
+		let q_half = (dilithium_params::Q / 2) as i32;
+		println!("\nQ/2 = {}", q_half);
+		println!(
+			"Our centered max is {:.1}% of Q/2",
+			max_w0_final_centered as f64 / q_half as f64 * 100.0
+		);
+
+		// This test just prints values for comparison - no assertions
+		println!("\n✅ Test complete - compare these values with Go reference implementation");
 	}
 
 	#[test]
