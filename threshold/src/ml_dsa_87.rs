@@ -1778,8 +1778,7 @@ impl Round2State {
 		let mut w_aggregated = round1_state.w.clone(); // Start with our own w
 
 		// Add w values from other parties - these are in canonical format with multiple K iterations
-		// For Round 2, we just need to store them for later use in Round 3
-		// The actual aggregation will happen during signature creation
+		// We need to extract the first w commitment from each party's canonical data and aggregate them
 		for (party_idx, w_data) in other_parties_w_values.iter().enumerate() {
 			if !w_data.is_empty() {
 				println!(
@@ -1787,10 +1786,45 @@ impl Round2State {
 					party_idx,
 					w_data.len()
 				);
-				// For now, just verify the data is not empty
-				// The actual unpacking and aggregation happens in signature creation
+
+				// Extract the first K commitment from the canonical format
+				let single_commitment_size = Params::SINGLE_COMMITMENT_SIZE;
+				if w_data.len() >= single_commitment_size {
+					let first_commitment = &w_data[0..single_commitment_size];
+
+					// Unpack the first w commitment and aggregate it
+					match unpack_commitment_dilithium(first_commitment) {
+						Ok(w_other) => {
+							println!(
+								"DEBUG: Successfully unpacked w from party {}, aggregating...",
+								party_idx
+							);
+							// Aggregate: w_aggregated = w_aggregated + w_other
+							aggregate_commitments_dilithium(&mut w_aggregated, &w_other);
+						},
+						Err(e) => {
+							println!("DEBUG: Failed to unpack w from party {}: {:?}", party_idx, e);
+							return Err(ThresholdError::InvalidCommitment {
+								party_id: party_idx as u8,
+								expected_size: single_commitment_size,
+								actual_size: first_commitment.len(),
+							});
+						},
+					}
+				} else {
+					return Err(ThresholdError::InvalidCommitment {
+						party_id: party_idx as u8,
+						expected_size: single_commitment_size,
+						actual_size: w_data.len(),
+					});
+				}
 			}
 		}
+
+		println!(
+			"DEBUG: Round2State::new - Successfully aggregated w from {} parties",
+			other_parties_w_values.len() + 1
+		);
 
 		// Pack our w for transmission
 		let mut w_packed = vec![0u8; dilithium_params::K * (dilithium_params::N as usize) * 4];
