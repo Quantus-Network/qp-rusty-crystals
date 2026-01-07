@@ -1182,27 +1182,37 @@ impl FVec {
 
 	/// Round floating-point values back to integer polynomials
 	pub fn round(&self, s1: &mut polyvec::Polyvecl, s2: &mut polyvec::Polyveck) {
-		// Round s1 components
+		// Round s1 components with proper centered reduction
 		for i in 0..dilithium_params::L {
 			for j in 0..dilithium_params::N as usize {
 				let idx = i * dilithium_params::N as usize + j;
-				let mut u = self.data[idx].round() as i32;
-				// Add Q if negative to ensure positive
-				let t = u >> 31;
-				u = u + (t & dilithium_params::Q as i32);
-				s1.vec[i].coeffs[j as usize] = u as i32;
+				let u = self.data[idx].round() as i32;
+				// Use centered reduction: reduce to range [-(Q-1)/2, (Q-1)/2]
+				let reduced = ((u % dilithium_params::Q as i32) + dilithium_params::Q as i32)
+					% dilithium_params::Q as i32;
+				let centered = if reduced > (dilithium_params::Q as i32) / 2 {
+					reduced - dilithium_params::Q as i32
+				} else {
+					reduced
+				};
+				s1.vec[i].coeffs[j as usize] = centered;
 			}
 		}
 
-		// Round s2 components
+		// Round s2 components with proper centered reduction
 		for i in 0..dilithium_params::K {
 			for j in 0..dilithium_params::N as usize {
 				let idx = (dilithium_params::L + i) * dilithium_params::N as usize + j;
-				let mut u = self.data[idx].round() as i32;
-				// Add Q if negative to ensure positive
-				let t = u >> 31;
-				u = u + (t & dilithium_params::Q as i32);
-				s2.vec[i].coeffs[j as usize] = u as i32;
+				let u = self.data[idx].round() as i32;
+				// Use centered reduction: reduce to range [-(Q-1)/2, (Q-1)/2]
+				let reduced = ((u % dilithium_params::Q as i32) + dilithium_params::Q as i32)
+					% dilithium_params::Q as i32;
+				let centered = if reduced > (dilithium_params::Q as i32) / 2 {
+					reduced - dilithium_params::Q as i32
+				} else {
+					reduced
+				};
+				s2.vec[i].coeffs[j as usize] = centered;
 			}
 		}
 	}
@@ -1720,6 +1730,8 @@ impl Round3State {
 			config.base.threshold()
 		);
 
+		eprintln!("DEBUG: Using reference approach for response generation");
+
 		// Use reference approach with stored hyperball samples
 		let response = Self::compute_threshold_response_reference_approach(
 			sk,
@@ -1730,7 +1742,22 @@ impl Round3State {
 			&active_parties,
 		)?;
 
-		Ok((response.clone(), Self { response, responses: vec![] }))
+		// Create individual response vectors for each K iteration
+		let k = config.base.canonical_k() as usize;
+		let single_response_size = dilithium_params::L * dilithium_params::POLYZ_PACKEDBYTES;
+		let mut responses = Vec::with_capacity(k);
+
+		for i in 0..k {
+			let start_idx = i * single_response_size;
+			let end_idx = start_idx + single_response_size;
+			if end_idx <= response.len() {
+				responses.push(response[start_idx..end_idx].to_vec());
+			} else {
+				responses.push(vec![0u8; single_response_size]);
+			}
+		}
+
+		Ok((response.clone(), Self { response, responses }))
 	}
 
 	/// Compute threshold response using reference implementation approach (direct polynomial arithmetic)
@@ -1742,6 +1769,7 @@ impl Round3State {
 		config: &ThresholdConfig,
 		active_parties: &[u8],
 	) -> ThresholdResult<Vec<u8>> {
+		eprintln!("DEBUG: Inside compute_threshold_response_reference_approach");
 		// Recover partial secret using hardcoded patterns like reference recoverShare
 		let (s1h, s2h) = secret_sharing::recover_share_hardcoded(
 			&sk.shares,
@@ -1819,10 +1847,28 @@ impl Round3State {
 
 			// Step 5: Create FVec from z,y and add original hyperball sample (like reference)
 			let mut zf = FVec::from_polyvecs(&z, &y);
+
+			// Debug: Check FVec magnitude before adding hyperball sample
+			let mut max_zf_before = 0.0f64;
+			for j in 0..zf.data.len() {
+				max_zf_before = max_zf_before.max(zf.data[j].abs());
+			}
+			eprintln!("DEBUG: FVec from z,y max = {}", max_zf_before);
+
 			zf.add(&hyperball_samples[i]);
 
+			// Debug: Check FVec magnitude after adding hyperball sample
+			let mut max_zf_after = 0.0f64;
+			for j in 0..zf.data.len() {
+				max_zf_after = max_zf_after.max(zf.data[j].abs());
+			}
+			eprintln!("DEBUG: FVec after adding hyperball max = {}", max_zf_after);
+
 			// Step 6: Check excess (rejection sampling)
-			if zf.excess(config.r, config.nu) {
+			let excess_result = zf.excess(config.r, config.nu);
+			eprintln!("DEBUG: zf.excess({}, {}) = {}", config.r, config.nu, excess_result);
+
+			if excess_result {
 				// Fill with zeros for failed iteration
 				let start_idx = i * packed_size;
 				for poly_idx in 0..dilithium_params::L {
@@ -1839,7 +1885,24 @@ impl Round3State {
 			// Step 7: Round back to integers (like reference zf.Round())
 			let mut z_final = polyvec::Polyvecl::default();
 			let mut y_temp = polyvec::Polyveck::default();
+
+			// Debug: Check FVec magnitude before rounding
+			let mut max_zf_before_round = 0.0f64;
+			for j in 0..zf.data.len() {
+				max_zf_before_round = max_zf_before_round.max(zf.data[j].abs());
+			}
+			eprintln!("DEBUG: FVec before rounding max = {}", max_zf_before_round);
+
 			zf.round(&mut z_final, &mut y_temp);
+
+			// Debug: Check z_final magnitude after rounding
+			let mut max_z_final_coeff = 0i32;
+			for j in 0..dilithium_params::L {
+				for k in 0..(dilithium_params::N as usize) {
+					max_z_final_coeff = max_z_final_coeff.max(z_final.vec[j].coeffs[k].abs());
+				}
+			}
+			eprintln!("DEBUG: z_final after rounding max = {}", max_z_final_coeff);
 
 			// Step 8: Pack this iteration's response
 			let start_idx = i * packed_size;
@@ -1849,6 +1912,19 @@ impl Round3State {
 				if poly_end <= response.len() {
 					poly::z_pack(&mut response[poly_start..poly_end], &z_final.vec[poly_idx]);
 				}
+			}
+
+			// Debug: Test unpack to see if the issue is in pack/unpack
+			let test_unpacked =
+				unpack_response_dilithium(&response[start_idx..start_idx + packed_size]);
+			if let Ok(test_z) = test_unpacked {
+				let mut max_test_coeff = 0i32;
+				for j in 0..dilithium_params::L {
+					for k in 0..(dilithium_params::N as usize) {
+						max_test_coeff = max_test_coeff.max(test_z.vec[j].coeffs[k].abs());
+					}
+				}
+				eprintln!("DEBUG: After pack/unpack test, max coeff = {}", max_test_coeff);
 			}
 		}
 
@@ -2033,6 +2109,7 @@ pub fn get_original_secrets_from_seed(
 }
 
 /// Combine signature shares into final signature
+/// Combine threshold signatures using reference ML-DSA approach (direct polynomial arithmetic)
 pub fn combine_signatures(
 	pk: &PublicKey,
 	message: &[u8],
@@ -2057,41 +2134,8 @@ pub fn combine_signatures(
 		});
 	}
 
-	// Verify all responses and commitments have correct size
-	let expected_response_size = params.response_size::<Params>();
-	let expected_commitment_size = params.commitment_size::<Params>();
-
-	for response in responses.iter() {
-		if response.len() != expected_response_size {
-			return Err(ThresholdError::InvalidResponseSize {
-				expected: expected_response_size,
-				actual: response.len(),
-			});
-		}
-	}
-
-	for commitment in commitments.iter() {
-		if commitment.len() != expected_commitment_size {
-			return Err(ThresholdError::InvalidCommitmentSize {
-				expected: expected_commitment_size,
-				actual: commitment.len(),
-			});
-		}
-	}
-
-	// Get K parameter - this should match the number of commitment/response sets per party
-	// Use proper K value derived from threshold parameters
-	let k_iterations = config.k_iterations as usize;
-
-	// Create final ML-DSA signature using per-iteration approach with packed K sets
-	create_mldsa_signature_dilithium_k_iterations(
-		pk,
-		message,
-		context,
-		commitments,
-		responses,
-		config,
-	)
+	// Use reference implementation approach: aggregate commitments and responses directly
+	create_mldsa_signature_reference_approach(pk, message, context, commitments, responses, config)
 }
 
 /// Aggregate threshold commitments and responses into a valid ML-DSA signature
@@ -2185,321 +2229,142 @@ pub fn aggregate_responses_dilithium(z_final: &mut polyvec::Polyvecl, z_temp: &p
 	}
 }
 
-/// Create a valid ML-DSA signature from aggregated threshold components
-/// This follows the CIRCL combine logic more closely
-/// Create a signature from a single w/z pair following Threshold-ML-DSA Combine logic
-fn create_signature_from_pair(
+/// Create a signature from w/z pair using reference implementation approach
+fn create_signature_from_pair_reference(
 	pk: &PublicKey,
 	mu: &[u8; 64],
 	w_final: &polyvec::Polyveck,
 	z_final: &polyvec::Polyvecl,
 ) -> ThresholdResult<Vec<u8>> {
-	// Handle single iteration with provided (w_final, z_final) pair
-	// The K-iteration loop is now handled by the caller
-
-	// Use the provided w_final and z_final directly
-	let w_k = w_final;
-	let z_k = z_final;
-
-	// Step 1: Check ||z_k||∞ < γ₁ - β constraint first
+	// Step 1: Check ||z||∞ < γ₁ - β constraint (like reference)
 	let gamma1_minus_beta = (dilithium_params::GAMMA1 - dilithium_params::BETA) as i32;
-
-	// Debug: Check z_k magnitude at start
 	let mut max_z_coeff = 0i32;
 	for i in 0..dilithium_params::L {
 		for j in 0..(dilithium_params::N as usize) {
-			max_z_coeff = max_z_coeff.max(z_k.vec[i].coeffs[j].abs());
+			max_z_coeff = max_z_coeff.max(z_final.vec[i].coeffs[j].abs());
 		}
 	}
-	eprintln!("DEBUG: z_k max coefficient = {} (bound = {})", max_z_coeff, gamma1_minus_beta);
+	eprintln!("DEBUG: Reference approach z max = {}, bound = {}", max_z_coeff, gamma1_minus_beta);
 
-	if !polyvec::polyvecl_is_norm_within_bound(z_k, gamma1_minus_beta) {
-		eprintln!("CONSTRAINT VIOLATION: z_k norm check failed. γ₁ - β = {}", gamma1_minus_beta);
+	if !polyvec::polyvecl_is_norm_within_bound(z_final, gamma1_minus_beta) {
+		eprintln!("CONSTRAINT VIOLATION: Reference approach z norm check failed");
 		return Err(ThresholdError::ConstraintViolation);
 	}
 
-	// Step 2: Compute Az = A * z_k (using NTT domain)
-	let mut z_ntt = z_k.clone();
-	polyvec::l_ntt(&mut z_ntt);
-
-	// Debug: Check z_ntt magnitude after NTT
-	let mut max_z_ntt_coeff = 0i32;
-	for i in 0..dilithium_params::L {
-		for j in 0..(dilithium_params::N as usize) {
-			max_z_ntt_coeff = max_z_ntt_coeff.max(z_ntt.vec[i].coeffs[j].abs());
-		}
+	// Step 2: Decompose w into w0 and w1 (like reference)
+	let mut w0 = polyvec::Polyveck::default();
+	let mut w1 = polyvec::Polyveck::default();
+	for i in 0..dilithium_params::K {
+		w1.vec[i] = w_final.vec[i].clone();
+		poly::decompose(&mut w1.vec[i], &mut w0.vec[i]);
 	}
-	eprintln!("DEBUG: z_ntt max coefficient = {}", max_z_ntt_coeff);
+
+	// Step 3: Generate challenge c~ = H(μ || w1) like reference
+	let mut w1_packed = vec![0u8; dilithium_params::K * dilithium_params::POLYW1_PACKEDBYTES];
+	polyvec::k_pack_w1(&mut w1_packed, &w1);
+
+	let mut c_bytes = [0u8; dilithium_params::C_DASH_BYTES];
+	let mut keccak_state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut keccak_state, mu, 64);
+	fips202::shake256_absorb(&mut keccak_state, &w1_packed, w1_packed.len());
+	fips202::shake256_finalize(&mut keccak_state);
+	fips202::shake256_squeeze(&mut c_bytes, dilithium_params::C_DASH_BYTES, &mut keccak_state);
+
+	// Create challenge polynomial
+	let mut challenge_poly = poly::Poly::default();
+	poly::challenge(&mut challenge_poly, &c_bytes);
+
+	// Step 4: Compute Az (like reference)
+	let mut z_ntt = z_final.clone();
+	polyvec::l_ntt(&mut z_ntt);
 
 	let mut az = polyvec::Polyveck::default();
 	for i in 0..dilithium_params::K {
 		for j in 0..dilithium_params::L {
 			let mut temp = poly::Poly::default();
-
-			// Convert threshold polynomial to dilithium polynomial for pointwise multiplication
 			let mut a_poly = poly::Poly::default();
 			let threshold_poly = pk.a_ntt.get(i, j);
 			for k in 0..(dilithium_params::N as usize) {
 				a_poly.coeffs[k] = threshold_poly.get(k).value() as i32;
 			}
-
 			poly::pointwise_montgomery(&mut temp, &a_poly, &z_ntt.vec[j]);
 			poly::add_ip(&mut az.vec[i], &temp);
 		}
 	}
 	polyvec::k_invntt_tomont(&mut az);
-	// Add ReduceLe2Q and NormalizeAssumingLe2Q following reference
 	for i in 0..dilithium_params::K {
 		poly::reduce(&mut az.vec[i]);
 	}
 
-	// Debug: Check Az magnitude
-	let mut max_az_coeff_debug = 0i32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_az_coeff_debug = max_az_coeff_debug.max(az.vec[i].coeffs[j].abs());
-		}
-	}
-	eprintln!("DEBUG: Az max coefficient = {}", max_az_coeff_debug);
-
-	// Step 3: Decompose w_k into w0 and w1
-	let mut w0 = polyvec::Polyveck::default();
-	let mut w1 = polyvec::Polyveck::default();
-
-	// Debug: Check w_k magnitude before decomposition
-	let mut max_wk_coeff_debug = 0i32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_wk_coeff_debug = max_wk_coeff_debug.max(w_k.vec[i].coeffs[j].abs());
-		}
-	}
-	eprintln!("DEBUG: w_k max coefficient = {}", max_wk_coeff_debug);
-
-	for i in 0..dilithium_params::K {
-		w1.vec[i] = w_k.vec[i].clone();
-		poly::decompose(&mut w1.vec[i], &mut w0.vec[i]);
-	}
-
-	// Debug: Check w0 and w1 magnitudes after decomposition
-	let mut max_w0_coeff = 0i32;
-	let mut max_w1_coeff = 0i32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_w0_coeff = max_w0_coeff.max(w0.vec[i].coeffs[j].abs());
-			max_w1_coeff = max_w1_coeff.max(w1.vec[i].coeffs[j].abs());
-		}
-	}
-	eprintln!(
-		"DEBUG: w0 max coefficient = {}, w1 max coefficient = {}",
-		max_w0_coeff, max_w1_coeff
-	);
-
-	// Step 4: Generate iteration-specific challenge c~ = H(μ || w₁_k)
-	// CRITICAL FIX: Use w1_k specific to this iteration, not reused challenge
-	let mut w1_packed = vec![0u8; dilithium_params::K * dilithium_params::POLYW1_PACKEDBYTES];
-	polyvec::k_pack_w1(&mut w1_packed, &w1);
-
-	let mut c_bytes = [0u8; dilithium_params::C_DASH_BYTES];
-	let mut keccak_state = qp_rusty_crystals_dilithium::fips202::KeccakState::default();
-	qp_rusty_crystals_dilithium::fips202::shake256_absorb(&mut keccak_state, mu, mu.len());
-	qp_rusty_crystals_dilithium::fips202::shake256_absorb(
-		&mut keccak_state,
-		&w1_packed,
-		w1_packed.len(),
-	);
-	qp_rusty_crystals_dilithium::fips202::shake256_finalize(&mut keccak_state);
-	qp_rusty_crystals_dilithium::fips202::shake256_squeeze(
-		&mut c_bytes,
-		dilithium_params::C_DASH_BYTES,
-		&mut keccak_state,
-	);
-
-	// Step 5: Create challenge polynomial and compute Az - 2^d * c * t1
-	let mut challenge_poly = qp_rusty_crystals_dilithium::poly::Poly::default();
-	poly::challenge(&mut challenge_poly, &c_bytes);
-
-	// Debug: Check challenge polynomial magnitude
-	let mut max_c_coeff = 0i32;
-	for j in 0..(dilithium_params::N as usize) {
-		max_c_coeff = max_c_coeff.max(challenge_poly.coeffs[j].abs());
-	}
-	eprintln!("DEBUG: challenge polynomial max coefficient = {}", max_c_coeff);
-
-	// Convert challenge to NTT domain
+	// Step 5: Compute Az - 2^d * c * t1 (like reference)
 	let mut c_ntt = challenge_poly.clone();
 	poly::ntt(&mut c_ntt);
 
-	// Compute c * t1 * 2^d
 	let mut ct1_2d = polyvec::Polyveck::default();
-
-	// Debug: Check t1 magnitudes
-	let mut max_t1_coeff = 0u32;
 	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			let t1_coeff = pk.t1.get(i).get(j).value();
-			max_t1_coeff = max_t1_coeff.max(t1_coeff);
-		}
-	}
-	eprintln!("DEBUG: t1 max coefficient = {}", max_t1_coeff);
-
-	for i in 0..dilithium_params::K {
-		// First multiply t1 by 2^d
 		for j in 0..(dilithium_params::N as usize) {
 			let t1_coeff = pk.t1.get(i).get(j).value() as i32;
 			ct1_2d.vec[i].coeffs[j] = t1_coeff << dilithium_params::D;
 		}
 	}
 
-	// Debug: Check t1 * 2^d magnitudes
-	let mut max_t1_2d_coeff = 0i32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_t1_2d_coeff = max_t1_2d_coeff.max(ct1_2d.vec[i].coeffs[j].abs());
-		}
-	}
-	eprintln!(
-		"DEBUG: t1 * 2^d max coefficient = {} (2^d = {})",
-		max_t1_2d_coeff,
-		1 << dilithium_params::D
-	);
-
-	// Convert to NTT and multiply by challenge
 	polyvec::k_ntt(&mut ct1_2d);
 	for i in 0..dilithium_params::K {
 		let temp_poly = ct1_2d.vec[i].clone();
 		poly::pointwise_montgomery(&mut ct1_2d.vec[i], &temp_poly, &c_ntt);
 	}
 	polyvec::k_invntt_tomont(&mut ct1_2d);
-	// Add proper normalization following reference implementation
 	for i in 0..dilithium_params::K {
 		poly::reduce(&mut ct1_2d.vec[i]);
 	}
 
-	// Debug: Check final ct1_2d magnitudes
-	let mut max_ct1_2d_final_coeff = 0i32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_ct1_2d_final_coeff = max_ct1_2d_final_coeff.max(ct1_2d.vec[i].coeffs[j].abs());
-		}
-	}
-	eprintln!("DEBUG: final ct1_2d max coefficient = {}", max_ct1_2d_final_coeff);
-
-	// Compute f = Az - ct1_2d - w_k
+	// Step 6: Compute f = Az - ct1_2d - w (like reference)
 	let mut f = az.clone();
-	eprintln!("DEBUG: f = Az initially, max = {}", max_az_coeff_debug);
-
 	polyvec::k_sub(&mut f, &ct1_2d);
-
-	// Debug: Check f after subtracting ct1_2d
-	let mut max_f_after_ct1_coeff = 0i32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_f_after_ct1_coeff = max_f_after_ct1_coeff.max(f.vec[i].coeffs[j].abs());
-		}
-	}
-	eprintln!("DEBUG: f after subtracting ct1_2d, max = {}", max_f_after_ct1_coeff);
-
-	polyvec::k_sub(&mut f, &w_k);
-
-	// Debug: Check f after subtracting w_k
-	let mut max_f_after_wk_coeff = 0i32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_f_after_wk_coeff = max_f_after_wk_coeff.max(f.vec[i].coeffs[j].abs());
-		}
-	}
-	eprintln!("DEBUG: f after subtracting w_k, max = {}", max_f_after_wk_coeff);
-
+	polyvec::k_sub(&mut f, &w_final);
 	polyvec::k_caddq(&mut f);
-
-	// Debug: Check f after caddq
-	let mut max_f_after_caddq_coeff = 0i32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_f_after_caddq_coeff = max_f_after_caddq_coeff.max(f.vec[i].coeffs[j].abs());
-		}
-	}
-	eprintln!("DEBUG: f after caddq, max = {}", max_f_after_caddq_coeff);
-
-	// Add proper f.Normalize() following reference implementation
 	for i in 0..dilithium_params::K {
 		poly::reduce(&mut f.vec[i]);
 	}
 
-	// Debug: Check f after final reduce
-	let mut max_f_final_coeff = 0i32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_f_final_coeff = max_f_final_coeff.max(f.vec[i].coeffs[j].abs());
-		}
-	}
-	eprintln!("DEBUG: f after final reduce, max = {}", max_f_final_coeff);
-
-	// Check if ||f||_∞ < γ₂ constraint
+	// Step 7: Check f constraint (like reference)
 	let gamma2 = dilithium_params::GAMMA2 as i32;
-
-	// Debug: Calculate actual f norm and component norms for detailed diagnosis
 	let mut max_f_coeff = 0i32;
-	let mut max_az_coeff = 0i32;
-	let mut max_ct1_2d_coeff = 0i32;
-	let mut max_wk_coeff = 0i32;
-
 	for i in 0..dilithium_params::K {
 		for j in 0..(dilithium_params::N as usize) {
-			let abs_f = f.vec[i].coeffs[j].abs();
-			let abs_az = az.vec[i].coeffs[j].abs();
-			let abs_ct1_2d = ct1_2d.vec[i].coeffs[j].abs();
-			let abs_wk = w_k.vec[i].coeffs[j].abs();
-
-			if abs_f > max_f_coeff {
-				max_f_coeff = abs_f;
-			}
-			if abs_az > max_az_coeff {
-				max_az_coeff = abs_az;
-			}
-			if abs_ct1_2d > max_ct1_2d_coeff {
-				max_ct1_2d_coeff = abs_ct1_2d;
-			}
-			if abs_wk > max_wk_coeff {
-				max_wk_coeff = abs_wk;
-			}
+			max_f_coeff = max_f_coeff.max(f.vec[i].coeffs[j].abs());
 		}
 	}
+	eprintln!("DEBUG: Reference approach f max = {}, γ₂ bound = {}", max_f_coeff, gamma2);
 
 	if !polyvec::polyveck_is_norm_within_bound(&f, gamma2) {
-		eprintln!(
-			"CONSTRAINT VIOLATION: f norm check failed. max_f = {}, γ₂ = {}",
-			max_f_coeff, gamma2
-		);
-		eprintln!(
-			"  Component norms: Az = {}, ct1_2d = {}, wk = {}",
-			max_az_coeff, max_ct1_2d_coeff, max_wk_coeff
-		);
+		eprintln!("CONSTRAINT VIOLATION: Reference approach f norm check failed");
 		return Err(ThresholdError::ConstraintViolation);
 	}
 
-	// Step 7: Compute w0_modified = w0 + f (this is the key correction!)
+	// Step 8: Compute w0 + f and make hint (like reference)
 	let mut w0_modified = w0.clone();
 	polyvec::k_add(&mut w0_modified, &f);
-	// Add w0pf.Normalize() following reference implementation
 	for i in 0..dilithium_params::K {
 		poly::reduce(&mut w0_modified.vec[i]);
 	}
 
-	// Step 8: Compute proper hints using MakeHint(w0_modified, w1)
 	let mut hint = polyvec::Polyveck::default();
 	let hint_pop = compute_dilithium_hint(&mut hint, &w0_modified, &w1);
 
-	// Step 9: Check if hint population ≤ Omega
+	// Step 9: Check hint constraint and pack signature
+	eprintln!(
+		"DEBUG: Reference approach hint_pop = {}, Ω bound = {}",
+		hint_pop,
+		dilithium_params::OMEGA
+	);
+
 	if hint_pop <= dilithium_params::OMEGA {
-		return pack_dilithium_signature(&c_bytes, z_k, &hint);
+		eprintln!("DEBUG: Reference approach signature creation succeeded!");
+		pack_dilithium_signature(&c_bytes, z_final, &hint)
 	} else {
-		eprintln!(
-			"CONSTRAINT VIOLATION: hint population check failed. pop = {}, Ω = {}",
-			hint_pop,
-			dilithium_params::OMEGA
-		);
-		return Err(ThresholdError::ConstraintViolation);
+		eprintln!("CONSTRAINT VIOLATION: Reference approach hint population check failed");
+		Err(ThresholdError::ConstraintViolation)
 	}
 }
 
@@ -2507,8 +2372,8 @@ fn create_signature_from_pair(
 
 /// Legacy function for backwards compatibility
 
-/// Create ML-DSA signature using K different commitment/response iterations
-fn create_mldsa_signature_dilithium_k_iterations(
+/// Create ML-DSA signature using reference implementation approach
+fn create_mldsa_signature_reference_approach(
 	pk: &PublicKey,
 	message: &[u8],
 	context: &[u8],
@@ -2516,7 +2381,7 @@ fn create_mldsa_signature_dilithium_k_iterations(
 	responses: &[Vec<u8>],
 	config: &ThresholdConfig,
 ) -> ThresholdResult<Vec<u8>> {
-	// Compute μ = H(tr || msg)
+	// Compute μ = H(tr || msg) like reference implementation
 	let mut mu = [0u8; 64];
 	let mut input = Vec::new();
 	input.extend_from_slice(&pk.tr);
@@ -2532,83 +2397,40 @@ fn create_mldsa_signature_dilithium_k_iterations(
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut mu, 64, &mut state);
 
-	// Extract K different commitment/response pairs and try each one
+	// Try each K iteration following reference Combine logic
 	let k_iterations = config.base.canonical_k() as usize;
 	let single_commitment_size = Params::SINGLE_COMMITMENT_SIZE;
 	let single_response_size = Params::SINGLE_RESPONSE_SIZE;
 
 	for k_iter in 0..k_iterations {
-		// Extract k-th commitment from each party
-		let mut w_k_aggregated = polyvec::Polyveck::default();
-		for (party_idx, commitment_set) in commitments.iter().enumerate() {
-			// Extract k-th commitment from this party's commitment set
+		// Aggregate commitments for this iteration (like reference AggregateCommitments)
+		let mut w_final = polyvec::Polyveck::default();
+		for commitment_set in commitments.iter() {
 			let start_idx = k_iter * single_commitment_size;
 			let end_idx = start_idx + single_commitment_size;
 
 			if start_idx < commitment_set.len() && end_idx <= commitment_set.len() {
 				let k_commitment = &commitment_set[start_idx..end_idx];
-				let w_k = unpack_commitment_dilithium(k_commitment)?;
-				aggregate_commitments_dilithium(&mut w_k_aggregated, &w_k);
+				let w_temp = unpack_commitment_dilithium(k_commitment)?;
+				aggregate_commitments_dilithium(&mut w_final, &w_temp);
 			}
 		}
 
-		// Extract k-th response from each party and aggregate using simple addition like reference
-		let mut z_k = polyvec::Polyvecl::default();
-		for (party_idx, response_set) in responses.iter().enumerate() {
-			// Extract k-th response from this party's response set
+		// Aggregate responses for this iteration (like reference AggregateResponses)
+		let mut z_final = polyvec::Polyvecl::default();
+		for response_set in responses.iter() {
 			let start_idx = k_iter * single_response_size;
 			let end_idx = start_idx + single_response_size;
 
 			if start_idx < response_set.len() && end_idx <= response_set.len() {
 				let k_response = &response_set[start_idx..end_idx];
-				let z_temp = match unpack_response_dilithium(k_response) {
-					Ok(z) => z,
-					Err(_e) => continue,
-				};
-
-				// Debug: Check individual response magnitude
-				let mut max_z_temp_coeff = 0i32;
-				for i in 0..dilithium_params::L {
-					for j in 0..(dilithium_params::N as usize) {
-						max_z_temp_coeff = max_z_temp_coeff.max(z_temp.vec[i].coeffs[j].abs());
-					}
-				}
-				eprintln!(
-					"DEBUG: k_iter={}, party={}, z_temp max coeff = {}",
-					k_iter, party_idx, max_z_temp_coeff
-				);
-
-				// Simple addition like reference AggregateResponses
-				aggregate_responses_dilithium(&mut z_k, &z_temp);
-
-				// Debug: Check aggregated magnitude after this party
-				let mut max_z_k_coeff = 0i32;
-				for i in 0..dilithium_params::L {
-					for j in 0..(dilithium_params::N as usize) {
-						max_z_k_coeff = max_z_k_coeff.max(z_k.vec[i].coeffs[j].abs());
-					}
-				}
-				eprintln!(
-					"DEBUG: k_iter={}, after party {}, z_k max coeff = {}",
-					k_iter, party_idx, max_z_k_coeff
-				);
+				let z_temp = unpack_response_dilithium(k_response)?;
+				aggregate_responses_dilithium(&mut z_final, &z_temp);
 			}
 		}
 
-		// Debug: Check final z_k magnitude before signature creation
-		let mut max_z_k_final_coeff = 0i32;
-		for i in 0..dilithium_params::L {
-			for j in 0..(dilithium_params::N as usize) {
-				max_z_k_final_coeff = max_z_k_final_coeff.max(z_k.vec[i].coeffs[j].abs());
-			}
-		}
-		eprintln!(
-			"DEBUG: k_iter={}, final z_k max coeff before signature = {}",
-			k_iter, max_z_k_final_coeff
-		);
-
-		// Try to create signature with this (w_k, z_k) pair
-		match create_signature_from_pair(pk, &mu, &w_k_aggregated, &z_k) {
+		// Try to create signature with this iteration (like reference Combine)
+		match create_signature_from_pair_reference(pk, &mu, &w_final, &z_final) {
 			Ok(signature) => {
 				return Ok(signature);
 			},
@@ -2619,7 +2441,7 @@ fn create_mldsa_signature_dilithium_k_iterations(
 		}
 	}
 
-	// If we get here, no valid K-iteration was found
+	// If no iteration succeeds, return constraint violation
 	Err(ThresholdError::ConstraintViolation)
 }
 

@@ -406,6 +406,8 @@ fn test_threshold_protocol_3_of_5_real_e2e() {
 			println!("   the cryptographic verification compatibility needs work");
 		},
 		Err(e) => {
+			println!("❌ 3-of-5 threshold protocol failed with error: {}", e);
+			println!("   Error details: {:?}", e);
 			panic!("3-of-5 threshold protocol failed unexpectedly: {}", e);
 		},
 	}
