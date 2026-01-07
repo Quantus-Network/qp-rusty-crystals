@@ -102,7 +102,7 @@ fn run_threshold_protocol(
 		Err(e) => return Err(format!("Reference signature failed: {:?}", e).into()),
 	};
 	// Verify reference signature works
-	let reference_verification =
+	let _reference_verification =
 		reference_keypair.public.verify(message, &reference_signature, Some(context));
 
 	// Step 3: Round 2 - REAL commitment aggregation and challenge computation
@@ -191,13 +191,6 @@ fn run_threshold_protocol(
 	}
 
 	// VALIDATION: Check that responses are actually different and not all zeros
-
-	// Validate that responses are reasonable sizes and non-zero
-	let mut total_response_coefficients = 0i64;
-	for response in &responses {
-		let coeff_sum: i64 = response.iter().map(|&b| b as i64).sum();
-		total_response_coefficients += coeff_sum;
-	}
 
 	// Step 5: Combine into final threshold signature using K-iteration data
 	let packed_commitments: Vec<Vec<u8>> = active_party_indices

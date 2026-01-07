@@ -67,66 +67,6 @@
 //! The protocol is secure against up to t-1 malicious parties where t is the threshold.
 
 // Reference NTT implementation constants (ported from Go reference)
-const ZETAS: [u32; 256] = [
-	4193792, 25847, 5771523, 7861508, 237124, 7602457, 7504169, 466468, 1826347, 2353451, 8021166,
-	6288512, 3119733, 5495562, 3111497, 2680103, 2725464, 1024112, 7300517, 3585928, 7830929,
-	7260833, 2619752, 6271868, 6262231, 4520680, 6980856, 5102745, 1757237, 8360995, 4010497,
-	280005, 2706023, 95776, 3077325, 3530437, 6718724, 4788269, 5842901, 3915439, 4519302, 5336701,
-	3574422, 5512770, 3539968, 8079950, 2348700, 7841118, 6681150, 6736599, 3505694, 4558682,
-	3507263, 6239768, 6779997, 3699596, 811944, 531354, 954230, 3881043, 3900724, 5823537, 2071892,
-	5582638, 4450022, 6851714, 4702672, 5339162, 6927966, 3475950, 2176455, 6795196, 7122806,
-	1939314, 4296819, 7380215, 5190273, 5223087, 4747489, 126922, 3412210, 7396998, 2147896,
-	2715295, 5412772, 4686924, 7969390, 5903370, 7709315, 7151892, 8357436, 7072248, 7998430,
-	1349076, 1852771, 6949987, 5037034, 264944, 508951, 3097992, 44288, 7280319, 904516, 3958618,
-	4656075, 8371839, 1653064, 5130689, 2389356, 8169440, 759969, 7063561, 189548, 4827145,
-	3159746, 6529015, 5971092, 8202977, 1315589, 1341330, 1285669, 6795489, 7567685, 6940675,
-	5361315, 4499357, 4751448, 3839961, 2091667, 3407706, 2316500, 3817976, 5037939, 2244091,
-	5933984, 4817955, 266997, 2434439, 7144689, 3513181, 4860065, 4621053, 7183191, 5187039,
-	900702, 1859098, 909542, 819034, 495491, 6767243, 8337157, 7857917, 7725090, 5257975, 2031748,
-	3207046, 4823422, 7855319, 7611795, 4784579, 342297, 286988, 5942594, 4108315, 3437287,
-	5038140, 1735879, 203044, 2842341, 2691481, 5790267, 1265009, 4055324, 1247620, 2486353,
-	1595974, 4613401, 1250494, 2635921, 4832145, 5386378, 1869119, 1903435, 7329447, 7047359,
-	1237275, 5062207, 6950192, 7929317, 1312455, 3306115, 6417775, 7100756, 1917081, 5834105,
-	7005614, 1500165, 777191, 2235880, 3406031, 7838005, 5548557, 6709241, 6533464, 5796124,
-	4656147, 594136, 4603424, 6366809, 2432395, 2454455, 8215696, 1957272, 3369112, 185531,
-	7173032, 5196991, 162844, 1616392, 3014001, 810149, 1652634, 4686184, 6581310, 5341501,
-	3523897, 3866901, 269760, 2213111, 7404533, 1717735, 472078, 7953734, 1723600, 6577327,
-	1910376, 6712985, 7276084, 8119771, 4546524, 5441381, 6144432, 7959518, 6094090, 183443,
-	7403526, 1612842, 4834730, 7826001, 3919660, 8332111, 7018208, 3937738, 1400424, 7534263,
-	1976782,
-];
-
-const INV_ZETAS: [u32; 256] = [
-	6403635, 846154, 6979993, 4442679, 1362209, 48306, 4460757, 554416, 3545687, 6767575, 976891,
-	8196974, 2286327, 420899, 2235985, 2939036, 3833893, 260646, 1104333, 1667432, 6470041,
-	1803090, 6656817, 426683, 7908339, 6662682, 975884, 6167306, 8110657, 4513516, 4856520,
-	3038916, 1799107, 3694233, 6727783, 7570268, 5366416, 6764025, 8217573, 3183426, 1207385,
-	8194886, 5011305, 6423145, 164721, 5925962, 5948022, 2013608, 3776993, 7786281, 3724270,
-	2584293, 1846953, 1671176, 2831860, 542412, 4974386, 6144537, 7603226, 6880252, 1374803,
-	2546312, 6463336, 1279661, 1962642, 5074302, 7067962, 451100, 1430225, 3318210, 7143142,
-	1333058, 1050970, 6476982, 6511298, 2994039, 3548272, 5744496, 7129923, 3767016, 6784443,
-	5894064, 7132797, 4325093, 7115408, 2590150, 5688936, 5538076, 8177373, 6644538, 3342277,
-	4943130, 4272102, 2437823, 8093429, 8038120, 3595838, 768622, 525098, 3556995, 5173371,
-	6348669, 3122442, 655327, 522500, 43260, 1613174, 7884926, 7561383, 7470875, 6521319, 7479715,
-	3193378, 1197226, 3759364, 3520352, 4867236, 1235728, 5945978, 8113420, 3562462, 2446433,
-	6136326, 3342478, 4562441, 6063917, 4972711, 6288750, 4540456, 3628969, 3881060, 3019102,
-	1439742, 812732, 1584928, 7094748, 7039087, 7064828, 177440, 2409325, 1851402, 5220671,
-	3553272, 8190869, 1316856, 7620448, 210977, 5991061, 3249728, 6727353, 8578, 3724342, 4421799,
-	7475901, 1100098, 8336129, 5282425, 7871466, 8115473, 3343383, 1430430, 6527646, 7031341,
-	381987, 1308169, 22981, 1228525, 671102, 2477047, 411027, 3693493, 2967645, 5665122, 6232521,
-	983419, 4968207, 8253495, 3632928, 3157330, 3190144, 1000202, 4083598, 6441103, 1257611,
-	1585221, 6203962, 4904467, 1452451, 3041255, 3677745, 1528703, 3930395, 2797779, 6308525,
-	2556880, 4479693, 4499374, 7426187, 7849063, 7568473, 4680821, 1600420, 2140649, 4873154,
-	3821735, 4874723, 1643818, 1699267, 539299, 6031717, 300467, 4840449, 2867647, 4805995,
-	3043716, 3861115, 4464978, 2537516, 3592148, 1661693, 4849980, 5303092, 8284641, 5674394,
-	8100412, 4369920, 19422, 6623180, 3277672, 1399561, 3859737, 2118186, 2108549, 5760665,
-	1119584, 549488, 4794489, 1079900, 7356305, 5654953, 5700314, 5268920, 2884855, 5260684,
-	2091905, 359251, 6026966, 6554070, 7913949, 876248, 777960, 8143293, 518909, 2608894, 8354570,
-	4186625,
-];
-
-const R_OVER_256: u64 = 41978; // (256)⁻¹ R² where R = 2³² mod Q
-const Q_INV: u64 = 4236238847; // -(q⁻¹) mod 2³²
 
 use crate::{
 	common::{ThresholdError, ThresholdResult},
@@ -147,13 +87,6 @@ pub use crate::params::{common::*, MlDsa87Params as Params};
 pub use crate::params::common::SEED_SIZE;
 
 /// Reduces coefficient to be ≤ 2Q following reference implementation
-/// Equivalent to dilithium common::ReduceLe2Q
-/// Montgomery reduction that returns a value ≤ 2Q
-/// For x R ≤ q 2³², find y ≤ 2q with y = x mod q
-fn mont_reduce_le2q(x: u64) -> u32 {
-	let m = (x.wrapping_mul(Q_INV)) & 0xffffffff;
-	((x.wrapping_add(m * dilithium_params::Q as u64)) >> 32) as u32
-}
 
 /// Reduces x to a value ≤ 2Q following ML-DSA reference implementation
 fn reduce_le2q(x: u32) -> u32 {
@@ -163,82 +96,6 @@ fn reduce_le2q(x: u32) -> u32 {
 	let x1 = x >> 23;
 	let x2 = x & 0x7FFFFF; // 2²³-1
 	x2 + (x1 << 13) - x1
-}
-
-/// Execute an in-place forward NTT (ported from Go reference)
-/// Assumes coefficients are in [0, 2Q) and produces coefficients bounded by 18Q
-fn ntt_ref(p: &mut [u32; 256]) {
-	let mut k = 0usize; // Index into ZETAS
-	let mut l = 128usize; // Half the height of a row group
-
-	while l > 0 {
-		let mut offset = 0usize;
-		while offset < 256 - l {
-			k += 1;
-			let zeta = ZETAS[k] as u64;
-
-			for j in offset..offset + l {
-				let t = mont_reduce_le2q(zeta * p[j + l] as u64);
-				p[j + l] = p[j].wrapping_add(2 * dilithium_params::Q as u32).wrapping_sub(t);
-				p[j] = p[j].wrapping_add(t);
-			}
-
-			offset += 2 * l;
-		}
-		l >>= 1;
-	}
-}
-
-/// Execute an in-place inverse NTT and multiply by Montgomery factor R (ported from Go reference)
-/// Assumes coefficients are in [0, 2Q) and produces coefficients bounded by 2Q
-fn inv_ntt_ref(p: &mut [u32; 256]) {
-	let mut k = 0usize; // Index into INV_ZETAS
-	let mut l = 1usize;
-
-	while l < 256 {
-		let mut offset = 0usize;
-		while offset < 256 - l {
-			let zeta = INV_ZETAS[k] as u64;
-			k += 1;
-
-			for j in offset..offset + l {
-				let t = p[j];
-				p[j] = t.wrapping_add(p[j + l]);
-				let temp = t.wrapping_add(256 * dilithium_params::Q as u32).wrapping_sub(p[j + l]);
-				p[j + l] = mont_reduce_le2q(zeta * temp as u64);
-			}
-
-			offset += 2 * l;
-		}
-		l <<= 1;
-	}
-
-	for j in 0..256 {
-		p[j] = mont_reduce_le2q(R_OVER_256 * p[j] as u64);
-	}
-}
-
-/// Convert dilithium poly to array for NTT operations
-fn poly_to_array(p: &poly::Poly) -> [u32; 256] {
-	let mut arr = [0u32; 256];
-	for i in 0..256 {
-		// Convert i32 to u32, properly handling negative values modulo Q
-		let coeff = p.coeffs[i];
-		arr[i] = if coeff < 0 { (coeff + dilithium_params::Q as i32) as u32 } else { coeff as u32 };
-	}
-	arr
-}
-
-/// Convert array back to dilithium poly
-fn array_to_poly(arr: &[u32; 256], p: &mut poly::Poly) {
-	for i in 0..256 {
-		// Properly reduce modulo Q and center in range [-(Q-1)/2, (Q-1)/2]
-		let mut val = (arr[i] % dilithium_params::Q as u32) as i32;
-		if val > (dilithium_params::Q / 2) as i32 {
-			val -= dilithium_params::Q as i32;
-		}
-		p.coeffs[i] = val;
-	}
 }
 
 /// Apply NTT to a polynomial using dilithium library
@@ -262,20 +119,6 @@ fn ntt_polyvecl(v: &mut polyvec::Polyvecl) {
 fn ntt_polyveck(v: &mut polyvec::Polyveck) {
 	for i in 0..dilithium_params::K {
 		ntt_poly(&mut v.vec[i]);
-	}
-}
-
-/// Apply reference inverse NTT to a vector of L polynomials
-fn inv_ntt_polyvecl(v: &mut polyvec::Polyvecl) {
-	for i in 0..dilithium_params::L {
-		inv_ntt_poly(&mut v.vec[i]);
-	}
-}
-
-/// Apply reference inverse NTT to a vector of K polynomials
-fn inv_ntt_polyveck(v: &mut polyvec::Polyveck) {
-	for i in 0..dilithium_params::K {
-		inv_ntt_poly(&mut v.vec[i]);
 	}
 }
 
@@ -1421,7 +1264,6 @@ impl FVec {
 		// Generate normally distributed random numbers using Box-Muller transform
 		// CRITICAL: Must compute sq BEFORE applying nu scaling (matching reference)
 		let mut sq = 0.0f64;
-		let mut sq_count = 0;
 		for i in (0..size + 2).step_by(2) {
 			// Convert bytes to u64
 			let u1_bytes: [u8; 8] = buf[i * 8..(i + 1) * 8].try_into().unwrap();
@@ -1443,11 +1285,9 @@ impl FVec {
 			// Store samples and add to sq BEFORE nu scaling (critical!)
 			samples[i] = z1;
 			sq += z1 * z1;
-			sq_count += 1;
 
 			samples[i + 1] = z2;
 			sq += z2 * z2;
-			sq_count += 1;
 
 			// Apply nu scaling to first N*L components AFTER adding to sq
 			if i < dilithium_params::N as usize * dilithium_params::L {
@@ -1459,28 +1299,6 @@ impl FVec {
 		let factor = radius / sq.sqrt();
 		for i in 0..size {
 			self.data[i] = samples[i] * factor;
-		}
-
-		// Verify the actual norm after normalization (Euclidean)
-		let mut final_sq_euclidean = 0.0f64;
-		for i in 0..size {
-			final_sq_euclidean += self.data[i] * self.data[i];
-		}
-
-		// Compute weighted norm (matching excess check formula)
-		let mut final_sq_weighted = 0.0f64;
-		for i in 0..(dilithium_params::L + dilithium_params::K) {
-			for j in 0..dilithium_params::N as usize {
-				let idx = i * dilithium_params::N as usize + j;
-				let val = self.data[idx];
-				if i < dilithium_params::L {
-					// For s1 components, divide by nu^2
-					final_sq_weighted += val * val / (nu * nu);
-				} else {
-					// For s2 components, use directly
-					final_sq_weighted += val * val;
-				}
-			}
 		}
 	}
 
@@ -1612,24 +1430,6 @@ pub struct SecretShare {
 #[derive(Debug, Clone)]
 pub struct Mat<const K: usize, const L: usize>([[Polynomial; L]; K]);
 
-/// Center coefficient to minimize magnitude for threshold signatures
-/// Handles all cases: large positives, small positives, and negatives
-fn center_coefficient(coeff: i32) -> u32 {
-	const Q_HALF: i32 = (dilithium_params::Q - 1) / 2; // 4190208
-
-	if coeff < 0 {
-		// Convert negative to positive modular representation
-		(dilithium_params::Q + coeff) as u32
-	} else if coeff > Q_HALF {
-		// Map large positive values to their negative modular equivalents
-		// This reduces magnitude: 8000000 -> Q - 8000000 = 380417
-		dilithium_params::Q as u32 - coeff as u32
-	} else {
-		// Small positive values stay as they are
-		coeff as u32
-	}
-}
-
 /// Apply coefficient centering to a dilithium polynomial in-place to minimize magnitudes
 fn center_dilithium_poly(poly: &mut qp_rusty_crystals_dilithium::poly::Poly) {
 	const Q_HALF: i32 = (dilithium_params::Q - 1) / 2;
@@ -1642,58 +1442,6 @@ fn center_dilithium_poly(poly: &mut qp_rusty_crystals_dilithium::poly::Poly) {
 		// Small values (both positive and negative) stay as they are
 		// This preserves the small magnitudes we want for threshold signatures
 	}
-}
-
-/// Get effective coefficient value for threshold signatures (handles modular representation)
-/// Converts large positive values representing negatives back to their effective small magnitudes
-fn get_effective_coefficient(field_coeff: u32) -> i32 {
-	const Q: u32 = dilithium_params::Q as u32;
-	const Q_HALF: u32 = (Q - 1) / 2;
-
-	if field_coeff > Q_HALF {
-		// Large positive represents negative: convert back to negative
-		field_coeff as i32 - Q as i32
-	} else {
-		// Small positive stays positive
-		field_coeff as i32
-	}
-}
-
-/// Check if polynomial exceeds bound using centered norm (matching Threshold-ML-DSA reference)
-/// This implements the same logic as exceedsGeneric() in the Go reference implementation
-fn poly_exceeds_centered_norm(poly: &qp_rusty_crystals_dilithium::poly::Poly, bound: u32) -> bool {
-	const Q: u32 = dilithium_params::Q as u32;
-	const Q_HALF: u32 = (Q - 1) / 2;
-
-	for i in 0..(dilithium_params::N as usize) {
-		let coeff = poly.coeffs[i] as u32;
-
-		// Compute centered norm like Go reference implementation:
-		// Sets x to             {(Q-1)/2, (Q-3)/2, ..., 0, -1, ..., -(Q-1)/2}
-		let mut x = Q_HALF as i32 - coeff as i32;
-		// Sets x to             {(Q-1)/2, (Q-3)/2, ..., 0, 0, ...,  (Q-3)/2}
-		x ^= x >> 31;
-		// Sets x to             {0,       1, ...,  (Q-1)/2, (Q-1)/2, ..., 1}
-		x = Q_HALF as i32 - x;
-
-		if x as u32 >= bound {
-			return true;
-		}
-	}
-	false
-}
-
-/// Check if polyvec exceeds bound using centered norm for all polynomials
-fn polyveck_exceeds_centered_norm(
-	polyvec: &qp_rusty_crystals_dilithium::polyvec::Polyveck,
-	bound: u32,
-) -> bool {
-	for i in 0..dilithium_params::K {
-		if poly_exceeds_centered_norm(&polyvec.vec[i], bound) {
-			return true;
-		}
-	}
-	false
 }
 
 /// Check if any coefficient in polynomial vector exceeds bound (matches reference Exceeds)
@@ -1743,13 +1491,14 @@ impl<const K: usize, const L: usize> Mat<K, L> {
 				let mut dilithium_poly = qp_rusty_crystals_dilithium::poly::Poly::default();
 				poly::uniform(&mut dilithium_poly, rho, ((i << 8) + j) as u16);
 
-				// Convert to threshold polynomial format with coefficient centering
+				// Convert to threshold polynomial format WITHOUT centering
+				// CRITICAL: Keep coefficients in [0, Q) to match Dilithium library representation
+				// Centering would create a different matrix than what's used in Round1
 				let mut poly = Polynomial::zero();
 				for k in 0..N {
 					if k < dilithium_params::N as usize {
-						let coeff = dilithium_poly.coeffs[k];
-						let centered_coeff = center_coefficient(coeff);
-						poly.set(k, FieldElement::new(centered_coeff));
+						let coeff = dilithium_poly.coeffs[k] as u32;
+						poly.set(k, FieldElement::new(coeff));
 					}
 				}
 				self.0[i][j] = poly;
@@ -1842,12 +1591,6 @@ impl Round1State {
 			// Sample from hyperball using threshold parameters
 			fvec.sample_hyperball(config.r_prime, config.nu, &iter_rho_prime, k_iter as u16);
 
-			// Debug: Check actual norm of sampled hyperball
-			let mut actual_norm_sq = 0.0;
-			for val in fvec.data.iter() {
-				actual_norm_sq += val * val;
-			}
-
 			// Store hyperball sample for reuse in Round 3 (reference approach)
 			hyperball_samples.push(fvec.clone());
 
@@ -1861,16 +1604,11 @@ impl Round1State {
 			let mut min_y = i32::MAX;
 			let mut max_e = 0i32;
 			let mut min_e = i32::MAX;
-			let mut y_negative_count = 0;
-			let mut e_negative_count = 0;
 			for i in 0..dilithium_params::L {
 				for j in 0..(dilithium_params::N as usize) {
 					let coeff = y_k.vec[i].coeffs[j];
 					max_y = max_y.max(coeff.abs());
 					min_y = min_y.min(coeff);
-					if coeff < 0 {
-						y_negative_count += 1;
-					}
 				}
 			}
 			for i in 0..dilithium_params::K {
@@ -1878,9 +1616,6 @@ impl Round1State {
 					let coeff = e_k.vec[i].coeffs[j];
 					max_e = max_e.max(coeff.abs());
 					min_e = min_e.min(coeff);
-					if coeff < 0 {
-						e_negative_count += 1;
-					}
 				}
 			}
 
@@ -1891,16 +1626,91 @@ impl Round1State {
 				ntt_poly(&mut y_k_ntt.vec[i]);
 			}
 
+			// Debug: Check w in NTT domain before InvNTT
+			if k_iter == 0 {
+				let mut max_w_ntt = 0i32;
+				let mut w_ntt_sample = Vec::new();
+				for i in 0..dilithium_params::K {
+					for j in 0..(dilithium_params::N as usize) {
+						max_w_ntt = max_w_ntt.max(w_k.vec[i].coeffs[j].abs());
+						if i == 0 && j < 5 {
+							w_ntt_sample.push(w_k.vec[i].coeffs[j]);
+						}
+					}
+				}
+				eprintln!("DEBUG NTT CHECK:");
+				eprintln!("  w IN NTT domain: max={}, samples={:?}", max_w_ntt, w_ntt_sample);
+			}
+
 			for i in 0..dilithium_params::K {
 				polyvec::l_pointwise_acc_montgomery(&mut w_k.vec[i], &a_matrix[i], &y_k_ntt);
 
-				// Apply reduce after accumulation to prevent overflow
-				poly::reduce(&mut w_k.vec[i]);
+				// Debug: Check after pointwise but before any reduction
+				if k_iter == 0 && i == 0 {
+					let mut max_after_acc = 0i32;
+					let mut after_acc_sample = Vec::new();
+					for j in 0..5 {
+						max_after_acc = max_after_acc.max(w_k.vec[i].coeffs[j].abs());
+						after_acc_sample.push(w_k.vec[i].coeffs[j]);
+					}
+					eprintln!(
+						"  w AFTER pointwise_acc (in NTT): max={}, samples={:?}",
+						max_after_acc, after_acc_sample
+					);
+				}
+
+				// CRITICAL: Apply ReduceLe2Q in NTT domain BEFORE InvNTT
+				// This prevents overflow when transforming back to normal domain
+				for j in 0..dilithium_params::N as usize {
+					w_k.vec[i].coeffs[j] = reduce_le2q(w_k.vec[i].coeffs[j] as u32) as i32;
+				}
+
+				// Debug: Check after reduce in NTT domain
+				if k_iter == 0 && i == 0 {
+					let mut max_after_ntt_reduce = 0i32;
+					let mut after_ntt_reduce_sample = Vec::new();
+					for j in 0..5 {
+						max_after_ntt_reduce = max_after_ntt_reduce.max(w_k.vec[i].coeffs[j].abs());
+						after_ntt_reduce_sample.push(w_k.vec[i].coeffs[j]);
+					}
+					eprintln!(
+						"  w AFTER reduce (in NTT): max={}, samples={:?}",
+						max_after_ntt_reduce, after_ntt_reduce_sample
+					);
+				}
 
 				inv_ntt_poly(&mut w_k.vec[i]);
 
-				// Apply reduce after InvNTT
+				// Debug: Check immediately after InvNTT
+				if k_iter == 0 && i == 0 {
+					let mut max_after_invntt = 0i32;
+					let mut after_invntt_sample = Vec::new();
+					for j in 0..5 {
+						max_after_invntt = max_after_invntt.max(w_k.vec[i].coeffs[j].abs());
+						after_invntt_sample.push(w_k.vec[i].coeffs[j]);
+					}
+					eprintln!(
+						"  w AFTER InvNTT: max={}, samples={:?}",
+						max_after_invntt, after_invntt_sample
+					);
+				}
+
+				// Apply reduce after InvNTT as well
 				poly::reduce(&mut w_k.vec[i]);
+
+				// Debug: Check after reduce in normal domain
+				if k_iter == 0 && i == 0 {
+					let mut max_after_reduce = 0i32;
+					let mut after_reduce_sample = Vec::new();
+					for j in 0..5 {
+						max_after_reduce = max_after_reduce.max(w_k.vec[i].coeffs[j].abs());
+						after_reduce_sample.push(w_k.vec[i].coeffs[j]);
+					}
+					eprintln!(
+						"  w AFTER reduce (normal domain): max={}, samples={:?}",
+						max_after_reduce, after_reduce_sample
+					);
+				}
 
 				// Don't manually center - normalize_assuming_le2q will handle representation
 				// This ensures w stays in [0, Q) for proper pack/unpack compatibility
@@ -1925,21 +1735,6 @@ impl Round1State {
 
 				// Debug: Check magnitude after adding error
 
-				// Debug: Check coefficients before 2nd ReduceLe2Q
-				if k_iter == 0 && i == 0 {
-					let mut min_before = i32::MAX;
-					let mut max_before = i32::MIN;
-					let mut negative_count = 0;
-					for j in 0..(dilithium_params::N as usize) {
-						let coeff = w_k.vec[i].coeffs[j];
-						min_before = min_before.min(coeff);
-						max_before = max_before.max(coeff);
-						if coeff < 0 {
-							negative_count += 1;
-						}
-					}
-				}
-
 				// Apply reduce after addition (poly::reduce handles i32 correctly)
 				poly::reduce(&mut w_k.vec[i]);
 
@@ -1951,7 +1746,25 @@ impl Round1State {
 				normalize_assuming_le2q(&mut w_k.vec[i]);
 			}
 
-			// Debug: Check w magnitude after normalization
+			// Debug: Check w magnitude AFTER final normalization
+			if k_iter == 0 {
+				let mut max_after_norm = 0i32;
+				let mut after_norm_sample = Vec::new();
+				for i in 0..dilithium_params::K {
+					for j in 0..(dilithium_params::N as usize) {
+						max_after_norm = max_after_norm.max(w_k.vec[i].coeffs[j].abs());
+						if i == 0 && j < 5 {
+							after_norm_sample.push(w_k.vec[i].coeffs[j]);
+						}
+					}
+				}
+				eprintln!(
+					"  w AFTER normalize: max={}, samples={:?}",
+					max_after_norm, after_norm_sample
+				);
+			}
+
+			// Debug: Check w magnitude after normalization (legacy check)
 			if k_iter == 0 {
 				let mut max_w_k = 0i32;
 				let mut max_w_k_centered = 0i32;
@@ -2440,24 +2253,6 @@ impl Round3State {
 				max_zf_after = max_zf_after.max(zf.data[j].abs());
 			}
 			// Step 6: Check excess (rejection sampling)
-			// Compute the norm manually for debugging
-			let mut sq = 0.0;
-			for j in 0..(dilithium_params::L + dilithium_params::K) {
-				for k in 0..dilithium_params::N as usize {
-					let idx = j * dilithium_params::N as usize + k;
-					let val = zf.data[idx];
-					if j < dilithium_params::L {
-						// For s1 components, divide by nu^2
-						sq += val * val / (config.nu * config.nu);
-					} else {
-						// For s2 components, use directly
-						sq += val * val;
-					}
-				}
-			}
-			let norm = sq.sqrt();
-			let bound = config.r;
-
 			let excess_result = zf.excess(config.r, config.nu);
 
 			if excess_result {
@@ -2679,15 +2474,11 @@ pub fn generate_threshold_key(
 	// Debug: Check t1 values after power2round
 	let mut max_t1_after_power2round = 0i32;
 	let mut min_t1_after_power2round = i32::MAX;
-	let mut negative_count = 0;
 	for i in 0..dilithium_params::K {
 		for j in 0..(dilithium_params::N as usize) {
 			let val = t1_poly.vec[i].coeffs[j];
 			max_t1_after_power2round = max_t1_after_power2round.max(val);
 			min_t1_after_power2round = min_t1_after_power2round.min(val);
-			if val < 0 {
-				negative_count += 1;
-			}
 		}
 	}
 
@@ -2830,14 +2621,6 @@ fn unpack_response_dilithium(response: &[u8]) -> ThresholdResult<polyvec::Polyve
 
 	if response.len() < single_response_size {
 		return Err(ThresholdError::InvalidData("Response too small".into()));
-	}
-
-	// Debug: Check if response buffer is all zeros
-	let mut non_zero_count = 0;
-	for &byte in response.iter().take(single_response_size) {
-		if byte != 0 {
-			non_zero_count += 1;
-		}
 	}
 
 	// Use first iteration
@@ -2985,35 +2768,15 @@ fn create_signature_from_pair_reference(
 	}
 
 	// Compute Az in NTT domain (keep in NTT domain!)
+	// CRITICAL FIX: Use polyvec::matrix_expand to generate A matrix, matching Round1
 	let mut az_ntt = polyvec::Polyveck::default();
+	let mut a_matrix: Vec<polyvec::Polyvecl> =
+		(0..dilithium_params::K).map(|_| polyvec::Polyvecl::default()).collect();
+	polyvec::matrix_expand(&mut a_matrix, &pk.rho);
 
-	// Debug: Check A matrix magnitudes
-	let mut max_a_coeff = 0i32;
+	// Compute Az using the same matrix as Round1
 	for i in 0..dilithium_params::K {
-		for j in 0..dilithium_params::L {
-			let threshold_poly = pk.a_ntt.get(i, j);
-			for k in 0..(dilithium_params::N as usize) {
-				let coeff = threshold_poly.get(k).value() as i32;
-				max_a_coeff = max_a_coeff.max(coeff.abs());
-			}
-		}
-	}
-
-	// Compute Az with debug tracking (keep in NTT domain)
-	for i in 0..dilithium_params::K {
-		for j in 0..dilithium_params::L {
-			let mut temp = poly::Poly::default();
-			let mut a_poly = poly::Poly::default();
-			let threshold_poly = pk.a_ntt.get(i, j);
-			for k in 0..(dilithium_params::N as usize) {
-				a_poly.coeffs[k] = threshold_poly.get(k).value() as i32;
-			}
-
-			// Debug: Check intermediate multiplication results
-			poly::pointwise_montgomery(&mut temp, &a_poly, &z_ntt.vec[j]);
-
-			poly::add_ip(&mut az_ntt.vec[i], &temp);
-		}
+		polyvec::l_pointwise_acc_montgomery(&mut az_ntt.vec[i], &a_matrix[i], &z_ntt);
 	}
 
 	// Step 5: Compute ct1_2d in NTT domain (like reference)
@@ -3065,9 +2828,11 @@ fn create_signature_from_pair_reference(
 	let mut f = az2dct1.clone();
 	polyvec::k_sub(&mut f, &w_final);
 
-	// Apply full normalization like reference (ReduceLe2Q + NormalizeAssumingLe2Q)
-	polyvec_k_reduce_le2q(&mut f);
-	polyvec_k_normalize_assuming_le2q(&mut f);
+	// Apply full reduction and normalization like reference f.Normalize()
+	// After subtraction, coefficients can be outside [0, 2Q) range, so we need full reduce
+	for i in 0..dilithium_params::K {
+		poly::reduce(&mut f.vec[i]);
+	}
 
 	// Step 7: Check f constraint using centered norm (like Threshold-ML-DSA reference)
 	let gamma2 = dilithium_params::GAMMA2 as u32;
@@ -3086,10 +2851,10 @@ fn create_signature_from_pair_reference(
 			max_f_centered = max_f_centered.max(x);
 		}
 	}
-	// Constraint check summary
+	// Constraint check summary (use centered norm for f)
 	eprintln!(
-		"  Constraints: z_max={}, f_max={} (γ₁-β={}, γ₂={})",
-		max_z_coeff, max_f_coeff, gamma1_minus_beta, gamma2
+		"  Constraints: z_max={}, f_max_centered={} (γ₁-β={}, γ₂={})",
+		max_z_coeff, max_f_centered, gamma1_minus_beta, gamma2
 	);
 
 	// Use Exceeds check like Threshold-ML-DSA reference
@@ -3117,8 +2882,8 @@ fn create_signature_from_pair_reference(
 	// Step 9: Check hint constraint and pack signature
 	if hint_pop <= dilithium_params::OMEGA {
 		eprintln!(
-			"✅ Signature succeeded: z_max={}, f_max={}, hint={}",
-			max_z_coeff, max_f_coeff, hint_pop
+			"✅ Signature succeeded: z_max={}, f_max_centered={}, hint={}",
+			max_z_coeff, max_f_centered, hint_pop
 		);
 		pack_dilithium_signature(&c_bytes, z_final, &hint)
 	} else {
@@ -3140,11 +2905,6 @@ fn create_mldsa_signature_reference_approach(
 	responses: &[Vec<u8>],
 	config: &ThresholdConfig,
 ) -> ThresholdResult<Vec<u8>> {
-	// Track constraint violation statistics
-	let mut z_norm_failures = 0;
-	let mut f_norm_failures = 0;
-	let mut hint_failures = 0;
-
 	// Compute μ = H(tr || msg) like reference implementation
 	let mut mu = [0u8; 64];
 	let mut input = Vec::new();
@@ -3221,7 +2981,6 @@ fn create_mldsa_signature_reference_approach(
 
 		// Aggregate responses for this iteration (like reference AggregateResponses)
 		let mut z_final = polyvec::Polyvecl::default();
-		let mut response_count = 0;
 		for response_set in responses.iter() {
 			let start_idx = k_iter * single_response_size;
 			let end_idx = start_idx + single_response_size;
@@ -3233,7 +2992,6 @@ fn create_mldsa_signature_reference_approach(
 				// Debug: Check z_temp right after unpacking
 
 				aggregate_responses_dilithium(&mut z_final, &z_temp);
-				response_count += 1;
 			}
 		}
 
@@ -3252,10 +3010,7 @@ fn create_mldsa_signature_reference_approach(
 		}
 	}
 
-	eprintln!(
-		"❌ All {} attempts failed (z:{}, f:{}, hint:{})",
-		k_iterations, z_norm_failures, f_norm_failures, hint_failures
-	);
+	eprintln!("❌ All {} attempts failed due to constraint violations", k_iterations);
 	Err(ThresholdError::ConstraintViolation)
 }
 
@@ -3686,10 +3441,12 @@ mod tests {
 
 		// Check that matrix is not all zeros after derivation
 		let mut all_zero = true;
+		let mut min_coeff = u32::MAX;
 		let mut max_coeff = 0u32;
 		let mut coeff_count_large = 0usize;
 		let mut coeff_count_small = 0usize;
-		const Q_HALF: u32 = (dilithium_params::Q as u32 - 1) / 2; // 4190208
+		const Q: u32 = dilithium_params::Q as u32; // 8380417
+		const Q_HALF: u32 = (Q - 1) / 2; // 4190208
 
 		for i in 0..Params::K {
 			for j in 0..Params::L {
@@ -3698,6 +3455,7 @@ mod tests {
 					if coeff_val != 0 {
 						all_zero = false;
 					}
+					min_coeff = min_coeff.min(coeff_val);
 					max_coeff = max_coeff.max(coeff_val);
 
 					// Count coefficients by magnitude
@@ -3712,22 +3470,28 @@ mod tests {
 
 		assert!(!all_zero, "Matrix should not be all zeros after derivation");
 
-		// Verify coefficient centering is working
+		// Verify coefficients are in [0, Q) range (NOT centered)
+		// This matches Dilithium library and Threshold-ML-DSA reference implementation
 		println!("Matrix A coefficient analysis:");
+		println!("  Min coefficient: {}", min_coeff);
 		println!("  Max coefficient: {}", max_coeff);
+		println!("  Q value: {}", Q);
 		println!("  Q/2 threshold: {}", Q_HALF);
 		println!("  Large coefficients (> Q/2): {}", coeff_count_large);
 		println!("  Small coefficients (≤ Q/2): {}", coeff_count_small);
 
-		// With centering, max coefficient should be ≤ Q/2
+		// Matrix A coefficients should be in [0, Q) range, NOT centered
+		// Centering only happens for norm checks, not for storage
+		assert!(max_coeff < Q, "Max coefficient {} should be < Q = {}", max_coeff, Q);
+
+		// Verify we have a good distribution (both small and large coefficients)
+		// This ensures the sampling is working correctly
 		assert!(
-			max_coeff <= Q_HALF,
-			"Max coefficient {} should be ≤ Q/2 = {} after centering",
-			max_coeff,
-			Q_HALF
+			coeff_count_large > 0 && coeff_count_small > 0,
+			"Should have both small and large coefficients (uniform distribution)"
 		);
 
-		println!("✅ Matrix derivation with coefficient centering test passed");
+		println!("✅ Matrix derivation test passed (coefficients in [0, Q) range)");
 	}
 
 	#[test]
