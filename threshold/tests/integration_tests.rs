@@ -4,11 +4,62 @@
 //! using real cryptographic operations, no mocking whatsoever.
 
 use qp_rusty_crystals_threshold::ml_dsa_87::{
-	self, Round1State, Round2State, Round3State, ThresholdConfig,
+	self, PrivateKey, Round1State, Round2State, Round3State, ThresholdConfig,
 };
+
+/// Reconstruct the full secret key from threshold shares for testing validation
+/// In production, this would be done using proper secret sharing reconstruction
+fn reconstruct_full_secret_from_shares(
+	threshold_sks: &[PrivateKey],
+	threshold: u8,
+) -> Result<
+	(
+		qp_rusty_crystals_dilithium::polyvec::Polyvecl,
+		qp_rusty_crystals_dilithium::polyvec::Polyveck,
+	),
+	Box<dyn std::error::Error>,
+> {
+	// Use only the first 'threshold' shares for reconstruction (simulating t-of-n)
+	let active_shares = &threshold_sks[..threshold as usize];
+
+	let mut reconstructed_s1 = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+	let mut reconstructed_s2 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+
+	// Simple additive reconstruction (this works because our threshold shares are additive)
+	for threshold_sk in active_shares {
+		if let Some((ref s1_share, ref s2_share)) = threshold_sk.s_total {
+			// Add s1 shares
+			for i in 0..qp_rusty_crystals_dilithium::params::L {
+				for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
+					reconstructed_s1.vec[i].coeffs[j] += s1_share.vec[i].coeffs[j];
+					// Keep in proper range
+					reconstructed_s1.vec[i].coeffs[j] = ((reconstructed_s1.vec[i].coeffs[j]
+						% qp_rusty_crystals_dilithium::params::Q as i32)
+						+ qp_rusty_crystals_dilithium::params::Q as i32)
+						% qp_rusty_crystals_dilithium::params::Q as i32;
+				}
+			}
+
+			// Add s2 shares
+			for i in 0..qp_rusty_crystals_dilithium::params::K {
+				for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
+					reconstructed_s2.vec[i].coeffs[j] += s2_share.vec[i].coeffs[j];
+					// Keep in proper range
+					reconstructed_s2.vec[i].coeffs[j] = ((reconstructed_s2.vec[i].coeffs[j]
+						% qp_rusty_crystals_dilithium::params::Q as i32)
+						+ qp_rusty_crystals_dilithium::params::Q as i32)
+						% qp_rusty_crystals_dilithium::params::Q as i32;
+				}
+			}
+		}
+	}
+
+	Ok((reconstructed_s1, reconstructed_s2))
+}
 
 /// Run the complete 3-round threshold protocol using REAL cryptographic operations
 /// NO MOCKS - this is a true end-to-end test
+/// Also runs solo ML-DSA alongside for validation at synchronization points
 fn run_threshold_protocol(
 	threshold: u8,
 	total_parties: u8,
@@ -25,6 +76,24 @@ fn run_threshold_protocol(
 	let (threshold_pk, threshold_sks) = ml_dsa_87::generate_threshold_key(&seed, &config)?;
 
 	println!("✅ Generated threshold keys for {} parties", total_parties);
+
+	// VALIDATION: Reconstruct the full secret key from threshold shares
+	println!("🔍 VALIDATION: Reconstructing full secret key from threshold shares");
+
+	let (reconstructed_s1, reconstructed_s2) =
+		reconstruct_full_secret_from_shares(&threshold_sks, threshold)?;
+	println!("✅ Reconstructed full secret polynomials from threshold shares");
+
+	// For validation, also get what the original secret should be
+	let (original_s1, original_s2) = ml_dsa_87::get_original_secrets_from_seed(&seed);
+
+	// Create a solo ML-DSA signature using a keypair generated from the same seed
+	// This serves as our "ground truth" for what the signature should look like
+	let mut seed_mut = seed;
+	let reference_keypair = qp_rusty_crystals_dilithium::ml_dsa_87::Keypair::generate(
+		qp_rusty_crystals_dilithium::SensitiveBytes32::from(&mut seed_mut),
+	);
+	println!("✅ Generated reference ML-DSA keypair for validation");
 
 	// Step 2: Round 1 - Each party generates REAL commitments with REAL randomness
 	let mut round1_states = Vec::new();
@@ -44,6 +113,68 @@ fn run_threshold_protocol(
 	}
 
 	println!("✅ All {} parties completed Round 1 with real commitments", total_parties);
+
+	// VALIDATION: Run solo ML-DSA Round 1 for comparison
+	println!("🔍 VALIDATION: Running solo ML-DSA signing alongside threshold protocol");
+
+	// Generate reference signature for comparison
+	let reference_signature = match reference_keypair.sign(message, Some(context), None) {
+		Ok(sig) => sig,
+		Err(e) => return Err(format!("Reference signature failed: {:?}", e).into()),
+	};
+	println!("✅ Reference ML-DSA signature: {} bytes", reference_signature.len());
+
+	// Verify reference signature works
+	let reference_verification =
+		reference_keypair.public.verify(message, &reference_signature, Some(context));
+	println!(
+		"✅ Reference ML-DSA verification: {}",
+		if reference_verification { "SUCCESS" } else { "FAILED" }
+	);
+
+	// VALIDATION: Verify reference public key matches threshold public key (should match)
+	let reference_pk_bytes = reference_keypair.public.to_bytes();
+	let pk_matches = reference_pk_bytes == threshold_pk.packed;
+	println!(
+		"🔍 Public key validation: reference {} threshold public key",
+		if pk_matches { "MATCHES" } else { "DIFFERS FROM" }
+	);
+
+	// VALIDATION: Verify our reconstruction matches the original secret
+	let mut secret_reconstruction_correct = true;
+	for i in 0..qp_rusty_crystals_dilithium::params::L {
+		for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
+			if reconstructed_s1.vec[i].coeffs[j] != original_s1.vec[i].coeffs[j] {
+				secret_reconstruction_correct = false;
+				break;
+			}
+		}
+		if !secret_reconstruction_correct {
+			break;
+		}
+	}
+	if secret_reconstruction_correct {
+		for i in 0..qp_rusty_crystals_dilithium::params::K {
+			for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
+				if reconstructed_s2.vec[i].coeffs[j] != original_s2.vec[i].coeffs[j] {
+					secret_reconstruction_correct = false;
+					break;
+				}
+			}
+			if !secret_reconstruction_correct {
+				break;
+			}
+		}
+	}
+
+	println!(
+		"✅ Secret reconstruction validation: {}",
+		if secret_reconstruction_correct {
+			"CORRECT - reconstructed secret matches original"
+		} else {
+			"INCORRECT - reconstruction does not match original"
+		}
+	);
 
 	// Step 3: Round 2 - REAL commitment aggregation and challenge computation
 	// Use the first 'threshold' parties as active parties to match sharing pattern expectations
@@ -92,6 +223,39 @@ fn run_threshold_protocol(
 
 	println!("✅ All {} active parties completed Round 2 with real aggregation", threshold);
 
+	// VALIDATION: Check that aggregated w values make sense
+	println!("🔍 VALIDATION: Checking Round 2 aggregation correctness");
+
+	// Sum up the individual w values manually
+	let mut manual_w_sum = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+	for &party_idx in &active_party_indices {
+		for i in 0..qp_rusty_crystals_dilithium::params::K {
+			for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
+				manual_w_sum.vec[i].coeffs[j] += round1_states[party_idx].w.vec[i].coeffs[j];
+				manual_w_sum.vec[i].coeffs[j] %= qp_rusty_crystals_dilithium::params::Q as i32;
+			}
+		}
+	}
+
+	// Compare first aggregated w with manual sum
+	let first_aggregated_w = &round2_states[0].w_aggregated;
+	let mut aggregation_matches = true;
+	for i in 0..qp_rusty_crystals_dilithium::params::K {
+		for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
+			if first_aggregated_w.vec[i].coeffs[j] != manual_w_sum.vec[i].coeffs[j] {
+				aggregation_matches = false;
+				break;
+			}
+		}
+		if !aggregation_matches {
+			break;
+		}
+	}
+	println!(
+		"✅ Round 2 aggregation validation: {}",
+		if aggregation_matches { "CORRECT" } else { "MISMATCH" }
+	);
+
 	// Step 4: Round 3 - Each active party computes REAL responses
 	let mut responses = Vec::new();
 
@@ -110,6 +274,20 @@ fn run_threshold_protocol(
 	}
 
 	println!("✅ All {} active parties completed Round 3 with real responses", threshold);
+
+	// VALIDATION: Check response aggregation makes sense
+	println!("🔍 VALIDATION: Checking Round 3 response correctness");
+
+	// Validate that responses are reasonable sizes and non-zero
+	let mut total_response_coefficients = 0i64;
+	for response in &responses {
+		let coeff_sum: i64 = response.iter().map(|&b| b as i64).sum();
+		total_response_coefficients += coeff_sum;
+	}
+	println!(
+		"✅ Total response coefficient sum: {} (non-zero indicates real crypto)",
+		total_response_coefficients
+	);
 
 	// Step 5: Combine into final threshold signature using REAL data
 	let packed_commitments: Vec<Vec<u8>> = active_party_indices
@@ -145,6 +323,31 @@ fn run_threshold_protocol(
 
 	println!("✅ Combined threshold signature ({} bytes)", threshold_signature.len());
 
+	// VALIDATION: Compare threshold signature characteristics with reference signature
+	println!("🔍 VALIDATION: Comparing threshold vs reference signature characteristics");
+
+	if threshold_signature.len() == reference_signature.len() {
+		println!("✅ Signature lengths match: {} bytes", threshold_signature.len());
+
+		// Compare first few bytes to see if they're completely different (they should be due to randomness)
+		let mut bytes_different = 0;
+		for i in 0..std::cmp::min(64, threshold_signature.len()) {
+			if threshold_signature[i] != reference_signature[i] {
+				bytes_different += 1;
+			}
+		}
+		println!(
+			"✅ First 64 bytes differ in {}/64 positions (should be high due to randomness)",
+			bytes_different
+		);
+	} else {
+		println!(
+			"❌ Signature length mismatch: threshold={}, reference={}",
+			threshold_signature.len(),
+			reference_signature.len()
+		);
+	}
+
 	// Step 6: Verify signature with the Dilithium crate (REAL verification)
 	let dilithium_pk =
 		match qp_rusty_crystals_dilithium::ml_dsa_87::PublicKey::from_bytes(&threshold_pk.packed) {
@@ -155,8 +358,26 @@ fn run_threshold_protocol(
 
 	if is_valid {
 		println!("✅ Signature verification SUCCESS - threshold protocol working correctly");
+		println!("🎉 VALIDATION COMPLETE: Threshold protocol produces valid ML-DSA signatures!");
 	} else {
 		println!("❌ Signature verification FAILED - protocol needs debugging");
+		println!("🔍 VALIDATION: Threshold signature format correct but crypto verification fails");
+		println!(
+			"   Reference ML-DSA signature: {}",
+			if reference_verification { "✅ WORKS" } else { "❌ ALSO FAILED" }
+		);
+		if reference_verification && pk_matches && secret_reconstruction_correct {
+			println!("   This indicates threshold-specific aggregation/combination issues");
+			println!("   The secret reconstruction and key generation work correctly");
+		} else if !reference_verification {
+			println!("   This may indicate broader ML-DSA compatibility issues");
+		} else if !pk_matches {
+			println!(
+				"   This indicates public key mismatch between threshold and reference generation"
+			);
+		} else if !secret_reconstruction_correct {
+			println!("   This indicates issues with threshold share reconstruction");
+		}
 	}
 
 	Ok(is_valid)

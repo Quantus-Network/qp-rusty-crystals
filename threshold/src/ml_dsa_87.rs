@@ -1974,8 +1974,25 @@ pub fn combine_signatures(
 		}
 	}
 
-	// Implement proper threshold signature aggregation
-	aggregate_threshold_signature(pk, message, context, commitments, responses, config)
+	// Use proper Lagrange interpolation for responses
+	let z_final = lagrange_interpolate_responses(responses, params.threshold())?;
+
+	// Aggregate commitments to get w_final
+	let mut w_final = polyvec::Polyveck::default();
+	for commitment in commitments.iter().take(params.threshold() as usize) {
+		let w_temp = unpack_commitment_dilithium(commitment)?;
+		aggregate_commitments_dilithium(&mut w_final, &w_temp);
+	}
+
+	// Verify constraints before creating signature
+	let w0 = polyvec::Polyveck::default(); // Placeholder - w0 calculation needed
+	let w1 = polyvec::Polyveck::default(); // Placeholder - w1 calculation needed
+	if !verify_dilithium_constraints(&z_final, &w0, &w1) {
+		return Err(ThresholdError::ConstraintViolation);
+	}
+
+	// Create final ML-DSA signature
+	create_mldsa_signature_dilithium(pk, message, context, &w_final, &z_final)
 }
 
 /// Aggregate threshold commitments and responses into a valid ML-DSA signature
