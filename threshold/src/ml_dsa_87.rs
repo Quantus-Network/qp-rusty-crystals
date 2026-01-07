@@ -1232,7 +1232,6 @@ impl FVec {
 		fips202::shake256_squeeze(&mut buf, buf_len, &mut keccak_state);
 
 		// Generate normally distributed random numbers using Box-Muller transform
-		let mut sq = 0.0f64;
 		for i in (0..size + 2).step_by(2) {
 			// Convert bytes to u64
 			let u1_bytes: [u8; 8] = buf[i * 8..(i + 1) * 8].try_into().unwrap();
@@ -1251,18 +1250,21 @@ impl FVec {
 			let z1 = (-2.0 * f1.ln()).sqrt() * (2.0 * PI * f2).cos();
 			let z2 = (-2.0 * f1.ln()).sqrt() * (2.0 * PI * f2).sin();
 
-			// Store samples and add to sq BEFORE nu scaling (matching reference exactly)
+			// Store samples
 			samples[i] = z1;
-			sq += z1 * z1;
-
 			samples[i + 1] = z2;
-			sq += z2 * z2;
 
-			// Apply nu scaling condition exactly as reference: if i < common.N*L
+			// Apply nu scaling to first N*L components (for y part)
 			if i < dilithium_params::N as usize * dilithium_params::L {
 				samples[i] *= nu;
 				samples[i + 1] *= nu;
 			}
+		}
+
+		// Compute squared norm AFTER nu scaling to ensure correct normalization
+		let mut sq = 0.0f64;
+		for i in 0..size {
+			sq += samples[i] * samples[i];
 		}
 
 		let factor = radius / sq.sqrt();
@@ -1629,6 +1631,20 @@ impl Round1State {
 			// Sample from hyperball using threshold parameters
 			fvec.sample_hyperball(config.r_prime, config.nu, &iter_rho_prime, k_iter as u16);
 
+			// Debug: Check actual norm of sampled hyperball
+			let mut actual_norm_sq = 0.0;
+			for val in fvec.data.iter() {
+				actual_norm_sq += val * val;
+			}
+			if k_iter == 0 {
+				eprintln!(
+					"DEBUG HYPERBALL: expected radius={}, actual norm={}, nu={}",
+					config.r_prime,
+					actual_norm_sq.sqrt(),
+					config.nu
+				);
+			}
+
 			// Store hyperball sample for reuse in Round 3 (reference approach)
 			hyperball_samples.push(fvec.clone());
 
@@ -1660,27 +1676,109 @@ impl Round1State {
 
 			for i in 0..dilithium_params::K {
 				polyvec::l_pointwise_acc_montgomery(&mut w_k.vec[i], &a_matrix[i], &y_k_ntt);
-				// Apply ReduceLe2Q after NTT inverse like reference
+
+				// Debug: Check magnitude after pointwise multiplication (in NTT domain)
+				if k_iter == 0 && i == 0 {
+					let mut max_ntt = 0i32;
+					for j in 0..(dilithium_params::N as usize) {
+						max_ntt = max_ntt.max(w_k.vec[i].coeffs[j].abs());
+					}
+					eprintln!("DEBUG W_NTT[0]: after pointwise_acc max = {}", max_ntt);
+				}
+
+				// Apply ReduceLe2Q in NTT domain like reference
 				let mut temp_coeff = 0u32;
 				for j in 0..(dilithium_params::N as usize) {
 					temp_coeff = w_k.vec[i].coeffs[j] as u32;
 					w_k.vec[i].coeffs[j] = reduce_le2q(temp_coeff) as i32;
 				}
+
+				// Debug: Check magnitude after ReduceLe2Q (still in NTT domain)
+				if k_iter == 0 && i == 0 {
+					let mut max_reduced = 0i32;
+					let mut max_reduced_centered = 0i32;
+					for j in 0..(dilithium_params::N as usize) {
+						let coeff = w_k.vec[i].coeffs[j];
+						max_reduced = max_reduced.max(coeff.abs());
+
+						// Compute centered representation
+						let coeff_u32 = coeff as u32;
+						let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
+						x ^= x >> 31;
+						x = ((dilithium_params::Q - 1) / 2) as i32 - x;
+						max_reduced_centered = max_reduced_centered.max(x);
+					}
+					eprintln!(
+						"DEBUG W_NTT[0]: after ReduceLe2Q max = {}, centered = {}",
+						max_reduced, max_reduced_centered
+					);
+				}
+
 				poly::invntt_tomont(&mut w_k.vec[i]);
+
+				// Debug: Check magnitude after InvNTT (now in normal domain)
+				if k_iter == 0 && i == 0 {
+					let mut max_invntt = 0i32;
+					for j in 0..(dilithium_params::N as usize) {
+						max_invntt = max_invntt.max(w_k.vec[i].coeffs[j].abs());
+					}
+					eprintln!("DEBUG W[0]: after InvNTT max = {}", max_invntt);
+				}
 
 				// Add error term e_k for threshold scheme (like reference ws[i][j].Add(&e_[j], &ws[i][j]))
 				poly::add_ip(&mut w_k.vec[i], &e_k.vec[i]);
+
+				// Debug: Check magnitude after adding error
+				if k_iter == 0 && i == 0 {
+					let mut max_with_e = 0i32;
+					for j in 0..(dilithium_params::N as usize) {
+						max_with_e = max_with_e.max(w_k.vec[i].coeffs[j].abs());
+					}
+					eprintln!("DEBUG W[0]: after adding e max = {}", max_with_e);
+				}
 
 				// Apply ReduceLe2Q after addition like reference
 				for j in 0..(dilithium_params::N as usize) {
 					temp_coeff = w_k.vec[i].coeffs[j] as u32;
 					w_k.vec[i].coeffs[j] = reduce_le2q(temp_coeff) as i32;
 				}
+
+				// Debug: Check magnitude after second ReduceLe2Q
+				if k_iter == 0 && i == 0 {
+					let mut max_reduced2 = 0i32;
+					for j in 0..(dilithium_params::N as usize) {
+						max_reduced2 = max_reduced2.max(w_k.vec[i].coeffs[j].abs());
+					}
+					eprintln!("DEBUG W[0]: after 2nd ReduceLe2Q max = {}", max_reduced2);
+				}
 			}
 
 			// Apply NormalizeAssumingLe2Q to entire vector like reference
 			for i in 0..dilithium_params::K {
 				normalize_assuming_le2q(&mut w_k.vec[i]);
+			}
+
+			// Debug: Check w magnitude after normalization
+			if k_iter == 0 {
+				let mut max_w_k = 0i32;
+				let mut max_w_k_centered = 0i32;
+				for i in 0..dilithium_params::K {
+					for j in 0..(dilithium_params::N as usize) {
+						let coeff = w_k.vec[i].coeffs[j];
+						max_w_k = max_w_k.max(coeff.abs());
+
+						// Compute centered representation
+						let coeff_u32 = coeff as u32;
+						let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
+						x ^= x >> 31;
+						x = ((dilithium_params::Q - 1) / 2) as i32 - x;
+						max_w_k_centered = max_w_k_centered.max(x);
+					}
+				}
+				eprintln!(
+					"DEBUG W_COMPUTE: max |w_k| = {}, centered = {} (from A·y + e)",
+					max_w_k, max_w_k_centered
+				);
 			}
 
 			// Store this iteration's w and y
@@ -1696,6 +1794,28 @@ impl Round1State {
 		let fvec_size = dilithium_params::N as usize * (dilithium_params::L + dilithium_params::K);
 		let mut fvec = FVec::new(fvec_size);
 		fvec.sample_hyperball(config.r_prime, config.nu, &rho_prime, 0);
+
+		// Debug: Check the rounded y and error magnitudes
+		let mut y_rounded = polyvec::Polyvecl::default();
+		let mut e_rounded = polyvec::Polyveck::default();
+		fvec.round(&mut y_rounded, &mut e_rounded);
+
+		let mut max_y = 0i32;
+		let mut max_e = 0i32;
+		for i in 0..dilithium_params::L {
+			for j in 0..dilithium_params::N as usize {
+				max_y = max_y.max(y_rounded.vec[i].coeffs[j].abs());
+			}
+		}
+		for i in 0..dilithium_params::K {
+			for j in 0..dilithium_params::N as usize {
+				max_e = max_e.max(e_rounded.vec[i].coeffs[j].abs());
+			}
+		}
+		eprintln!(
+			"DEBUG ROUND: max |y| = {}, max |e| = {} (y scaled by nu={})",
+			max_y, max_e, config.nu
+		);
 
 		// Pack w for commitment hash (use first w for now)
 		let mut w_packed = vec![0u8; dilithium_params::K * (dilithium_params::N as usize) * 4];
@@ -2757,11 +2877,38 @@ fn create_signature_from_pair_reference(
 	// Step 6: Compute f = Az2dct1 - w (like reference)
 	// Debug: Check w_final magnitude
 	let mut max_w = 0i32;
+	let mut max_w_centered = 0i32;
 	for i in 0..dilithium_params::K {
 		for j in 0..(dilithium_params::N as usize) {
-			max_w = max_w.max(w_final.vec[i].coeffs[j].abs());
+			let coeff = w_final.vec[i].coeffs[j];
+			max_w = max_w.max(coeff.abs());
+
+			// Compute centered representation
+			let coeff_u32 = coeff as u32;
+			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
+			x ^= x >> 31;
+			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
+			max_w_centered = max_w_centered.max(x);
 		}
 	}
+
+	// Debug: Check Az2dct1 magnitude
+	let mut max_az2dct1_centered = 0i32;
+	for i in 0..dilithium_params::K {
+		for j in 0..(dilithium_params::N as usize) {
+			let coeff = az2dct1.vec[i].coeffs[j];
+			let coeff_u32 = coeff as u32;
+			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
+			x ^= x >> 31;
+			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
+			max_az2dct1_centered = max_az2dct1_centered.max(x);
+		}
+	}
+
+	eprintln!(
+		"DEBUG BEFORE SUB: Az2dct1 centered max = {}, w centered max = {}",
+		max_az2dct1_centered, max_w_centered
+	);
 
 	// Compute f = Az2dct1 - w in normal domain
 	let mut f = az2dct1.clone();
@@ -2777,17 +2924,33 @@ fn create_signature_from_pair_reference(
 	// Step 7: Check f constraint using centered norm (like Threshold-ML-DSA reference)
 	let gamma2 = dilithium_params::GAMMA2 as u32;
 	let mut max_f_coeff = 0i32;
+	let mut max_f_centered = 0i32;
 	for i in 0..dilithium_params::K {
 		for j in 0..(dilithium_params::N as usize) {
-			max_f_coeff = max_f_coeff.max(f.vec[i].coeffs[j].abs());
+			let coeff = f.vec[i].coeffs[j];
+			max_f_coeff = max_f_coeff.max(coeff.abs());
+
+			// Compute centered representation
+			let coeff_u32 = coeff as u32;
+			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
+			x ^= x >> 31;
+			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
+			max_f_centered = max_f_centered.max(x);
 		}
 	}
-	eprintln!("  f_final_max = {}", max_f_coeff);
+	eprintln!("  f_final_max (raw) = {}", max_f_coeff);
+	eprintln!("  f_final_max (centered) = {}", max_f_centered);
 	eprintln!(
 		"DEBUG: f constraint check: f_max = {}, γ₂ bound = {} (ratio: {:.1}x)",
 		max_f_coeff,
 		gamma2,
 		max_f_coeff as f64 / gamma2 as f64
+	);
+	eprintln!(
+		"       f_centered_max = {}, γ₂ bound = {} (ratio: {:.1}x)",
+		max_f_centered,
+		gamma2,
+		max_f_centered as f64 / gamma2 as f64
 	);
 
 	// Component magnitude analysis
