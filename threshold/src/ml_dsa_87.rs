@@ -1894,30 +1894,16 @@ impl Round1State {
 			for i in 0..dilithium_params::K {
 				polyvec::l_pointwise_acc_montgomery(&mut w_k.vec[i], &a_matrix[i], &y_k_ntt);
 
-				// Debug: Check magnitude after pointwise multiplication (in NTT domain)
-
-				let mut temp_coeff = 0u32;
-				for j in 0..(dilithium_params::N as usize) {
-					temp_coeff = w_k.vec[i].coeffs[j] as u32;
-					w_k.vec[i].coeffs[j] = reduce_le2q(temp_coeff) as i32;
-				}
-				// handles Montgomery reduction correctly for i32 values
+				// Apply reduce after accumulation to prevent overflow
+				poly::reduce(&mut w_k.vec[i]);
 
 				inv_ntt_poly(&mut w_k.vec[i]);
 
 				// Apply reduce after InvNTT
 				poly::reduce(&mut w_k.vec[i]);
 
-				// Manually center coefficients to match reference behavior
-				// Reference uses uint32 with values near Q representing small negative values
-				// We need to explicitly center i32 values to get small magnitudes
-				for j in 0..(dilithium_params::N as usize) {
-					let coeff = w_k.vec[i].coeffs[j];
-					// Center to range [-(Q-1)/2, (Q-1)/2]
-					if coeff > (dilithium_params::Q as i32) / 2 {
-						w_k.vec[i].coeffs[j] = coeff - dilithium_params::Q as i32;
-					}
-				}
+				// Don't manually center - normalize_assuming_le2q will handle representation
+				// This ensures w stays in [0, Q) for proper pack/unpack compatibility
 
 				// Debug: Check magnitude after InvNTT (now in normal domain)
 				if k_iter == 0 && i == 0 {
@@ -3034,32 +3020,23 @@ fn create_signature_from_pair_reference(
 	let mut c_ntt = challenge_poly.clone();
 	ntt_poly(&mut c_ntt);
 
-	// Debug: Check what t1 values we're reading from pk
-	let mut max_t1_from_pk = 0u32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			let val = pk.t1.get(i).get(j).value();
-			max_t1_from_pk = max_t1_from_pk.max(val);
-		}
-	}
-
 	// t1 coefficients are already in [0, (Q-1)/2^D] range after Power2Round
 	// They are always positive, so we use them directly (no centering needed)
 	let mut ct1_2d = polyvec::Polyveck::default();
 	for i in 0..dilithium_params::K {
 		for j in 0..(dilithium_params::N as usize) {
-			let t1_coeff = pk.t1.get(i).get(j).value();
-			// t1 values are always positive after Power2Round, just shift left by D
-			ct1_2d.vec[i].coeffs[j] = (t1_coeff << dilithium_params::D) as i32;
+			// Read t1 value and multiply by 2^D
+			let t1_val = pk.t1.get(i).get(j).value();
+			let scaled = (t1_val << dilithium_params::D) as i32;
+			// CRITICAL: Reduce modulo Q to prevent overflow in NTT domain
+			// t1_max * 2^D = 1023 * 8192 = 8,380,416 ≈ Q, so reduction is essential
+			ct1_2d.vec[i].coeffs[j] = scaled % dilithium_params::Q as i32;
 		}
 	}
 
-	// Debug: Check t1 * 2^D magnitude before multiplication by challenge
-	let mut max_t1_2d = 0i32;
+	// Apply full reduction to ensure values are in proper range [0, Q)
 	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_t1_2d = max_t1_2d.max(ct1_2d.vec[i].coeffs[j].abs());
-		}
+		poly::reduce(&mut ct1_2d.vec[i]);
 	}
 
 	ntt_polyveck(&mut ct1_2d);
@@ -3083,45 +3060,7 @@ fn create_signature_from_pair_reference(
 	// Apply NormalizeAssumingLe2Q after inverse NTT (like reference)
 	polyvec_k_normalize_assuming_le2q(&mut az2dct1);
 
-	// Debug: Check Az2dct1 magnitude
-	let mut max_az2dct1 = 0i32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_az2dct1 = max_az2dct1.max(az2dct1.vec[i].coeffs[j].abs());
-		}
-	}
-
 	// Step 6: Compute f = Az2dct1 - w (like reference)
-	// Debug: Check w_final magnitude
-	let mut max_w = 0i32;
-	let mut max_w_centered = 0i32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			let coeff = w_final.vec[i].coeffs[j];
-			max_w = max_w.max(coeff.abs());
-
-			// Compute centered representation
-			let coeff_u32 = coeff as u32;
-			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
-			x ^= x >> 31;
-			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
-			max_w_centered = max_w_centered.max(x);
-		}
-	}
-
-	// Debug: Check Az2dct1 magnitude
-	let mut max_az2dct1_centered = 0i32;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			let coeff = az2dct1.vec[i].coeffs[j];
-			let coeff_u32 = coeff as u32;
-			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
-			x ^= x >> 31;
-			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
-			max_az2dct1_centered = max_az2dct1_centered.max(x);
-		}
-	}
-
 	// Compute f = Az2dct1 - w in normal domain
 	let mut f = az2dct1.clone();
 	polyvec::k_sub(&mut f, &w_final);
