@@ -157,17 +157,13 @@ fn run_threshold_protocol(
 			.map(|&idx| round1_commitments[idx].clone())
 			.collect();
 
-		// Collect w values from OTHER active parties for aggregation
+		// Collect w values from OTHER active parties for aggregation using proper canonical format
 		let mut other_parties_w_values = Vec::new();
 		for &other_party_idx in &active_party_indices {
 			if other_party_idx != party_idx {
-				let mut w_packed = vec![
-					0u8;
-					qp_rusty_crystals_dilithium::params::K
-						* (qp_rusty_crystals_dilithium::params::N as usize)
-						* 4
-				];
-				Round1State::pack_w_dilithium(&round1_states[other_party_idx].w, &mut w_packed);
+				// Use the canonical commitment packing that the protocol expects
+				let w_packed = round1_states[other_party_idx].pack_commitment_canonical(&config);
+				println!("DEBUG: Using canonical commitment packing, size={}", w_packed.len());
 				other_parties_w_values.push(w_packed);
 			}
 		}
