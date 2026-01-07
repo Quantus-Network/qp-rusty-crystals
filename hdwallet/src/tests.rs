@@ -11,7 +11,9 @@ pub struct TestVector {
 #[cfg(test)]
 mod hdwallet_tests {
 	use crate::{
-		derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed, mnemonic_to_seed,
+		derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed,
+		hderive::{ChildNumber, ExtendedPrivKey},
+		mnemonic_to_seed,
 		test_vectors::{
 			get_test_vectors, load_known_private_keys, str_to_32_bytes, str_to_64_bytes,
 		},
@@ -24,7 +26,6 @@ mod hdwallet_tests {
 		vec::Vec,
 	};
 	use core::str::FromStr;
-	use nam_tiny_hderive::{bip32::ExtendedPrivKey, bip44::ChildNumber};
 	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 	use rand::{rngs::StdRng, RngCore, SeedableRng};
 
@@ -233,7 +234,7 @@ mod hdwallet_tests {
 
 		assert_eq!(
 			result.err().unwrap(),
-			HDLatticeError::GenericError(nam_tiny_hderive::Error::InvalidDerivationPath),
+			HDLatticeError::GenericError(crate::hderive::Error::InvalidDerivationPath),
 			"Expected InvalidChildNumber error"
 		);
 	}
@@ -250,7 +251,7 @@ mod hdwallet_tests {
 		assert!(result.is_err());
 		assert_eq!(
 			result.err().unwrap(),
-			HDLatticeError::GenericError(nam_tiny_hderive::Error::InvalidChildNumber),
+			HDLatticeError::GenericError(crate::hderive::Error::InvalidChildNumber),
 			"Expected InvalidChildNumber error"
 		);
 	}
@@ -267,7 +268,7 @@ mod hdwallet_tests {
 		assert!(result.is_err());
 		assert_eq!(
 			result.err().unwrap(),
-			HDLatticeError::GenericError(nam_tiny_hderive::Error::InvalidDerivationPath),
+			HDLatticeError::GenericError(crate::hderive::Error::InvalidDerivationPath),
 			"Expected InvalidChildNumber error"
 		);
 	}
