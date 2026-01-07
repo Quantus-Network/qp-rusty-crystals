@@ -19,42 +19,65 @@ fn reconstruct_full_secret_from_shares(
 	),
 	Box<dyn std::error::Error>,
 > {
+	use qp_rusty_crystals_threshold::ml_dsa_87::secret_sharing::reconstruct_secret;
+
 	// Use only the first 'threshold' shares for reconstruction (simulating t-of-n)
 	let active_shares = &threshold_sks[..threshold as usize];
 
-	let mut reconstructed_s1 = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
-	let mut reconstructed_s2 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+	// Collect the secret shares in the format expected by reconstruct_secret
+	let mut collected_shares = std::collections::HashMap::new();
 
-	// Simple additive reconstruction (this works because our threshold shares are additive)
-	for threshold_sk in active_shares {
-		if let Some((ref s1_share, ref s2_share)) = threshold_sk.s_total {
-			// Add s1 shares
-			for i in 0..qp_rusty_crystals_dilithium::params::L {
-				for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
-					reconstructed_s1.vec[i].coeffs[j] += s1_share.vec[i].coeffs[j];
-					// Keep in proper range
-					reconstructed_s1.vec[i].coeffs[j] = ((reconstructed_s1.vec[i].coeffs[j]
-						% qp_rusty_crystals_dilithium::params::Q as i32)
-						+ qp_rusty_crystals_dilithium::params::Q as i32)
-						% qp_rusty_crystals_dilithium::params::Q as i32;
-				}
-			}
+	// For testing, we use subset_id = 0x01 which corresponds to the first threshold parties
+	let subset_id = (1u8 << threshold) - 1; // Creates bitmask: 0x03 for t=2, 0x07 for t=3, etc.
 
-			// Add s2 shares
-			for i in 0..qp_rusty_crystals_dilithium::params::K {
-				for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
-					reconstructed_s2.vec[i].coeffs[j] += s2_share.vec[i].coeffs[j];
-					// Keep in proper range
-					reconstructed_s2.vec[i].coeffs[j] = ((reconstructed_s2.vec[i].coeffs[j]
-						% qp_rusty_crystals_dilithium::params::Q as i32)
-						+ qp_rusty_crystals_dilithium::params::Q as i32)
-						% qp_rusty_crystals_dilithium::params::Q as i32;
-				}
+	for (i, threshold_sk) in active_shares.iter().enumerate() {
+		if let Some(share) = threshold_sk.shares.get(&subset_id) {
+			collected_shares.insert(i as u8, share.clone());
+			println!("  Collected share from party {}", i);
+		} else {
+			println!("  Warning: No share found for party {} with subset_id {:#x}", i, subset_id);
+			// For testing purposes, if share is missing, try to get any available share
+			if let Some((first_key, first_share)) = threshold_sk.shares.iter().next() {
+				println!("  Using fallback share with subset_id {:#x}", first_key);
+				collected_shares.insert(i as u8, first_share.clone());
 			}
 		}
 	}
 
-	Ok((reconstructed_s1, reconstructed_s2))
+	if collected_shares.len() < threshold as usize {
+		return Err(format!(
+			"Insufficient shares for reconstruction: got {}, need {}",
+			collected_shares.len(),
+			threshold
+		)
+		.into());
+	}
+
+	println!(
+		"  Reconstructing secret from {} shares using Lagrange interpolation",
+		collected_shares.len()
+	);
+
+	// Convert HashMap to Vec and extract party IDs for reconstruction
+	let mut shares_vec = Vec::new();
+	let mut party_ids = Vec::new();
+
+	for (party_id, share) in collected_shares.iter() {
+		shares_vec.push(share.clone());
+		party_ids.push(*party_id);
+	}
+
+	// Use proper Lagrange interpolation reconstruction
+	match reconstruct_secret(&shares_vec, &party_ids) {
+		Ok((s1, s2)) => {
+			println!("  ✅ Secret reconstruction successful using proper Lagrange interpolation");
+			Ok((s1, s2))
+		},
+		Err(e) => {
+			println!("  ❌ Secret reconstruction failed: {:?}", e);
+			Err(format!("Secret reconstruction failed: {:?}", e).into())
+		},
+	}
 }
 
 /// Run the complete 3-round threshold protocol using REAL cryptographic operations
@@ -256,12 +279,13 @@ fn run_threshold_protocol(
 		if aggregation_matches { "CORRECT" } else { "MISMATCH" }
 	);
 
-	// Step 4: Round 3 - Each active party computes REAL responses
+	// Step 4: Round 3 - Each active party computes K different REAL responses
 	let mut responses = Vec::new();
+	let mut round3_states = Vec::new();
 
 	for (i, &party_idx) in active_party_indices.iter().enumerate() {
 		// In Round 3, each party uses the aggregated w values from Round 2
-		let (response_packed, _round3_state) = Round3State::new(
+		let (response_packed, round3_state) = Round3State::new(
 			&threshold_sks[party_idx],
 			&config,
 			&w_aggregated_values, // round2_commitments parameter
@@ -269,8 +293,9 @@ fn run_threshold_protocol(
 			&round2_states[i],
 		)?;
 
-		// Extract the REAL response computed from the threshold protocol
+		// Keep both the packed response and the Round3State for K-iteration packing
 		responses.push(response_packed);
+		round3_states.push(round3_state);
 	}
 
 	println!("✅ All {} active parties completed Round 3 with real responses", threshold);
@@ -289,27 +314,24 @@ fn run_threshold_protocol(
 		total_response_coefficients
 	);
 
-	// Step 5: Combine into final threshold signature using REAL data
+	// Step 5: Combine into final threshold signature using K-iteration data
 	let packed_commitments: Vec<Vec<u8>> = active_party_indices
 		.iter()
 		.map(|&idx| round1_states[idx].pack_commitment_canonical(&config))
 		.collect();
 
-	// Pack REAL responses using proper Dilithium packing
-	let packed_responses: Vec<Vec<u8>> = responses
+	// Pack K different responses using new canonical packing method
+	let packed_responses: Vec<Vec<u8>> = active_party_indices
 		.iter()
-		.map(|response| {
-			let response_size = config
-				.threshold_params()
-				.response_size::<qp_rusty_crystals_threshold::params::MlDsa87Params>(
-			);
-			// Response is already properly packed, just copy and resize if needed
-			let mut packed = response.clone();
-			packed.resize(response_size, 0);
-
-			packed
-		})
+		.enumerate()
+		.map(|(i, _)| round3_states[i].pack_responses_canonical(&config))
 		.collect();
+
+	println!(
+		"✅ Using K-iteration packing: {} commitment sets and {} response sets per party",
+		config.base.canonical_k(),
+		config.base.canonical_k()
+	);
 
 	// Combine using REAL threshold signature combination
 	let threshold_signature = ml_dsa_87::combine_signatures(
