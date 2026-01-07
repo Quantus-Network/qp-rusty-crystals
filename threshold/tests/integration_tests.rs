@@ -40,10 +40,7 @@ fn reconstruct_full_secret_from_shares(
 		parties,
 	) {
 		Ok((s1, s2)) => Ok((s1, s2)),
-		Err(e) => {
-			println!("  ❌ Secret reconstruction failed: {:?}", e);
-			Err(format!("Secret reconstruction failed: {:?}", e).into())
-		},
+		Err(e) => Err(format!("Secret reconstruction failed: {:?}", e).into()),
 	}
 }
 
@@ -104,29 +101,9 @@ fn run_threshold_protocol(
 		Ok(sig) => sig,
 		Err(e) => return Err(format!("Reference signature failed: {:?}", e).into()),
 	};
-	println!("✅ Reference ML-DSA signature: {} bytes", reference_signature.len());
-
 	// Verify reference signature works
 	let reference_verification =
 		reference_keypair.public.verify(message, &reference_signature, Some(context));
-	println!(
-		"✅ Reference ML-DSA verification: {}",
-		if reference_verification { "SUCCESS" } else { "FAILED" }
-	);
-
-	// VALIDATION: Verify reference public key matches threshold public key (should match)
-	let reference_pk_bytes = reference_keypair.public.to_bytes();
-	let pk_matches = reference_pk_bytes == threshold_pk.packed;
-	println!(
-		"🔍 Public key validation: reference {} threshold public key",
-		if pk_matches { "MATCHES" } else { "DIFFERS FROM" }
-	);
-
-	// VALIDATION: Verify that partial secrets can be used for signing
-	// NOTE: Partial recovered secrets should NOT match the total secret - this is by design
-	// The partial secret is only for signing, the total secret is only for public key generation
-	println!("✅ Secret recovery validation: Partial secret successfully recovered for signing");
-	println!("   (Note: Partial secrets differ from total secret by design - this is correct)");
 
 	// Step 3: Round 2 - REAL commitment aggregation and challenge computation
 	// Use the first 'threshold' parties as active parties to match sharing pattern expectations
@@ -221,10 +198,6 @@ fn run_threshold_protocol(
 		let coeff_sum: i64 = response.iter().map(|&b| b as i64).sum();
 		total_response_coefficients += coeff_sum;
 	}
-	println!(
-		"✅ Total response coefficient sum: {} (non-zero indicates real crypto)",
-		total_response_coefficients
-	);
 
 	// Step 5: Combine into final threshold signature using K-iteration data
 	let packed_commitments: Vec<Vec<u8>> = active_party_indices
@@ -251,14 +224,7 @@ fn run_threshold_protocol(
 		&config,
 	)?;
 
-	// Combined threshold signature - checking lengths
-	if threshold_signature.len() != reference_signature.len() {
-		println!(
-			"❌ Signature length mismatch: threshold={}, reference={}",
-			threshold_signature.len(),
-			reference_signature.len()
-		);
-	}
+	// Combined threshold signature
 
 	// Step 6: Verify signature with the Dilithium crate (REAL verification)
 	let dilithium_pk =
@@ -269,25 +235,9 @@ fn run_threshold_protocol(
 	let is_valid = dilithium_pk.verify(message, &threshold_signature, Some(context));
 
 	if is_valid {
-		println!("✅ Signature verification SUCCESS - threshold protocol working correctly");
-		println!("🎉 VALIDATION COMPLETE: Threshold protocol produces valid ML-DSA signatures!");
+		println!("✅ {}-of-{}: Signature verified", threshold, total_parties);
 	} else {
-		println!("❌ Signature verification FAILED - protocol needs debugging");
-		println!("🔍 VALIDATION: Threshold signature format correct but crypto verification fails");
-		println!(
-			"   Reference ML-DSA signature: {}",
-			if reference_verification { "✅ WORKS" } else { "❌ ALSO FAILED" }
-		);
-		if reference_verification && pk_matches {
-			println!("   This indicates threshold-specific aggregation/combination issues");
-			println!("   The secret reconstruction and key generation work correctly");
-		} else if !reference_verification {
-			println!("   This may indicate broader ML-DSA compatibility issues");
-		} else if !pk_matches {
-			println!(
-				"   This indicates public key mismatch between threshold and reference generation"
-			);
-		}
+		println!("❌ {}-of-{}: Verification failed", threshold, total_parties);
 	}
 
 	Ok(is_valid)
@@ -298,23 +248,10 @@ fn run_test_matrix(configs: Vec<(u8, u8)>) -> Vec<String> {
 	let mut results = Vec::new();
 
 	for (t, n) in configs {
-		println!("\n{}", "=".repeat(60));
-		println!("Testing {}-of-{} threshold configuration", t, n);
-		println!("{}", "=".repeat(60));
-
 		let result = match run_threshold_protocol(t, n) {
-			Ok(true) => {
-				println!("✅ {}-of-{} CRYPTOGRAPHIC VERIFICATION SUCCESS", t, n);
-				format!("{}-of-{}: ✅ PASS (cryptographic verification succeeded)", t, n)
-			},
-			Ok(false) => {
-				println!("❌ {}-of-{} protocol completed but verification failed", t, n);
-				format!("{}-of-{}: ⚠️  PARTIAL (protocol runs, verification fails)", t, n)
-			},
-			Err(e) => {
-				println!("💥 {}-of-{} protocol error: {}", t, n, e);
-				format!("{}-of-{}: 💥 ERROR ({})", t, n, e)
-			},
+			Ok(true) => format!("{}-of-{}: ✅ PASS", t, n),
+			Ok(false) => format!("{}-of-{}: ⚠️  PARTIAL", t, n),
+			Err(e) => format!("{}-of-{}: 💥 ERROR ({})", t, n, e),
 		};
 
 		results.push(result);
@@ -327,17 +264,12 @@ fn run_test_matrix(configs: Vec<(u8, u8)>) -> Vec<String> {
 #[test]
 fn test_threshold_protocol_2_of_3_real_e2e() {
 	match run_threshold_protocol(2, 3) {
-		Ok(true) => {
-			println!("🎉 2-of-3 threshold protocol completed successfully with cryptographic verification");
-		},
+		Ok(true) => {},
 		Ok(false) => {
-			// Protocol completed but verification failed - this may be expected during development
-			println!("⚠️ 2-of-3 threshold protocol completed but verification failed");
-			println!("   This indicates the threshold construction format is correct but");
-			println!("   the cryptographic verification compatibility needs work");
+			println!("⚠️ 2-of-3: Protocol completed but verification failed");
 		},
 		Err(e) => {
-			panic!("2-of-3 threshold protocol failed unexpectedly: {}", e);
+			panic!("2-of-3 failed: {}", e);
 		},
 	}
 }
@@ -346,19 +278,12 @@ fn test_threshold_protocol_2_of_3_real_e2e() {
 #[test]
 fn test_threshold_protocol_3_of_5_real_e2e() {
 	match run_threshold_protocol(3, 5) {
-		Ok(true) => {
-			println!("🎉 3-of-5 threshold protocol completed successfully with cryptographic verification");
-		},
+		Ok(true) => {},
 		Ok(false) => {
-			// Protocol completed but verification failed - this may be expected during development
-			println!("⚠️ 3-of-5 threshold protocol completed but verification failed");
-			println!("   This indicates the threshold construction format is correct but");
-			println!("   the cryptographic verification compatibility needs work");
+			println!("⚠️ 3-of-5: Protocol completed but verification failed");
 		},
 		Err(e) => {
-			println!("❌ 3-of-5 threshold protocol failed with error: {}", e);
-			println!("   Error details: {:?}", e);
-			panic!("3-of-5 threshold protocol failed unexpectedly: {}", e);
+			panic!("3-of-5 failed: {}", e);
 		},
 	}
 }
@@ -388,11 +313,9 @@ fn test_comprehensive_threshold_matrix_real_e2e() {
 
 	let results = run_test_matrix(configs.clone());
 
-	println!("\n{}", "=".repeat(60));
-	println!("COMPREHENSIVE TEST MATRIX RESULTS");
-	println!("{}", "=".repeat(60));
+	println!("\n📊 Test Matrix:");
 	for result in &results {
-		println!("{}", result);
+		println!("  {}", result);
 	}
 
 	// Count outcomes
@@ -400,21 +323,7 @@ fn test_comprehensive_threshold_matrix_real_e2e() {
 	let partials = results.iter().filter(|r| r.contains("⚠️  PARTIAL")).count();
 	let errors = results.iter().filter(|r| r.contains("💥 ERROR")).count();
 
-	println!("\n📊 SUMMARY:");
-	println!("   ✅ Full passes (protocol + verification): {}", passes);
-	println!("   ⚠️  Partial passes (protocol only): {}", partials);
-	println!("   💥 Errors (protocol failures): {}", errors);
-	println!("   📋 Total configurations tested: {}", results.len());
-
-	if errors > 0 {
-		println!("\n⚠️  Some configurations failed completely - check implementation");
-	}
-
-	if partials > 0 && errors == 0 {
-		println!("\n✅ All protocols completed successfully!");
-		println!("   Verification failures are expected during development");
-		println!("   Focus: Fix cryptographic verification compatibility");
-	}
+	println!("Summary: ✅{} ⚠️{} 💥{} (total:{})", passes, partials, errors, results.len());
 
 	// The test succeeds if all protocols at least complete (even if verification fails)
 	// This allows us to identify implementation progress vs verification issues
@@ -535,48 +444,30 @@ fn test_round_by_round_real_data_flow() {
 /// Test that demonstrates the current implementation status
 #[test]
 fn test_implementation_status_discovery() {
-	println!("🔬 Testing implementation status across different threshold configurations");
-
-	// Test only simple configurations that work with current sharing pattern implementation
 	let test_configs = vec![(2, 2), (2, 3)];
 	let mut protocol_successes = 0;
 	let mut verification_successes = 0;
 
 	for &(t, n) in &test_configs {
-		println!("\n--- Testing {}-of-{} configuration ---", t, n);
-
 		match run_threshold_protocol(t, n) {
 			Ok(true) => {
-				println!("✅ {}-of-{}: Full success (protocol + verification)", t, n);
 				protocol_successes += 1;
 				verification_successes += 1;
 			},
 			Ok(false) => {
-				println!("⚠️ {}-of-{}: Partial success (protocol works, verification fails)", t, n);
 				protocol_successes += 1;
 			},
 			Err(e) => {
-				println!("❌ {}-of-{}: Protocol failed: {}", t, n, e);
+				eprintln!("💥 {}-of-{}: {}", t, n, e);
 			},
 		}
 	}
 
-	println!("\n📋 IMPLEMENTATION STATUS SUMMARY:");
-	println!("   Threshold protocols working: {}/{}", protocol_successes, test_configs.len());
 	println!(
-		"   Dilithium verification working: {}/{}",
+		"Status: protocols {}/{}, verification {}/{}",
+		protocol_successes,
+		test_configs.len(),
 		verification_successes,
 		test_configs.len()
 	);
-
-	if protocol_successes == test_configs.len() && verification_successes == 0 {
-		println!("   🎯 STATUS: Threshold protocol implemented, verification needs work");
-	} else if protocol_successes == test_configs.len() && verification_successes > 0 {
-		println!("   🎉 STATUS: Threshold protocol working with some verification success!");
-	} else {
-		println!("   ⚠️  STATUS: Threshold protocol implementation has gaps");
-	}
-
-	// This test always passes - it's for discovery, not assertion
-	println!("✅ Implementation status discovery completed");
 }
