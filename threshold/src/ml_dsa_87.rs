@@ -1952,15 +1952,6 @@ pub fn combine_signatures(
 	let expected_response_size = params.response_size::<Params>();
 	let expected_commitment_size = params.commitment_size::<Params>();
 
-	println!("DEBUG: params.threshold() = {}", params.threshold());
-	println!("DEBUG: params.total_parties() = {}", params.total_parties());
-	println!("DEBUG: params.active_parties() = {}", params.active_parties());
-	println!("DEBUG: params.canonical_k() = {}", params.canonical_k());
-	println!("DEBUG: expected_response_size = {}", expected_response_size);
-	println!("DEBUG: expected_commitment_size = {}", expected_commitment_size);
-	println!("DEBUG: SINGLE_RESPONSE_SIZE = {}", Params::SINGLE_RESPONSE_SIZE);
-	println!("DEBUG: SINGLE_COMMITMENT_SIZE = {}", Params::SINGLE_COMMITMENT_SIZE);
-
 	for response in responses.iter() {
 		if response.len() != expected_response_size {
 			return Err(ThresholdError::InvalidResponseSize {
@@ -2012,13 +2003,10 @@ fn aggregate_threshold_signature(
 	fips202::shake256_squeeze(&mut mu, 64, &mut state);
 
 	let k_canonical = params.canonical_k();
-	println!("Using canonical K = {} for threshold aggregation", k_canonical);
 
 	// Proper threshold signature aggregation using Lagrange interpolation
 	// For each of the K canonical iterations, try to reconstruct and verify
 	for k in 0..(k_canonical as usize) {
-		println!("  Trying canonical iteration {}/{}", k + 1, k_canonical);
-
 		// Extract the k-th iteration from each party's commitment and response
 		let mut iter_commitments = Vec::new();
 		let mut iter_responses = Vec::new();
@@ -2105,61 +2093,15 @@ fn aggregate_threshold_signature(
 				}
 			}
 
-			// Debug coefficient values before trying signature creation
-			let mut z_max = 0i32;
-			let mut z_min = 0i32;
-			let mut w_max = 0i32;
-			let mut w_min = 0i32;
-
-			for i in 0..dilithium_params::L {
-				for j in 0..dilithium_params::N as usize {
-					let coeff = z_aggregated.vec[i].coeffs[j];
-					z_max = z_max.max(coeff);
-					z_min = z_min.min(coeff);
-				}
-			}
-
-			for i in 0..dilithium_params::K {
-				for j in 0..dilithium_params::N as usize {
-					let coeff = w_aggregated.vec[i].coeffs[j];
-					w_max = w_max.max(coeff);
-					w_min = w_min.min(coeff);
-				}
-			}
-
-			println!(
-				"    Debug: z_aggregated range: [{}, {}], max_abs: {}",
-				z_min,
-				z_max,
-				z_max.max(z_min.abs())
-			);
-			println!(
-				"    Debug: w_aggregated range: [{}, {}], max_abs: {}",
-				w_min,
-				w_max,
-				w_max.max(w_min.abs())
-			);
-			println!(
-				"    Debug: γ₁ - β limit: {}",
-				(dilithium_params::GAMMA1 - dilithium_params::BETA) as i32
-			);
-
 			// Try to create signature with this aggregated iteration
 			match create_signature_from_pair(pk, &mu, &w_aggregated, &z_aggregated) {
-				Ok(signature) => {
-					println!("  ✅ Success: Found valid signature at iteration {}", k + 1);
-					return Ok(signature);
-				},
-				Err(ThresholdError::ConstraintViolation) => {
-					println!("  ❌ Iteration {} failed constraint check, trying next...", k + 1);
-					continue;
-				},
+				Ok(signature) => return Ok(signature),
+				Err(ThresholdError::ConstraintViolation) => continue,
 				Err(e) => return Err(e),
 			}
 		}
 	}
 
-	println!("❌ All {} canonical iterations failed - no valid signature found", k_canonical);
 	Err(ThresholdError::CombinationFailed)
 }
 
@@ -2366,62 +2308,19 @@ fn create_signature_from_pair(
 	// Check z bounds first (most important constraint)
 	let z_bound_ok = polyvec::polyvecl_is_norm_within_bound(z_final, gamma1_minus_beta);
 
-	// Debug z coefficient ranges in detail
-	let mut z_max = 0i32;
-	let mut z_min = 0i32;
-	let mut z_violations = 0;
-	for i in 0..dilithium_params::L {
-		for j in 0..(dilithium_params::N as usize) {
-			let coeff = z_final.vec[i].coeffs[j];
-			z_max = z_max.max(coeff);
-			z_min = z_min.min(coeff);
-			if coeff.abs() >= gamma1_minus_beta {
-				z_violations += 1;
-			}
-		}
-	}
-	println!("    z constraint (||z||∞ < γ₁ - β = {}): {}", gamma1_minus_beta, z_bound_ok);
-	println!("    z coefficient range: [{}, {}], violations: {}", z_min, z_max, z_violations);
-	println!("    z max abs: {}, limit: {}", z_max.max(z_min.abs()), gamma1_minus_beta);
-
 	if !z_bound_ok {
-		println!("    ❌ Z constraint failed - coefficients too large");
 		return Err(ThresholdError::ConstraintViolation);
 	}
 
 	// Check w0 bounds
 	let w0_bound_ok = polyvec::polyveck_is_norm_within_bound(&w0, gamma2_minus_beta);
 
-	// Debug w0 coefficient ranges in detail
-	let mut w0_max = 0i32;
-	let mut w0_min = 0i32;
-	let mut w0_violations = 0;
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			let coeff = w0.vec[i].coeffs[j];
-			w0_max = w0_max.max(coeff);
-			w0_min = w0_min.min(coeff);
-			if coeff.abs() >= gamma2_minus_beta {
-				w0_violations += 1;
-			}
-		}
-	}
-	println!("    w0 constraint (||w0||∞ < γ₂ - β = {}): {}", gamma2_minus_beta, w0_bound_ok);
-	println!("    w0 coefficient range: [{}, {}], violations: {}", w0_min, w0_max, w0_violations);
-
 	if !w0_bound_ok {
-		println!("    ❌ W0 constraint failed - coefficients too large");
 		return Err(ThresholdError::ConstraintViolation);
 	}
 
-	// Step 7: Use zero hints for threshold signatures
-	// This is a common approach in threshold protocols where hints are handled differently
-	// or not needed due to the way threshold responses are constructed
+	// Use zero hints for threshold signatures
 	let hint = polyvec::Polyveck::default(); // All zeros
-	let hint_pop = 0;
-	println!("    hint population: {} (max allowed: {})", hint_pop, dilithium_params::OMEGA);
-
-	// Zero hints should always pass the population constraint
 
 	// Step 8: Pack final signature
 	pack_dilithium_signature(&c_bytes, z_final, &hint)

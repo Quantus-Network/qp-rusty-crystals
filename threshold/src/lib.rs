@@ -19,42 +19,92 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use qp_rusty_crystals_threshold::mldsa87::{ThresholdConfig, generate_threshold_key};
-//! use rand_core::{CryptoRng, RngCore};
+//! use qp_rusty_crystals_threshold::ml_dsa_87::{ThresholdConfig, generate_threshold_key, combine_signatures};
+//! use qp_rusty_crystals_threshold::params::MlDsa87Params;
 //!
-//! // Setup threshold parameters: 3-of-5 threshold scheme
-//! let config = ThresholdConfig::new(3, 5).expect("Invalid parameters");
+//! // Setup threshold parameters: 2-of-3 threshold scheme
+//! let config = ThresholdConfig::new(2, 3).expect("Invalid parameters");
+//! let seed = [42u8; 32];
 //!
-//! // Generate threshold keys (requires a cryptographically secure RNG)
-//! // let mut rng = /* your CryptoRng + RngCore implementation */;
-//! // let (pk, sks) = generate_threshold_key(&mut rng, &config)
-//! //     .expect("Key generation failed");
+//! // Generate threshold keys
+//! let (threshold_pk, threshold_sks) = generate_threshold_key(&seed, &config)
+//!     .expect("Key generation failed");
 //!
-//! // Threshold signing involves 3 rounds of communication between parties
-//! // See individual module documentation for detailed protocol description
+//! // In a real threshold protocol, parties would generate Round1 states,
+//! // exchange commitments, and compute responses. For testing purposes,
+//! // mock data can be generated:
+//! let commitment_size = config.threshold_params().commitment_size::<MlDsa87Params>();
+//! let response_size = config.threshold_params().response_size::<MlDsa87Params>();
+//!
+//! // Generate mock threshold data (for testing only)
+//! let commitments = vec![
+//!     generate_mock_commitment(0, commitment_size),
+//!     generate_mock_commitment(1, commitment_size),
+//! ];
+//! let responses = vec![
+//!     generate_mock_response(0, response_size),
+//!     generate_mock_response(1, response_size),
+//! ];
+//!
+//! // Combine into threshold signature
+//! let message = b"Hello, threshold world!";
+//! let context = b"";
+//! let threshold_signature = combine_signatures(
+//!     &threshold_pk,
+//!     message,
+//!     context,
+//!     &commitments,
+//!     &responses,
+//!     &config,
+//! ).expect("Signature combination failed");
 //! ```
-//!
-//! ## Protocol Overview
-//!
-//! The threshold signing protocol consists of three rounds:
-//!
-//! 1. **Round 1**: Each party generates and commits to random polynomials
-//! 2. **Round 2**: Parties exchange commitments and compute challenge
-//! 3. **Round 3**: Parties compute responses and combine into final signature
 //!
 //! ## Implementation Status
 //!
-//! This implementation provides:
-//! - ✅ Complete 3-round threshold protocol
-//! - ✅ Proper ML-DSA-87 signature format compatibility
-//! - ✅ Integration with qp-rusty-crystals-dilithium crate
-//! - 🚧 Simplified NTT operations (placeholder implementations)
-//! - 🚧 Basic constraint validation (relaxed for testing)
+//! ### ✅ **Working Components:**
+//! - **Threshold key generation**: Generates proper threshold keys from deterministic seeds
+//! - **ML-DSA format compliance**: Produces signatures with correct ML-DSA-87 byte format (4627 bytes)
+//! - **Internal constraint validation**: Passes ML-DSA coefficient bounds (γ₁-β, γ₂-β limits)
+//! - **Lagrange interpolation**: Proper secret sharing reconstruction using Lagrange coefficients
+//! - **Round1 state generation**: Creates proper commitment and masking polynomial states
+//! - **Signature combination**: Aggregates threshold shares into final signature format
+//! - **Parameter validation**: Validates threshold configurations and sizes
 //!
-//! ## Warning
+//! ### 🚧 **Partially Working:**
+//! - **Mock data generation**: Works for testing internal components and format validation
+//! - **Challenge generation**: Produces valid challenge format but may have compatibility issues
+//! - **Hint computation**: Generates hint structures but uses simplified zero-hints approach
 //!
-//! **This implementation is for research and experimentation purposes.**
-//! **It has not undergone security review and should not be used in production systems.**
+//! ### ❌ **Known Limitations:**
+//! - **Cryptographic verification**: Signatures fail verification by qp-rusty-crystals-dilithium crate
+//! - **Full threshold protocol**: Complete Round2/Round3 coordination not implemented
+//! - **Real-world compatibility**: Format mismatch between real Round1State data and mock responses
+//! - **Production readiness**: Not suitable for production use due to verification failures
+//!
+//! ## Testing Status
+//!
+//! The test suite validates:
+//! - ✅ Size calculations and signature format (4627 bytes)
+//! - ✅ Internal ML-DSA constraint checking
+//! - ✅ Challenge and hint structure formatting
+//! - ✅ Threshold parameter validation
+//! - ❌ Cryptographic verification (ignored test - known to fail)
+//!
+//! ## Next Steps for Full Implementation
+//!
+//! To complete the implementation for production use:
+//!
+//! 1. **Fix cryptographic verification**: Investigate why signatures fail dilithium crate verification
+//! 2. **Implement complete Round2/Round3**: Build full threshold protocol coordination
+//! 3. **Fix format compatibility**: Resolve mismatch between real commitments and responses
+//! 4. **Add security review**: Comprehensive cryptographic security audit
+//! 5. **Optimize performance**: Remove placeholder implementations and add proper NTT operations
+//!
+//! ## Research and Experimentation Warning
+//!
+//! **This implementation is for research and experimentation purposes only.**
+//! **It has not undergone security review and MUST NOT be used in production systems.**
+//! **Signatures generated by this crate do not currently pass cryptographic verification.**
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
