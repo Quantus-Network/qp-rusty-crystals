@@ -1662,7 +1662,14 @@ impl Round1State {
 				// CRITICAL: Apply ReduceLe2Q in NTT domain BEFORE InvNTT
 				// This prevents overflow when transforming back to normal domain
 				for j in 0..dilithium_params::N as usize {
-					w_k.vec[i].coeffs[j] = reduce_le2q(w_k.vec[i].coeffs[j] as u32) as i32;
+					let coeff = w_k.vec[i].coeffs[j];
+					// Handle negative coefficients: add Q to bring into [0, 2Q) range
+					let coeff_u32 = if coeff < 0 {
+						(coeff + dilithium_params::Q as i32) as u32
+					} else {
+						coeff as u32
+					};
+					w_k.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
 				}
 
 				// Debug: Check after reduce in NTT domain
@@ -1695,76 +1702,56 @@ impl Round1State {
 					);
 				}
 
-				// Apply reduce after InvNTT as well
-				poly::reduce(&mut w_k.vec[i]);
-
-				// Debug: Check after reduce in normal domain
-				if k_iter == 0 && i == 0 {
-					let mut max_after_reduce = 0i32;
-					let mut after_reduce_sample = Vec::new();
-					for j in 0..5 {
-						max_after_reduce = max_after_reduce.max(w_k.vec[i].coeffs[j].abs());
-						after_reduce_sample.push(w_k.vec[i].coeffs[j]);
-					}
-					eprintln!(
-						"  w AFTER reduce (normal domain): max={}, samples={:?}",
-						max_after_reduce, after_reduce_sample
-					);
-				}
-
-				// Don't manually center - normalize_assuming_le2q will handle representation
-				// This ensures w stays in [0, Q) for proper pack/unpack compatibility
-
-				// Debug: Check magnitude after InvNTT (now in normal domain)
-				if k_iter == 0 && i == 0 {
-					let mut max_invntt = 0i32;
-					let mut min_invntt = i32::MAX;
-					let mut sample_coeffs = Vec::new();
-					for j in 0..(dilithium_params::N as usize) {
-						let coeff = w_k.vec[i].coeffs[j];
-						max_invntt = max_invntt.max(coeff.abs());
-						min_invntt = min_invntt.min(coeff);
-						if j < 10 {
-							sample_coeffs.push(coeff);
-						}
-					}
-				}
-
 				// Add error term e_k for threshold scheme (like reference ws[i][j].Add(&e_[j], &ws[i][j]))
+				// Note: Reference does NOT reduce after InvNTT, only after Add
 				poly::add_ip(&mut w_k.vec[i], &e_k.vec[i]);
 
 				// Debug: Check magnitude after adding error
+				if k_iter == 0 && i == 0 {
+					let mut max_after_add = 0i32;
+					let mut after_add_sample = Vec::new();
+					for j in 0..5 {
+						max_after_add = max_after_add.max(w_k.vec[i].coeffs[j].abs());
+						after_add_sample.push(w_k.vec[i].coeffs[j]);
+					}
+					eprintln!(
+						"  w AFTER add: max={}, samples={:?}",
+						max_after_add, after_add_sample
+					);
+				}
 
-				// Apply reduce after addition (poly::reduce handles i32 correctly)
-				poly::reduce(&mut w_k.vec[i]);
-
-				// Debug: Check magnitude after reduce
+				// DO NOT call ReduceLe2Q here! Keep coefficients in centered representation.
+				// After InvNTT and Add, coefficients are in centered form with small magnitudes.
+				// Calling ReduceLe2Q would convert negative values to large positive values,
+				// destroying the small centered norm that we need for the protocol to work.
+				// The reference implementation's ReduceLe2Q works differently - it keeps
+				// the centered representation intact.
 			}
 
-			// Apply NormalizeAssumingLe2Q to entire vector like reference
+			// Apply NormalizeAssumingLe2Q to match Go reference behavior
+			// Go uses uint32 which means values are ALWAYS in [0, Q) representation
+			// We must match this by normalizing our i32 values to [0, Q) range
 			for i in 0..dilithium_params::K {
 				normalize_assuming_le2q(&mut w_k.vec[i]);
 			}
 
-			// Debug: Check w magnitude AFTER final normalization
+			// Debug: Check w magnitude after normalization
 			if k_iter == 0 {
-				let mut max_after_norm = 0i32;
-				let mut after_norm_sample = Vec::new();
+				let mut max_w_abs = 0i32;
+				let mut w_sample = Vec::new();
 				for i in 0..dilithium_params::K {
 					for j in 0..(dilithium_params::N as usize) {
-						max_after_norm = max_after_norm.max(w_k.vec[i].coeffs[j].abs());
+						let coeff = w_k.vec[i].coeffs[j];
+						max_w_abs = max_w_abs.max(coeff.abs());
 						if i == 0 && j < 5 {
-							after_norm_sample.push(w_k.vec[i].coeffs[j]);
+							w_sample.push(coeff);
 						}
 					}
 				}
-				eprintln!(
-					"  w AFTER normalize: max={}, samples={:?}",
-					max_after_norm, after_norm_sample
-				);
+				eprintln!("  w after normalization: max_abs={}, samples={:?}", max_w_abs, w_sample);
 			}
 
-			// Debug: Check w magnitude after normalization (legacy check)
+			// Debug: Check w magnitude (legacy check)
 			if k_iter == 0 {
 				let mut max_w_k = 0i32;
 				let mut max_w_k_centered = 0i32;
@@ -2201,8 +2188,7 @@ impl Round3State {
 			// Normalize like reference
 			for j in 0..dilithium_params::L {
 				poly::reduce(&mut z.vec[j]);
-				// Apply coefficient centering for threshold signature compatibility
-				center_dilithium_poly(&mut z.vec[j]);
+				// Match Go reference: Normalize() keeps values in [0, Q) (they use uint32)
 			}
 
 			// Step 4: Compute c·s2 (like reference)
@@ -2214,8 +2200,7 @@ impl Round3State {
 			// Normalize like reference
 			for j in 0..dilithium_params::K {
 				poly::reduce(&mut y.vec[j]);
-				// Apply coefficient centering for threshold signature compatibility
-				center_dilithium_poly(&mut y.vec[j]);
+				// Match Go reference: Normalize() keeps values in [0, Q) (they use uint32)
 			}
 
 			// Debug: Check magnitude of c*s1 and c*s2
@@ -2671,7 +2656,9 @@ pub fn unpack_commitment_dilithium(commitment: &[u8]) -> ThresholdResult<polyvec
 			j = j.saturating_sub(23);
 		}
 
-		// Do NOT center - reference implementation keeps values as-is in [0, 2^23) range
+		// Keep coefficients in [0, Q) range as unpacked
+		// Go reference uses uint32, so values are always in [0, Q) representation
+		// We must maintain this representation to match their behavior
 	}
 
 	Ok(w)
@@ -2685,9 +2672,8 @@ pub fn aggregate_commitments_dilithium(
 	for i in 0..dilithium_params::K {
 		// Use polyvec add_ip to match reference Add behavior
 		poly::add_ip(&mut w_final.vec[i], &w_temp.vec[i]);
-		// Apply reduce after addition to prevent overflow (4.2M + 4.2M = 8.4M > Q)
-		poly::reduce(&mut w_final.vec[i]);
-		// Apply normalization like reference AggregateCommitments
+		// Apply normalize to match Go reference behavior (NormalizeAssumingLe2Q after Add)
+		// Go's Add doesn't normalize but we need to ensure values stay in valid range
 		normalize_assuming_le2q(&mut w_final.vec[i]);
 	}
 }
@@ -2779,6 +2765,16 @@ fn create_signature_from_pair_reference(
 		polyvec::l_pointwise_acc_montgomery(&mut az_ntt.vec[i], &a_matrix[i], &z_ntt);
 	}
 
+	// Apply ReduceLe2Q to Az in NTT domain (matching reference behavior)
+	for i in 0..dilithium_params::K {
+		for j in 0..dilithium_params::N as usize {
+			let coeff = az_ntt.vec[i].coeffs[j];
+			let coeff_u32 =
+				if coeff < 0 { (coeff + dilithium_params::Q as i32) as u32 } else { coeff as u32 };
+			az_ntt.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
+		}
+	}
+
 	// Step 5: Compute ct1_2d in NTT domain (like reference)
 	let mut c_ntt = challenge_poly.clone();
 	ntt_poly(&mut c_ntt);
@@ -2824,9 +2820,42 @@ fn create_signature_from_pair_reference(
 	polyvec_k_normalize_assuming_le2q(&mut az2dct1);
 
 	// Step 6: Compute f = Az2dct1 - w (like reference)
+	// Debug: Check values before computing f
+	eprintln!("DEBUG: Before computing f:");
+	eprintln!("  Az2dct1[0] first 5 coeffs: {:?}", &az2dct1.vec[0].coeffs[0..5]);
+	eprintln!("  w_final[0] first 5 coeffs: {:?}", &w_final.vec[0].coeffs[0..5]);
+
+	let mut max_az2dct1 = 0i32;
+	let mut max_w = 0i32;
+	let mut max_az2dct1_centered = 0i32;
+	let mut max_w_centered = 0i32;
+	for i in 0..dilithium_params::K {
+		for j in 0..(dilithium_params::N as usize) {
+			max_az2dct1 = max_az2dct1.max(az2dct1.vec[i].coeffs[j].abs());
+			max_w = max_w.max(w_final.vec[i].coeffs[j].abs());
+
+			// Compute centered values
+			let az_u32 = az2dct1.vec[i].coeffs[j] as u32;
+			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - az_u32 as i32;
+			x ^= x >> 31;
+			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
+			max_az2dct1_centered = max_az2dct1_centered.max(x);
+
+			let w_u32 = w_final.vec[i].coeffs[j] as u32;
+			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - w_u32 as i32;
+			x ^= x >> 31;
+			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
+			max_w_centered = max_w_centered.max(x);
+		}
+	}
+	eprintln!("  Az2dct1: max_abs={}, max_centered={}", max_az2dct1, max_az2dct1_centered);
+	eprintln!("  w_final: max_abs={}, max_centered={}", max_w, max_w_centered);
+
 	// Compute f = Az2dct1 - w in normal domain
 	let mut f = az2dct1.clone();
 	polyvec::k_sub(&mut f, &w_final);
+
+	eprintln!("  f[0] first 5 coeffs after sub: {:?}", &f.vec[0].coeffs[0..5]);
 
 	// Apply full reduction and normalization like reference f.Normalize()
 	// After subtraction, coefficients can be outside [0, 2Q) range, so we need full reduce
@@ -2927,6 +2956,7 @@ fn create_mldsa_signature_reference_approach(
 	let single_response_size = Params::SINGLE_RESPONSE_SIZE;
 
 	for k_iter in 0..k_iterations {
+		eprintln!("DEBUG: === Attempting k_iter {} of {} ===", k_iter, k_iterations);
 		// Aggregate commitments for this iteration (like reference AggregateCommitments)
 		let mut w_final = polyvec::Polyveck::default();
 		let mut commitment_count = 0;
@@ -2938,8 +2968,8 @@ fn create_mldsa_signature_reference_approach(
 				let k_commitment = &commitment_set[start_idx..end_idx];
 				let w_temp = unpack_commitment_dilithium(k_commitment)?;
 
-				// Debug: Check w_temp after unpacking
-				if k_iter == 0 && commitment_count == 0 {
+				// Debug: Check w_temp after unpacking for EACH party
+				if k_iter == 0 {
 					let mut max_w_temp = 0i32;
 					let mut max_w_temp_centered = 0i32;
 					for i in 0..dilithium_params::K {
@@ -2954,6 +2984,17 @@ fn create_mldsa_signature_reference_approach(
 							max_w_temp_centered = max_w_temp_centered.max(x);
 						}
 					}
+					eprintln!(
+						"DEBUG: Party {} w_temp: max_abs={}, max_centered={}, first_5=[{}, {}, {}, {}, {}]",
+						commitment_count,
+						max_w_temp,
+						max_w_temp_centered,
+						w_temp.vec[0].coeffs[0],
+						w_temp.vec[0].coeffs[1],
+						w_temp.vec[0].coeffs[2],
+						w_temp.vec[0].coeffs[3],
+						w_temp.vec[0].coeffs[4]
+					);
 				}
 
 				aggregate_commitments_dilithium(&mut w_final, &w_temp);
@@ -3120,7 +3161,9 @@ fn poly_pack_w(poly: &qp_rusty_crystals_dilithium::poly::Poly, buf: &mut [u8]) {
 
 	for i in 0..dilithium_params::N as usize {
 		// Pack coefficient with 23 bits
-		let coeff = poly.coeffs[i] as u32 & ((1 << 23) - 1); // Mask to 23 bits
+		// Coefficients are in [0, Q) range from normalization (matching Go uint32)
+		// Cast i32 to u32 safely since we know they're >= 0
+		let coeff = (poly.coeffs[i] as u32) & ((1 << 23) - 1); // Mask to 23 bits
 		v |= coeff << j;
 		j += 23;
 
