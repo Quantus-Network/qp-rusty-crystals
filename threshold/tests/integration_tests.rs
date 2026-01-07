@@ -175,7 +175,7 @@ fn run_threshold_protocol(
 		// Create Round2 state with REAL aggregation
 		let (w_aggregated, round2_state) = Round2State::new(
 			&threshold_sks[party_idx],
-			active_party_indices.len() as u8, // number of active parties
+			(1u8 << threshold) - 1, // bitmask for first 'threshold' parties (e.g., 0b111 for 3-of-5)
 			message,
 			context,
 			&active_commitments,
@@ -524,7 +524,7 @@ fn test_round_by_round_real_data_flow() {
 
 		let (_w_aggregated, round2_state) = Round2State::new(
 			&threshold_sks[party_idx],
-			2, // 2 active parties
+			0b11, // bitmask for parties 0 and 1
 			message,
 			context,
 			&active_commitments,
