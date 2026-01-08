@@ -114,6 +114,7 @@
 pub mod ml_dsa_87;
 
 // Internal modules
+mod circl_ntt;
 mod common;
 pub mod field;
 pub mod params;

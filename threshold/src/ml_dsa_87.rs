@@ -90,7 +90,7 @@ pub use crate::params::common::SEED_SIZE;
 
 /// Reduces x to a value ≤ 2Q following ML-DSA reference implementation
 fn reduce_le2q(x: u32) -> u32 {
-	// Note 2²³ = 2¹³ - 1 mod q. So, writing x = x₁ 2²³ + x₂ with x₂ < 2²³
+	// Note 2²³ = 2¹³ - 1 mod q. So, writing  x = x₁ 2²³ + x₂ with x₂ < 2²³
 	// and x₁ < 2⁹, we have x = y (mod q) where
 	// y = x₂ + x₁ 2¹³ - x₁ ≤ 2²³ + 2¹³ < 2q.
 	let x1 = x >> 23;
@@ -98,14 +98,29 @@ fn reduce_le2q(x: u32) -> u32 {
 	x2 + (x1 << 13) - x1
 }
 
-/// Apply NTT to a polynomial using dilithium library
-fn ntt_poly(p: &mut poly::Poly) {
-	poly::ntt(p);
+fn le2q_mod_q(x: u32) -> u32 {
+	// Returns x mod q for 0 ≤ x < 2q.
+	// Equivalent to Go's le2qModQ
+	let q = dilithium_params::Q as u32;
+	let result = x.wrapping_sub(q);
+	let mask = (result as i32 >> 31) as u32; // mask is 0xFFFFFFFF if x < Q; 0 otherwise
+	result.wrapping_add(mask & q)
 }
 
-/// Apply inverse NTT to a polynomial using dilithium library
+fn mod_q(x: u32) -> u32 {
+	// Returns x mod q.
+	// Equivalent to Go's modQ
+	le2q_mod_q(reduce_le2q(x))
+}
+
+/// Apply NTT to a polynomial using circl-compatible implementation
+fn ntt_poly(p: &mut poly::Poly) {
+	crate::circl_ntt::ntt(p);
+}
+
+/// Apply inverse NTT to a polynomial using circl-compatible implementation
 fn inv_ntt_poly(p: &mut poly::Poly) {
-	poly::invntt_tomont(p);
+	crate::circl_ntt::inv_ntt(p);
 }
 
 /// Apply reference NTT to a vector of L polynomials
@@ -359,6 +374,7 @@ pub mod secret_sharing {
 		nonce: u16,
 		threshold: u8,
 		parties: u8,
+		rho: &[u8; 32],
 	) -> ThresholdResult<(Vec<u8>, Vec<polyvec::Polyvecl>)> {
 		use qp_rusty_crystals_dilithium::fips202;
 
@@ -382,20 +398,11 @@ pub mod secret_sharing {
 		let mut a_matrix: Vec<polyvec::Polyvecl> =
 			(0..dilithium_params::K).map(|_| polyvec::Polyvecl::default()).collect();
 
-		// We need rho from the party share - for now use a deterministic derivation from seed
-		let mut rho = [0u8; 32];
-		let mut rho_state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut rho_state, seed, 32);
-		fips202::shake256_absorb(&mut rho_state, b"matrix_seed", 11);
-		fips202::shake256_absorb(&mut rho_state, &[party_id], 1);
-		fips202::shake256_finalize(&mut rho_state);
-		fips202::shake256_squeeze(&mut rho, 32, &mut rho_state);
-
-		polyvec::matrix_expand(&mut a_matrix, &rho);
+		polyvec::matrix_expand(&mut a_matrix, rho);
 
 		// Generate K different masking polynomial sets
 		for iter in 0u16..k_iterations {
-			// Generate y masking polynomials using eta-bounded sampling
+			// Generate y masking polynomials using gamma1-bounded sampling (correct for ML-DSA)
 			let mut y_polys = polyvec::Polyvecl::default();
 
 			for j in 0..dilithium_params::L {
@@ -409,7 +416,8 @@ pub mod secret_sharing {
 				fips202::shake256_finalize(&mut state);
 				fips202::shake256_squeeze(&mut iter_seed, 64, &mut state);
 
-				let poly = sample_poly_leq_eta(&iter_seed, j as u16, 2); // eta = 2 for ML-DSA-87
+				let mut poly = poly::Poly::default();
+				poly::uniform_gamma1(&mut poly, &iter_seed, j as u16);
 				y_polys.vec[j] = poly;
 			}
 
@@ -670,39 +678,45 @@ pub mod secret_sharing {
 		fips202::shake256_absorb(&mut state, &nonce_bytes, 2);
 		fips202::shake256_finalize(&mut state);
 
+		let q = dilithium_params::Q;
 		let mut i = 0;
 		while i < qp_rusty_crystals_dilithium::params::N as usize {
 			fips202::shake256_squeeze(&mut buf, 136, &mut state);
 
-			// Use rejection sampling to get coefficients in [-eta, eta]
+			// Use rejection sampling to get coefficients in [Q-eta, Q+eta] (unnormalized form)
+			// This matches the Go circl library's behavior
 			for j in 0..136 {
 				if i >= qp_rusty_crystals_dilithium::params::N as usize {
 					break;
 				}
 
-				let t1 = (buf[j] & 15) as i32;
-				let t2 = (buf[j] >> 4) as i32;
+				let mut t1 = (buf[j] & 15) as u32;
+				let mut t2 = (buf[j] >> 4) as u32;
 
 				// For eta = 2 (ML-DSA-87 parameter)
 				if eta == 2 {
 					if t1 <= 14 {
-						let val = 2 - (t1 % 5); // Maps to [-2, 2]
-						poly.coeffs[i] = val;
+						// Reduce mod 5 using bit tricks like Go: t1 -= ((205 * t1) >> 10) * 5
+						t1 -= ((205 * t1) >> 10) * 5;
+						// Store in unnormalized form: Q + eta - t1
+						poly.coeffs[i] = (q + eta - t1 as i32) as i32;
 						i += 1;
 					}
 					if t2 <= 14 && i < qp_rusty_crystals_dilithium::params::N as usize {
-						let val = 2 - (t2 % 5); // Maps to [-2, 2]
-						poly.coeffs[i] = val;
+						// Reduce mod 5 using bit tricks like Go
+						t2 -= ((205 * t2) >> 10) * 5;
+						// Store in unnormalized form: Q + eta - t2
+						poly.coeffs[i] = (q + eta - t2 as i32) as i32;
 						i += 1;
 					}
 				} else {
-					// Generic case for other eta values
-					if t1 <= 2 * eta {
-						poly.coeffs[i] = eta - t1;
+					// Generic case for other eta values (eta = 4)
+					if t1 <= 2 * eta as u32 {
+						poly.coeffs[i] = (q + eta - t1 as i32) as i32;
 						i += 1;
 					}
-					if t2 <= 2 * eta && i < qp_rusty_crystals_dilithium::params::N as usize {
-						poly.coeffs[i] = eta - t2;
+					if t2 <= 2 * eta as u32 && i < qp_rusty_crystals_dilithium::params::N as usize {
+						poly.coeffs[i] = (q + eta - t2 as i32) as i32;
 						i += 1;
 					}
 				}
@@ -716,20 +730,17 @@ pub mod secret_sharing {
 	/// This creates shares for all possible signer combinations and builds the total secret
 	/// as the sum of these shares, which works with the hardcoded sharing patterns
 	pub fn generate_proper_threshold_shares(
-		seed: &[u8; 32],
+		state: &mut qp_rusty_crystals_dilithium::fips202::KeccakState,
 		threshold: u8,
 		parties: u8,
 	) -> ThresholdResult<(
 		polyvec::Polyvecl,
 		polyvec::Polyveck,
+		polyvec::Polyvecl,
+		polyvec::Polyveck,
 		std::collections::HashMap<u8, std::collections::HashMap<u8, SecretShare>>,
 	)> {
 		use qp_rusty_crystals_dilithium::fips202;
-
-		// Initialize SHAKE-256 with the seed
-		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, seed, 32);
-		fips202::shake256_finalize(&mut state);
 
 		// Initialize private keys for each party
 		let mut party_shares: std::collections::HashMap<
@@ -740,9 +751,11 @@ pub mod secret_sharing {
 			party_shares.insert(i, std::collections::HashMap::new());
 		}
 
-		// Total secret (sum of all shares)
+		// Total secret (sum of all shares) - both normal and NTT form
 		let mut s1_total = polyvec::Polyvecl::default();
 		let mut s2_total = polyvec::Polyveck::default();
+		let mut s1h_total = polyvec::Polyvecl::default();
+		let mut s2h_total = polyvec::Polyveck::default();
 
 		// Generate shares for all possible "honest signer" combinations
 		// This follows the same enumeration as Threshold-ML-DSA
@@ -752,7 +765,7 @@ pub mod secret_sharing {
 		while honest_signers < max_combinations {
 			// Generate a random seed for this share
 			let mut share_seed = [0u8; 64];
-			fips202::shake256_squeeze(&mut share_seed, 64, &mut state);
+			fips202::shake256_squeeze(&mut share_seed, 64, state);
 
 			// Create η-bounded shares for s1 (L polynomials)
 			let mut s1_share = polyvec::Polyvecl::default();
@@ -766,6 +779,24 @@ pub mod secret_sharing {
 			for j in 0..dilithium_params::K {
 				let poly = sample_poly_leq_eta(&share_seed, (dilithium_params::L + j) as u16, 2);
 				s2_share.vec[j] = poly;
+			}
+
+			// Debug: Print first share values before NTT (only for first iteration)
+			if honest_signers == ((1u8 << (parties - threshold + 1)) - 1) {
+				eprintln!("DEBUG: First share s1[0][0..5] before centering: {:?}", &s1_share.vec[0].coeffs[0..5]);
+			}
+
+			// Compute NTT of shares BEFORE adding (like Go does)
+			// Pass unnormalized values [Q-η, Q+η] directly to NTT like Go does
+			let mut s1h_share = s1_share.clone();
+			let mut s2h_share = s2_share.clone();
+
+			ntt_polyvecl(&mut s1h_share);
+			ntt_polyveck(&mut s2h_share);
+
+			// Debug: Print first share after NTT (only for first iteration)
+			if honest_signers == ((1u8 << (parties - threshold + 1)) - 1) {
+				eprintln!("DEBUG: First share s1h[0][0..5] after NTT: {:?}", &s1h_share.vec[0].coeffs[0..5]);
 			}
 
 			// Create the share object with η-bounded coefficients
@@ -785,30 +816,19 @@ pub mod secret_sharing {
 				}
 			}
 
-			// Add to total secret with periodic centered reduction to prevent overflow
+			// Add to total secret (no reduction during accumulation, like Go)
+			// Add both normal and NTT forms
 			for i in 0..dilithium_params::L {
 				for j in 0..(dilithium_params::N as usize) {
 					s1_total.vec[i].coeffs[j] += s1_share.vec[i].coeffs[j];
-					// Apply centered reduction if coefficient gets too large
-					if s1_total.vec[i].coeffs[j].abs() > dilithium_params::Q / 4 {
-						s1_total.vec[i].coeffs[j] = s1_total.vec[i].coeffs[j] % dilithium_params::Q;
-						if s1_total.vec[i].coeffs[j] > dilithium_params::Q / 2 {
-							s1_total.vec[i].coeffs[j] -= dilithium_params::Q;
-						}
-					}
+					s1h_total.vec[i].coeffs[j] += s1h_share.vec[i].coeffs[j];
 				}
 			}
 
 			for i in 0..dilithium_params::K {
 				for j in 0..(dilithium_params::N as usize) {
 					s2_total.vec[i].coeffs[j] += s2_share.vec[i].coeffs[j];
-					// Apply centered reduction if coefficient gets too large
-					if s2_total.vec[i].coeffs[j].abs() > dilithium_params::Q / 4 {
-						s2_total.vec[i].coeffs[j] = s2_total.vec[i].coeffs[j] % dilithium_params::Q;
-						if s2_total.vec[i].coeffs[j] > dilithium_params::Q / 2 {
-							s2_total.vec[i].coeffs[j] -= dilithium_params::Q;
-						}
-					}
+					s2h_total.vec[i].coeffs[j] += s2h_share.vec[i].coeffs[j];
 				}
 			}
 
@@ -818,76 +838,40 @@ pub mod secret_sharing {
 			honest_signers = (((r ^ honest_signers) >> 2) / c) | r;
 		}
 
-		// Debug: Verify individual shares remain η-bounded (≤2 for ML-DSA-87)
-		let mut max_individual_s1_coeff = 0i32;
-		let mut max_individual_s2_coeff = 0i32;
-		for (_party_id, shares_map) in &party_shares {
-			for (_share_id, share) in shares_map {
-				for i in 0..dilithium_params::L {
-					for j in 0..(dilithium_params::N as usize) {
-						max_individual_s1_coeff =
-							max_individual_s1_coeff.max(share.s1_share.vec[i].coeffs[j].abs());
-					}
-				}
-				for i in 0..dilithium_params::K {
-					for j in 0..(dilithium_params::N as usize) {
-						max_individual_s2_coeff =
-							max_individual_s2_coeff.max(share.s2_share.vec[i].coeffs[j].abs());
-					}
-				}
-			}
-		}
-
-		// Debug: Check magnitude of total secrets before normalization
-		let mut max_s1_coeff = 0i32;
-		let mut max_s2_coeff = 0i32;
+		// Apply final normalization to bring coefficients to [0, Q) like Go's Normalize()
 		for i in 0..dilithium_params::L {
 			for j in 0..(dilithium_params::N as usize) {
-				max_s1_coeff = max_s1_coeff.max(s1_total.vec[i].coeffs[j].abs());
-			}
-		}
-		for i in 0..dilithium_params::K {
-			for j in 0..(dilithium_params::N as usize) {
-				max_s2_coeff = max_s2_coeff.max(s2_total.vec[i].coeffs[j].abs());
-			}
-		}
+				// Normalize s1_total
+				let coeff = s1_total.vec[i].coeffs[j];
+				let coeff_u32 =
+					if coeff < 0 { (coeff + dilithium_params::Q) as u32 } else { coeff as u32 };
+				s1_total.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
 
-		// Final normalization to ensure coefficients are in proper range
-		for i in 0..dilithium_params::L {
-			for j in 0..(dilithium_params::N as usize) {
-				// Apply final centered reduction
-				s1_total.vec[i].coeffs[j] = s1_total.vec[i].coeffs[j] % dilithium_params::Q;
-				if s1_total.vec[i].coeffs[j] > dilithium_params::Q / 2 {
-					s1_total.vec[i].coeffs[j] -= dilithium_params::Q;
-				}
+				// Normalize s1h_total (NTT form)
+				let coeff_h = s1h_total.vec[i].coeffs[j];
+				let coeff_h_u32 =
+					if coeff_h < 0 { (coeff_h + dilithium_params::Q) as u32 } else { coeff_h as u32 };
+				s1h_total.vec[i].coeffs[j] = mod_q(coeff_h_u32) as i32;
 			}
 		}
 
 		for i in 0..dilithium_params::K {
 			for j in 0..(dilithium_params::N as usize) {
-				// Apply final centered reduction
-				s2_total.vec[i].coeffs[j] = s2_total.vec[i].coeffs[j] % dilithium_params::Q;
-				if s2_total.vec[i].coeffs[j] > dilithium_params::Q / 2 {
-					s2_total.vec[i].coeffs[j] -= dilithium_params::Q;
-				}
+				// Normalize s2_total
+				let coeff = s2_total.vec[i].coeffs[j];
+				let coeff_u32 =
+					if coeff < 0 { (coeff + dilithium_params::Q) as u32 } else { coeff as u32 };
+				s2_total.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
+
+				// Normalize s2h_total (NTT form)
+				let coeff_h = s2h_total.vec[i].coeffs[j];
+				let coeff_h_u32 =
+					if coeff_h < 0 { (coeff_h + dilithium_params::Q) as u32 } else { coeff_h as u32 };
+				s2h_total.vec[i].coeffs[j] = mod_q(coeff_h_u32) as i32;
 			}
 		}
 
-		// Debug: Check magnitude after normalization
-		max_s1_coeff = 0;
-		max_s2_coeff = 0;
-		for i in 0..dilithium_params::L {
-			for j in 0..(dilithium_params::N as usize) {
-				max_s1_coeff = max_s1_coeff.max(s1_total.vec[i].coeffs[j].abs());
-			}
-		}
-		for i in 0..dilithium_params::K {
-			for j in 0..(dilithium_params::N as usize) {
-				max_s2_coeff = max_s2_coeff.max(s2_total.vec[i].coeffs[j].abs());
-			}
-		}
-
-		Ok((s1_total, s2_total, party_shares))
+		Ok((s1_total, s2_total, s1h_total, s2h_total, party_shares))
 	}
 
 	/// Get hardcoded sharing patterns for specific (threshold, parties) combinations.
@@ -1434,13 +1418,16 @@ pub struct Mat<const K: usize, const L: usize>([[Polynomial; L]; K]);
 fn center_dilithium_poly(poly: &mut qp_rusty_crystals_dilithium::poly::Poly) {
 	const Q_HALF: i32 = (dilithium_params::Q - 1) / 2;
 	for j in 0..(dilithium_params::N as usize) {
-		let coeff = poly.coeffs[j];
+		// Ensure value is in (-Q, Q) range first
+		let mut coeff = poly.coeffs[j] % (dilithium_params::Q as i32);
+
+		// Center to [-(Q-1)/2, (Q-1)/2]
 		if coeff > Q_HALF {
-			// Large positive -> negative representation (reduces magnitude)
-			poly.coeffs[j] = coeff - dilithium_params::Q;
+			coeff -= dilithium_params::Q as i32;
+		} else if coeff < -Q_HALF {
+			coeff += dilithium_params::Q as i32;
 		}
-		// Small values (both positive and negative) stay as they are
-		// This preserves the small magnitudes we want for threshold signatures
+		poly.coeffs[j] = coeff;
 	}
 }
 
@@ -1907,7 +1894,7 @@ pub struct Round2State {
 	/// Active party bitmask
 	pub active_parties: u8,
 	/// Aggregated w values for challenge computation
-	pub w_aggregated: polyvec::Polyveck,
+	pub w_aggregated: Vec<polyvec::Polyveck>,
 }
 
 impl Zeroize for Round2State {
@@ -1918,9 +1905,12 @@ impl Zeroize for Round2State {
 		self.commitment_hashes.clear();
 		self.mu.zeroize();
 		// Note: w_aggregated doesn't implement Zeroize, so we manually clear
-		for i in 0..dilithium_params::K {
-			self.w_aggregated.vec[i].coeffs.fill(0);
+		for w in &mut self.w_aggregated {
+			for i in 0..dilithium_params::K {
+				w.vec[i].coeffs.fill(0);
+			}
 		}
+		self.w_aggregated.clear();
 	}
 }
 
@@ -1988,45 +1978,62 @@ impl Round2State {
 		// Compute message hash μ
 		let mu = Self::compute_mu(sk, message, context);
 
-		// Aggregate w values from all parties (including our own)
-		let mut w_aggregated = round1_state.w.clone(); // Start with our own w
+		// Aggregate w values from all parties (including our own) for all K iterations
+		// Use w_commitments if available (populated in Round 1), otherwise fallback to single w
+		let k_iterations = if !round1_state.w_commitments.is_empty() {
+			round1_state.w_commitments.len()
+		} else {
+			1
+		};
+
+		let mut w_aggregated = Vec::with_capacity(k_iterations);
+		if !round1_state.w_commitments.is_empty() {
+			for k in 0..k_iterations {
+				w_aggregated.push(round1_state.w_commitments[k].clone());
+			}
+		} else {
+			w_aggregated.push(round1_state.w.clone());
+		}
 
 		// Add w values from other parties - these are in canonical format with multiple K iterations
-		// We need to extract the first w commitment from each party's canonical data and aggregate them
 		for (party_idx, w_data) in other_parties_w_values.iter().enumerate() {
 			if !w_data.is_empty() {
-				// Extract the first K commitment from the canonical format
 				let single_commitment_size = Params::SINGLE_COMMITMENT_SIZE;
-				if w_data.len() >= single_commitment_size {
-					let first_commitment = &w_data[0..single_commitment_size];
 
-					// Unpack the first w commitment and aggregate it
-					match unpack_commitment_dilithium(first_commitment) {
-						Ok(w_other) => {
-							// Aggregate: w_aggregated = w_aggregated + w_other
-							aggregate_commitments_dilithium(&mut w_aggregated, &w_other);
-						},
-						Err(_e) => {
-							return Err(ThresholdError::InvalidCommitment {
-								party_id: party_idx as u8,
-								expected_size: single_commitment_size,
-								actual_size: first_commitment.len(),
-							});
-						},
+				for k in 0..k_iterations {
+					let start = k * single_commitment_size;
+					let end = start + single_commitment_size;
+
+					if end <= w_data.len() {
+						let commitment_bytes = &w_data[start..end];
+						match unpack_commitment_dilithium(commitment_bytes) {
+							Ok(w_other) => {
+								if k < w_aggregated.len() {
+									aggregate_commitments_dilithium(&mut w_aggregated[k], &w_other);
+								}
+							},
+							Err(_e) => {
+								return Err(ThresholdError::InvalidCommitment {
+									party_id: party_idx as u8,
+									expected_size: single_commitment_size,
+									actual_size: commitment_bytes.len(),
+								});
+							},
+						}
 					}
-				} else {
-					return Err(ThresholdError::InvalidCommitment {
-						party_id: party_idx as u8,
-						expected_size: single_commitment_size,
-						actual_size: w_data.len(),
-					});
 				}
 			}
 		}
 
-		// Pack our w for transmission
+		// Pack our w for transmission (using canonical packing)
+		// We return the first one to maintain compatibility with callers expecting single w packing
+		// but Round2State now holds the full aggregated set.
 		let mut w_packed = vec![0u8; dilithium_params::K * (dilithium_params::N as usize) * 4];
-		Round1State::pack_w_dilithium(&round1_state.w, &mut w_packed);
+		if !round1_state.w_commitments.is_empty() {
+			Round1State::pack_w_dilithium(&round1_state.w_commitments[0], &mut w_packed);
+		} else {
+			Round1State::pack_w_dilithium(&round1_state.w, &mut w_packed);
+		}
 
 		Ok((w_packed, Self { commitment_hashes, mu, active_parties, w_aggregated }))
 	}
@@ -2095,6 +2102,7 @@ impl Round3State {
 			&round2_state.w_aggregated,
 			&round2_state.mu,
 			&round1_state.hyperball_samples,
+			&round1_state.y_commitments,
 			config,
 			&active_parties,
 		)?;
@@ -2120,9 +2128,10 @@ impl Round3State {
 	/// Compute threshold response using reference implementation approach (direct polynomial arithmetic)
 	fn compute_threshold_response_reference_approach(
 		sk: &PrivateKey,
-		w_aggregated: &polyvec::Polyveck,
+		w_aggregated: &[polyvec::Polyveck],
 		mu: &[u8; 64],
 		hyperball_samples: &[FVec],
+		y_commitments: &[polyvec::Polyvecl],
 		config: &ThresholdConfig,
 		active_parties: &[u8],
 	) -> ThresholdResult<Vec<u8>> {
@@ -2152,7 +2161,19 @@ impl Round3State {
 			let mut w1 = polyvec::Polyveck::default();
 
 			for j in 0..dilithium_params::K {
-				w1.vec[j] = w_aggregated.vec[j].clone();
+				if i < w_aggregated.len() {
+					w1.vec[j] = w_aggregated[i].vec[j].clone();
+				} else {
+					return Err(ThresholdError::InvalidData(format!(
+						"Missing w_aggregated data for iteration {}",
+						i
+					)));
+				}
+
+				// Reduce coefficients to [0, Q) range before decomposition
+				poly::reduce(&mut w1.vec[j]);
+				poly::caddq(&mut w1.vec[j]);
+
 				poly::decompose(&mut w1.vec[j], &mut w0.vec[j]);
 			}
 
@@ -2171,7 +2192,6 @@ impl Round3State {
 				dilithium_params::C_DASH_BYTES,
 				&mut keccak_state,
 			);
-
 			let mut challenge_poly = poly::Poly::default();
 			poly::challenge(&mut challenge_poly, &c_bytes);
 
@@ -2254,17 +2274,21 @@ impl Round3State {
 				continue;
 			}
 
-			// Step 7: Round back to integers (like reference zf.Round())
-			let mut z_final = polyvec::Polyvecl::default();
-			let mut y_temp = polyvec::Polyveck::default();
-
-			// Debug: Check FVec magnitude before rounding
-			let mut max_zf_before_round = 0.0f64;
-			for j in 0..zf.data.len() {
-				max_zf_before_round = max_zf_before_round.max(zf.data[j].abs());
+			// Step 7: Use integer arithmetic for final z output to ensure exact correctness
+			// z = y + c*s1 (where y comes from commitment)
+			// z variable already holds c*s1.
+			let mut z_final = z.clone();
+			if i < y_commitments.len() {
+				for poly_idx in 0..dilithium_params::L {
+					z_final.vec[poly_idx] =
+						poly::add(&z_final.vec[poly_idx], &y_commitments[i].vec[poly_idx]);
+				}
+			} else {
+				return Err(ThresholdError::InvalidData(format!(
+					"Missing y_commitment for iteration {}",
+					i
+				)));
 			}
-
-			zf.round(&mut z_final, &mut y_temp);
 
 			// Debug: Check z_final magnitude after rounding
 			let mut max_z_final_coeff = 0i32;
@@ -2330,18 +2354,34 @@ pub fn generate_threshold_key(
 ) -> ThresholdResult<(PublicKey, Vec<PrivateKey>)> {
 	// Generate proper threshold secret shares using Threshold-ML-DSA approach
 	let params = config.threshold_params();
-	let (s1_total, s2_total, _party_shares) = secret_sharing::generate_proper_threshold_shares(
-		seed,
+	// Initialize SHAKE-256 stream for consistent randomness generation (matching Go reference)
+	// Sequence: Seed || K || L -> rho -> party_keys -> shares
+	let mut h = qp_rusty_crystals_dilithium::fips202::KeccakState::default();
+	qp_rusty_crystals_dilithium::fips202::shake256_absorb(&mut h, seed, 32);
+
+	// NIST mode: absorb K and L
+	let kl = [dilithium_params::K as u8, dilithium_params::L as u8];
+	qp_rusty_crystals_dilithium::fips202::shake256_absorb(&mut h, &kl, 2);
+	qp_rusty_crystals_dilithium::fips202::shake256_finalize(&mut h);
+
+	// 1. Squeeze rho
+	let mut rho = [0u8; 32];
+	qp_rusty_crystals_dilithium::fips202::shake256_squeeze(&mut rho, 32, &mut h);
+
+	// 2. Squeeze party keys
+	let mut party_keys = Vec::with_capacity(params.total_parties() as usize);
+	for _ in 0..params.total_parties() {
+		let mut key = [0u8; 32];
+		qp_rusty_crystals_dilithium::fips202::shake256_squeeze(&mut key, 32, &mut h);
+		party_keys.push(key);
+	}
+
+	// 3. Generate proper threshold shares using the SAME stream
+	let (s1_total, s2_total, s1h_total, s2h_total, party_shares) = secret_sharing::generate_proper_threshold_shares(
+		&mut h,
 		params.threshold(),
 		params.total_parties(),
 	)?;
-
-	// Generate rho from seed like the reference implementation
-	let mut rho = [0u8; 32];
-	let mut h = qp_rusty_crystals_dilithium::fips202::KeccakState::default();
-	qp_rusty_crystals_dilithium::fips202::shake256_absorb(&mut h, seed, 32);
-	qp_rusty_crystals_dilithium::fips202::shake256_finalize(&mut h);
-	qp_rusty_crystals_dilithium::fips202::shake256_squeeze(&mut rho, 32, &mut h);
 
 	// Generate matrix A from rho
 	let mut a_ntt = Mat::zero();
@@ -2359,40 +2399,16 @@ pub fn generate_threshold_key(
 		}
 	}
 
-	// CRITICAL FIX: Compute t1 from threshold total secret like reference implementation
-	// This replaces the mismatched t1 from regular Dilithium keypair
-	let mut s1_ntt = s1_total.clone();
-	let mut s2_ntt = s2_total.clone();
-	ntt_polyvecl(&mut s1_ntt);
-	ntt_polyveck(&mut s2_ntt);
+	// Debug: Check s1_total and s2_total
+	eprintln!("DEBUG: s1_total[0][0..5]: {:?}", &s1_total.vec[0].coeffs[0..5]);
+	eprintln!("DEBUG: s2_total[0][0..5]: {:?}", &s2_total.vec[0].coeffs[0..5]);
+	eprintln!("DEBUG: s1h_total[0][0..5] (NTT): {:?}", &s1h_total.vec[0].coeffs[0..5]);
+	eprintln!("DEBUG: s2h_total[0][0..5] (NTT): {:?}", &s2h_total.vec[0].coeffs[0..5]);
 
-	// Debug: Check magnitude of normalized secrets before matrix computation
-	let mut max_s1_norm = 0i32;
-	let mut max_s2_norm = 0i32;
-	for i in 0..dilithium_params::L {
-		for j in 0..(dilithium_params::N as usize) {
-			max_s1_norm = max_s1_norm.max(s1_total.vec[i].coeffs[j].abs());
-		}
-	}
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_s2_norm = max_s2_norm.max(s2_total.vec[i].coeffs[j].abs());
-		}
-	}
-
-	// Debug: Check s1_ntt and s2_ntt magnitudes after NTT
-	let mut max_s1_ntt = 0i32;
-	let mut max_s2_ntt = 0i32;
-	for i in 0..dilithium_params::L {
-		for j in 0..(dilithium_params::N as usize) {
-			max_s1_ntt = max_s1_ntt.max(s1_ntt.vec[i].coeffs[j].abs());
-		}
-	}
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			max_s2_ntt = max_s2_ntt.max(s2_ntt.vec[i].coeffs[j].abs());
-		}
-	}
+	// Use the already-normalized NTT versions (s1h_total, s2h_total) from share generation
+	// This matches Go's approach: NTT each share, sum them, then normalize
+	let s1_ntt = s1h_total;
+	let s2_ntt = s2h_total;
 
 	// Compute t = A*s1 + s2 following reference implementation approach
 	// First compute A*s1 in NTT domain, then add s2 in normal domain
@@ -2408,28 +2424,57 @@ pub fn generate_threshold_key(
 			for k in 0..(dilithium_params::N as usize) {
 				a_poly.coeffs[k] = threshold_poly.get(k).value() as i32;
 			}
-			poly::pointwise_montgomery(&mut temp, &a_poly, &s1_ntt.vec[j]);
-			poly::add_ip(&mut t.vec[i], &temp);
+			// Use circl-compatible pointwise multiplication
+			crate::circl_ntt::mul_hat(&mut temp, &a_poly, &s1_ntt.vec[j]);
+			// Use circl-compatible addition
+			let mut temp_sum = poly::Poly::default();
+			crate::circl_ntt::poly_add(&mut temp_sum, &t.vec[i], &temp);
+			t.vec[i] = temp_sum;
 		}
+
+		// Debug: Check intermediate result before ReduceLe2Q
+		if i == 0 {
+			eprintln!("DEBUG: t[0][0..5] after A*s1 (in NTT, before ReduceLe2Q): {:?}", &t.vec[0].coeffs[0..5]);
+		}
+
 		// Apply ReduceLe2Q like reference implementation
 		for j in 0..(dilithium_params::N as usize) {
 			let coeff = t.vec[i].coeffs[j];
 			// Handle negative coefficients: add Q to bring into [0, Q) range
 			let coeff_u32 =
 				if coeff < 0 { (coeff + dilithium_params::Q as i32) as u32 } else { coeff as u32 };
-			t.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
+			t.vec[i].coeffs[j] = crate::circl_ntt::reduce_le2q(coeff_u32) as i32;
 		}
+
+		// Debug: Check after ReduceLe2Q
+		if i == 0 {
+			eprintln!("DEBUG: t[0][0..5] after ReduceLe2Q: {:?}", &t.vec[0].coeffs[0..5]);
+		}
+
 		// Convert from NTT domain (like reference t[i].InvNTT())
 		inv_ntt_poly(&mut t.vec[i]);
+
+		// Debug: Check after InvNTT
+		if i == 0 {
+			eprintln!("DEBUG: t[0][0..5] after InvNTT: {:?}", &t.vec[0].coeffs[0..5]);
+		}
 	}
 
 	// Now add s2 in normal domain (like reference t.Add(&t, s2))
 	for i in 0..dilithium_params::K {
-		poly::add_ip(&mut t.vec[i], &s2_total.vec[i]);
+		let mut temp_sum = poly::Poly::default();
+		crate::circl_ntt::poly_add(&mut temp_sum, &t.vec[i], &s2_total.vec[i]);
+		t.vec[i] = temp_sum;
 	}
+
+	// Debug: Check after adding s2
+	eprintln!("DEBUG: t[0][0..5] after adding s2: {:?}", &t.vec[0].coeffs[0..5]);
 
 	// Apply normalization like reference t.Normalize()
 	polyvec_k_normalize_assuming_le2q(&mut t);
+
+	// Debug: Check after Normalize
+	eprintln!("DEBUG: t[0][0..5] after Normalize: {:?}", &t.vec[0].coeffs[0..5]);
 
 	// Debug: Check t magnitude after matrix computation
 	let mut max_t = 0i32;
@@ -2456,6 +2501,9 @@ pub fn generate_threshold_key(
 	let mut t1_poly = t.clone();
 	polyvec::k_power2round(&mut t1_poly, &mut t0);
 
+	// Debug: Check t values before Power2Round
+	eprintln!("DEBUG: t[0][0..5] before Power2Round: {:?}", &t.vec[0].coeffs[0..5]);
+
 	// Debug: Check t1 values after power2round
 	let mut max_t1_after_power2round = 0i32;
 	let mut min_t1_after_power2round = i32::MAX;
@@ -2466,6 +2514,8 @@ pub fn generate_threshold_key(
 			min_t1_after_power2round = min_t1_after_power2round.min(val);
 		}
 	}
+
+	eprintln!("DEBUG: t1[0][0..5] after Power2Round: {:?}", &t1_poly.vec[0].coeffs[0..5]);
 
 	// Convert t1 to threshold format (power2round already produces small coefficients)
 	// t1 values are in [0, (Q-1)/2^D] range after Power2Round and should NOT be centered
@@ -2498,24 +2548,11 @@ pub fn generate_threshold_key(
 	let mut private_keys = Vec::with_capacity(params.total_parties() as usize);
 	for party_id in 0..params.total_parties() {
 		// Get the shares for this specific party
-		let party_specific_shares = _party_shares.get(&party_id).cloned().unwrap_or_default();
-
-		// Derive party-specific key material
-		let mut party_key = [0u8; 32];
-		let mut hasher = qp_rusty_crystals_dilithium::fips202::KeccakState::default();
-		qp_rusty_crystals_dilithium::fips202::shake256_absorb(&mut hasher, seed, 32);
-		qp_rusty_crystals_dilithium::fips202::shake256_absorb(&mut hasher, &[party_id], 1);
-		qp_rusty_crystals_dilithium::fips202::shake256_absorb(
-			&mut hasher,
-			b"party_key_derivation",
-			20,
-		);
-		qp_rusty_crystals_dilithium::fips202::shake256_finalize(&mut hasher);
-		qp_rusty_crystals_dilithium::fips202::shake256_squeeze(&mut party_key, 32, &mut hasher);
+		let party_specific_shares = party_shares.get(&party_id).cloned().unwrap_or_default();
 
 		let sk = PrivateKey {
 			id: party_id,
-			key: party_key,
+			key: party_keys[party_id as usize],
 			rho: pk.rho,
 			a: a_ntt.clone(),
 			tr: pk.tr,
@@ -2537,33 +2574,39 @@ pub fn generate_threshold_key(
 /// Test function to get original secrets used in key generation
 pub fn get_original_secrets_from_seed(
 	seed: &[u8; SEED_SIZE],
-) -> (polyvec::Polyvecl, polyvec::Polyveck) {
-	let mut dilithium_seed = *seed;
-	let sensitive_seed = qp_rusty_crystals_dilithium::SensitiveBytes32::new(&mut dilithium_seed);
+	config: &ThresholdConfig,
+) -> ThresholdResult<(polyvec::Polyvecl, polyvec::Polyveck)> {
+	use qp_rusty_crystals_dilithium::fips202;
 
-	let mut pk_bytes = [0u8; dilithium_params::PUBLICKEYBYTES];
-	let mut sk_bytes = [0u8; dilithium_params::SECRETKEYBYTES];
+	let params = config.threshold_params();
 
-	sign::keypair(&mut pk_bytes, &mut sk_bytes, sensitive_seed);
+	// Initialize SHAKE-256 stream matching generate_threshold_key
+	let mut h = qp_rusty_crystals_dilithium::fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut h, seed, 32);
 
-	let mut rho = [0u8; dilithium_params::SEEDBYTES];
-	let mut tr = [0u8; dilithium_params::TR_BYTES];
-	let mut key = [0u8; dilithium_params::SEEDBYTES];
-	let mut t0 = polyvec::Polyveck::default();
-	let mut s1_original = polyvec::Polyvecl::default();
-	let mut s2_original = polyvec::Polyveck::default();
+	// NIST mode: absorb K and L
+	let kl = [dilithium_params::K as u8, dilithium_params::L as u8];
+	fips202::shake256_absorb(&mut h, &kl, 2);
+	fips202::shake256_finalize(&mut h);
 
-	packing::unpack_sk(
-		&mut rho,
-		&mut tr,
-		&mut key,
-		&mut t0,
-		&mut s1_original,
-		&mut s2_original,
-		&sk_bytes,
-	);
+	// 1. Squeeze rho
+	let mut rho = [0u8; 32];
+	fips202::shake256_squeeze(&mut rho, 32, &mut h);
 
-	(s1_original, s2_original)
+	// 2. Squeeze party keys
+	for _ in 0..params.total_parties() {
+		let mut key = [0u8; 32];
+		fips202::shake256_squeeze(&mut key, 32, &mut h);
+	}
+
+	// 3. Generate proper threshold shares using the SAME stream
+	let (s1_total, s2_total, _s1h_total, _s2h_total, _party_shares) = secret_sharing::generate_proper_threshold_shares(
+		&mut h,
+		params.threshold(),
+		params.total_parties(),
+	)?;
+
+	Ok((s1_total, s2_total))
 }
 
 /// Combine signature shares into final signature
@@ -2723,6 +2766,9 @@ fn create_signature_from_pair_reference(
 	let mut w1 = polyvec::Polyveck::default();
 	for i in 0..dilithium_params::K {
 		w1.vec[i] = w_final.vec[i].clone();
+		// Reduce coefficients to [0, Q) range before decomposition
+		poly::reduce(&mut w1.vec[i]);
+		poly::caddq(&mut w1.vec[i]);
 		poly::decompose(&mut w1.vec[i], &mut w0.vec[i]);
 	}
 
@@ -2810,6 +2856,12 @@ fn create_signature_from_pair_reference(
 	let mut az2dct1 = az_ntt.clone();
 	polyvec::k_sub(&mut az2dct1, &ct1_2d);
 
+	for i in 0..dilithium_params::K {
+		for j in 0..dilithium_params::N as usize {
+			az2dct1.vec[i].coeffs[j] += 2 * dilithium_params::Q as i32;
+		}
+	}
+
 	// Apply ReduceLe2Q while still in NTT domain (like reference)
 	polyvec_k_reduce_le2q(&mut az2dct1);
 
@@ -2861,6 +2913,13 @@ fn create_signature_from_pair_reference(
 	// After subtraction, coefficients can be outside [0, 2Q) range, so we need full reduce
 	for i in 0..dilithium_params::K {
 		poly::reduce(&mut f.vec[i]);
+
+		// Normalize to [0, Q) range for proper constraint checking
+		for j in 0..dilithium_params::N as usize {
+			if f.vec[i].coeffs[j] < 0 {
+				f.vec[i].coeffs[j] += dilithium_params::Q as i32;
+			}
+		}
 	}
 
 	// Step 7: Check f constraint using centered norm (like Threshold-ML-DSA reference)

@@ -163,7 +163,7 @@ fn run_threshold_protocol(
 		}
 
 		// Compare first aggregated w with manual sum
-		let first_aggregated_w = &round2_states[0].w_aggregated;
+		let first_aggregated_w = &round2_states[0].w_aggregated[0];
 		let mut aggregation_matches = true;
 		for i in 0..qp_rusty_crystals_dilithium::params::K {
 			for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
@@ -408,8 +408,7 @@ fn test_round_by_round_real_data_flow() {
 			.map(|&coeff| coeff as i64)
 			.sum();
 
-		let aggregated_w_sum: i64 = round2_state
-			.w_aggregated
+		let aggregated_w_sum: i64 = round2_state.w_aggregated[0]
 			.vec
 			.iter()
 			.flat_map(|poly| poly.coeffs.iter())
