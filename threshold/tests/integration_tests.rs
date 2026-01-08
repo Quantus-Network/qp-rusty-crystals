@@ -72,7 +72,8 @@ fn run_threshold_protocol(
 		let (_partial_s1, _partial_s2) =
 			reconstruct_full_secret_from_shares(&threshold_sks, threshold, total_parties)?;
 		// The total secret is used only for public key generation, not for comparison
-		let (_total_s1, _total_s2) = ml_dsa_87::get_original_secrets_from_seed(&seed);
+		let config = ml_dsa_87::ThresholdConfig::new(threshold, total_parties)?;
+		let (_total_s1, _total_s2) = ml_dsa_87::get_original_secrets_from_seed(&seed, &config)?;
 
 		// Create a solo ML-DSA signature using a keypair generated from the same seed
 		// This serves as our "ground truth" for what the signature should look like

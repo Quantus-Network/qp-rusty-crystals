@@ -972,33 +972,57 @@ pub mod secret_sharing {
 
 			// Find the corresponding share
 			if let Some(share) = shares.get(&u_translated) {
-				// Add the share to the partial secret (simple addition like reference)
+				// Convert share to NTT domain first (like Go's s1h.Add(&s1h, &sk.shares[u_].s1h))
+				// Go stores shares in both normal and NTT domain, and adds in NTT domain
+				let mut s1_ntt = share.s1_share.clone();
+				let mut s2_ntt = share.s2_share.clone();
+
+				for i in 0..dilithium_params::L {
+					crate::circl_ntt::ntt(&mut s1_ntt.vec[i]);
+				}
+				for i in 0..dilithium_params::K {
+					crate::circl_ntt::ntt(&mut s2_ntt.vec[i]);
+				}
+
+				// Add in NTT domain (pointwise addition)
 				for i in 0..dilithium_params::L {
 					for j in 0..(dilithium_params::N as usize) {
-						s1_combined.vec[i].coeffs[j] += share.s1_share.vec[i].coeffs[j];
+						s1_combined.vec[i].coeffs[j] += s1_ntt.vec[i].coeffs[j];
 					}
 				}
 
 				for i in 0..dilithium_params::K {
 					for j in 0..(dilithium_params::N as usize) {
-						s2_combined.vec[i].coeffs[j] += share.s2_share.vec[i].coeffs[j];
+						s2_combined.vec[i].coeffs[j] += s2_ntt.vec[i].coeffs[j];
 					}
 				}
 			}
 		}
 
-		// Apply proper polynomial normalization like reference implementation
-		// This centers the coefficients around 0, matching reference's s1h.Normalize() and s2h.Normalize()
+		// Apply normalization like Go's s1h.Normalize() and s2h.Normalize()
+		// Note: s1_combined and s2_combined are in NTT domain at this point
 		for i in 0..dilithium_params::L {
-			poly::reduce(&mut s1_combined.vec[i]);
-			// Apply coefficient centering for threshold signature compatibility
-			center_dilithium_poly(&mut s1_combined.vec[i]);
+			for j in 0..(dilithium_params::N as usize) {
+				let coeff = s1_combined.vec[i].coeffs[j];
+				let coeff_u32 = if coeff < 0 {
+					(coeff + dilithium_params::Q as i32) as u32
+				} else {
+					coeff as u32
+				};
+				s1_combined.vec[i].coeffs[j] = crate::circl_ntt::reduce_le2q(coeff_u32) as i32;
+			}
 		}
 
 		for i in 0..dilithium_params::K {
-			poly::reduce(&mut s2_combined.vec[i]);
-			// Apply coefficient centering for threshold signature compatibility
-			center_dilithium_poly(&mut s2_combined.vec[i]);
+			for j in 0..(dilithium_params::N as usize) {
+				let coeff = s2_combined.vec[i].coeffs[j];
+				let coeff_u32 = if coeff < 0 {
+					(coeff + dilithium_params::Q as i32) as u32
+				} else {
+					coeff as u32
+				};
+				s2_combined.vec[i].coeffs[j] = crate::circl_ntt::reduce_le2q(coeff_u32) as i32;
+			}
 		}
 
 		// Debug: Check magnitude of recovered partial secret
@@ -3271,7 +3295,6 @@ pub fn test_generate_threshold_key(
 }
 
 /// Test-only Round1 generation using seed
-#[cfg(any(test, doc))]
 pub fn test_round1_new(
 	sk: &PrivateKey,
 	config: &ThresholdConfig,
@@ -3280,6 +3303,195 @@ pub fn test_round1_new(
 	let mut seed_bytes = [0u8; 32];
 	seed_bytes[0..8].copy_from_slice(&seed.to_le_bytes());
 	Round1State::new(sk, config, &seed_bytes)
+}
+
+/// Test helper that takes rhop directly like Go's GenThCommitment
+pub fn test_round1_with_rhop(
+	sk: &PrivateKey,
+	rhop: &[u8; 64],
+	nonce: u16,
+	config: &ThresholdConfig,
+) -> ThresholdResult<Round1State> {
+	// Generate K iterations of w and y
+	let k = config.k_iterations as usize;
+	let mut w_commitments = Vec::with_capacity(k);
+	let mut y_commitments = Vec::with_capacity(k);
+	let mut hyperball_samples = Vec::with_capacity(k);
+
+	for k_iter in 0..k {
+		// Sample from hyperball
+		let fvec_size = dilithium_params::N as usize * (dilithium_params::L + dilithium_params::K);
+		let mut fvec = FVec::new(fvec_size);
+		fvec.sample_hyperball(config.r_prime, config.nu, rhop, nonce * config.k_iterations + k_iter as u16);
+
+		hyperball_samples.push(fvec.clone());
+
+		// Round to get y and e
+		let mut y_k = polyvec::Polyvecl::default();
+		let mut e_k = polyvec::Polyveck::default();
+		fvec.round(&mut y_k, &mut e_k);
+
+		// Compute w = A*y + e
+		let mut w_k = polyvec::Polyveck::default();
+		let mut y_k_ntt = y_k.clone();
+		for i in 0..dilithium_params::L {
+			ntt_poly(&mut y_k_ntt.vec[i]);
+		}
+
+		// Matrix multiplication using circl-compatible operations
+		for i in 0..dilithium_params::K {
+			let mut temp = poly::Poly::default();
+			for j in 0..dilithium_params::L {
+				let mut a_poly = poly::Poly::default();
+				let threshold_poly = sk.a.get(i, j);
+				for k_idx in 0..(dilithium_params::N as usize) {
+					a_poly.coeffs[k_idx] = threshold_poly.get(k_idx).value() as i32;
+				}
+				let mut mul_result = poly::Poly::default();
+				crate::circl_ntt::mul_hat(&mut mul_result, &a_poly, &y_k_ntt.vec[j]);
+				let mut temp_sum = poly::Poly::default();
+				crate::circl_ntt::poly_add(&mut temp_sum, &temp, &mul_result);
+				temp = temp_sum;
+			}
+			w_k.vec[i] = temp;
+
+			// ReduceLe2Q before InvNTT
+			for j in 0..dilithium_params::N as usize {
+				let coeff = w_k.vec[i].coeffs[j];
+				let coeff_u32 = if coeff < 0 {
+					(coeff + dilithium_params::Q as i32) as u32
+				} else {
+					coeff as u32
+				};
+				w_k.vec[i].coeffs[j] = crate::circl_ntt::reduce_le2q(coeff_u32) as i32;
+			}
+
+			inv_ntt_poly(&mut w_k.vec[i]);
+
+			// Add error term
+			let mut temp_sum = poly::Poly::default();
+			crate::circl_ntt::poly_add(&mut temp_sum, &w_k.vec[i], &e_k.vec[i]);
+			w_k.vec[i] = temp_sum;
+		}
+
+		// Normalize
+		for i in 0..dilithium_params::K {
+			normalize_assuming_le2q(&mut w_k.vec[i]);
+		}
+
+		w_commitments.push(w_k);
+		y_commitments.push(y_k);
+	}
+
+	Ok(Round1State {
+		w: polyvec::Polyveck::default(),
+		y: polyvec::Polyvecl::default(),
+		y_fvec: FVec::new(0),
+		hyperball_sample: FVec::new(0),
+		rho_prime: *rhop,
+		w_commitments,
+		y_commitments,
+		hyperball_samples,
+	})
+}
+
+/// Test helper to compute Round 3 response (z = c*s1 + y)
+pub fn test_compute_response(
+	sk: &PrivateKey,
+	active_parties: u8,
+	c_poly: &qp_rusty_crystals_dilithium::poly::Poly,
+	y: &qp_rusty_crystals_dilithium::polyvec::Polyvecl,
+	config: &ThresholdConfig,
+) -> ThresholdResult<qp_rusty_crystals_dilithium::polyvec::Polyvecl> {
+	// Check that the party is in the active set
+	if active_parties & (1 << sk.id) == 0 {
+		return Err(ThresholdError::InvalidParameters {
+			threshold: 0,
+			parties: 0,
+			reason: "Specified user is not part of the signing set",
+		});
+	}
+
+	// Build the active parties list from the bitmap
+	let mut active_party_list = Vec::new();
+	for i in 0..config.base.n {
+		if active_parties & (1 << i) != 0 {
+			active_party_list.push(i);
+		}
+	}
+
+	// Recover the share for this signing set using the hardcoded sharing patterns
+	let (s1h, _s2h) = secret_sharing::recover_share_hardcoded(
+		&sk.shares,
+		sk.id,
+		&active_party_list,
+		config.base.t,
+		config.base.n,
+	)?;
+
+	eprintln!("DEBUG RESPONSE: s1_share[0][0..5] (raw): {:?}", &s1h.vec[0].coeffs[0..5]);
+
+	// Convert c_poly to NTT domain
+	let mut c_ntt = c_poly.clone();
+	eprintln!("DEBUG RESPONSE: c_poly[0..5] before NTT: {:?}", &c_ntt.coeffs[0..5]);
+	crate::circl_ntt::ntt(&mut c_ntt);
+	eprintln!("DEBUG RESPONSE: c_ntt[0..5] after NTT: {:?}", &c_ntt.coeffs[0..5]);
+
+	// s1h is already in NTT domain from recover_share_hardcoded
+	// (matching Go's recoverShare which returns s1h already in NTT)
+
+	// Compute c * s1 (in NTT domain)
+	let mut cs1 = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+	for j in 0..dilithium_params::L {
+		crate::circl_ntt::mul_hat(&mut cs1.vec[j], &c_ntt, &s1h.vec[j]);
+		if j == 0 {
+			eprintln!("DEBUG RESPONSE: cs1[0][0..5] after mul_hat (in NTT): {:?}", &cs1.vec[j].coeffs[0..5]);
+		}
+		crate::circl_ntt::inv_ntt(&mut cs1.vec[j]);
+		if j == 0 {
+			eprintln!("DEBUG RESPONSE: cs1[0][0..5] after InvNTT: {:?}", &cs1.vec[j].coeffs[0..5]);
+		}
+	}
+
+	// Normalize cs1
+	for i in 0..dilithium_params::L {
+		for j in 0..(dilithium_params::N as usize) {
+			let coeff = cs1.vec[i].coeffs[j];
+			let coeff_u32 = if coeff < 0 {
+				(coeff + dilithium_params::Q as i32) as u32
+			} else {
+				coeff as u32
+			};
+			cs1.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
+		}
+	}
+	eprintln!("DEBUG RESPONSE: cs1[0][0..5] after normalize: {:?}", &cs1.vec[0].coeffs[0..5]);
+	eprintln!("DEBUG RESPONSE: y[0][0..5] (raw): {:?}", &y.vec[0].coeffs[0..5]);
+
+	// Compute z = cs1 + y
+	let mut z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+	for i in 0..dilithium_params::L {
+		let mut temp_sum = qp_rusty_crystals_dilithium::poly::Poly::default();
+		crate::circl_ntt::poly_add(&mut temp_sum, &cs1.vec[i], &y.vec[i]);
+		z.vec[i] = temp_sum;
+	}
+	eprintln!("DEBUG RESPONSE: z[0][0..5] after add (before normalize): {:?}", &z.vec[0].coeffs[0..5]);
+
+	// Normalize z
+	for i in 0..dilithium_params::L {
+		for j in 0..dilithium_params::N as usize {
+			let coeff = z.vec[i].coeffs[j];
+			let coeff_u32 = if coeff < 0 {
+				(coeff + dilithium_params::Q as i32) as u32
+			} else {
+				coeff as u32
+			};
+			z.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
+		}
+	}
+	eprintln!("DEBUG RESPONSE: z[0][0..5] after normalize: {:?}", &z.vec[0].coeffs[0..5]);
+
+	Ok(z)
 }
 
 /// Test helper for creating Round2State
