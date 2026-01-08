@@ -2869,9 +2869,8 @@ pub fn generate_threshold_key(
 			for k in 0..(dilithium_params::N as usize) {
 				a_poly.coeffs[k] = threshold_poly.get(k).value() as i32;
 			}
-			// Apply NTT to A polynomial (A is stored in normal form)
-			poly::ntt(&mut a_poly);
-			// Use dilithium's pointwise multiplication (both A and s1 now in NTT domain)
+			// A is already effectively in NTT domain (standard ML-DSA optimization)
+			// Use dilithium's pointwise multiplication (both A and s1 in NTT domain)
 			poly::pointwise_montgomery(&mut temp, &a_poly, &s1_ntt.vec[j]);
 			// Use standard addition
 			t.vec[i] = poly::add(&t.vec[i], &temp);
