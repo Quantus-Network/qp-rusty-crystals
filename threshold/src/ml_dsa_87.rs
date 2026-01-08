@@ -1026,6 +1026,8 @@ pub mod secret_sharing {
 
 		// Apply normalization like Go's s1h.Normalize() and s2h.Normalize()
 		// Note: s1_combined and s2_combined are in NTT domain at this point
+		// IMPORTANT: Must use mod_q (not reduce_le2q) because after adding multiple
+		// NTT shares, values can be much larger than 2Q
 		for i in 0..dilithium_params::L {
 			for j in 0..(dilithium_params::N as usize) {
 				let coeff = s1_combined.vec[i].coeffs[j];
@@ -1034,7 +1036,7 @@ pub mod secret_sharing {
 				} else {
 					coeff as u32
 				};
-				s1_combined.vec[i].coeffs[j] = crate::circl_ntt::reduce_le2q(coeff_u32) as i32;
+				s1_combined.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
 			}
 		}
 
@@ -1046,7 +1048,7 @@ pub mod secret_sharing {
 				} else {
 					coeff as u32
 				};
-				s2_combined.vec[i].coeffs[j] = crate::circl_ntt::reduce_le2q(coeff_u32) as i32;
+				s2_combined.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
 			}
 		}
 
@@ -3258,6 +3260,10 @@ fn create_signature_from_pair_reference(
 	w_final: &polyvec::Polyveck,
 	z_final: &polyvec::Polyvecl,
 ) -> ThresholdResult<Vec<u8>> {
+	// Debug: Print entry values
+	eprintln!("DEBUG RUST COMBINE: Entry - z_final[0][0..5]: {:?}", &z_final.vec[0].coeffs[0..5]);
+	eprintln!("DEBUG RUST COMBINE: Entry - w_final[0][0..5]: {:?}", &w_final.vec[0].coeffs[0..5]);
+
 	// Step 1: Check ||z||∞ < γ₁ - β constraint (like reference)
 	// z_final is in uint32 [0, Q) format, need to check centered norm like Go's Exceeds
 	let gamma1_minus_beta = (dilithium_params::GAMMA1 - dilithium_params::BETA) as i32;
@@ -3455,19 +3461,13 @@ fn create_mldsa_signature_reference_approach(
 	responses: &[Vec<u8>],
 	config: &ThresholdConfig,
 ) -> ThresholdResult<Vec<u8>> {
-	// Compute μ = H(tr || msg) like reference implementation
+	// Compute μ = H(tr || msg) like Go's internal ComputeMu
+	// Note: Go's internal test does NOT add context prefix, only tr || msg
+	// The public API wrapper adds context, but we match the internal test here
 	let mut mu = [0u8; 64];
-	let mut input = Vec::new();
-	input.extend_from_slice(&pk.tr);
-	input.push(0u8);
-	input.push(context.len() as u8);
-	if !context.is_empty() {
-		input.extend_from_slice(context);
-	}
-	input.extend_from_slice(message);
-
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, &input, input.len());
+	fips202::shake256_absorb(&mut state, &pk.tr, 64);
+	fips202::shake256_absorb(&mut state, message, message.len());
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut mu, 64, &mut state);
 
@@ -3810,8 +3810,18 @@ pub fn test_compute_response(
 		config.base.n,
 	)?;
 
+	// Debug: Print recovered s1_share like Go does
+	eprintln!("DEBUG RUST RESPONSE: Party {} s1_share[0][0..5] (raw): {:?}",
+		sk.id,
+		&s1h.vec[0].coeffs[0..5]);
+
 	// Convert c_poly to NTT domain
 	let mut c_ntt = c_poly.clone();
+
+	// Debug: Print c_poly before conversion
+	eprintln!("DEBUG RUST RESPONSE: Party {} c_poly[0..5] before NTT: {:?}",
+		sk.id,
+		&c_ntt.coeffs[0..5]);
 
 	// Convert c_poly from signed {-1,0,1} to uint32 [0,Q) format before NTT
 	// Go stores -1 as Q-1 (8380416), so we need to match that
@@ -3822,6 +3832,11 @@ pub fn test_compute_response(
 	}
 
 	crate::circl_ntt::ntt(&mut c_ntt);
+
+	// Debug: Print c_ntt after NTT
+	eprintln!("DEBUG RUST RESPONSE: Party {} c_ntt[0..5] after NTT: {:?}",
+		sk.id,
+		&c_ntt.coeffs[0..5]);
 
 	// s1h is already in NTT domain from recover_share_hardcoded
 	// (matching Go's recoverShare which returns s1h already in NTT)
@@ -3845,6 +3860,11 @@ pub fn test_compute_response(
 			cs1.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
 			}
 		}
+
+	// Debug: Print cs1 after normalize like Go does
+	eprintln!("DEBUG RUST RESPONSE: Party {} cs1[0][0..5] after normalize: {:?}",
+		sk.id,
+		&cs1.vec[0].coeffs[0..5]);
 
 		// Compute c * s2 (in NTT domain)
 	let mut cs2 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
@@ -3872,10 +3892,22 @@ pub fn test_compute_response(
 	// Add the hyperball sample
 	zf.add(hyperball_sample);
 
+	// Check Excess before rounding (matching Go's rejection sampling)
+	// Go: if zf.Excess(params.r, params.nu) { continue }
+	// IMPORTANT: Use params.r (not r_prime) - r is for response checking, r_prime is for commitment
+	if zf.excess(config.r, config.nu) {
+		return Err(ThresholdError::ConstraintViolation);
+	}
+
 	// Round back to integer
 	let mut z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
 	let mut y = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
 	zf.round(&mut z, &mut y);
+
+	// Debug: Print z after round (before uint32 conversion) like Go does
+	let z_debug: Vec<i32> = (0..5).map(|j| z.vec[0].coeffs[j]).collect();
+	eprintln!("DEBUG RUST RESPONSE: Party {} z[0][0..5] after round (centered): {:?}",
+		sk.id, z_debug);
 
 	// Convert z from centered format to uint32 [0, Q) format
 	for i in 0..dilithium_params::L {
@@ -3890,6 +3922,11 @@ pub fn test_compute_response(
 			z.vec[i].coeffs[j] = coeff_u32 as i32;
 			}
 		}
+
+	// Debug: Print final z values like Go does
+	let z_final: Vec<i32> = (0..5).map(|j| z.vec[0].coeffs[j]).collect();
+	eprintln!("DEBUG RUST RESPONSE: Party {} z[0][0..5] final (uint32): {:?}",
+		sk.id, z_final);
 
 		Ok(z)
 }
