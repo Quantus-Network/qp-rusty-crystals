@@ -2604,15 +2604,26 @@ impl Round3State {
 				eprintln!("DEBUG Round3State: Expected c_poly from Go: [0, 0, 0, 0, 8380416, 0, 0, 0, 0, 0]");
 			}
 
-			// Convert to NTT
+			// Convert to NTT - use circl_ntt consistently
 			let mut ch_ntt = challenge_poly.clone();
-			ntt_poly(&mut ch_ntt);
+
+			// Debug: Show challenge polynomial before NTT
+			if i == 0 {
+				eprintln!("DEBUG Round3State: challenge_poly[0..5] before NTT (raw i32): {:?}", &challenge_poly.coeffs[0..5]);
+			}
+
+			crate::circl_ntt::ntt(&mut ch_ntt);
+
+			// Debug: Show challenge polynomial after NTT
+			if i == 0 {
+				eprintln!("DEBUG Round3State: ch_ntt[0..5] after NTT (raw i32): {:?}", &ch_ntt.coeffs[0..5]);
+			}
 
 			// Step 3: Compute c·s1 (like reference)
 			let mut z = polyvec::Polyvecl::default();
 			for j in 0..dilithium_params::L {
-				poly::pointwise_montgomery(&mut z.vec[j], &ch_ntt, &s1h_ntt.vec[j]);
-				inv_ntt_poly(&mut z.vec[j]);
+				crate::circl_ntt::mul_hat(&mut z.vec[j], &ch_ntt, &s1h_ntt.vec[j]);
+				crate::circl_ntt::inv_ntt(&mut z.vec[j]);
 			}
 			// Normalize like reference
 			for j in 0..dilithium_params::L {
@@ -2623,8 +2634,8 @@ impl Round3State {
 			// Step 4: Compute c·s2 (like reference)
 			let mut y = polyvec::Polyveck::default();
 			for j in 0..dilithium_params::K {
-				poly::pointwise_montgomery(&mut y.vec[j], &ch_ntt, &s2h_ntt.vec[j]);
-				inv_ntt_poly(&mut y.vec[j]);
+				crate::circl_ntt::mul_hat(&mut y.vec[j], &ch_ntt, &s2h_ntt.vec[j]);
+				crate::circl_ntt::inv_ntt(&mut y.vec[j]);
 			}
 			// Normalize like reference
 			for j in 0..dilithium_params::K {
@@ -2671,39 +2682,23 @@ impl Round3State {
 			// in combine_signatures after aggregating z values from all parties.
 			// Each party just computes and packs their z response.
 
-			// Step 6: Use integer arithmetic for final z output to ensure exact correctness
-			// z = y + c*s1 (where y comes from commitment)
-			// z variable already holds c*s1.
-			let mut z_final = z.clone();
+			// Step 6: Round FVec back to integers (matching Go's zf.Round(&zs[i], &y))
+			// This gives us z = y_commitment + c*s1 + hyperball_sample
+			let mut z_final = polyvec::Polyvecl::default();
+			let mut y_final = polyvec::Polyveck::default();
+			zf.round(&mut z_final, &mut y_final);
 
-			// Debug: Check c*s1 before adding y
-			if i == 0 {
-				eprintln!("DEBUG Round3State: c*s1 (before adding y), first_5=[{}, {}, {}, {}, {}]",
-					z.vec[0].coeffs[0], z.vec[0].coeffs[1], z.vec[0].coeffs[2],
-					z.vec[0].coeffs[3], z.vec[0].coeffs[4]);
-			}
-
-			if i < y_commitments.len() {
-				for poly_idx in 0..dilithium_params::L {
-					z_final.vec[poly_idx] =
-						poly::add(&z_final.vec[poly_idx], &y_commitments[i].vec[poly_idx]);
-				}
-			} else {
-				return Err(ThresholdError::InvalidData(format!(
-					"Missing y_commitment for iteration {}",
-					i
-				)));
-			}
-
-			// Normalize z_final to [0, Q) representation like Go reference (they use uint32)
-			// Normalize like reference implementation
+			// Convert z_final from centered format [-Q/2, Q/2] to [0, Q) format like Go
 			for j in 0..dilithium_params::L {
-				poly::reduce(&mut z_final.vec[j]);
-				// Apply normalize to bring into [0, Q) range
 				for k in 0..dilithium_params::N as usize {
-					if z_final.vec[j].coeffs[k] < 0 {
-						z_final.vec[j].coeffs[k] += dilithium_params::Q as i32;
-					}
+					let coeff = z_final.vec[j].coeffs[k];
+					// Convert from centered to [0, Q)
+					let coeff_u32 = if coeff < 0 {
+						(coeff + dilithium_params::Q as i32) as u32
+					} else {
+						coeff as u32
+					};
+					z_final.vec[j].coeffs[k] = coeff_u32 as i32;
 				}
 			}
 
@@ -2875,13 +2870,11 @@ pub fn generate_threshold_key(
 				a_poly.coeffs[k] = threshold_poly.get(k).value() as i32;
 			}
 			// Apply NTT to A polynomial (A is stored in normal form)
-			crate::circl_ntt::ntt(&mut a_poly);
-			// Use circl-compatible pointwise multiplication (both A and s1 now in NTT domain)
-			crate::circl_ntt::mul_hat(&mut temp, &a_poly, &s1_ntt.vec[j]);
-			// Use circl-compatible addition
-			let mut temp_sum = poly::Poly::default();
-			crate::circl_ntt::poly_add(&mut temp_sum, &t.vec[i], &temp);
-			t.vec[i] = temp_sum;
+			poly::ntt(&mut a_poly);
+			// Use dilithium's pointwise multiplication (both A and s1 now in NTT domain)
+			poly::pointwise_montgomery(&mut temp, &a_poly, &s1_ntt.vec[j]);
+			// Use standard addition
+			t.vec[i] = poly::add(&t.vec[i], &temp);
 		}
 
 		// Debug: Check intermediate result before ReduceLe2Q
@@ -2889,22 +2882,16 @@ pub fn generate_threshold_key(
 			eprintln!("DEBUG: t[0][0..5] after A*s1 (in NTT, before ReduceLe2Q): {:?}", &t.vec[0].coeffs[0..5]);
 		}
 
-		// Apply ReduceLe2Q like reference implementation
-		for j in 0..(dilithium_params::N as usize) {
-			let coeff = t.vec[i].coeffs[j];
-			// Handle negative coefficients: add Q to bring into [0, Q) range
-			let coeff_u32 =
-				if coeff < 0 { (coeff + dilithium_params::Q as i32) as u32 } else { coeff as u32 };
-			t.vec[i].coeffs[j] = crate::circl_ntt::reduce_le2q(coeff_u32) as i32;
-		}
+		// Apply reduce like reference implementation
+		poly::reduce(&mut t.vec[i]);
 
 		// Debug: Check after ReduceLe2Q
 		if i == 0 {
 			eprintln!("DEBUG: t[0][0..5] after ReduceLe2Q: {:?}", &t.vec[0].coeffs[0..5]);
 		}
 
-		// Convert from NTT domain using circl's inv_ntt
-		crate::circl_ntt::inv_ntt(&mut t.vec[i]);
+		// Convert from NTT domain
+		poly::invntt_tomont(&mut t.vec[i]);
 
 		// Debug: Check after InvNTT
 		if i == 0 {
@@ -2914,16 +2901,16 @@ pub fn generate_threshold_key(
 
 	// Now add s2 in normal domain (like reference t.Add(&t, s2))
 	for i in 0..dilithium_params::K {
-		let mut temp_sum = poly::Poly::default();
-		crate::circl_ntt::poly_add(&mut temp_sum, &t.vec[i], &s2_total.vec[i]);
-		t.vec[i] = temp_sum;
+		t.vec[i] = poly::add(&t.vec[i], &s2_total.vec[i]);
 	}
 
 	// Debug: Check after adding s2
 	eprintln!("DEBUG: t[0][0..5] after adding s2: {:?}", &t.vec[0].coeffs[0..5]);
 
 	// Apply normalization like reference t.Normalize()
-	polyvec_k_normalize_assuming_le2q(&mut t);
+	for i in 0..dilithium_params::K {
+		poly::reduce(&mut t.vec[i]);
+	}
 
 	// Debug: Check after Normalize
 	eprintln!("DEBUG: t[0][0..5] after Normalize: {:?}", &t.vec[0].coeffs[0..5]);
@@ -3408,7 +3395,7 @@ fn create_signature_from_pair_reference(
 
 	// Step 5: Compute ct1_2d in NTT domain (like reference)
 	let mut c_ntt = challenge_poly.clone();
-	ntt_poly(&mut c_ntt);
+	crate::circl_ntt::ntt(&mut c_ntt);
 
 	// t1 coefficients are already in [0, (Q-1)/2^D] range after Power2Round
 	// They are always positive, so we use them directly (no centering needed)

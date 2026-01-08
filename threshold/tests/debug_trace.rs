@@ -110,16 +110,12 @@ fn test_debug_trace() {
 	// Dump y and w values for Party 0 (first iteration, first polynomial)
 	if !round1_state_party0.y_commitments.is_empty() {
 		let y0 = &round1_state_party0.y_commitments[0];
-		print!("Party 0 Round1 Iter0 y[0][0..5]: [");
+		print!("Party 0 Round1 Iter0 y[0][0..5] (raw i32): [");
 		for k in 0..5 {
 			if k > 0 {
 				print!(" ");
 			}
-			// Display in unnormalized form like Go does
-			let coeff = y0.vec[0].coeffs[k];
-			let q = 8380417i32;
-			let unnormalized = if coeff < 0 { coeff + q } else { coeff };
-			print!("{}", unnormalized);
+			print!("{}", y0.vec[0].coeffs[k]);
 		}
 		println!("]");
 	}
@@ -143,15 +139,12 @@ fn test_debug_trace() {
 	// Dump y and w values for Party 1
 	if !round1_state_party1.y_commitments.is_empty() {
 		let y1 = &round1_state_party1.y_commitments[0];
-		print!("Party 1 Round1 Iter0 y[0][0..5]: [");
+		print!("Party 1 Round1 Iter0 y[0][0..5] (raw i32): [");
 		for k in 0..5 {
 			if k > 0 {
 				print!(" ");
 			}
-			let coeff = y1.vec[0].coeffs[k];
-			let q = 8380417i32;
-			let unnormalized = if coeff < 0 { coeff + q } else { coeff };
-			print!("{}", unnormalized);
+			print!("{}", y1.vec[0].coeffs[k]);
 		}
 		println!("]");
 	}
@@ -276,29 +269,22 @@ fn test_debug_trace() {
 	let mut c_poly = poly::Poly::default();
 	poly::challenge(&mut c_poly, &c_bytes);
 
-	print!("c_poly[0..10]: [");
+	print!("c_poly[0..10] (raw i32): [");
 	for k in 0..10 {
 		if k > 0 {
 			print!(" ");
 		}
-		// Display in unnormalized form like Go does
-		let coeff = c_poly.coeffs[k];
-		let q = 8380417i32;
-		let unnormalized = if coeff < 0 { coeff + q } else { coeff };
-		print!("{}", unnormalized);
+		print!("{}", c_poly.coeffs[k]);
 	}
 	println!("]");
 
-	// Print all 256 coefficients of c_poly for comparison with Go
-	println!("C_POLY_FULL:");
+	// Print all 256 coefficients of c_poly for comparison with Go (raw i32)
+	println!("C_POLY_FULL (raw i32):");
 	for i in 0..256 {
 		if i > 0 && i % 16 == 0 {
 			println!();
 		}
-		let coeff = c_poly.coeffs[i];
-		let q = 8380417i32;
-		let unnormalized = if coeff < 0 { coeff + q } else { coeff };
-		print!("{} ", unnormalized);
+		print!("{} ", c_poly.coeffs[i]);
 	}
 	println!("\n");
 
