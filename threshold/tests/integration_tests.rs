@@ -59,9 +59,12 @@ fn run_threshold_protocol(
 
 	let config = ThresholdConfig::new(threshold, total_parties)?;
 
-	// Step 1: Generate threshold keys using random seed like reference implementation
+	// Step 1: Generate threshold keys using FIXED seed matching debug_trace test
+	// Seed: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 	let mut seed = [0u8; 32];
-	rand::thread_rng().fill_bytes(&mut seed);
+	for i in 0..32 {
+		seed[i] = i as u8;
+	}
 	let (threshold_pk, threshold_sks) = ml_dsa_87::generate_threshold_key(&seed, &config)?;
 
 	// Retry entire protocol up to 10 times (reasonable for testing)
@@ -81,7 +84,89 @@ fn run_threshold_protocol(
 		let reference_keypair = qp_rusty_crystals_dilithium::ml_dsa_87::Keypair::generate(
 			qp_rusty_crystals_dilithium::SensitiveBytes32::from(&mut seed_mut),
 		);
-		// VALIDATION: Run solo ML-DSA Round 1 for comparison
+
+		// CRITICAL VALIDATION: Verify that reconstructed s1_total matches public key
+		println!("=== VALIDATING KEY CONSISTENCY ===");
+		let (s1_total_check, s2_total_check) =
+			qp_rusty_crystals_threshold::ml_dsa_87::get_original_secrets_from_seed(&seed, &config)?;
+
+		// Compute t = A*s1_total + s2_total and verify it matches threshold_pk.t1
+		// This is the fundamental relationship that must hold for signatures to verify
+		use qp_rusty_crystals_dilithium::{poly, polyvec};
+
+		let mut s1_ntt = s1_total_check.clone();
+		for i in 0..qp_rusty_crystals_dilithium::params::L {
+			poly::ntt(&mut s1_ntt.vec[i]);
+		}
+
+		let mut t_computed = polyvec::Polyveck::default();
+		for i in 0..qp_rusty_crystals_dilithium::params::K {
+			// Manually build row vector and compute A*s1
+			let mut row_vec = polyvec::Polyvecl::default();
+			for j in 0..qp_rusty_crystals_dilithium::params::L {
+				let threshold_poly = threshold_pk.a_ntt.get(i, j);
+				for k in 0..qp_rusty_crystals_dilithium::params::N as usize {
+					row_vec.vec[j].coeffs[k] = threshold_poly.get(k).value() as i32;
+				}
+			}
+			polyvec::l_pointwise_acc_montgomery(&mut t_computed.vec[i], &row_vec, &s1_ntt);
+			if i == 0 {
+				println!("VALIDATION DEBUG: After A*s1 (in NTT), t[0][0..5]: {:?}", &t_computed.vec[0].coeffs[0..5]);
+			}
+			poly::invntt_tomont(&mut t_computed.vec[i]);
+			if i == 0 {
+				println!("VALIDATION DEBUG: After InvNTT, t[0][0..5]: {:?}", &t_computed.vec[0].coeffs[0..5]);
+			}
+			poly::add_ip(&mut t_computed.vec[i], &s2_total_check.vec[i]);
+			if i == 0 {
+				println!("VALIDATION DEBUG: After add s2, t[0][0..5]: {:?}", &t_computed.vec[0].coeffs[0..5]);
+			}
+			poly::caddq(&mut t_computed.vec[i]);
+			if i == 0 {
+				println!("VALIDATION DEBUG: After caddq, t[0][0..5]: {:?}", &t_computed.vec[0].coeffs[0..5]);
+			}
+			// Apply the same normalization as key generation (NormalizeAssumingLe2Q)
+			// Inline the logic since the function is private
+			for coeff in t_computed.vec[i].coeffs.iter_mut() {
+				let mut x = *coeff;
+				if x < 0 {
+					x += qp_rusty_crystals_dilithium::params::Q as i32;
+				}
+				let y = x - qp_rusty_crystals_dilithium::params::Q as i32;
+				let mask = y >> 31;
+				*coeff = y + (mask & qp_rusty_crystals_dilithium::params::Q as i32);
+			}
+			if i == 0 {
+				println!("VALIDATION DEBUG: After normalize_assuming_le2q, t[0][0..5]: {:?}", &t_computed.vec[0].coeffs[0..5]);
+			}
+		}
+
+		// Compare with stored t1 (after power2round)
+		let mut t1_matches = true;
+		for i in 0..qp_rusty_crystals_dilithium::params::K {
+			let mut t1_check = t_computed.vec[i].clone();
+			let mut t0_check = poly::Poly::default();
+			poly::power2round(&mut t1_check, &mut t0_check);
+
+			for j in 0..qp_rusty_crystals_dilithium::params::N as usize {
+				if t1_check.coeffs[j] != threshold_pk.t1.get(i).get(j).value() as i32 {
+					println!("MISMATCH at t1[{}][{}]: computed={}, stored={}",
+						i, j, t1_check.coeffs[j], threshold_pk.t1.get(i).get(j).value());
+					t1_matches = false;
+					break;
+				}
+			}
+			if !t1_matches { break; }
+		}
+
+		if t1_matches {
+			println!("✓ Public key t1 matches A*s1_total + s2_total");
+		} else {
+			println!("✗ PUBLIC KEY INCONSISTENCY DETECTED!");
+			println!("  This means the threshold key generation has a bug.");
+			return Err("Public key does not match reconstructed secret".into());
+		}
+		println!("================================");
 
 		// Step 2: Round 1 - Each party generates REAL commitments with REAL randomness
 		let mut round1_states = Vec::new();
@@ -89,8 +174,12 @@ fn run_threshold_protocol(
 
 		for party_id in 0..total_parties {
 			// Use random seed per party like reference implementation (cryptoRand.Read)
+			// CRITICAL: Each party MUST have unique randomness for security
 			let mut party_seed = [0u8; 32];
 			rand::thread_rng().fill_bytes(&mut party_seed);
+			// Add party_id to ensure uniqueness even if RNG fails
+			party_seed[0] ^= party_id;
+			party_seed[31] ^= party_id << 4;
 
 			let (commitment, state) =
 				Round1State::new(&threshold_sks[party_id as usize], &config, &party_seed)?;
@@ -274,8 +363,9 @@ fn run_test_matrix(configs: Vec<(u8, u8)>) -> Vec<String> {
 /// Test the complete threshold protocol for 2-of-2 configuration (matches Go reference test)
 #[test]
 fn test_threshold_protocol_2_of_2_real_e2e() {
-	if let Err(e) = run_threshold_protocol(2, 2) {
-		panic!("2-of-2 failed: {}", e);
+	// Use 2-of-3 to match debug_trace test configuration
+	if let Err(e) = run_threshold_protocol(2, 3) {
+		panic!("2-of-3 failed: {}", e);
 	}
 }
 

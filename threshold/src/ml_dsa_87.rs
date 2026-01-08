@@ -137,6 +137,19 @@ fn ntt_polyveck(v: &mut polyvec::Polyveck) {
 	}
 }
 
+/// Pointwise dot product in NTT domain using CIRCL implementation
+/// Matches Go's PolyDotHat function exactly
+fn poly_dot_hat_circl(result: &mut poly::Poly, a: &polyvec::Polyvecl, b: &polyvec::Polyvecl) {
+	let mut t = poly::Poly::default();
+	*result = poly::Poly::default(); // zero result
+	for i in 0..dilithium_params::L {
+		crate::circl_ntt::mul_hat(&mut t, &a.vec[i], &b.vec[i]);
+		let mut temp = poly::Poly::default();
+		crate::circl_ntt::poly_add(&mut temp, result, &t);
+		*result = temp;
+	}
+}
+
 /// Normalizes coefficients assuming they're ≤ 2Q following reference implementation
 /// Equivalent to dilithium common::le2qModQ applied to polynomial
 fn normalize_assuming_le2q(poly: &mut qp_rusty_crystals_dilithium::poly::Poly) {
@@ -766,6 +779,18 @@ pub mod secret_sharing {
 			// Generate a random seed for this share
 			let mut share_seed = [0u8; 64];
 			fips202::shake256_squeeze(&mut share_seed, 64, state);
+
+			// Debug: Print first share seed (only for first iteration)
+			if honest_signers == ((1u8 << (parties - threshold + 1)) - 1) {
+				eprint!("DEBUG: First share_seed[0..8]: [");
+				for i in 0..8 {
+					if i > 0 {
+						eprint!(", ");
+					}
+					eprint!("{:02x}", share_seed[i]);
+				}
+				eprintln!("]");
+			}
 
 			// Create η-bounded shares for s1 (L polynomials)
 			let mut s1_share = polyvec::Polyvecl::default();
@@ -1654,7 +1679,8 @@ impl Round1State {
 			}
 
 			for i in 0..dilithium_params::K {
-				polyvec::l_pointwise_acc_montgomery(&mut w_k.vec[i], &a_matrix[i], &y_k_ntt);
+				// Use CIRCL-compatible pointwise multiplication to match Go reference
+				poly_dot_hat_circl(&mut w_k.vec[i], &a_matrix[i], &y_k_ntt);
 
 				// Debug: Check after pointwise but before any reduction
 				if k_iter == 0 && i == 0 {
@@ -1713,11 +1739,21 @@ impl Round1State {
 					);
 				}
 
-				// Add error term e_k for threshold scheme (like reference ws[i][j].Add(&e_[j], &ws[i][j]))
-				// Note: Reference does NOT reduce after InvNTT, only after Add
+				// Add error term e_k for threshold scheme (matching Go: ws[i][j].Add(&e_[j], &ws[i][j]))
 				poly::add_ip(&mut w_k.vec[i], &e_k.vec[i]);
 
-				// Debug: Check magnitude after adding error
+				// Apply ReduceLe2Q after Add (matching Go: ws[i][j].ReduceLe2Q())
+				for j in 0..dilithium_params::N as usize {
+					let coeff = w_k.vec[i].coeffs[j];
+					let coeff_u32 = if coeff < 0 {
+						(coeff + dilithium_params::Q as i32) as u32
+					} else {
+						coeff as u32
+					};
+					w_k.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
+				}
+
+				// Debug: Check magnitude after adding error and reducing
 				if k_iter == 0 && i == 0 {
 					let mut max_after_add = 0i32;
 					let mut after_add_sample = Vec::new();
@@ -1726,17 +1762,10 @@ impl Round1State {
 						after_add_sample.push(w_k.vec[i].coeffs[j]);
 					}
 					eprintln!(
-						"  w AFTER add: max={}, samples={:?}",
+						"  w AFTER add and reduce: max={}, samples={:?}",
 						max_after_add, after_add_sample
 					);
 				}
-
-				// DO NOT call ReduceLe2Q here! Keep coefficients in centered representation.
-				// After InvNTT and Add, coefficients are in centered form with small magnitudes.
-				// Calling ReduceLe2Q would convert negative values to large positive values,
-				// destroying the small centered norm that we need for the protocol to work.
-				// The reference implementation's ReduceLe2Q works differently - it keeps
-				// the centered representation intact.
 			}
 
 			// Apply NormalizeAssumingLe2Q to match Go reference behavior
@@ -1840,6 +1869,249 @@ impl Round1State {
 				y_fvec: fvec.clone(),
 				hyperball_sample: fvec,
 				rho_prime,
+				w_commitments,
+				y_commitments,
+				hyperball_samples,
+			},
+		))
+	}
+
+	/// Generate Round 1 commitment using rho_prime directly (matches Go API)
+	pub fn new_with_rhoprime(
+		sk: &PrivateKey,
+		config: &ThresholdConfig,
+		rho_prime: &[u8; 64],
+		nonce_base: u16,
+	) -> ThresholdResult<(Vec<u8>, Self)> {
+		eprintln!("DEBUG new_with_rhoprime: nonce_base={}, k_iterations={}", nonce_base, config.k_iterations);
+		eprintln!("DEBUG new_with_rhoprime: rho_prime[0..8]={:02x?}", &rho_prime[0..8]);
+
+		// Generate K different commitment/randomness pairs
+		// Use proper K value derived from threshold parameters matching reference implementation
+		let k = config.k_iterations as usize;
+		let mut w_commitments = Vec::with_capacity(k);
+		let mut y_commitments = Vec::with_capacity(k);
+		let mut hyperball_samples = Vec::with_capacity(k);
+
+		// Initialize matrix A once for all computations
+		let mut a_matrix: Vec<polyvec::Polyvecl> =
+			(0..dilithium_params::K).map(|_| polyvec::Polyvecl::default()).collect();
+		polyvec::matrix_expand(&mut a_matrix, &sk.rho);
+
+		// Generate K different (w, y) pairs using same rho_prime but different nonces
+		for k_iter in 0..k {
+			// Use threshold-specific hyperball sampling
+			let fvec_size =
+				dilithium_params::N as usize * (dilithium_params::L + dilithium_params::K);
+			let mut fvec = FVec::new(fvec_size);
+
+			// Sample from hyperball using threshold parameters with unique nonce per iteration
+			// This matches Go: SampleHyperball(&sts[i], params.rPrime, params.nu, rhop, nonce*params.K+i)
+			let nonce = nonce_base * config.k_iterations + k_iter as u16;
+			if k_iter == 0 {
+				eprintln!("DEBUG new_with_rhoprime: k_iter={}, nonce={}, r_prime={}, nu={}",
+					k_iter, nonce, config.r_prime, config.nu);
+			}
+			fvec.sample_hyperball(config.r_prime, config.nu, rho_prime, nonce);
+
+			// Store hyperball sample for reuse in Round 3 (reference approach)
+			hyperball_samples.push(fvec.clone());
+
+			// Round to integer polynomials
+			let mut y_k = polyvec::Polyvecl::default();
+			let mut e_k = polyvec::Polyveck::default();
+			fvec.round(&mut y_k, &mut e_k);
+
+			// Compute w_k = A·y_k using NTT
+			let mut w_k = polyvec::Polyveck::default();
+			let mut y_k_ntt = y_k.clone();
+			for i in 0..dilithium_params::L {
+				ntt_poly(&mut y_k_ntt.vec[i]);
+			}
+
+			// Debug: Check y_k_ntt values after NTT
+			if k_iter == 0 {
+				let mut y_ntt_sample = Vec::new();
+				for j in 0..5 {
+					y_ntt_sample.push(y_k_ntt.vec[0].coeffs[j]);
+				}
+				eprintln!("  y_k_ntt[0][0..5] after NTT: {:?}", y_ntt_sample);
+			}
+
+			// Debug: Check A matrix row being used
+			if k_iter == 0 {
+				let mut a_matrix_sample = Vec::new();
+				for j in 0..5 {
+					a_matrix_sample.push(a_matrix[0].vec[0].coeffs[j]);
+				}
+				eprintln!("  A[0][0][0..5] (in NTT): {:?}", a_matrix_sample);
+			}
+
+			// Debug: Check w in NTT domain before InvNTT
+			if k_iter == 0 {
+				let mut max_w_ntt = 0i32;
+				let mut w_ntt_sample = Vec::new();
+				for i in 0..dilithium_params::K {
+					for j in 0..(dilithium_params::N as usize) {
+						max_w_ntt = max_w_ntt.max(w_k.vec[i].coeffs[j].abs());
+						if i == 0 && j < 5 {
+							w_ntt_sample.push(w_k.vec[i].coeffs[j]);
+						}
+					}
+				}
+				eprintln!("DEBUG NTT CHECK:");
+				eprintln!("  w IN NTT domain: max={}, samples={:?}", max_w_ntt, w_ntt_sample);
+			}
+
+			for i in 0..dilithium_params::K {
+				// Use CIRCL-compatible pointwise multiplication to match Go reference
+				poly_dot_hat_circl(&mut w_k.vec[i], &a_matrix[i], &y_k_ntt);
+
+				// Debug: Check after pointwise but before any reduction
+				if k_iter == 0 && i == 0 {
+					let mut max_after_acc = 0i32;
+					let mut after_acc_sample = Vec::new();
+					for j in 0..5 {
+						max_after_acc = max_after_acc.max(w_k.vec[i].coeffs[j].abs());
+						after_acc_sample.push(w_k.vec[i].coeffs[j]);
+					}
+					eprintln!(
+						"  w AFTER pointwise_acc (in NTT): max={}, samples={:?}",
+						max_after_acc, after_acc_sample
+					);
+				}
+
+				// CRITICAL: Apply ReduceLe2Q in NTT domain BEFORE InvNTT
+				// This prevents overflow when transforming back to normal domain
+				for j in 0..dilithium_params::N as usize {
+					let coeff = w_k.vec[i].coeffs[j];
+					// Handle negative coefficients: add Q to bring into [0, 2Q) range
+					let coeff_u32 = if coeff < 0 {
+						(coeff + dilithium_params::Q as i32) as u32
+					} else {
+						coeff as u32
+					};
+					w_k.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
+				}
+
+				// Debug: Check after reduce in NTT domain
+				if k_iter == 0 && i == 0 {
+					let mut max_after_ntt_reduce = 0i32;
+					let mut after_ntt_reduce_sample = Vec::new();
+					for j in 0..5 {
+						max_after_ntt_reduce = max_after_ntt_reduce.max(w_k.vec[i].coeffs[j].abs());
+						after_ntt_reduce_sample.push(w_k.vec[i].coeffs[j]);
+					}
+					eprintln!(
+						"  w AFTER reduce (in NTT): max={}, samples={:?}",
+						max_after_ntt_reduce, after_ntt_reduce_sample
+					);
+				}
+
+				inv_ntt_poly(&mut w_k.vec[i]);
+
+				// Debug: Check immediately after InvNTT
+				if k_iter == 0 && i == 0 {
+					let mut max_after_invntt = 0i32;
+					let mut after_invntt_sample = Vec::new();
+					for j in 0..5 {
+						max_after_invntt = max_after_invntt.max(w_k.vec[i].coeffs[j].abs());
+						after_invntt_sample.push(w_k.vec[i].coeffs[j]);
+					}
+					eprintln!(
+						"  w AFTER InvNTT: max={}, samples={:?}",
+						max_after_invntt, after_invntt_sample
+					);
+				}
+
+				// Add error term e_k for threshold scheme (matching Go: ws[i][j].Add(&e_[j], &ws[i][j]))
+				poly::add_ip(&mut w_k.vec[i], &e_k.vec[i]);
+
+				// Apply ReduceLe2Q after Add (matching Go: ws[i][j].ReduceLe2Q())
+				for j in 0..dilithium_params::N as usize {
+					let coeff = w_k.vec[i].coeffs[j];
+					let coeff_u32 = if coeff < 0 {
+						(coeff + dilithium_params::Q as i32) as u32
+					} else {
+						coeff as u32
+					};
+					w_k.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
+				}
+
+				// Debug: Check magnitude after adding error and reducing
+				if k_iter == 0 && i == 0 {
+					let mut max_after_add = 0i32;
+					let mut after_add_sample = Vec::new();
+					for j in 0..5 {
+						max_after_add = max_after_add.max(w_k.vec[i].coeffs[j].abs());
+						after_add_sample.push(w_k.vec[i].coeffs[j]);
+					}
+					eprintln!(
+						"  w AFTER add and reduce: max={}, samples={:?}",
+						max_after_add, after_add_sample
+					);
+				}
+			}
+
+			// Apply NormalizeAssumingLe2Q to match Go reference behavior
+			// Go uses uint32 which means values are ALWAYS in [0, Q) representation
+			// We must match this by normalizing our i32 values to [0, Q) range
+			for i in 0..dilithium_params::K {
+				normalize_assuming_le2q(&mut w_k.vec[i]);
+			}
+
+			// Debug: Check w magnitude after normalization
+			if k_iter == 0 {
+				let mut max_w_abs = 0i32;
+				let mut w_sample = Vec::new();
+				for i in 0..dilithium_params::K {
+					for j in 0..(dilithium_params::N as usize) {
+						let coeff = w_k.vec[i].coeffs[j];
+						max_w_abs = max_w_abs.max(coeff.abs());
+						if i == 0 && j < 5 {
+							w_sample.push(coeff);
+						}
+					}
+				}
+				eprintln!("  w after normalization: max_abs={}, samples={:?}", max_w_abs, w_sample);
+			}
+
+			// Store this iteration's w and y
+			w_commitments.push(w_k.clone());
+			y_commitments.push(y_k.clone());
+		}
+
+		// Use the first commitment as the primary w and y for backward compatibility
+		let w = w_commitments[0].clone();
+		let y = y_commitments[0].clone();
+
+		// Use the first iteration's values for the primary fvec
+		let fvec_size = dilithium_params::N as usize * (dilithium_params::L + dilithium_params::K);
+		let mut fvec = FVec::new(fvec_size);
+		let nonce = nonce_base * config.k_iterations;
+		fvec.sample_hyperball(config.r_prime, config.nu, rho_prime, nonce);
+
+		// Pack w for commitment hash (use first w for now)
+		let mut w_packed = vec![0u8; dilithium_params::K * (dilithium_params::N as usize) * 4];
+		Self::pack_w_dilithium(&w, &mut w_packed);
+
+		// Generate commitment hash
+		let mut commitment = vec![0u8; 32];
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, &sk.tr, sk.tr.len());
+		fips202::shake256_absorb(&mut state, &[sk.id], 1);
+		fips202::shake256_absorb(&mut state, &w_packed, w_packed.len());
+		fips202::shake256_finalize(&mut state);
+		fips202::shake256_squeeze(&mut commitment, 32, &mut state);
+
+		Ok((
+			commitment,
+			Self {
+				w,
+				y,
+				y_fvec: fvec.clone(),
+				hyperball_sample: fvec,
+				rho_prime: *rho_prime,
 				w_commitments,
 				y_commitments,
 				hyperball_samples,
@@ -2019,6 +2291,16 @@ impl Round2State {
 			w_aggregated.push(round1_state.w.clone());
 		}
 
+		// Debug: Check initial w_aggregated from our own party
+		if k_iterations > 0 {
+			eprintln!("DEBUG Round2State: Our w_aggregated[0] first 5 coeffs: [{}, {}, {}, {}, {}]",
+				w_aggregated[0].vec[0].coeffs[0],
+				w_aggregated[0].vec[0].coeffs[1],
+				w_aggregated[0].vec[0].coeffs[2],
+				w_aggregated[0].vec[0].coeffs[3],
+				w_aggregated[0].vec[0].coeffs[4]);
+		}
+
 		// Add w values from other parties - these are in canonical format with multiple K iterations
 		for (party_idx, w_data) in other_parties_w_values.iter().enumerate() {
 			if !w_data.is_empty() {
@@ -2047,6 +2329,16 @@ impl Round2State {
 					}
 				}
 			}
+		}
+
+		// Debug: Check w_aggregated after adding other parties
+		if k_iterations > 0 && !w_aggregated.is_empty() {
+			eprintln!("DEBUG Round2State: After aggregation w_aggregated[0] first 5 coeffs: [{}, {}, {}, {}, {}]",
+				w_aggregated[0].vec[0].coeffs[0],
+				w_aggregated[0].vec[0].coeffs[1],
+				w_aggregated[0].vec[0].coeffs[2],
+				w_aggregated[0].vec[0].coeffs[3],
+				w_aggregated[0].vec[0].coeffs[4]);
 		}
 
 		// Pack our w for transmission (using canonical packing)
@@ -2159,6 +2451,10 @@ impl Round3State {
 		config: &ThresholdConfig,
 		active_parties: &[u8],
 	) -> ThresholdResult<Vec<u8>> {
+		eprintln!("DEBUG: compute_threshold_response_reference_approach called");
+		eprintln!("DEBUG: k iterations = {}, hyperball_samples.len() = {}, y_commitments.len() = {}, w_aggregated.len() = {}",
+			config.base.canonical_k(), hyperball_samples.len(), y_commitments.len(), w_aggregated.len());
+
 		// Recover partial secret using hardcoded patterns like reference recoverShare
 		let (s1h, s2h) = secret_sharing::recover_share_hardcoded(
 			&sk.shares,
@@ -2174,12 +2470,21 @@ impl Round3State {
 		ntt_polyvecl(&mut s1h_ntt);
 		ntt_polyveck(&mut s2h_ntt);
 
+		// Debug: Check s1h before NTT
+		eprintln!("DEBUG Round3State: s1h[0][0..5] before NTT: [{}, {}, {}, {}, {}]",
+			s1h.vec[0].coeffs[0], s1h.vec[0].coeffs[1], s1h.vec[0].coeffs[2],
+			s1h.vec[0].coeffs[3], s1h.vec[0].coeffs[4]);
+		eprintln!("DEBUG Round3State: s1h_ntt[0][0..5] after NTT: [{}, {}, {}, {}, {}]",
+			s1h_ntt.vec[0].coeffs[0], s1h_ntt.vec[0].coeffs[1], s1h_ntt.vec[0].coeffs[2],
+			s1h_ntt.vec[0].coeffs[3], s1h_ntt.vec[0].coeffs[4]);
+
 		let k = config.base.canonical_k() as usize;
 		let packed_size = dilithium_params::L * dilithium_params::POLYZ_PACKEDBYTES;
 		let mut response = vec![0u8; k * packed_size];
 
 		// For each of the K commitments/iterations
 		for i in 0..k.min(hyperball_samples.len()) {
+			eprintln!("DEBUG: Starting iteration {} of {}", i, k.min(hyperball_samples.len()));
 			// Step 1: Decompose w into w0 and w1
 			let mut w0 = polyvec::Polyveck::default();
 			let mut w1 = polyvec::Polyveck::default();
@@ -2188,6 +2493,7 @@ impl Round3State {
 				if i < w_aggregated.len() {
 					w1.vec[j] = w_aggregated[i].vec[j].clone();
 				} else {
+					eprintln!("ERROR: Missing w_aggregated for iteration {}, w_aggregated.len() = {}", i, w_aggregated.len());
 					return Err(ThresholdError::InvalidData(format!(
 						"Missing w_aggregated data for iteration {}",
 						i
@@ -2281,24 +2587,12 @@ impl Round3State {
 			for j in 0..zf.data.len() {
 				max_zf_after = max_zf_after.max(zf.data[j].abs());
 			}
-			// Step 6: Check excess (rejection sampling)
-			let excess_result = zf.excess(config.r, config.nu);
 
-			if excess_result {
-				// Fill with zeros for failed iteration
-				let start_idx = i * packed_size;
-				for poly_idx in 0..dilithium_params::L {
-					let poly_start = start_idx + poly_idx * dilithium_params::POLYZ_PACKEDBYTES;
-					let poly_end = poly_start + dilithium_params::POLYZ_PACKEDBYTES;
-					if poly_end <= response.len() {
-						let zero_poly = poly::Poly::default();
-						poly::z_pack(&mut response[poly_start..poly_end], &zero_poly);
-					}
-				}
-				continue;
-			}
+			// NOTE: Rejection sampling is NOT done here in Round3 - it's done later
+			// in combine_signatures after aggregating z values from all parties.
+			// Each party just computes and packs their z response.
 
-			// Step 7: Use integer arithmetic for final z output to ensure exact correctness
+			// Step 6: Use integer arithmetic for final z output to ensure exact correctness
 			// z = y + c*s1 (where y comes from commitment)
 			// z variable already holds c*s1.
 			let mut z_final = z.clone();
@@ -2314,7 +2608,17 @@ impl Round3State {
 				)));
 			}
 
-			// Debug: Check z_final magnitude after rounding
+			// Normalize z_final to [0, Q) representation like Go reference (they use uint32)
+			for j in 0..dilithium_params::L {
+				poly::reduce(&mut z_final.vec[j]);
+				for k in 0..(dilithium_params::N as usize) {
+					if z_final.vec[j].coeffs[k] < 0 {
+						z_final.vec[j].coeffs[k] += dilithium_params::Q as i32;
+					}
+				}
+			}
+
+			// Debug: Check z_final magnitude after normalization
 			let mut max_z_final_coeff = 0i32;
 			for j in 0..dilithium_params::L {
 				for k in 0..(dilithium_params::N as usize) {
@@ -2323,12 +2627,23 @@ impl Round3State {
 			}
 
 			// Step 8: Pack this iteration's response
+			// z_pack expects values in centered form [-(γ₁-1), γ₁], so convert from [0, Q)
 			let start_idx = i * packed_size;
+
+			eprintln!("DEBUG: Iteration {} - packing z_final: max_coeff={}, first_5=[{}, {}, {}, {}, {}]",
+				i, max_z_final_coeff,
+				z_final.vec[0].coeffs[0], z_final.vec[0].coeffs[1], z_final.vec[0].coeffs[2],
+				z_final.vec[0].coeffs[3], z_final.vec[0].coeffs[4]);
+
 			for poly_idx in 0..dilithium_params::L {
+				// Convert to centered form before packing
+				let mut z_centered = z_final.vec[poly_idx].clone();
+				center_dilithium_poly(&mut z_centered);
+
 				let poly_start = start_idx + poly_idx * dilithium_params::POLYZ_PACKEDBYTES;
 				let poly_end = poly_start + dilithium_params::POLYZ_PACKEDBYTES;
 				if poly_end <= response.len() {
-					poly::z_pack(&mut response[poly_start..poly_end], &z_final.vec[poly_idx]);
+					poly::z_pack(&mut response[poly_start..poly_end], &z_centered);
 				}
 			}
 
@@ -2345,6 +2660,7 @@ impl Round3State {
 			}
 		}
 
+		eprintln!("DEBUG: compute_threshold_response_reference_approach returning response of {} bytes", response.len());
 		Ok(response)
 	}
 
@@ -2394,9 +2710,22 @@ pub fn generate_threshold_key(
 
 	// 2. Squeeze party keys
 	let mut party_keys = Vec::with_capacity(params.total_parties() as usize);
-	for _ in 0..params.total_parties() {
+	for i in 0..params.total_parties() {
 		let mut key = [0u8; 32];
 		qp_rusty_crystals_dilithium::fips202::shake256_squeeze(&mut key, 32, &mut h);
+
+		// Debug: Print party keys
+		if i == 0 {
+			eprint!("DEBUG RUST: Party {} key[0..8]: [", i);
+			for j in 0..8 {
+				if j > 0 {
+					eprint!(", ");
+				}
+				eprint!("{:02x}", key[j]);
+			}
+			eprintln!("]");
+		}
+
 		party_keys.push(key);
 	}
 
@@ -3114,12 +3443,46 @@ fn create_mldsa_signature_reference_approach(
 				let z_temp = unpack_response_dilithium(k_response)?;
 
 				// Debug: Check z_temp right after unpacking
+				if k_iter == 0 {
+					let mut max_z_temp = 0i32;
+					for i in 0..dilithium_params::L {
+						for j in 0..dilithium_params::N as usize {
+							max_z_temp = max_z_temp.max(z_temp.vec[i].coeffs[j].abs());
+						}
+					}
+					eprintln!(
+						"DEBUG: z_temp after unpack: max_abs={}, first_5=[{}, {}, {}, {}, {}]",
+						max_z_temp,
+						z_temp.vec[0].coeffs[0],
+						z_temp.vec[0].coeffs[1],
+						z_temp.vec[0].coeffs[2],
+						z_temp.vec[0].coeffs[3],
+						z_temp.vec[0].coeffs[4]
+					);
+				}
 
 				aggregate_responses_dilithium(&mut z_final, &z_temp);
 			}
 		}
 
 		// Debug: Final z_final magnitude
+		if k_iter == 0 {
+			let mut max_z_final = 0i32;
+			for i in 0..dilithium_params::L {
+				for j in 0..dilithium_params::N as usize {
+					max_z_final = max_z_final.max(z_final.vec[i].coeffs[j].abs());
+				}
+			}
+			eprintln!(
+				"DEBUG: z_final after aggregation: max_abs={}, first_5=[{}, {}, {}, {}, {}]",
+				max_z_final,
+				z_final.vec[0].coeffs[0],
+				z_final.vec[0].coeffs[1],
+				z_final.vec[0].coeffs[2],
+				z_final.vec[0].coeffs[3],
+				z_final.vec[0].coeffs[4]
+			);
+		}
 
 		// Try to create signature with this iteration (like reference Combine)
 		match create_signature_from_pair_reference(pk, &mu, &w_final, &z_final) {
