@@ -2833,7 +2833,7 @@ pub fn generate_threshold_key(
 		params.total_parties(),
 	)?;
 
-	// Generate matrix A from rho
+	// Generate matrix A from rho (stored in normal form, NTT applied when needed)
 	let mut a_ntt = Mat::zero();
 	a_ntt.derive_from_seed(&rho);
 
@@ -2868,13 +2868,15 @@ pub fn generate_threshold_key(
 	for i in 0..dilithium_params::K {
 		for j in 0..dilithium_params::L {
 			let mut temp = poly::Poly::default();
-			// Convert threshold polynomial to dilithium polynomial for pointwise multiplication
+			// Convert threshold polynomial to dilithium polynomial
 			let mut a_poly = poly::Poly::default();
 			let threshold_poly = a_ntt.get(i, j);
 			for k in 0..(dilithium_params::N as usize) {
 				a_poly.coeffs[k] = threshold_poly.get(k).value() as i32;
 			}
-			// Use circl-compatible pointwise multiplication
+			// Apply NTT to A polynomial (A is stored in normal form)
+			crate::circl_ntt::ntt(&mut a_poly);
+			// Use circl-compatible pointwise multiplication (both A and s1 now in NTT domain)
 			crate::circl_ntt::mul_hat(&mut temp, &a_poly, &s1_ntt.vec[j]);
 			// Use circl-compatible addition
 			let mut temp_sum = poly::Poly::default();
@@ -2901,8 +2903,8 @@ pub fn generate_threshold_key(
 			eprintln!("DEBUG: t[0][0..5] after ReduceLe2Q: {:?}", &t.vec[0].coeffs[0..5]);
 		}
 
-		// Convert from NTT domain (like reference t[i].InvNTT())
-		inv_ntt_poly(&mut t.vec[i]);
+		// Convert from NTT domain using circl's inv_ntt
+		crate::circl_ntt::inv_ntt(&mut t.vec[i]);
 
 		// Debug: Check after InvNTT
 		if i == 0 {
@@ -3092,21 +3094,83 @@ pub fn combine_signatures(
 /// Aggregate threshold commitments and responses into a valid ML-DSA signature
 /// This implements real threshold aggregation with Lagrange interpolation
 
-/// Unpack a response from bytes using dilithium polynomial types (legacy function)
+/// Pack a polynomial in LeGamma1 format (matching Go's PolyPackLeGamma1)
+/// Input coefficients should be in uint32 [0, Q) format (normalized)
+/// For ML-DSA-87: Gamma1Bits = 19, PolyLeGamma1Size = 640
+fn poly_pack_le_gamma1(p: &poly::Poly, buf: &mut [u8]) {
+	const GAMMA1: u32 = dilithium_params::GAMMA1 as u32;
+	const GAMMA1_BITS: usize = 19; // For ML-DSA-87
+
+	if GAMMA1_BITS == 19 {
+		let mut j = 0;
+		for i in (0..640).step_by(5) {
+			// Coefficients in [0, Q) format, transform to [0, 2*GAMMA1) for packing
+			let mut p0 = GAMMA1.wrapping_sub(p.coeffs[j] as u32);
+			p0 = p0.wrapping_add(((p0 as i32) >> 31) as u32 & (dilithium_params::Q as u32));
+			let mut p1 = GAMMA1.wrapping_sub(p.coeffs[j + 1] as u32);
+			p1 = p1.wrapping_add(((p1 as i32) >> 31) as u32 & (dilithium_params::Q as u32));
+
+			// Pack two coefficients into 5 bytes (19 bits each)
+			buf[i] = (p0 & 0xFF) as u8;
+			buf[i + 1] = ((p0 >> 8) & 0xFF) as u8;
+			buf[i + 2] = (((p0 >> 16) & 0x0F) | ((p1 & 0x0F) << 4)) as u8;
+			buf[i + 3] = ((p1 >> 4) & 0xFF) as u8;
+			buf[i + 4] = ((p1 >> 12) & 0xFF) as u8;
+
+			j += 2;
+		}
+	} else {
+		panic!("Unsupported GAMMA1_BITS");
+	}
+}
+
+/// Unpack a polynomial from LeGamma1 format (matching Go's PolyUnpackLeGamma1)
+/// Output coefficients will be in uint32 [0, Q) format (normalized)
+fn poly_unpack_le_gamma1(p: &mut poly::Poly, buf: &[u8]) {
+	const GAMMA1: u32 = dilithium_params::GAMMA1 as u32;
+	const GAMMA1_BITS: usize = 19; // For ML-DSA-87
+
+	if GAMMA1_BITS == 19 {
+		let mut j = 0;
+		for i in (0..640).step_by(5) {
+			// Unpack two 19-bit coefficients from 5 bytes
+			let mut p0 = (buf[i] as u32) | ((buf[i + 1] as u32) << 8) | (((buf[i + 2] & 0x0F) as u32) << 16);
+			let mut p1 = ((buf[i + 2] >> 4) as u32) | ((buf[i + 3] as u32) << 4) | ((buf[i + 4] as u32) << 12);
+
+			// Coefficients are in [0, 2*GAMMA1), transform to (-GAMMA1, GAMMA1]
+			p0 = GAMMA1.wrapping_sub(p0);
+			p1 = GAMMA1.wrapping_sub(p1);
+
+			// Normalize to [0, Q) range
+			p0 = p0.wrapping_add(((p0 as i32) >> 31) as u32 & (dilithium_params::Q as u32));
+			p1 = p1.wrapping_add(((p1 as i32) >> 31) as u32 & (dilithium_params::Q as u32));
+
+			p.coeffs[j] = p0 as i32;
+			p.coeffs[j + 1] = p1 as i32;
+
+			j += 2;
+		}
+	} else {
+		panic!("Unsupported GAMMA1_BITS");
+	}
+}
+
+/// Unpack a response from bytes using Go-compatible LeGamma1 format
 fn unpack_response_dilithium(response: &[u8]) -> ThresholdResult<polyvec::Polyvecl> {
-	let single_response_size = dilithium_params::L * dilithium_params::POLYZ_PACKEDBYTES;
+	const POLY_LE_GAMMA1_SIZE: usize = 640; // For ML-DSA-87 with 19-bit packing
+	let single_response_size = dilithium_params::L * POLY_LE_GAMMA1_SIZE;
 	let mut z = polyvec::Polyvecl::default();
 
 	if response.len() < single_response_size {
 		return Err(ThresholdError::InvalidData("Response too small".into()));
 	}
 
-	// Use first iteration
+	// Unpack using Go-compatible LeGamma1 format
 	for i in 0..dilithium_params::L {
-		let poly_offset = i * dilithium_params::POLYZ_PACKEDBYTES;
-		poly::z_unpack(
+		let poly_offset = i * POLY_LE_GAMMA1_SIZE;
+		poly_unpack_le_gamma1(
 			&mut z.vec[i],
-			&response[poly_offset..poly_offset + dilithium_params::POLYZ_PACKEDBYTES],
+			&response[poly_offset..poly_offset + POLY_LE_GAMMA1_SIZE],
 		);
 	}
 
@@ -3282,20 +3346,22 @@ fn create_signature_from_pair_reference(
 		z_ntt.vec[0].coeffs[3], z_ntt.vec[0].coeffs[4]);
 
 	// Compute Az in NTT domain (keep in NTT domain!)
-	// Generate A fresh from rho, then convert to NTT domain
+	// A is stored in normal form in PublicKey, we need to apply NTT before use
 	let mut az_ntt = polyvec::Polyveck::default();
 
-	// Generate A matrix from rho (not in NTT domain yet)
+	// Extract A matrix from PublicKey (in normal form)
 	let mut a_matrix: Vec<polyvec::Polyvecl> =
 		(0..dilithium_params::K).map(|_| polyvec::Polyvecl::default()).collect();
 
-	// Convert A to NTT domain using circl_ntt
+	// Extract A and apply NTT to each polynomial
 	for i in 0..dilithium_params::K {
 		for j in 0..dilithium_params::L {
-		let threshold_poly = pk.a_ntt.get(i, j);
-		for k in 0..(dilithium_params::N as usize) {
-			a_matrix[i].vec[j].coeffs[k] = threshold_poly.get(k).value() as i32;
-		}
+			let threshold_poly = pk.a_ntt.get(i, j);
+			for k in 0..(dilithium_params::N as usize) {
+				a_matrix[i].vec[j].coeffs[k] = threshold_poly.get(k).value() as i32;
+			}
+			// Apply NTT to A[i][j] (A is stored in normal form)
+			crate::circl_ntt::ntt(&mut a_matrix[i].vec[j]);
 		}
 	}
 
@@ -3329,7 +3395,10 @@ fn create_signature_from_pair_reference(
 
 	// Debug: Check what Az would be if we InvNTT it now (for comparison with Go)
 	let mut az_temp_for_debug = az_ntt.clone();
-	polyvec::k_invntt_tomont(&mut az_temp_for_debug);
+	// Use circl inv_ntt to match Go reference
+	for i in 0..dilithium_params::K {
+		crate::circl_ntt::inv_ntt(&mut az_temp_for_debug.vec[i]);
+	}
 	polyvec_k_normalize_assuming_le2q(&mut az_temp_for_debug);
 	eprintln!("DEBUG: Az (if InvNTT+Normalize now) first 5 coeffs: [{}, {}, {}, {}, {}]",
 		az_temp_for_debug.vec[0].coeffs[0], az_temp_for_debug.vec[0].coeffs[1],
@@ -3401,7 +3470,10 @@ fn create_signature_from_pair_reference(
 
 	// Debug: Check what ct1_2d would be if we InvNTT it now (for comparison with Go)
 	let mut ct1_temp_for_debug = ct1_2d.clone();
-	polyvec::k_invntt_tomont(&mut ct1_temp_for_debug);
+	// Use circl inv_ntt to match Go reference
+	for i in 0..dilithium_params::K {
+		crate::circl_ntt::inv_ntt(&mut ct1_temp_for_debug.vec[i]);
+	}
 	polyvec_k_normalize_assuming_le2q(&mut ct1_temp_for_debug);
 	eprintln!("DEBUG: ct1*c (if InvNTT+Normalize now) first 5 coeffs: [{}, {}, {}, {}, {}]",
 		ct1_temp_for_debug.vec[0].coeffs[0], ct1_temp_for_debug.vec[0].coeffs[1],
@@ -3428,7 +3500,10 @@ fn create_signature_from_pair_reference(
 	polyvec_k_reduce_le2q(&mut az2dct1);
 
 	// Now do inverse NTT (like reference)
-	polyvec::k_invntt_tomont(&mut az2dct1);
+	// Use circl inv_ntt to match Go reference (CRITICAL FIX)
+	for i in 0..dilithium_params::K {
+		crate::circl_ntt::inv_ntt(&mut az2dct1.vec[i]);
+	}
 
 	// Debug: Check Az2dct1 after InvNTT
 	eprintln!("DEBUG: Az2dct1 (after InvNTT) first 5 coeffs: [{}, {}, {}, {}, {}]",
@@ -3586,7 +3661,8 @@ fn create_mldsa_signature_reference_approach(
 	// Try each K iteration following reference Combine logic
 	let k_iterations = config.base.canonical_k() as usize;
 	let single_commitment_size = Params::SINGLE_COMMITMENT_SIZE;
-	let single_response_size = Params::SINGLE_RESPONSE_SIZE;
+	const POLY_LE_GAMMA1_SIZE: usize = 640; // For ML-DSA-87
+	let single_response_size = dilithium_params::L * POLY_LE_GAMMA1_SIZE;
 
 	for k_iter in 0..k_iterations {
 		eprintln!("DEBUG: === Attempting k_iter {} of {} ===", k_iter, k_iterations);
@@ -4036,7 +4112,7 @@ pub fn test_compute_response(
 	sk: &PrivateKey,
 	active_parties: u8,
 	c_poly: &qp_rusty_crystals_dilithium::poly::Poly,
-	y: &qp_rusty_crystals_dilithium::polyvec::Polyvecl,
+	hyperball_sample: &FVec,
 	config: &ThresholdConfig,
 ) -> ThresholdResult<qp_rusty_crystals_dilithium::polyvec::Polyvecl> {
 	// Check that the party is in the active set
@@ -4057,7 +4133,7 @@ pub fn test_compute_response(
 	}
 
 	// Recover the share for this signing set using the hardcoded sharing patterns
-	let (s1h, _s2h) = secret_sharing::recover_share_hardcoded(
+	let (s1h, s2h) = secret_sharing::recover_share_hardcoded(
 		&sk.shares,
 		sk.id,
 		&active_party_list,
@@ -4069,7 +4145,30 @@ pub fn test_compute_response(
 
 	// Convert c_poly to NTT domain
 	let mut c_ntt = c_poly.clone();
-	eprintln!("DEBUG RESPONSE: c_poly[0..5] before NTT: {:?}", &c_ntt.coeffs[0..5]);
+
+	// Convert c_poly from signed {-1,0,1} to uint32 [0,Q) format before NTT
+	// Go stores -1 as Q-1 (8380416), so we need to match that
+	for j in 0..(dilithium_params::N as usize) {
+		if c_ntt.coeffs[j] < 0 {
+			c_ntt.coeffs[j] += dilithium_params::Q as i32;
+		}
+	}
+
+	// Count non-zero coefficients in c_poly
+	let mut nonzero_count = 0;
+	let mut first_nonzero_idx = None;
+	for (idx, &coeff) in c_ntt.coeffs.iter().enumerate() {
+		if coeff != 0 {
+			nonzero_count += 1;
+			if first_nonzero_idx.is_none() {
+				first_nonzero_idx = Some(idx);
+			}
+		}
+	}
+	eprintln!("DEBUG RESPONSE: c_poly has {} non-zero coefficients, first at index {:?}",
+		nonzero_count, first_nonzero_idx);
+	eprintln!("DEBUG RESPONSE: c_poly[0..5] before NTT (after conversion): {:?}", &c_ntt.coeffs[0..5]);
+
 	crate::circl_ntt::ntt(&mut c_ntt);
 	eprintln!("DEBUG RESPONSE: c_ntt[0..5] after NTT: {:?}", &c_ntt.coeffs[0..5]);
 
@@ -4102,30 +4201,61 @@ pub fn test_compute_response(
 		}
 	}
 	eprintln!("DEBUG RESPONSE: cs1[0][0..5] after normalize: {:?}", &cs1.vec[0].coeffs[0..5]);
-	eprintln!("DEBUG RESPONSE: y[0][0..5] (raw): {:?}", &y.vec[0].coeffs[0..5]);
 
-	// Compute z = cs1 + y
-	let mut z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
-	for i in 0..dilithium_params::L {
-		let mut temp_sum = qp_rusty_crystals_dilithium::poly::Poly::default();
-		crate::circl_ntt::poly_add(&mut temp_sum, &cs1.vec[i], &y.vec[i]);
-		z.vec[i] = temp_sum;
+	// Compute c * s2 (in NTT domain) - matching Go's computation
+	let mut cs2 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+	for j in 0..dilithium_params::K {
+		crate::circl_ntt::mul_hat(&mut cs2.vec[j], &c_ntt, &s2h.vec[j]);
+		crate::circl_ntt::inv_ntt(&mut cs2.vec[j]);
 	}
-	eprintln!("DEBUG RESPONSE: z[0][0..5] after add (before normalize): {:?}", &z.vec[0].coeffs[0..5]);
 
-	// Normalize z
-	for i in 0..dilithium_params::L {
-		for j in 0..dilithium_params::N as usize {
-			let coeff = z.vec[i].coeffs[j];
+	// Normalize cs2
+	for i in 0..dilithium_params::K {
+		for j in 0..(dilithium_params::N as usize) {
+			let coeff = cs2.vec[i].coeffs[j];
 			let coeff_u32 = if coeff < 0 {
 				(coeff + dilithium_params::Q as i32) as u32
 			} else {
 				coeff as u32
 			};
-			z.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
+			cs2.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
 		}
 	}
-	eprintln!("DEBUG RESPONSE: z[0][0..5] after normalize: {:?}", &z.vec[0].coeffs[0..5]);
+
+	// Convert cs1 and cs2 to FVec (matching Go's zf.From(&z, &y))
+	let mut zf = FVec::from_polyvecs(&cs1, &cs2);
+
+	// Debug: Check hyperball sample first few values
+	eprintln!("DEBUG RESPONSE: hyperball_sample[0..5]: {:?}", &hyperball_sample.data[0..5]);
+	eprintln!("DEBUG RESPONSE: zf before adding hyperball[0..5]: {:?}", &zf.data[0..5]);
+
+	// Add the hyperball sample (matching Go's zf.Add(&zf, &stws[i]))
+	zf.add(hyperball_sample);
+
+	eprintln!("DEBUG RESPONSE: zf after adding hyperball[0..5]: {:?}", &zf.data[0..5]);
+
+	// Round back to integer (matching Go's zf.Round(&zs[i], &y))
+	let mut z = qp_rusty_crystals_dilithium::polyvec::Polyvecl::default();
+	let mut y = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
+	zf.round(&mut z, &mut y);
+
+	eprintln!("DEBUG RESPONSE: z[0][0..5] after FVec round (centered): {:?}", &z.vec[0].coeffs[0..5]);
+
+	// Convert z from centered format to uint32 [0, Q) format (matching Go's output format)
+	for i in 0..dilithium_params::L {
+		for j in 0..(dilithium_params::N as usize) {
+			let coeff = z.vec[i].coeffs[j];
+			// Convert from centered [-Q/2, Q/2] to [0, Q)
+			let coeff_u32 = if coeff < 0 {
+				(coeff + dilithium_params::Q as i32) as u32
+			} else {
+				coeff as u32
+			};
+			z.vec[i].coeffs[j] = coeff_u32 as i32;
+		}
+	}
+
+	eprintln!("DEBUG RESPONSE: z[0][0..5] after normalize (final): {:?}", &z.vec[0].coeffs[0..5]);
 
 	Ok(z)
 }

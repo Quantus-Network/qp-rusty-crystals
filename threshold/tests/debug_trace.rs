@@ -289,19 +289,32 @@ fn test_debug_trace() {
 	}
 	println!("]");
 
+	// Print all 256 coefficients of c_poly for comparison with Go
+	println!("C_POLY_FULL:");
+	for i in 0..256 {
+		if i > 0 && i % 16 == 0 {
+			println!();
+		}
+		let coeff = c_poly.coeffs[i];
+		let q = 8380417i32;
+		let unnormalized = if coeff < 0 { coeff + q } else { coeff };
+		print!("{} ", unnormalized);
+	}
+	println!("\n");
+
 	// Compute Round 3 Response
 	println!("\n--- ROUND 3 RESPONSE ---");
 
 	// Setup active parties - use parties 0 and 1 (bitmap: 0b11 = 3)
 	let active_parties = 3u8; // Binary 11 = parties 0 and 1
 
-	// Get y from both parties' round1_state (first iteration)
-	if !round1_state_party0.y_commitments.is_empty() && !round1_state_party1.y_commitments.is_empty() {
-		let y0_party0 = &round1_state_party0.y_commitments[0];
-		let y0_party1 = &round1_state_party1.y_commitments[0];
+	// Get hyperball samples from both parties' round1_state (first iteration)
+	if !round1_state_party0.hyperball_samples.is_empty() && !round1_state_party1.hyperball_samples.is_empty() {
+		let hyperball0 = &round1_state_party0.hyperball_samples[0];
+		let hyperball1 = &round1_state_party1.hyperball_samples[0];
 
 		// Party 0's response (using challenge computed from AGGREGATED w)
-		let z_party0 = match ml_dsa_87::test_compute_response(&sks[0], active_parties, &c_poly, y0_party0, &config) {
+		let z_party0 = match ml_dsa_87::test_compute_response(&sks[0], active_parties, &c_poly, hyperball0, &config) {
 			Ok(z) => z,
 			Err(e) => {
 				println!("✗ Error computing party 0 response: {:?}", e);
@@ -351,7 +364,7 @@ fn test_debug_trace() {
 		}
 
 		// Party 1's response (using challenge computed from AGGREGATED w)
-		let z_party1 = match ml_dsa_87::test_compute_response(&sks[1], active_parties, &c_poly, y0_party1, &config) {
+		let z_party1 = match ml_dsa_87::test_compute_response(&sks[1], active_parties, &c_poly, hyperball1, &config) {
 			Ok(z) => z,
 			Err(e) => {
 				println!("✗ Error computing party 1 response: {:?}", e);
@@ -474,104 +487,137 @@ fn test_debug_trace() {
 			println!("✗ z max_raw MISMATCH: expected {}, got {}", expected_max, max_z);
 		}
 
-		// NOW USE THE PROPER combine_signatures API
-		println!("\n--- SIGNATURE COMBINATION ---");
-		println!("Using combine_signatures API with proper Round2/Round3 states...");
+		// NOW TEST DIRECT SIGNATURE COMBINATION LIKE GO TEST
+		println!("\n--- SIGNATURE COMBINATION (DIRECT METHOD) ---");
+		println!("Using direct combine with manually aggregated w and z like Go test...");
 
 		let message = b"test message";
 		let context = b"";
 
-		// Create Round2 state for both parties (simulating aggregation)
-		let active_parties = 3u8; // Bitmap: parties 0 and 1
+		// Pack individual party w values (before aggregation) for combine_signatures
+		// Use 23-bit packing like Go's PolyPackW
+		use qp_rusty_crystals_dilithium::params as dilithium_params;
+		let poly_q_size = (dilithium_params::N as usize * 23 + 7) / 8; // 736 bytes per poly
+		let single_commitment_size = dilithium_params::K * poly_q_size;
 
-		// For party 0: aggregate with party 1's commitment
-		// Use packed w values, not hashes
-		let other_party0_w = vec![round1_state_party1.pack_commitment_canonical(&config)];
-		let round1_commitments = vec![
-			commitment0.clone(),
-			commitment1.clone(),
-		];
+		// Helper function to pack w commitment using 23-bit format
+		let pack_w_commitment = |w: &qp_rusty_crystals_dilithium::polyvec::Polyveck| -> Vec<u8> {
+			let mut packed = vec![0u8; single_commitment_size];
+			for i in 0..dilithium_params::K {
+				let poly_start = i * poly_q_size;
+				let mut v: u32 = 0;
+				let mut j: u32 = 0;
+				let mut k: usize = poly_start;
 
-		let (_w_agg0, round2_state0) = match ml_dsa_87::Round2State::new(
-			&sks[0],
-			active_parties,
-			message,
-			context,
-			&round1_commitments,
-			&other_party0_w,
-			&round1_state_party0,
-		) {
-			Ok(state) => state,
-			Err(e) => {
-				println!("✗ Failed to create Round2 state for party 0: {:?}", e);
-				return;
+				for coeff_idx in 0..dilithium_params::N as usize {
+					let coeff = w.vec[i].coeffs[coeff_idx] as u32;
+					v = v | (coeff << j);
+					j += 23;
+					while j >= 8 && k < packed.len() {
+						packed[k] = (v & 0xFF) as u8;
+						v >>= 8;
+						j -= 8;
+						k += 1;
+					}
+				}
 			}
+			packed
 		};
 
-		// For party 1: aggregate with party 0's commitment
-		// Use packed w values, not hashes
-		let other_party1_w = vec![round1_state_party0.pack_commitment_canonical(&config)];
-		let (_w_agg1, round2_state1) = match ml_dsa_87::Round2State::new(
-			&sks[1],
-			active_parties,
-			message,
-			context,
-			&round1_commitments,
-			&other_party1_w,
-			&round1_state_party1,
-		) {
-			Ok(state) => state,
-			Err(e) => {
-				println!("✗ Failed to create Round2 state for party 1: {:?}", e);
-				return;
+		// Pack individual party z values using Go-compatible LeGamma1 format
+		// z values are in uint32 [0, Q) format which is what LeGamma1 packing expects
+		let pack_z_response = |z: &qp_rusty_crystals_dilithium::polyvec::Polyvecl| -> Vec<u8> {
+			const POLY_LE_GAMMA1_SIZE: usize = 640; // For ML-DSA-87 with 19-bit packing
+			let single_response_size = dilithium_params::L * POLY_LE_GAMMA1_SIZE;
+			let mut packed = vec![0u8; single_response_size];
+
+			// Pack using Go-compatible LeGamma1 format
+			const GAMMA1: u32 = dilithium_params::GAMMA1 as u32;
+			for poly_idx in 0..dilithium_params::L {
+				let poly_offset = poly_idx * POLY_LE_GAMMA1_SIZE;
+				let p = &z.vec[poly_idx];
+
+				let mut j = 0;
+				for i in (0..POLY_LE_GAMMA1_SIZE).step_by(5) {
+					// Transform coefficients from [0, Q) to [0, 2*GAMMA1) for packing
+					let mut p0 = GAMMA1.wrapping_sub(p.coeffs[j] as u32);
+					p0 = p0.wrapping_add(((p0 as i32) >> 31) as u32 & (dilithium_params::Q as u32));
+					let mut p1 = GAMMA1.wrapping_sub(p.coeffs[j + 1] as u32);
+					p1 = p1.wrapping_add(((p1 as i32) >> 31) as u32 & (dilithium_params::Q as u32));
+
+					// Debug first coefficient packing
+					if poly_idx == 0 && j == 0 {
+						println!("DEBUG PACK: z.coeffs[0] = {}", p.coeffs[0]);
+						println!("DEBUG PACK: GAMMA1 = {}", GAMMA1);
+						println!("DEBUG PACK: GAMMA1 - z.coeffs[0] = {} (wrapping)", GAMMA1.wrapping_sub(p.coeffs[0] as u32));
+						println!("DEBUG PACK: After adjustment p0 = {}", p0);
+					}
+
+					// Pack two coefficients into 5 bytes (19 bits each)
+					let buf_offset = poly_offset + i;
+					packed[buf_offset] = (p0 & 0xFF) as u8;
+					packed[buf_offset + 1] = ((p0 >> 8) & 0xFF) as u8;
+					packed[buf_offset + 2] = (((p0 >> 16) & 0x0F) | ((p1 & 0x0F) << 4)) as u8;
+					packed[buf_offset + 3] = ((p1 >> 4) & 0xFF) as u8;
+					packed[buf_offset + 4] = ((p1 >> 12) & 0xFF) as u8;
+
+					if poly_idx == 0 && j == 0 {
+						println!("DEBUG PACK: Packed bytes[0..5] = {:?}", &packed[buf_offset..buf_offset+5]);
+					}
+
+					j += 2;
+				}
 			}
+			packed
 		};
 
-		// Create Round3 state for both parties
-		let round2_commitments = vec![vec![]; 2]; // Empty for this test
-
-		let (_response0, round3_state0) = match ml_dsa_87::Round3State::new(
-			&sks[0],
-			&config,
-			&round2_commitments,
-			&round1_state_party0,
-			&round2_state0,
-		) {
-			Ok(state) => state,
-			Err(e) => {
-				println!("✗ Failed to create Round3 state for party 0: {:?}", e);
-				return;
-			}
+		// Reconstruct individual party w values from round1_state
+		let w_party0 = if !round1_state_party0.w_commitments.is_empty() {
+			&round1_state_party0.w_commitments[0]
+		} else {
+			println!("✗ No w commitments for party 0");
+			return;
 		};
 
-		let (_response1, round3_state1) = match ml_dsa_87::Round3State::new(
-			&sks[1],
-			&config,
-			&round2_commitments,
-			&round1_state_party1,
-			&round2_state1,
-		) {
-			Ok(state) => state,
-			Err(e) => {
-				println!("✗ Failed to create Round3 state for party 1: {:?}", e);
-				return;
-			}
+		let w_party1 = if !round1_state_party1.w_commitments.is_empty() {
+			&round1_state_party1.w_commitments[0]
+		} else {
+			println!("✗ No w commitments for party 1");
+			return;
 		};
 
-		// Pack commitments and responses using canonical format
-		// Use pack_commitment_canonical to get the actual w values, not just hashes
-		let packed_commitments = vec![
-			round1_state_party0.pack_commitment_canonical(&config),
-			round1_state_party1.pack_commitment_canonical(&config),
-		];
+		// Pack both parties' commitments
+		let packed_w0 = pack_w_commitment(w_party0);
+		let packed_w1 = pack_w_commitment(w_party1);
 
-		let packed_responses = vec![
-			round3_state0.pack_responses_canonical(&config),
-			round3_state1.pack_responses_canonical(&config),
-		];
+		// Pack both parties' responses
+		let packed_z0 = pack_z_response(&z_party0);
+		let packed_z1 = pack_z_response(&z_party1);
 
-		// Combine signatures
-		println!("Calling combine_signatures...");
+		// Replicate for K iterations (matching Go test which uses k=4 iterations)
+		let k_iterations = config.k_iterations as usize;
+		let mut packed_commitments_party0 = vec![0u8; single_commitment_size * k_iterations];
+		let mut packed_commitments_party1 = vec![0u8; single_commitment_size * k_iterations];
+		const POLY_LE_GAMMA1_SIZE: usize = 640; // For ML-DSA-87 with 19-bit packing
+		let single_response_size = dilithium_params::L * POLY_LE_GAMMA1_SIZE;
+		let mut packed_responses_party0 = vec![0u8; single_response_size * k_iterations];
+		let mut packed_responses_party1 = vec![0u8; single_response_size * k_iterations];
+
+		// Copy the same w and z to all k iterations (iteration 0 should succeed)
+		for k_iter in 0..k_iterations {
+			let w_start = k_iter * single_commitment_size;
+			let z_start = k_iter * single_response_size;
+			packed_commitments_party0[w_start..w_start + single_commitment_size].copy_from_slice(&packed_w0);
+			packed_commitments_party1[w_start..w_start + single_commitment_size].copy_from_slice(&packed_w1);
+			packed_responses_party0[z_start..z_start + single_response_size].copy_from_slice(&packed_z0);
+			packed_responses_party1[z_start..z_start + single_response_size].copy_from_slice(&packed_z1);
+		}
+
+		let packed_commitments = vec![packed_commitments_party0, packed_commitments_party1];
+		let packed_responses = vec![packed_responses_party0, packed_responses_party1];
+
+		// Combine signatures (this should use iteration 0 and succeed)
+		println!("Calling combine_signatures with 2 parties' w and z values...");
 		let signature = match ml_dsa_87::combine_signatures(
 			&pk,
 			message,
@@ -583,7 +629,11 @@ fn test_debug_trace() {
 			Ok(sig) => {
 				println!("✅ Signature created successfully!");
 				println!("Signature size: {} bytes", sig.len());
-				println!("Signature c_tilde (first 32 bytes): {:02x?}", &sig[0..32.min(sig.len())]);
+				print!("Signature c_tilde (first 32 bytes): ");
+				for b in &sig[0..32.min(sig.len())] {
+					print!("{:02x}", b);
+				}
+				println!();
 				sig
 			},
 			Err(e) => {

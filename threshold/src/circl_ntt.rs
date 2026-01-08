@@ -351,4 +351,32 @@ mod tests {
 		assert_eq!(p.coeffs[3], 51878135, "coeff[3] mismatch");
 		assert_eq!(p.coeffs[4], 44099773, "coeff[4] mismatch");
 	}
+
+	#[test]
+	fn test_ntt_challenge_poly_simple() {
+		// Test NTT of a simple challenge polynomial with just one non-zero coefficient
+		// This test creates a polynomial with c[4] = Q-1 (representing -1)
+		// and compares with what Go's circl NTT produces
+
+		// Note: The actual challenge polynomial from the test has 60 non-zero coefficients
+		// at various positions. This simplified version helps us identify the NTT issue.
+		let mut p = Poly::default();
+		p.coeffs[4] = 8380416; // Q-1, representing -1
+
+		eprintln!("Simple challenge poly input[0..10]: {:?}", &p.coeffs[0..10]);
+
+		ntt(&mut p);
+
+		eprintln!("Simple challenge poly NTT output[0..5]: {:?}", &p.coeffs[0..5]);
+		eprintln!("Our output: [{}, {}, {}, {}, {}]",
+			p.coeffs[0], p.coeffs[1], p.coeffs[2], p.coeffs[3], p.coeffs[4]);
+
+		// TODO: Get the correct expected values from Go's circl NTT for this input
+		// Currently our NTT produces: [4778199, 21539033, 29919450, 29919450, 28743469]
+		// But we need to verify what Go produces for the same input
+
+		// For now, document what we produce so we can compare
+		println!("Rust circl_ntt output for c[4]=8380416: [{}, {}, {}, {}, {}]",
+			p.coeffs[0], p.coeffs[1], p.coeffs[2], p.coeffs[3], p.coeffs[4]);
+	}
 }
