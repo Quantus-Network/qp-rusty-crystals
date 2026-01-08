@@ -3260,6 +3260,12 @@ fn create_signature_from_pair_reference(
 	poly::challenge(&mut challenge_poly, &c_bytes);
 
 	// Step 4: Compute Az (like reference)
+	// Debug: Check z_final before NTT
+	eprintln!("DEBUG: z_final (before Az computation) first 5 coeffs: [{}, {}, {}, {}, {}]",
+		z_final.vec[0].coeffs[0], z_final.vec[0].coeffs[1], z_final.vec[0].coeffs[2],
+		z_final.vec[0].coeffs[3], z_final.vec[0].coeffs[4]);
+	eprintln!("DEBUG: Expected z from Go: [8371928, 8340508, 8185823, 3884, 8367315]");
+
 	let mut z_ntt = z_final.clone();
 	ntt_polyvecl(&mut z_ntt);
 
@@ -3271,27 +3277,65 @@ fn create_signature_from_pair_reference(
 		}
 	}
 
+	eprintln!("DEBUG: z_ntt (after NTT) first 5 coeffs: [{}, {}, {}, {}, {}]",
+		z_ntt.vec[0].coeffs[0], z_ntt.vec[0].coeffs[1], z_ntt.vec[0].coeffs[2],
+		z_ntt.vec[0].coeffs[3], z_ntt.vec[0].coeffs[4]);
+
 	// Compute Az in NTT domain (keep in NTT domain!)
-	// CRITICAL FIX: Use polyvec::matrix_expand to generate A matrix, matching Round1
+	// Generate A fresh from rho, then convert to NTT domain
 	let mut az_ntt = polyvec::Polyveck::default();
+
+	// Generate A matrix from rho (not in NTT domain yet)
 	let mut a_matrix: Vec<polyvec::Polyvecl> =
 		(0..dilithium_params::K).map(|_| polyvec::Polyvecl::default()).collect();
-	polyvec::matrix_expand(&mut a_matrix, &pk.rho);
 
-	// Compute Az using the same matrix as Round1
+	// Convert A to NTT domain using circl_ntt
 	for i in 0..dilithium_params::K {
-		polyvec::l_pointwise_acc_montgomery(&mut az_ntt.vec[i], &a_matrix[i], &z_ntt);
+		for j in 0..dilithium_params::L {
+		let threshold_poly = pk.a_ntt.get(i, j);
+		for k in 0..(dilithium_params::N as usize) {
+			a_matrix[i].vec[j].coeffs[k] = threshold_poly.get(k).value() as i32;
+		}
+		}
 	}
+
+	// Debug: Verify A matrix matches what we used in key generation
+	eprintln!("DEBUG: A matrix (from matrix_expand + NTT) first row, first poly, first 5 coeffs:");
+	eprintln!("       a_matrix[0].vec[0].coeffs[0..5] = [{}, {}, {}, {}, {}]",
+		a_matrix[0].vec[0].coeffs[0], a_matrix[0].vec[0].coeffs[1],
+		a_matrix[0].vec[0].coeffs[2], a_matrix[0].vec[0].coeffs[3],
+		a_matrix[0].vec[0].coeffs[4]);
+	eprintln!("DEBUG: Expected A[0][0][0..5] from key generation: [6954605, 732787, 284010, 6348222, 3737298]");
+
+	// Compute Az using poly_dot_hat_circl (matches Go's PolyDotHat exactly)
+	for i in 0..dilithium_params::K {
+		poly_dot_hat_circl(&mut az_ntt.vec[i], &a_matrix[i], &z_ntt);
+	}
+
+	// Debug: Check Az right after poly_dot_hat_circl (before any reduction)
+	eprintln!("DEBUG: Az (right after poly_dot_hat_circl) first 5 coeffs: [{}, {}, {}, {}, {}]",
+		az_ntt.vec[0].coeffs[0], az_ntt.vec[0].coeffs[1], az_ntt.vec[0].coeffs[2],
+		az_ntt.vec[0].coeffs[3], az_ntt.vec[0].coeffs[4]);
 
 	// Apply ReduceLe2Q to Az in NTT domain (matching reference behavior)
 	for i in 0..dilithium_params::K {
-		for j in 0..dilithium_params::N as usize {
+		for j in 0..(dilithium_params::N as usize) {
 			let coeff = az_ntt.vec[i].coeffs[j];
 			let coeff_u32 =
 				if coeff < 0 { (coeff + dilithium_params::Q as i32) as u32 } else { coeff as u32 };
 			az_ntt.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
 		}
 	}
+
+	// Debug: Check what Az would be if we InvNTT it now (for comparison with Go)
+	let mut az_temp_for_debug = az_ntt.clone();
+	polyvec::k_invntt_tomont(&mut az_temp_for_debug);
+	polyvec_k_normalize_assuming_le2q(&mut az_temp_for_debug);
+	eprintln!("DEBUG: Az (if InvNTT+Normalize now) first 5 coeffs: [{}, {}, {}, {}, {}]",
+		az_temp_for_debug.vec[0].coeffs[0], az_temp_for_debug.vec[0].coeffs[1],
+		az_temp_for_debug.vec[0].coeffs[2], az_temp_for_debug.vec[0].coeffs[3],
+		az_temp_for_debug.vec[0].coeffs[4]);
+	eprintln!("DEBUG: Expected Az from Go: [1007367, 2284287, 3619057, 2964694, 3702629]");
 
 	// Step 5: Compute ct1_2d in NTT domain (like reference)
 	let mut c_ntt = challenge_poly.clone();
@@ -3311,6 +3355,17 @@ fn create_signature_from_pair_reference(
 		}
 	}
 
+	// Debug: Check t1 and scaled values for first polynomial
+	eprintln!("DEBUG: t1 values [0][0..5]: [{}, {}, {}, {}, {}]",
+		pk.t1.get(0).get(0).value(), pk.t1.get(0).get(1).value(),
+		pk.t1.get(0).get(2).value(), pk.t1.get(0).get(3).value(),
+		pk.t1.get(0).get(4).value());
+	eprintln!("DEBUG: Expected t1 from Go: [973, 354, 918, 896, 243]");
+	eprintln!("DEBUG: ct1_2d (before NTT) first 5 coeffs: [{}, {}, {}, {}, {}]",
+		ct1_2d.vec[0].coeffs[0], ct1_2d.vec[0].coeffs[1], ct1_2d.vec[0].coeffs[2],
+		ct1_2d.vec[0].coeffs[3], ct1_2d.vec[0].coeffs[4]);
+	eprintln!("DEBUG: Expected ct1_2d values (973*8192=7970816, etc): [7970816, 2899968, 7520256, 7340032, 1990656]");
+
 	// Apply full reduction to ensure values are in proper range [0, Q)
 	for i in 0..dilithium_params::K {
 		poly::reduce(&mut ct1_2d.vec[i]);
@@ -3323,6 +3378,19 @@ fn create_signature_from_pair_reference(
 		poly::pointwise_montgomery(&mut ct1_2d.vec[i], &temp_poly, &c_ntt);
 	}
 
+	// Apply ReduceLe2Q to ct1_2d after multiplication (like reference)
+	for i in 0..dilithium_params::K {
+		for j in 0..(dilithium_params::N as usize) {
+			let coeff = ct1_2d.vec[i].coeffs[j];
+			let coeff_u32 = if coeff < 0 {
+				(coeff + dilithium_params::Q as i32) as u32
+			} else {
+				coeff as u32
+			};
+			ct1_2d.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
+		}
+	}
+
 	// Debug: Check Az and ct1_2d before subtraction
 	eprintln!("DEBUG: Az (in NTT) first 5 coeffs: [{}, {}, {}, {}, {}]",
 		az_ntt.vec[0].coeffs[0], az_ntt.vec[0].coeffs[1], az_ntt.vec[0].coeffs[2],
@@ -3330,6 +3398,16 @@ fn create_signature_from_pair_reference(
 	eprintln!("DEBUG: ct1_2d (in NTT) first 5 coeffs: [{}, {}, {}, {}, {}]",
 		ct1_2d.vec[0].coeffs[0], ct1_2d.vec[0].coeffs[1], ct1_2d.vec[0].coeffs[2],
 		ct1_2d.vec[0].coeffs[3], ct1_2d.vec[0].coeffs[4]);
+
+	// Debug: Check what ct1_2d would be if we InvNTT it now (for comparison with Go)
+	let mut ct1_temp_for_debug = ct1_2d.clone();
+	polyvec::k_invntt_tomont(&mut ct1_temp_for_debug);
+	polyvec_k_normalize_assuming_le2q(&mut ct1_temp_for_debug);
+	eprintln!("DEBUG: ct1*c (if InvNTT+Normalize now) first 5 coeffs: [{}, {}, {}, {}, {}]",
+		ct1_temp_for_debug.vec[0].coeffs[0], ct1_temp_for_debug.vec[0].coeffs[1],
+		ct1_temp_for_debug.vec[0].coeffs[2], ct1_temp_for_debug.vec[0].coeffs[3],
+		ct1_temp_for_debug.vec[0].coeffs[4]);
+	eprintln!("DEBUG: Expected ct1*c from Go: [5742597, 6995971, 811012, 2392070, 7315463]");
 
 	// KEY FIX: Subtract in NTT domain BEFORE inverse NTT (like reference)
 	// Az2dct1 = Az - ct1_2d (both in NTT domain)
