@@ -952,13 +952,15 @@ pub mod secret_sharing {
 	/// These patterns avoid the large Lagrange coefficients by using precomputed
 	/// share combinations. Based on Threshold-ML-DSA implementation.
 	fn get_sharing_patterns(threshold: u8, parties: u8) -> Result<Vec<Vec<u8>>, &'static str> {
+		// These patterns must match the Go implementation CODE (not comments)
+		// The Go code uses different patterns than what's in the comments
 		match (threshold, parties) {
-			(2, 3) => Ok(vec![vec![5, 3], vec![6]]),
-			(2, 4) => Ok(vec![vec![13, 7], vec![14, 11]]),
-			(3, 4) => Ok(vec![vec![9, 3], vec![10, 6], vec![12, 5]]),
-			(2, 5) => Ok(vec![vec![29, 15, 27], vec![30, 23]]),
-			(3, 5) => Ok(vec![vec![25, 7, 19], vec![26, 11, 14, 22], vec![28, 13, 21]]),
-			(4, 5) => Ok(vec![vec![17, 3], vec![18, 6, 10], vec![20, 5, 12], vec![24, 9]]),
+			(2, 3) => Ok(vec![vec![3, 5], vec![6]]),
+			(2, 4) => Ok(vec![vec![11, 13], vec![7, 14]]),
+			(3, 4) => Ok(vec![vec![3, 9], vec![6, 10], vec![12, 5]]),
+			(2, 5) => Ok(vec![vec![27, 29, 23], vec![30, 15]]),
+			(3, 5) => Ok(vec![vec![25, 11, 19, 13], vec![7, 14, 22, 26], vec![28, 21]]),
+			(4, 5) => Ok(vec![vec![3, 9, 17], vec![6, 10, 18], vec![12, 5, 20], vec![24]]),
 			(2, 6) => Ok(vec![vec![61, 47, 55], vec![62, 31, 59]]),
 			(3, 6) => Ok(vec![
 				vec![27, 23, 43, 57, 39],
