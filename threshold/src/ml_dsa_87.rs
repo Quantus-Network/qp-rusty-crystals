@@ -2255,7 +2255,6 @@ impl Round3State {
 			&round2_state.w_aggregated,
 			&round2_state.mu,
 			&round1_state.hyperball_samples,
-			&round1_state.y_commitments,
 			config,
 			&active_parties,
 		)?;
@@ -2284,7 +2283,6 @@ impl Round3State {
 		w_aggregated: &[polyvec::Polyveck],
 		mu: &[u8; 64],
 		hyperball_samples: &[FVec],
-		_y_commitments: &[polyvec::Polyvecl],
 		config: &ThresholdConfig,
 		active_parties: &[u8],
 	) -> ThresholdResult<Vec<u8>> {
@@ -2482,10 +2480,10 @@ pub fn generate_threshold_key(
 	let mut a_ntt = Mat::zero();
 	a_ntt.derive_from_seed(&rho);
 
-	// Use the already-normalized NTT versions (s1h_total, s2h_total) from share generation
-	// This matches Go's approach: NTT each share, sum them, then normalize
+	// Use the already-normalized NTT version of s1 from share generation
+	// Note: s2h_total is not needed since we add s2_total in normal domain below
 	let s1_ntt = s1h_total;
-	let _s2_ntt = s2h_total;
+	drop(s2h_total); // Explicitly drop unused NTT form
 
 	// Compute t = A*s1 + s2 following reference implementation approach
 	// First compute A*s1 in NTT domain, then add s2 in normal domain
@@ -3032,20 +3030,13 @@ fn create_signature_from_pair_reference(
 fn create_mldsa_signature_reference_approach(
 	pk: &PublicKey,
 	message: &[u8],
-	_context: &[u8],
+	context: &[u8],
 	commitments: &[Vec<u8>],
 	responses: &[Vec<u8>],
 	config: &ThresholdConfig,
 ) -> ThresholdResult<Vec<u8>> {
-	// Compute μ = H(tr || msg) like Go's internal ComputeMu
-	// Note: Go's internal test does NOT add context prefix, only tr || msg
-	// The public API wrapper adds context, but we match the internal test here
-	let mut mu = [0u8; 64];
-	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, &pk.tr, 64);
-	fips202::shake256_absorb(&mut state, message, message.len());
-	fips202::shake256_finalize(&mut state);
-	fips202::shake256_squeeze(&mut mu, 64, &mut state);
+	// Compute μ = H(tr || 0x00 || ctx_len || ctx || msg) per ML-DSA specification
+	let mu = compute_mu(&pk.tr, message, context);
 
 	// Try each K iteration following reference Combine logic
 	let k_iterations = config.base.canonical_k() as usize;
