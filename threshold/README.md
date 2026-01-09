@@ -1,6 +1,6 @@
-# Threshold ML-DSA Signature Scheme
+# Threshold ML-DSA-87 Signature Scheme
 
-A Rust implementation of threshold variants of the ML-DSA (Dilithium) signature scheme for ML-DSA-87 (256-bit security).
+A Rust implementation of threshold ML-DSA-87 (Dilithium) signatures, allowing multiple parties to collectively sign messages without any single party having access to the complete signing key.
 
 ## ⚠️ Warning
 
@@ -8,100 +8,120 @@ A Rust implementation of threshold variants of the ML-DSA (Dilithium) signature 
 
 ## Overview
 
-This crate implements threshold signature schemes that allow up to 6 parties to collectively sign messages without any single party having access to the complete signing key.
+In a (t, n) threshold scheme:
+- There are **n** total parties
+- Any **t** or more parties can cooperate to produce a valid signature
+- Fewer than **t** parties cannot produce a signature or learn the secret key
+
+This implementation supports configurations up to (6, 6) and produces signatures compatible with standard ML-DSA-87 verification.
 
 ### Features
 
 - **ML-DSA-87 Support**: 256-bit security level (NIST Level 5)
-- **Flexible Thresholds**: Support for any (t, n) configuration up to 6 parties
-- **3-Round Protocol**: Commitment, challenge, and response phases
+- **Flexible Thresholds**: Any (t, n) configuration where 2 ≤ t ≤ n ≤ 6
+- **3-Round Protocol**: Commitment, reveal, and response phases
+- **Network Ready**: Clear separation of broadcast messages for distributed signing
 - **Memory Safety**: Automatic zeroization of sensitive data
-- **Dilithium Compatibility**: Signatures verify with standard ML-DSA-87
+- **Serde Support**: Optional serialization for network transport
 
 ## Usage
 
-### Basic Setup
+### Key Generation
 
 ```rust
-use qp_rusty_crystals_threshold::mldsa87::{ThresholdConfig, generate_threshold_key};
+use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig};
 
-// Setup 3-of-5 threshold scheme
-let config = ThresholdConfig::new(3, 5)?;
+// Create a 2-of-3 threshold configuration
+let config = ThresholdConfig::new(2, 3)?;
+let seed = [0u8; 32]; // Use a cryptographically secure random seed!
 
-// Generate threshold keys
-let (public_key, secret_keys) = generate_threshold_key(&mut rng, &config)?;
+// Generate keys with a trusted dealer
+let (public_key, shares) = generate_with_dealer(&seed, config)?;
+
+// Distribute shares securely to each party:
+// - shares[0] goes to party 0
+// - shares[1] goes to party 1
+// - shares[2] goes to party 2
 ```
 
-### Threshold Signing (3 Rounds)
+### Threshold Signing
+
+Each party creates a `ThresholdSigner` and participates in three rounds:
 
 ```rust
-// Round 1: Generate commitments
-let (commitment, round1_state) = Round1State::new(&secret_keys[0], &config, &mut rng)?;
+use qp_rusty_crystals_threshold::{ThresholdSigner, ThresholdConfig};
 
-// Round 2: Exchange commitments and compute challenge
-let (packed_commitment, round2_state) = Round2State::new(
-    &secret_keys[0], active_parties, message, context, 
-    &all_commitments, &other_parties_w_values, &round1_state
-)?;
+// Each party creates their signer (on their own machine)
+let mut signer = ThresholdSigner::new(my_share, public_key, config)?;
 
-// Round 3: Generate responses
-let (response, _) = Round3State::new(
-    &secret_keys[0], &config, &packed_commitments,
-    &round1_state, &round2_state
-)?;
+// Round 1: Generate commitment
+let r1_broadcast = signer.round1_commit(&mut rng)?;
+// --> Send r1_broadcast to all other parties
+// --> Receive other parties' Round1Broadcasts
 
-// Combine into final signature
-let signature = combine_signatures(
-    &public_key, message, context,
-    &all_commitments, &all_responses, &config
+// Round 2: Reveal commitment  
+let r2_broadcast = signer.round2_reveal(message, context, &other_r1_broadcasts)?;
+// --> Send r2_broadcast to all other parties
+// --> Receive other parties' Round2Broadcasts
+
+// Round 3: Compute response
+let r3_broadcast = signer.round3_respond(&other_r2_broadcasts)?;
+// --> Send r3_broadcast to all other parties
+// --> Receive other parties' Round3Broadcasts
+
+// Combine into final signature (any party can do this)
+let signature = signer.combine_with_message(
+    message, context, &all_r2_broadcasts, &all_r3_broadcasts
 )?;
 ```
 
 ### Verification
 
-Signatures can be verified using either the threshold implementation or the standard dilithium crate:
+Signatures are compatible with standard ML-DSA-87:
 
 ```rust
-// Using threshold verification
-let is_valid = verify_signature(&public_key, message, context, &signature);
+use qp_rusty_crystals_threshold::verify_signature;
 
-// Using dilithium crate (demonstrates compatibility)
-let dilithium_pk = qp_rusty_crystals_dilithium::ml_dsa_87::PublicKey::from_bytes(&public_key.packed)?;
-let is_valid = dilithium_pk.verify(message, &signature, Some(context));
+let is_valid = verify_signature(&public_key, message, context, &signature);
 ```
 
-## Implementation Status
+## API Reference
 
-### ✅ Complete
+### Types
 
-- Field arithmetic and polynomial operations
-- ML-DSA-87 parameter handling
-- 3-round threshold protocol
-- Secret sharing and key generation
-- Signature aggregation and combination
-- Comprehensive error handling
-- 31 passing unit tests + integration tests
-- Dilithium compatibility (correct signature format)
+| Type | Description |
+|------|-------------|
+| `ThresholdConfig` | Configuration for (t, n) threshold scheme |
+| `PublicKey` | Threshold public key (can be freely shared) |
+| `PrivateKeyShare` | Secret key share for one party (keep confidential!) |
+| `ThresholdSigner` | Main signing interface for each party |
+| `Round1Broadcast` | Message to broadcast in Round 1 |
+| `Round2Broadcast` | Message to broadcast in Round 2 |
+| `Round3Broadcast` | Message to broadcast in Round 3 |
+| `Signature` | Final signature (standard ML-DSA-87 format) |
 
-### 🚧 Simplified/Placeholder
+### Functions
 
-- NTT operations (basic implementation)
-- Polynomial sampling (simplified)
-- Signature verification (placeholder)
-- Constraint validation (relaxed for testing)
+| Function | Description |
+|----------|-------------|
+| `generate_with_dealer` | Generate keys using a trusted dealer |
+| `verify_signature` | Verify a threshold signature |
 
 ## Architecture
 
 ```
-threshold/
-├── src/
-│   ├── lib.rs           # Main API
-│   ├── common.rs        # Error types
-│   ├── params.rs        # ML-DSA parameters
-│   ├── field.rs         # Field arithmetic
-│   └── mldsa87/mod.rs   # ML-DSA-87 implementation
-└── tests/
-    └── integration_tests.rs  # Dilithium compatibility tests
+threshold/src/
+├── lib.rs              # Public API exports
+├── config.rs           # ThresholdConfig
+├── keys.rs             # PublicKey, PrivateKeyShare
+├── broadcast.rs        # Round1/2/3Broadcast, Signature
+├── signer.rs           # ThresholdSigner
+├── error.rs            # Error types
+├── keygen/
+│   └── dealer.rs       # Trusted dealer key generation
+└── protocol/
+    ├── primitives.rs   # Internal crypto operations
+    └── signing.rs      # Protocol implementation
 ```
 
 ## Testing
@@ -110,30 +130,40 @@ threshold/
 # Run all tests
 cargo test --package qp-rusty-crystals-threshold
 
-# Integration tests (dilithium compatibility)
+# Run new API tests
+cargo test --test test_new_api
+
+# Run integration tests (old API)
 cargo test --test integration_tests
 ```
 
 ## Security Parameters
 
-- **Ring Dimension**: N = 256
-- **Matrix Dimensions**: k = 8, l = 7
-- **Security Level**: ~256-bit (NIST Level 5)
-- **Max Parties**: 6
-- **Supported Thresholds**: Any t ≤ n ≤ 6
+| Parameter | Value |
+|-----------|-------|
+| Ring Dimension (N) | 256 |
+| Matrix Dimensions | k=8, l=7 |
+| Security Level | ~256-bit (NIST Level 5) |
+| Max Parties | 6 |
+| Supported Thresholds | 2 ≤ t ≤ n ≤ 6 |
+
+## Features
+
+- `std` (default): Standard library support
+- `serde`: Serialization/deserialization for broadcast types
 
 ## Dependencies
 
-- `qp-rusty-crystals-dilithium`: For ML-DSA compatibility
-- `sha3`: Cryptographic hashing
-- `zeroize`: Memory safety
-- `rand_core`: Randomness interface
+- `qp-rusty-crystals-dilithium`: ML-DSA implementation
+- `zeroize`: Secure memory clearing
+- `rand_core`: Randomness traits
+- `serde` (optional): Serialization
 
 ## Future Work
 
-1. **Production readiness**: Full NTT implementation, proper sampling, security audit
-2. **Performance**: SIMD optimizations, constant-time operations
-3. **Features**: Serialization, network protocols, hardware integration
+- **Distributed Key Generation (DKG)**: Generate shares without a trusted dealer
+- **Performance**: SIMD optimizations, constant-time operations
+- **Security Audit**: Professional cryptographic review
 
 ## License
 

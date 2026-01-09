@@ -1,146 +1,264 @@
-//! # Threshold ML-DSA Signature Scheme
+//! # Threshold ML-DSA-87 Signature Scheme
 //!
-//! This crate implements threshold variants of the ML-DSA (Dilithium) signature scheme
-//! as described in "Efficient Threshold ML-DSA up to 6 parties".
+//! This crate implements a threshold variant of the ML-DSA-87 (Dilithium)
+//! signature scheme, allowing multiple parties to collectively sign messages
+//! without any single party having access to the complete signing key.
 //!
 //! ## Overview
 //!
-//! Threshold signatures allow a group of parties to collectively sign a message
-//! without any single party having access to the complete signing key. This
-//! implementation supports threshold signing with up to 6 parties for ML-DSA-87.
+//! In a (t, n) threshold scheme:
+//! - There are n total parties
+//! - Any t or more parties can cooperate to produce a valid signature
+//! - Fewer than t parties cannot produce a signature or learn the secret key
 //!
-//! ## Security Level
+//! This implementation supports configurations up to (6, 6) and produces
+//! signatures that are compatible with standard ML-DSA-87 verification.
 //!
-//! The implementation provides ML-DSA-87 (256-bit security, NIST Level 5):
-//! - Ring dimension N = 256
-//! - Matrix dimensions k = 8, l = 7
-//! - Supports (t,n) thresholds where 2 ≤ t ≤ n ≤ 6
+//! ## Quick Start
 //!
-//! ## Usage
+//! ```ignore
+//! use qp_rusty_crystals_threshold::{
+//!     ThresholdConfig, ThresholdSigner, generate_with_dealer,
+//!     Round1Broadcast, Round2Broadcast, Round3Broadcast, verify_signature,
+//! };
+//! use rand::thread_rng;
 //!
-//! ```rust,ignore
-//! use qp_rusty_crystals_threshold::ml_dsa_87::{ThresholdConfig, generate_threshold_key, combine_signatures};
-//! use qp_rusty_crystals_threshold::params::MlDsa87Params;
+//! // 1. Setup: Generate keys with a trusted dealer
+//! let config = ThresholdConfig::new(2, 3)?;  // 2-of-3 threshold
+//! let seed = [0u8; 32];  // Use a secure random seed!
+//! let (public_key, shares) = generate_with_dealer(&seed, config)?;
 //!
-//! // Setup threshold parameters: 2-of-3 threshold scheme
-//! let config = ThresholdConfig::new(2, 3).expect("Invalid parameters");
-//! let seed = [42u8; 32];
+//! // 2. Create signers (in practice, each party runs on a different machine)
+//! let mut signers: Vec<_> = shares.into_iter()
+//!     .map(|share| ThresholdSigner::new(share, public_key.clone(), config))
+//!     .collect::<Result<_, _>>()?;
 //!
-//! // Generate threshold keys
-//! let (threshold_pk, threshold_sks) = generate_threshold_key(&seed, &config)
-//!     .expect("Key generation failed");
+//! // 3. Round 1: Generate commitments
+//! let mut rng = thread_rng();
+//! let r1_broadcasts: Vec<_> = signers.iter_mut()
+//!     .take(2)  // Only need t=2 parties
+//!     .map(|s| s.round1_commit(&mut rng))
+//!     .collect::<Result<_, _>>()?;
 //!
-//! // In a real threshold protocol, parties would generate Round1 states,
-//! // exchange commitments, and compute responses. For testing purposes,
-//! // mock data can be generated:
-//! let commitment_size = config.threshold_params().commitment_size::<MlDsa87Params>();
-//! let response_size = config.threshold_params().response_size::<MlDsa87Params>();
+//! // 4. Round 2: Reveal commitments (exchange r1 broadcasts first)
+//! let r2_broadcasts: Vec<_> = signers.iter_mut()
+//!     .take(2)
+//!     .enumerate()
+//!     .map(|(i, s)| {
+//!         let others: Vec<_> = r1_broadcasts.iter()
+//!             .filter(|r| r.party_id != i as u8)
+//!             .cloned()
+//!             .collect();
+//!         s.round2_reveal(b"message", b"context", &others)
+//!     })
+//!     .collect::<Result<_, _>>()?;
 //!
-//! // Generate mock threshold data (for testing only)
-//! let commitments = vec![
-//!     generate_mock_commitment(0, commitment_size),
-//!     generate_mock_commitment(1, commitment_size),
-//! ];
-//! let responses = vec![
-//!     generate_mock_response(0, response_size),
-//!     generate_mock_response(1, response_size),
-//! ];
+//! // 5. Round 3: Compute responses (exchange r2 broadcasts first)
+//! let r3_broadcasts: Vec<_> = signers.iter_mut()
+//!     .take(2)
+//!     .enumerate()
+//!     .map(|(i, s)| {
+//!         let others: Vec<_> = r2_broadcasts.iter()
+//!             .filter(|r| r.party_id != i as u8)
+//!             .cloned()
+//!             .collect();
+//!         s.round3_respond(&others)
+//!     })
+//!     .collect::<Result<_, _>>()?;
 //!
-//! // Combine into threshold signature
-//! let message = b"Hello, threshold world!";
-//! let context = b"";
-//! let threshold_signature = combine_signatures(
-//!     &threshold_pk,
-//!     message,
-//!     context,
-//!     &commitments,
-//!     &responses,
-//!     &config,
-//! ).expect("Signature combination failed");
+//! // 6. Combine into final signature
+//! let signature = signers[0].combine_with_message(
+//!     b"message", b"context", &r2_broadcasts, &r3_broadcasts
+//! )?;
+//!
+//! // 7. Verify (works with standard ML-DSA-87 verification)
+//! assert!(verify_signature(&public_key, b"message", b"context", &signature));
 //! ```
 //!
-//! ## Implementation Status
-//!
-//! ### ✅ **Working Components:**
-//! - **Threshold key generation**: Generates proper threshold keys from deterministic seeds
-//! - **ML-DSA format compliance**: Produces signatures with correct ML-DSA-87 byte format (4627 bytes)
-//! - **Internal constraint validation**: Passes ML-DSA coefficient bounds (γ₁-β, γ₂-β limits)
-//! - **Lagrange interpolation**: Proper secret sharing reconstruction using Lagrange coefficients
-//! - **Round1 state generation**: Creates proper commitment and masking polynomial states
-//! - **Signature combination**: Aggregates threshold shares into final signature format
-//! - **Parameter validation**: Validates threshold configurations and sizes
-//!
-//! ### 🚧 **Partially Working:**
-//! - **Mock data generation**: Works for testing internal components and format validation
-//! - **Challenge generation**: Produces valid challenge format but may have compatibility issues
-//! - **Hint computation**: Generates hint structures but uses simplified zero-hints approach
-//!
-//! ### ❌ **Known Limitations:**
-//! - **Cryptographic verification**: Signatures fail verification by qp-rusty-crystals-dilithium crate
-//! - **Full threshold protocol**: Complete Round2/Round3 coordination not implemented
-//! - **Real-world compatibility**: Format mismatch between real Round1State data and mock responses
-//! - **Production readiness**: Not suitable for production use due to verification failures
-//!
-//! ## Testing Status
-//!
-//! The test suite validates:
-//! - ✅ Size calculations and signature format (4627 bytes)
-//! - ✅ Internal ML-DSA constraint checking
-//! - ✅ Challenge and hint structure formatting
-//! - ✅ Threshold parameter validation
-//! - ❌ Cryptographic verification (ignored test - known to fail)
-//!
-//! ## Next Steps for Full Implementation
-//!
-//! To complete the implementation for production use:
-//!
-//! 1. **Fix cryptographic verification**: Investigate why signatures fail dilithium crate verification
-//! 2. **Implement complete Round2/Round3**: Build full threshold protocol coordination
-//! 3. **Fix format compatibility**: Resolve mismatch between real commitments and responses
-//! 4. **Add security review**: Comprehensive cryptographic security audit
-//! 5. **Optimize performance**: Remove placeholder implementations and add proper NTT operations
-//!
-//! ## Research and Experimentation Warning
+//! ## Security Warning
 //!
 //! **This implementation is for research and experimentation purposes only.**
-//! **It has not undergone security review and MUST NOT be used in production systems.**
-//! **Signatures generated by this crate do not currently pass cryptographic verification.**
+//! It has not undergone a security audit and should not be used in production
+//! systems without thorough review.
+//!
+//! ## Network Usage
+//!
+//! In a real distributed system, each party runs on a separate machine:
+//!
+//! 1. **Key Generation**: A trusted dealer generates shares and securely
+//!    distributes them to each party (or use DKG when available).
+//!
+//! 2. **Round 1**: Each party generates a `Round1Broadcast` and sends it to
+//!    all other participating parties.
+//!
+//! 3. **Round 2**: After receiving all Round 1 broadcasts, each party
+//!    generates a `Round2Broadcast` and sends it to all others.
+//!
+//! 4. **Round 3**: After receiving all Round 2 broadcasts, each party
+//!    generates a `Round3Broadcast` and sends it to all others.
+//!
+//! 5. **Combine**: Any party can combine the broadcasts into a final signature.
+//!
+//! All broadcast types implement `serde::Serialize` and `serde::Deserialize`
+//! (when the `serde` feature is enabled) for easy network transmission.
+//!
+//! ## Features
+//!
+//! - `std` (default): Enable standard library support
+//! - `serde`: Enable serialization/deserialization of broadcast types
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
 #![warn(missing_docs, rust_2018_idioms)]
 
-// Public API module for ML-DSA-87 security level
+// Core modules
+mod broadcast;
+mod config;
+mod error;
+mod keys;
+mod signer;
+
+// Key generation
+mod keygen;
+
+// Internal protocol implementation
+pub(crate) mod protocol;
+
+// Keep these modules for internal use
+// circl_ntt is public for cross-language NTT testing with Go reference
+pub mod circl_ntt;
+pub(crate) mod field;
+
+// Legacy module - will be removed in future version
+// Keeping it for now to maintain test compatibility during migration
+#[doc(hidden)]
 pub mod ml_dsa_87;
 
-// Internal modules (circl_ntt made public for cross-language NTT testing)
-pub mod circl_ntt;
-mod common;
-pub mod field;
+// Also keep common and params for internal compatibility
+#[doc(hidden)]
+pub mod common;
+#[doc(hidden)]
 pub mod params;
 
-// Re-export common types and errors
-pub use common::{ThresholdError, ThresholdResult};
+// ============================================================================
+// Public API
+// ============================================================================
 
-// Convenience re-export for the main security level
-pub use ml_dsa_87 as threshold;
+// Configuration
+pub use config::ThresholdConfig;
 
-// Additional alias for compatibility
-pub use ml_dsa_87 as mldsa87;
+// Error types
+pub use error::{ThresholdError, ThresholdResult};
 
-/// Maximum number of parties supported by the threshold scheme
+// Key types
+pub use keys::{PrivateKeyShare, PublicKey};
+
+// Broadcast message types
+pub use broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature, SIGNATURE_SIZE};
+
+// The main signer
+pub use signer::ThresholdSigner;
+
+// Key generation
+pub use keygen::generate_with_dealer;
+
+// Verification
+pub use verification::verify_signature;
+
+/// Signature verification.
+mod verification {
+    use crate::keys::PublicKey;
+    use crate::broadcast::Signature;
+    use qp_rusty_crystals_dilithium::params as dilithium_params;
+
+    /// Verify a threshold signature.
+    ///
+    /// This function verifies a signature produced by the threshold signing
+    /// protocol. The signature is compatible with standard ML-DSA-87, so it
+    /// can also be verified using the `qp-rusty-crystals-dilithium` crate.
+    ///
+    /// # Arguments
+    ///
+    /// * `public_key` - The threshold public key
+    /// * `message` - The message that was signed
+    /// * `context` - The context string used during signing (max 255 bytes)
+    /// * `signature` - The signature to verify
+    ///
+    /// # Returns
+    ///
+    /// `true` if the signature is valid, `false` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use qp_rusty_crystals_threshold::{verify_signature, PublicKey, Signature};
+    ///
+    /// let is_valid = verify_signature(&public_key, b"message", b"context", &signature);
+    /// if is_valid {
+    ///     println!("Signature is valid!");
+    /// }
+    /// ```
+    pub fn verify_signature(
+        public_key: &PublicKey,
+        message: &[u8],
+        context: &[u8],
+        signature: &Signature,
+    ) -> bool {
+        // Validate context length
+        if context.len() > 255 {
+            return false;
+        }
+
+        // Check signature length
+        if signature.as_bytes().len() != dilithium_params::SIGNBYTES {
+            return false;
+        }
+
+        // Use dilithium crate for verification
+        let dilithium_pk = match qp_rusty_crystals_dilithium::ml_dsa_87::PublicKey::from_bytes(
+            public_key.as_bytes(),
+        ) {
+            Ok(pk) => pk,
+            Err(_) => return false,
+        };
+
+        let ctx_option = if context.is_empty() {
+            None
+        } else {
+            Some(context)
+        };
+
+        dilithium_pk.verify(message, signature.as_bytes(), ctx_option)
+    }
+}
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Maximum number of parties supported by the threshold scheme.
 pub const MAX_PARTIES: u8 = 6;
 
-/// Minimum threshold value (at least 2 parties required)
+/// Minimum threshold value (at least 2 parties required).
 pub const MIN_THRESHOLD: u8 = 2;
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+    use super::*;
 
-	#[test]
-	fn test_constants() {
-		assert!(MAX_PARTIES >= MIN_THRESHOLD);
-		assert!(MIN_THRESHOLD >= 2);
-	}
+    #[test]
+    fn test_constants() {
+        assert!(MAX_PARTIES >= MIN_THRESHOLD);
+        assert!(MIN_THRESHOLD >= 2);
+    }
+
+    #[test]
+    fn test_config_creation() {
+        let config = ThresholdConfig::new(2, 3);
+        assert!(config.is_ok());
+
+        let config = config.unwrap();
+        assert_eq!(config.threshold(), 2);
+        assert_eq!(config.total_parties(), 3);
+    }
 }
