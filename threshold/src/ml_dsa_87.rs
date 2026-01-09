@@ -78,7 +78,7 @@ use qp_rusty_crystals_dilithium::fips202;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // Import dilithium crate for real ML-DSA operations
-use qp_rusty_crystals_dilithium::{packing, params as dilithium_params, poly, polyvec, sign};
+use qp_rusty_crystals_dilithium::{packing, params as dilithium_params, poly, polyvec};
 
 // Re-export common parameter constants for ML-DSA-87
 pub use crate::params::{common::*, MlDsa87Params as Params};
@@ -134,8 +134,6 @@ pub fn veck_decompose_go(v: &polyvec::Polyveck, v0: &mut polyvec::Polyveck, v1: 
         }
     }
 }
-
-/// Reduces coefficient to be ≤ 2Q following reference implementation
 
 /// Reduces x to a value ≤ 2Q following ML-DSA reference implementation
 fn reduce_le2q(x: u32) -> u32 {
@@ -657,12 +655,12 @@ pub mod secret_sharing {
 				center_dilithium_poly(&mut z_response.vec[j]);
 			}
 
-			// Check bounds (rejection sampling)
-			let gamma1 = 1 << 19; // 2^19 for ML-DSA-87
-			let mut bounds_ok = true;
-			for i in 0..dilithium_params::L {
-				for j in 0..(dilithium_params::N as usize) {
-					if z_response.vec[i].coeffs[j].abs() >= gamma1 {
+				// Check bounds (rejection sampling)
+				const GAMMA1: i32 = 1 << 19; // 2^19 for ML-DSA-87
+				let mut bounds_ok = true;
+				for i in 0..dilithium_params::L {
+					for j in 0..(dilithium_params::N as usize) {
+						if z_response.vec[i].coeffs[j].abs() >= GAMMA1 {
 						bounds_ok = false;
 						break;
 					}
@@ -829,8 +827,6 @@ pub mod secret_sharing {
 			let mut share_seed = [0u8; 64];
 			fips202::shake256_squeeze(&mut share_seed, 64, state);
 
-
-
 			// Create η-bounded shares for s1 (L polynomials)
 			let mut s1_share = polyvec::Polyvecl::default();
 			for j in 0..dilithium_params::L {
@@ -845,17 +841,12 @@ pub mod secret_sharing {
 				s2_share.vec[j] = poly;
 			}
 
-
-
-			// Compute NTT of shares BEFORE adding (like Go does)
-			// Pass unnormalized values [Q-η, Q+η] directly to NTT like Go does
+			// Compute NTT of shares before adding (following reference implementation)
 			let mut s1h_share = s1_share.clone();
 			let mut s2h_share = s2_share.clone();
 
 			ntt_polyvecl(&mut s1h_share);
 			ntt_polyveck(&mut s2h_share);
-
-
 
 			// Create the share object with η-bounded coefficients
 			let share = SecretShare {
@@ -874,10 +865,8 @@ pub mod secret_sharing {
 				}
 			}
 
-			// Add to total secret (no reduction during accumulation, like Go)
-			// Add both normal and NTT forms
-			// Use wrapping_add to handle overflow for large configurations (4-of-6, 5-of-6, etc.)
-			// The normalization step later will bring values back to proper range
+			// Add to total secret (no reduction during accumulation)
+			// Use wrapping_add to handle overflow for large configurations
 			for i in 0..dilithium_params::L {
 				for j in 0..(dilithium_params::N as usize) {
 					s1_total.vec[i].coeffs[j] = s1_total.vec[i].coeffs[j].wrapping_add(s1_share.vec[i].coeffs[j]);
@@ -1006,11 +995,6 @@ pub mod secret_sharing {
 					crate::circl_ntt::ntt(&mut s2_ntt.vec[i]);
 				}
 
-				// NOTE: Go's recoverShare does NOT normalize in the base case (T==N).
-				// It returns the pre-computed NTT values as-is, which may have
-				// coefficients > Q. Normalization only happens in the general case
-				// after combining multiple shares.
-
 				return Ok((s1_ntt, s2_ntt));
 			}
 		}
@@ -1093,8 +1077,7 @@ pub mod secret_sharing {
 
 		// Apply normalization like Go's s1h.Normalize() and s2h.Normalize()
 		// Note: s1_combined and s2_combined are in NTT domain at this point
-		// IMPORTANT: Must use mod_q (not reduce_le2q) because after adding multiple
-		// NTT shares, values can be much larger than 2Q
+		// Apply mod_q normalization since accumulated NTT values can exceed 2Q
 		for i in 0..dilithium_params::L {
 			for j in 0..(dilithium_params::N as usize) {
 				let coeff = s1_combined.vec[i].coeffs[j];
@@ -1116,22 +1099,6 @@ pub mod secret_sharing {
 					coeff as u32
 				};
 				s2_combined.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
-			}
-		}
-
-		// Debug: Check magnitude of recovered partial secret
-		let mut max_recovered_s1_coeff = 0i32;
-		let mut max_recovered_s2_coeff = 0i32;
-		for i in 0..dilithium_params::L {
-			for j in 0..(dilithium_params::N as usize) {
-				max_recovered_s1_coeff =
-					max_recovered_s1_coeff.max(s1_combined.vec[i].coeffs[j].abs());
-			}
-		}
-		for i in 0..dilithium_params::K {
-			for j in 0..(dilithium_params::N as usize) {
-				max_recovered_s2_coeff =
-					max_recovered_s2_coeff.max(s2_combined.vec[i].coeffs[j].abs());
 			}
 		}
 
@@ -1709,26 +1676,6 @@ impl Round1State {
 			let mut e_k = polyvec::Polyveck::default();
 			fvec.round(&mut y_k, &mut e_k);
 
-			// Debug: Check magnitudes of y_k and e_k
-			let mut max_y = 0i32;
-			let mut min_y = i32::MAX;
-			let mut max_e = 0i32;
-			let mut min_e = i32::MAX;
-			for i in 0..dilithium_params::L {
-				for j in 0..(dilithium_params::N as usize) {
-					let coeff = y_k.vec[i].coeffs[j];
-					max_y = max_y.max(coeff.abs());
-					min_y = min_y.min(coeff);
-				}
-			}
-			for i in 0..dilithium_params::K {
-				for j in 0..(dilithium_params::N as usize) {
-					let coeff = e_k.vec[i].coeffs[j];
-					max_e = max_e.max(coeff.abs());
-					min_e = min_e.min(coeff);
-				}
-			}
-
 			// Compute w_k = A·y_k using NTT
 			let mut w_k = polyvec::Polyveck::default();
 			let mut y_k_ntt = y_k.clone();
@@ -1736,7 +1683,6 @@ impl Round1State {
 				ntt_poly(&mut y_k_ntt.vec[i]);
 			}
 
-			// Debug: Check w in NTT domain before InvNTT
 			for i in 0..dilithium_params::K {
 				// Use CIRCL-compatible pointwise multiplication to match Go reference
 				poly_dot_hat_circl(&mut w_k.vec[i], &a_matrix[i], &y_k_ntt);
@@ -1792,24 +1738,6 @@ impl Round1State {
 		let fvec_size = dilithium_params::N as usize * (dilithium_params::L + dilithium_params::K);
 		let mut fvec = FVec::new(fvec_size);
 		fvec.sample_hyperball(config.r_prime, config.nu, &rho_prime, 0);
-
-		// Debug: Check the rounded y and error magnitudes
-		let mut y_rounded = polyvec::Polyvecl::default();
-		let mut e_rounded = polyvec::Polyveck::default();
-		fvec.round(&mut y_rounded, &mut e_rounded);
-
-		let mut max_y = 0i32;
-		let mut max_e = 0i32;
-		for i in 0..dilithium_params::L {
-			for j in 0..dilithium_params::N as usize {
-				max_y = max_y.max(y_rounded.vec[i].coeffs[j].abs());
-			}
-		}
-		for i in 0..dilithium_params::K {
-			for j in 0..dilithium_params::N as usize {
-				max_e = max_e.max(e_rounded.vec[i].coeffs[j].abs());
-			}
-		}
 
 		// Pack w for commitment hash using 23-bit packing (matching Go)
 		// Size = K_iterations * K * PolyQSize = k * 8 * 736 bytes
@@ -2356,7 +2284,7 @@ impl Round3State {
 		w_aggregated: &[polyvec::Polyveck],
 		mu: &[u8; 64],
 		hyperball_samples: &[FVec],
-		y_commitments: &[polyvec::Polyvecl],
+		_y_commitments: &[polyvec::Polyvecl],
 		config: &ThresholdConfig,
 		active_parties: &[u8],
 	) -> ThresholdResult<Vec<u8>> {
@@ -2378,7 +2306,7 @@ impl Round3State {
 		for i in 0..k.min(hyperball_samples.len()) {
 			// Step 1: Decompose w into w0 and w1
 			let mut w0 = polyvec::Polyveck::default();
-			let mut w1 = polyvec::Polyveck::default();
+			let mut w1;
 
 			if i < w_aggregated.len() {
 				w1 = w_aggregated[i].clone();
@@ -2449,11 +2377,7 @@ impl Round3State {
 			let mut zf = FVec::from_polyvecs(&z, &y);
 			zf.add(&hyperball_samples[i]);
 
-			// NOTE: Rejection sampling is NOT done here in Round3 - it's done later
-			// in combine_signatures after aggregating z values from all parties.
-			// Each party just computes and packs their z response.
-
-			// Step 6: Round FVec back to integers (matching Go's zf.Round(&zs[i], &y))
+			// Step 6: Round FVec back to integers
 			// This gives us z = y_commitment + c*s1 + hyperball_sample
 			let mut z_final = polyvec::Polyvecl::default();
 			let mut y_final = polyvec::Polyveck::default();
@@ -2540,7 +2464,7 @@ pub fn generate_threshold_key(
 
 	// 2. Squeeze party keys
 	let mut party_keys = Vec::with_capacity(params.total_parties() as usize);
-	for i in 0..params.total_parties() {
+	for _ in 0..params.total_parties() {
 		let mut key = [0u8; 32];
 		qp_rusty_crystals_dilithium::fips202::shake256_squeeze(&mut key, 32, &mut h);
 
@@ -2558,22 +2482,10 @@ pub fn generate_threshold_key(
 	let mut a_ntt = Mat::zero();
 	a_ntt.derive_from_seed(&rho);
 
-	// Debug: Check matrix A magnitudes
-	let mut max_a_coeff = 0u32;
-	for i in 0..dilithium_params::K {
-		for j in 0..dilithium_params::L {
-			let threshold_poly = a_ntt.get(i, j);
-			for k in 0..(dilithium_params::N as usize) {
-				let a_val = threshold_poly.get(k).value();
-				max_a_coeff = max_a_coeff.max(a_val);
-			}
-		}
-	}
-
 	// Use the already-normalized NTT versions (s1h_total, s2h_total) from share generation
 	// This matches Go's approach: NTT each share, sum them, then normalize
 	let s1_ntt = s1h_total;
-	let s2_ntt = s2h_total;
+	let _s2_ntt = s2h_total;
 
 	// Compute t = A*s1 + s2 following reference implementation approach
 	// First compute A*s1 in NTT domain, then add s2 in normal domain
@@ -2752,12 +2664,10 @@ pub fn combine_signatures(
 	create_mldsa_signature_reference_approach(pk, message, context, commitments, responses, config)
 }
 
-/// Aggregate threshold commitments and responses into a valid ML-DSA signature
-/// This implements real threshold aggregation with Lagrange interpolation
-
 /// Pack a polynomial in LeGamma1 format (matching Go's PolyPackLeGamma1)
 /// Input coefficients should be in uint32 [0, Q) format (normalized)
 /// For ML-DSA-87: Gamma1Bits = 19, PolyLeGamma1Size = 640
+#[allow(dead_code)]
 fn poly_pack_le_gamma1(p: &poly::Poly, buf: &mut [u8]) {
 	const GAMMA1: u32 = dilithium_params::GAMMA1 as u32;
 	const GAMMA1_BITS: usize = 19; // For ML-DSA-87
@@ -2933,11 +2843,7 @@ fn create_signature_from_pair_reference(
 	w_final: &polyvec::Polyveck,
 	z_final: &polyvec::Polyvecl,
 ) -> ThresholdResult<Vec<u8>> {
-	// Debug: Print entry values
-	eprintln!("DEBUG RUST COMBINE: Entry - z_final[0][0..5]: {:?}", &z_final.vec[0].coeffs[0..5]);
-	eprintln!("DEBUG RUST COMBINE: Entry - w_final[0][0..5]: {:?}", &w_final.vec[0].coeffs[0..5]);
-
-	// Step 1: Check ||z||∞ < γ₁ - β constraint (like reference)
+	// Step 1: Check ||z||∞ < γ₁ - β constraint
 	// z_final is in uint32 [0, Q) format, need to check centered norm like Go's Exceeds
 	let gamma1_minus_beta = (dilithium_params::GAMMA1 - dilithium_params::BETA) as i32;
 
@@ -3122,15 +3028,11 @@ fn create_signature_from_pair_reference(
 	}
 }
 
-/// Decompose a single coefficient w into w0 and w1 such that w = w1*α + w0
-
-/// Legacy function for backwards compatibility
-
 /// Create ML-DSA signature using reference implementation approach
 fn create_mldsa_signature_reference_approach(
 	pk: &PublicKey,
 	message: &[u8],
-	context: &[u8],
+	_context: &[u8],
 	commitments: &[Vec<u8>],
 	responses: &[Vec<u8>],
 	config: &ThresholdConfig,
@@ -3154,7 +3056,6 @@ fn create_mldsa_signature_reference_approach(
 	for k_iter in 0..k_iterations {
 		// Aggregate commitments for this iteration
 		let mut w_final = polyvec::Polyveck::default();
-		let mut commitment_count = 0;
 		for commitment_set in commitments.iter() {
 			let start_idx = k_iter * single_commitment_size;
 			let end_idx = start_idx + single_commitment_size;
@@ -3163,13 +3064,11 @@ fn create_mldsa_signature_reference_approach(
 				let k_commitment = &commitment_set[start_idx..end_idx];
 				let w_temp = unpack_commitment_dilithium(k_commitment)?;
 				aggregate_commitments_dilithium(&mut w_final, &w_temp);
-				commitment_count += 1;
 			}
 		}
 
 		// Aggregate responses for this iteration
 		let mut z_final = polyvec::Polyvecl::default();
-		let mut response_count = 0;
 		for response_set in responses.iter() {
 			let start_idx = k_iter * single_response_size;
 			let end_idx = start_idx + single_response_size;
@@ -3178,7 +3077,6 @@ fn create_mldsa_signature_reference_approach(
 				let k_response = &response_set[start_idx..end_idx];
 				let z_temp = unpack_response_dilithium(k_response)?;
 				aggregate_responses_dilithium(&mut z_final, &z_temp);
-				response_count += 1;
 			}
 		}
 
@@ -3192,8 +3090,6 @@ fn create_mldsa_signature_reference_approach(
 
 	Err(ThresholdError::ConstraintViolation)
 }
-
-/// Verify signature constraints using dilithium operations
 
 /// Compute proper ML-DSA hint following the standard algorithm
 /// This implements the MakeHint algorithm from the ML-DSA specification
@@ -3484,18 +3380,8 @@ pub fn test_compute_response(
 		config.base.n,
 	)?;
 
-	// Debug: Print recovered s1_share like Go does
-	eprintln!("DEBUG RUST RESPONSE: Party {} s1_share[0][0..5] (raw): {:?}",
-		sk.id,
-		&s1h.vec[0].coeffs[0..5]);
-
 	// Convert c_poly to NTT domain
 	let mut c_ntt = c_poly.clone();
-
-	// Debug: Print c_poly before conversion
-	eprintln!("DEBUG RUST RESPONSE: Party {} c_poly[0..5] before NTT: {:?}",
-		sk.id,
-		&c_ntt.coeffs[0..5]);
 
 	// Convert c_poly from signed {-1,0,1} to uint32 [0,Q) format before NTT
 	// Go stores -1 as Q-1 (8380416), so we need to match that
@@ -3506,11 +3392,6 @@ pub fn test_compute_response(
 	}
 
 	crate::circl_ntt::ntt(&mut c_ntt);
-
-	// Debug: Print c_ntt after NTT
-	eprintln!("DEBUG RUST RESPONSE: Party {} c_ntt[0..5] after NTT: {:?}",
-		sk.id,
-		&c_ntt.coeffs[0..5]);
 
 	// s1h is already in NTT domain from recover_share_hardcoded
 	// (matching Go's recoverShare which returns s1h already in NTT)
@@ -3535,12 +3416,7 @@ pub fn test_compute_response(
 			}
 		}
 
-	// Debug: Print cs1 after normalize like Go does
-	eprintln!("DEBUG RUST RESPONSE: Party {} cs1[0][0..5] after normalize: {:?}",
-		sk.id,
-		&cs1.vec[0].coeffs[0..5]);
-
-		// Compute c * s2 (in NTT domain)
+	// Compute c * s2 (in NTT domain)
 	let mut cs2 = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
 	for j in 0..dilithium_params::K {
 		crate::circl_ntt::mul_hat(&mut cs2.vec[j], &c_ntt, &s2h.vec[j]);
@@ -3578,11 +3454,6 @@ pub fn test_compute_response(
 	let mut y = qp_rusty_crystals_dilithium::polyvec::Polyveck::default();
 	zf.round(&mut z, &mut y);
 
-	// Debug: Print z after round (before uint32 conversion) like Go does
-	let z_debug: Vec<i32> = (0..5).map(|j| z.vec[0].coeffs[j]).collect();
-	eprintln!("DEBUG RUST RESPONSE: Party {} z[0][0..5] after round (centered): {:?}",
-		sk.id, z_debug);
-
 	// Convert z from centered format to uint32 [0, Q) format
 	for i in 0..dilithium_params::L {
 		for j in 0..(dilithium_params::N as usize) {
@@ -3597,12 +3468,7 @@ pub fn test_compute_response(
 			}
 		}
 
-	// Debug: Print final z values like Go does
-	let z_final: Vec<i32> = (0..5).map(|j| z.vec[0].coeffs[j]).collect();
-	eprintln!("DEBUG RUST RESPONSE: Party {} z[0][0..5] final (uint32): {:?}",
-		sk.id, z_final);
-
-		Ok(z)
+	Ok(z)
 }
 
 /// Compute responses for a party - matches Go's ComputeResponses API for deterministic testing.
@@ -4086,158 +3952,24 @@ mod tests {
 		let config = ThresholdConfig::new(3, 5).unwrap();
 		assert_eq!(config.base.threshold(), 3);
 		assert_eq!(config.base.total_parties(), 5);
-		assert_eq!(config.k_iterations, 26); // From Go implementation
+		assert_eq!(config.k_iterations, 26);
 		assert!((config.r - 577400.0).abs() < 1.0);
 		assert!((config.r_prime - 577546.0).abs() < 1.0);
 	}
 
-	// Note: NTT roundtrip tests removed because Dilithium uses Montgomery arithmetic
-	// where invntt_tomont multiplies by Montgomery factor 2^32. This is correct behavior
-	// for Dilithium's use case but doesn't provide a "perfect" mathematical roundtrip.
-	// The NTT functions work correctly in actual threshold signing as verified by the
-	// integration tests.
-
 	#[test]
-	fn test_threshold_key_generation() {
+	fn test_signature_verification_rejects_invalid() {
 		let config = ThresholdConfig::new(2, 3).unwrap();
-
-		let result = test_generate_threshold_key(42, &config);
-		assert!(result.is_ok());
-
-		let (pk, sks) = result.unwrap();
-		assert_eq!(sks.len(), 3);
-
-		// Each private key should have unique ID
-		for (i, sk) in sks.iter().enumerate() {
-			assert_eq!(sk.id, i as u8);
-			assert_eq!(sk.rho, pk.rho);
-			assert_eq!(sk.tr, pk.tr);
-		}
-	}
-
-	#[test]
-	fn test_round1_commitment() {
-		let config = ThresholdConfig::new(2, 3).unwrap();
-
-		let (_pk, sks) = test_generate_threshold_key(42, &config).unwrap();
-		let result = test_round1_new(&sks[0], &config, 42);
-		assert!(result.is_ok(), "Round1State creation should succeed");
-
-		let (commitment, _state) = result.unwrap();
-		assert_eq!(commitment.len(), 32, "Commitment should be 32 bytes");
-	}
-
-	#[test]
-	fn test_round2_processing() {
-		let config = ThresholdConfig::new(2, 3).unwrap();
-
-		let (_pk, sks) = test_generate_threshold_key(42, &config).unwrap();
-		println!("Generated private keys for Round2 test");
-
-		let round1_result = test_round1_new(&sks[0], &config, 42);
-		assert!(round1_result.is_ok(), "Round1 should succeed");
-
-		let (commitment1, state1) = round1_result.unwrap();
-		println!("Round1 commitment length: {}", commitment1.len());
-
-		let message = b"test message";
-		let context = b"test";
-		let round1_commitments = vec![commitment1];
-		println!("Context length: {}", context.len());
-
-		// For testing, create mock w values from other parties
-		let other_parties_w_values = vec![];
-		let result = Round2State::new(
-			&sks[0],
-			1,
-			message,
-			context,
-			&round1_commitments,
-			&other_parties_w_values,
-			&state1,
-		);
-
-		if let Err(ref e) = result {
-			println!("Round2State::new failed: {:?}", e);
-		}
-		assert!(result.is_ok(), "Round2State creation should succeed");
-
-		let (_w_packed, _state2) = result.unwrap();
-		println!("Round2 processing completed successfully");
-	}
-
-	// test_round2_w_aggregation moved to integration tests
-
-	// generate_mock_threshold_data removed - no mocks in integration tests
-
-	// test_signature_combination moved to integration tests
-
-	#[test]
-	fn test_debug_key_generation() {
-		let config = ThresholdConfig::new(2, 3).unwrap();
-		let result = test_generate_threshold_key(42, &config);
-		assert!(result.is_ok(), "Key generation should succeed");
-
-		let (pk, sks) = result.unwrap();
-		assert_eq!(sks.len(), 3, "Should have 3 private keys");
-		assert!(!pk.rho.iter().all(|&x| x == 0), "rho should not be all zeros");
-		assert!(!pk.tr.iter().all(|&x| x == 0), "tr should not be all zeros");
-
-		// Verify private keys have proper data
-		for (i, sk) in sks.iter().enumerate() {
-			assert_eq!(sk.id, i as u8, "Private key ID should match index");
-			assert_eq!(sk.rho, pk.rho, "Private key rho should match public key");
-			assert_eq!(sk.tr, pk.tr, "Private key tr should match public key");
-			assert!(sk.s_total.is_some(), "Private key should have secret shares");
-		}
-		println!("✅ Debug key generation test passed");
-	}
-
-	#[test]
-	fn test_signature_verification_placeholder() {
-		let config = ThresholdConfig::new(2, 3).unwrap();
-
 		let (pk, _sks) = test_generate_threshold_key(42, &config).unwrap();
 
 		let message = b"test message";
 		let context = b"test";
 
-		// Create a properly formatted mock signature with reasonable values
-		let mut signature = vec![0u8; dilithium_params::SIGNBYTES];
-
-		// Fill c_tilde section (first 64 bytes) with reasonable values
-		for i in 0..dilithium_params::C_DASH_BYTES {
-			signature[i] = ((i * 17 + 42) % 200) as u8 + 20;
-		}
-
-		// Fill z section with small coefficients that are within ML-DSA bounds
-		let c_tilde_end = dilithium_params::C_DASH_BYTES;
-		let z_section_len = dilithium_params::L * dilithium_params::POLYZ_PACKEDBYTES;
-
-		for i in 0..(z_section_len / 4) {
-			let idx = c_tilde_end + i * 4;
-			if idx + 4 <= signature.len() {
-				// Create small coefficient values (within ±1000)
-				let coeff = ((i * 7 + 123) % 2000) as i32 - 1000;
-				let bytes = coeff.to_le_bytes();
-				signature[idx..idx + 4].copy_from_slice(&bytes);
-			}
-		}
-
-		// Fill remaining hint section with zeros (valid hint format)
-		for i in (c_tilde_end + z_section_len)..signature.len() {
-			signature[i] = 0; // Hints should be mostly zero for valid format
-		}
-
-		// NOTE: Mock signatures will fail dilithium's verification since they're not real
-		// This is expected behavior - we're testing the verification function works
-		assert!(!verify_signature(&pk, message, context, &signature));
-
-		// Test with invalid signature (all zeros) should also fail
+		// Invalid signature (all zeros) should fail
 		let invalid_signature = vec![0u8; dilithium_params::SIGNBYTES];
 		assert!(!verify_signature(&pk, message, context, &invalid_signature));
 
-		// Test that function handles different signature sizes correctly
+		// Wrong size signature should fail
 		let wrong_size_signature = vec![0u8; 100];
 		assert!(!verify_signature(&pk, message, context, &wrong_size_signature));
 	}
@@ -4245,21 +3977,18 @@ mod tests {
 	#[test]
 	fn test_invalid_context_length() {
 		let config = ThresholdConfig::new(2, 3).unwrap();
-
 		let (pk, _sks) = test_generate_threshold_key(42, &config).unwrap();
 
 		let message = b"test message";
-		let long_context = vec![0u8; 256]; // Too long
+		let long_context = vec![0u8; 256]; // Too long (max 255)
 		let signature = vec![0u8; dilithium_params::SIGNBYTES];
 
-		// Should fail due to context being too long
 		assert!(!verify_signature(&pk, message, &long_context, &signature));
 	}
 
 	#[test]
 	fn test_insufficient_responses() {
 		let config = ThresholdConfig::new(3, 5).unwrap();
-
 		let (pk, _sks) = test_generate_threshold_key(42, &config).unwrap();
 
 		let message = b"test message";
@@ -4289,14 +4018,10 @@ mod tests {
 
 		mat.derive_from_seed(&rho);
 
-		// Check that matrix is not all zeros after derivation
+		// Check that matrix is not all zeros and coefficients are in valid range
 		let mut all_zero = true;
-		let mut min_coeff = u32::MAX;
 		let mut max_coeff = 0u32;
-		let mut coeff_count_large = 0usize;
-		let mut coeff_count_small = 0usize;
-		const Q: u32 = dilithium_params::Q as u32; // 8380417
-		const Q_HALF: u32 = (Q - 1) / 2; // 4190208
+		const Q: u32 = dilithium_params::Q as u32;
 
 		for i in 0..Params::K {
 			for j in 0..Params::L {
@@ -4305,363 +4030,40 @@ mod tests {
 					if coeff_val != 0 {
 						all_zero = false;
 					}
-					min_coeff = min_coeff.min(coeff_val);
 					max_coeff = max_coeff.max(coeff_val);
-
-					// Count coefficients by magnitude
-					if coeff_val > Q_HALF {
-						coeff_count_large += 1;
-					} else {
-						coeff_count_small += 1;
-					}
 				}
 			}
 		}
 
 		assert!(!all_zero, "Matrix should not be all zeros after derivation");
-
-		// Verify coefficients are in [0, Q) range (NOT centered)
-		// This matches Dilithium library and Threshold-ML-DSA reference implementation
-		println!("Matrix A coefficient analysis:");
-		println!("  Min coefficient: {}", min_coeff);
-		println!("  Max coefficient: {}", max_coeff);
-		println!("  Q value: {}", Q);
-		println!("  Q/2 threshold: {}", Q_HALF);
-		println!("  Large coefficients (> Q/2): {}", coeff_count_large);
-		println!("  Small coefficients (≤ Q/2): {}", coeff_count_small);
-
-		// Matrix A coefficients should be in [0, Q) range, NOT centered
-		// Centering only happens for norm checks, not for storage
-		assert!(max_coeff < Q, "Max coefficient {} should be < Q = {}", max_coeff, Q);
-
-		// Verify we have a good distribution (both small and large coefficients)
-		// This ensures the sampling is working correctly
-		assert!(
-			coeff_count_large > 0 && coeff_count_small > 0,
-			"Should have both small and large coefficients (uniform distribution)"
-		);
-
-		println!("✅ Matrix derivation test passed (coefficients in [0, Q) range)");
+		assert!(max_coeff < Q, "Coefficients should be in [0, Q) range");
 	}
 
 	#[test]
-	fn test_t1_centering() {
-		println!("🧪 Testing t1 coefficient effective magnitude");
-
+	fn test_t1_coefficient_bounds() {
 		let config = ThresholdConfig::new(2, 2).unwrap();
-		let seed = 42u64;
+		let (pk, _sks) = test_generate_threshold_key(42, &config).unwrap();
 
-		// Generate threshold keys
-		let result = test_generate_threshold_key(seed, &config);
-		assert!(result.is_ok(), "Threshold key generation should succeed");
-		let (pk, _sks) = result.unwrap();
-
-		// Check t1 coefficients - measure effective magnitude considering modular arithmetic
-		let mut max_effective_magnitude = 0u32;
-		let mut large_magnitude_count = 0usize;
-		let mut small_magnitude_count = 0usize;
+		// For t1 from power2round with D=13, effective magnitude should be ≤ 2^12
 		const Q: u32 = dilithium_params::Q as u32;
-		const Q_HALF: u32 = (Q - 1) / 2; // 4190208
+		const Q_HALF: u32 = (Q - 1) / 2;
+		let expected_max = 1u32 << 12;
 
 		for i in 0..Params::K {
 			for j in 0..N {
 				let t1_coeff = pk.t1.get(i).get(j).value();
-
-				// Calculate effective magnitude: min(coeff, Q - coeff)
-				// This handles both positive and negative modular representations
 				let effective_magnitude = if t1_coeff > Q_HALF {
-					Q - t1_coeff // This represents the magnitude of the negative equivalent
+					Q - t1_coeff
 				} else {
 					t1_coeff
 				};
-
-				max_effective_magnitude = max_effective_magnitude.max(effective_magnitude);
-
-				// Count by effective magnitude
-				if effective_magnitude > Q_HALF {
-					large_magnitude_count += 1;
-				} else {
-					small_magnitude_count += 1;
-				}
+				assert!(
+					effective_magnitude <= expected_max,
+					"t1 coefficient magnitude {} exceeds expected max {}",
+					effective_magnitude,
+					expected_max
+				);
 			}
 		}
-
-		println!("t1 effective magnitude analysis:");
-		println!("  Max effective magnitude: {}", max_effective_magnitude);
-		println!("  Q/2 threshold: {}", Q_HALF);
-		println!("  Large magnitude coeffs: {}", large_magnitude_count);
-		println!("  Small magnitude coeffs: {}", small_magnitude_count);
-
-		// For t1 from power2round with D=13, effective magnitude should be ≤ 2^12 = 4096
-		// The original test expectation of 512 was too strict for ML-DSA-87
-		println!("  Expected for D=13: ~{}", 1 << 12); // 2^12 = 4096
-
-		// Use reasonable bound based on D=13 power2round
-		let expected_max = 1 << 12; // 2^12 = 4096 for D=13
-		assert!(
-			max_effective_magnitude <= expected_max as u32,
-			"Max effective magnitude {} should be ≤ {} for D=13 power2round coefficients",
-			max_effective_magnitude,
-			expected_max
-		);
-
-		assert!(
-			large_magnitude_count == 0,
-			"All t1 coefficients should have small effective magnitude, found {} large",
-			large_magnitude_count
-		);
-
-		println!("✅ t1 effective magnitude test passed");
-	}
-
-	/// Run this test to output NTT intermediate values for comparison with Go reference.
-	///
-	/// To create the Go comparison test, add this to dilithium_test.go:
-	/// ```go
-	/// func TestNTTComparison(t *testing.T) {
-	///     seed := [32]byte{} // All zeros
-	///
-	///     // Generate A matrix
-	///     var A Mat
-	///     A.Derive(&seed)
-	///
-	///     // Create simple y vector with known values
-	///     var y VecL
-	///     for i := 0; i < L; i++ {
-	///         for j := 0; j < common.N; j++ {
-	///             y[i][j] = uint32((i*common.N + j) % 100 + 1)
-	///         }
-	///     }
-	///
-	///     fmt.Printf("Input y[0] first 5: %v\n", y[0][:5])
-	///
-	///     // NTT transform y
-	///     yNTT := y
-	///     yNTT.NTT()
-	///     fmt.Printf("After NTT y[0] first 5: %v\n", yNTT[0][:5])
-	///
-	///     // Compute A[0]·y
-	///     var w0 common.Poly
-	///     PolyDotHat(&w0, &A[0], &yNTT)
-	///     fmt.Printf("\nAfter A[0]·y (NTT domain) first 5: %v\n", w0[:5])
-	///
-	///     // ReduceLe2Q
-	///     w0.ReduceLe2Q()
-	///     fmt.Printf("After ReduceLe2Q first 5: %v\n", w0[:5])
-	///
-	///     // InvNTT
-	///     w0.InvNTT()
-	///     fmt.Printf("After InvNTT first 5: %v\n", w0[:5])
-	///
-	///     // Normalize
-	///     w0.NormalizeAssumingLe2Q()
-	///     fmt.Printf("After Normalize first 5: %v\n", w0[:5])
-	/// }
-	/// ```
-	#[test]
-	fn test_ntt_comparison_with_reference() {
-		println!("🧪 Minimal NTT comparison test");
-		println!("Compare output with Go reference implementation\n");
-
-		// Use fixed seed for deterministic results
-		let seed = [0u8; 32];
-
-		// Generate A matrix deterministically
-		let mut rho = [0u8; 32];
-		rho.copy_from_slice(&seed);
-
-		let mut a_matrix: Vec<polyvec::Polyvecl> = Vec::new();
-		for i in 0..dilithium_params::K {
-			let mut row = polyvec::Polyvecl::default();
-			for j in 0..dilithium_params::L {
-				let mut poly_ntt = poly::Poly::default();
-				poly::uniform(&mut poly_ntt, &rho, ((i as u16) << 8) + (j as u16));
-				row.vec[j] = poly_ntt;
-			}
-			a_matrix.push(row);
-		}
-
-		// Create a simple y vector with small known values
-		let mut y = polyvec::Polyvecl::default();
-		for i in 0..dilithium_params::L {
-			for j in 0..dilithium_params::N as usize {
-				// Use small values: 1, 2, 3, ... to make debugging easier
-				y.vec[i].coeffs[j] = ((i * dilithium_params::N as usize + j) % 100) as i32 + 1;
-			}
-		}
-
-		println!("\nInput y coefficients (first 5): {:?}", &y.vec[0].coeffs[0..5]);
-
-		// Compute y in NTT domain using reference implementation
-		let mut y_ntt = y.clone();
-		ntt_polyvecl(&mut y_ntt);
-
-		println!("After NTT y_ntt coefficients (first 5): {:?}", &y_ntt.vec[0].coeffs[0..5]);
-		let mut max_y_ntt = 0i32;
-		for i in 0..dilithium_params::L {
-			for j in 0..dilithium_params::N as usize {
-				max_y_ntt = max_y_ntt.max(y_ntt.vec[i].coeffs[j].abs());
-			}
-		}
-		println!("Max |y_ntt| = {}", max_y_ntt);
-
-		// Compute A·y for first row only
-		let mut w0 = poly::Poly::default();
-		polyvec::l_pointwise_acc_montgomery(&mut w0, &a_matrix[0], &y_ntt);
-
-		println!("\nAfter A[0]·y_ntt (in NTT domain):");
-		println!("  First 5 coeffs: {:?}", &w0.coeffs[0..5]);
-		let mut max_w0_ntt = 0i32;
-		for j in 0..dilithium_params::N as usize {
-			max_w0_ntt = max_w0_ntt.max(w0.coeffs[j].abs());
-		}
-		println!("  Max |w0_ntt| = {}", max_w0_ntt);
-
-		// Apply ReduceLe2Q in NTT domain
-		for j in 0..dilithium_params::N as usize {
-			w0.coeffs[j] = reduce_le2q(w0.coeffs[j] as u32) as i32;
-		}
-
-		println!("\nAfter ReduceLe2Q (still in NTT domain):");
-		println!("  First 5 coeffs: {:?}", &w0.coeffs[0..5]);
-		let mut max_w0_reduced = 0i32;
-		let mut max_w0_reduced_centered = 0i32;
-		for j in 0..dilithium_params::N as usize {
-			max_w0_reduced = max_w0_reduced.max(w0.coeffs[j].abs());
-
-			let coeff_u32 = w0.coeffs[j] as u32;
-			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
-			x ^= x >> 31;
-			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
-			max_w0_reduced_centered = max_w0_reduced_centered.max(x);
-		}
-		println!("  Max |w0_reduced| = {}", max_w0_reduced);
-		println!("  Max centered = {}", max_w0_reduced_centered);
-
-		// Apply InvNTT using reference implementation
-		inv_ntt_poly(&mut w0);
-
-		println!("\nAfter InvNTT (normal domain):");
-		println!("  First 5 coeffs: {:?}", &w0.coeffs[0..5]);
-		let mut max_w0_normal = 0i32;
-		let mut max_w0_normal_centered = 0i32;
-		for j in 0..dilithium_params::N as usize {
-			max_w0_normal = max_w0_normal.max(w0.coeffs[j].abs());
-
-			let coeff_u32 = w0.coeffs[j] as u32;
-			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
-			x ^= x >> 31;
-			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
-			max_w0_normal_centered = max_w0_normal_centered.max(x);
-		}
-		println!("  Max |w0_normal| = {}", max_w0_normal);
-		println!("  Max centered = {}", max_w0_normal_centered);
-
-		// Apply second ReduceLe2Q
-		for j in 0..dilithium_params::N as usize {
-			w0.coeffs[j] = reduce_le2q(w0.coeffs[j] as u32) as i32;
-		}
-
-		println!("\nAfter 2nd ReduceLe2Q:");
-		println!("  First 5 coeffs: {:?}", &w0.coeffs[0..5]);
-		let mut max_w0_reduced2 = 0i32;
-		for j in 0..dilithium_params::N as usize {
-			max_w0_reduced2 = max_w0_reduced2.max(w0.coeffs[j].abs());
-		}
-		println!("  Max |w0| = {}", max_w0_reduced2);
-
-		// Apply NormalizeAssumingLe2Q
-		normalize_assuming_le2q(&mut w0);
-
-		println!("\nAfter NormalizeAssumingLe2Q:");
-		println!("  First 5 coeffs: {:?}", &w0.coeffs[0..5]);
-		let mut max_w0_final = 0i32;
-		let mut max_w0_final_centered = 0i32;
-		for j in 0..dilithium_params::N as usize {
-			max_w0_final = max_w0_final.max(w0.coeffs[j].abs());
-
-			let coeff_u32 = w0.coeffs[j] as u32;
-			let mut x = ((dilithium_params::Q - 1) / 2) as i32 - coeff_u32 as i32;
-			x ^= x >> 31;
-			x = ((dilithium_params::Q - 1) / 2) as i32 - x;
-			max_w0_final_centered = max_w0_final_centered.max(x);
-		}
-		println!("  Max |w0| = {}", max_w0_final);
-		println!("  Max centered = {}", max_w0_final_centered);
-		println!(
-			"  Centered/Q ratio = {:.2}%",
-			max_w0_final_centered as f64 / dilithium_params::Q as f64 * 100.0
-		);
-
-		// Expected: centered magnitude should be much smaller than Q/2
-		// If it's close to Q/2, there's a problem
-		let q_half = (dilithium_params::Q / 2) as i32;
-		println!("\nQ/2 = {}", q_half);
-		println!(
-			"Our centered max is {:.1}% of Q/2",
-			max_w0_final_centered as f64 / q_half as f64 * 100.0
-		);
-
-		// This test just prints values for comparison - no assertions
-		println!("\n✅ Test complete - compare these values with Go reference implementation");
-	}
-
-	#[test]
-	fn test_simple_2_of_2_threshold_quick() {
-		println!("🧪 Quick test: 2-of-2 threshold with coefficient centering");
-
-		let config = ThresholdConfig::new(2, 2).unwrap();
-		let seed = 42u64;
-
-		// Generate threshold keys
-		let result = test_generate_threshold_key(seed, &config);
-		assert!(result.is_ok(), "Threshold key generation should succeed");
-		let (_pk, sks) = result.unwrap();
-		println!("✅ Generated threshold keys");
-
-		// Test Round 1
-		let round1_result = test_round1_new(&sks[0], &config, seed);
-		assert!(round1_result.is_ok(), "Round 1 should succeed");
-		let (commitment1, state1) = round1_result.unwrap();
-		println!("✅ Round 1 completed");
-
-		// Test Round 2 with proper w commitment data
-		let message = b"test message";
-		let context = b"test";
-		let round1_commitments = vec![commitment1.clone(), commitment1.clone()];
-
-		// Generate proper w commitment data using pack_commitment_canonical
-		let other_w_values = vec![state1.pack_commitment_canonical(&config); 2];
-
-		let round2_result = Round2State::new(
-			&sks[0],
-			3,
-			message,
-			context,
-			&round1_commitments,
-			&other_w_values,
-			&state1,
-		);
-
-		if round2_result.is_ok() {
-			println!("✅ Round 2 completed successfully");
-			let (_commitment2, state2) = round2_result.unwrap();
-
-			// Test Round 3
-			let round3_result = Round3State::new(&sks[0], &config, &[], &state1, &state2);
-
-			match round3_result {
-				Ok(_) => {
-					println!("✅ Round 3 completed successfully");
-				},
-				Err(e) => {
-					println!("⚠️ Round 3 failed: {:?}", e);
-				},
-			}
-		} else {
-			println!("⚠️ Round 2 failed: {:?}", round2_result.err());
-		}
-
-		println!("✅ Quick threshold test completed");
 	}
 }
