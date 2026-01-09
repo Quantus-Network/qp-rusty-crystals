@@ -133,6 +133,45 @@ impl ThresholdParams {
 		Ok(Self { t, n, k: n, canonical_k })
 	}
 
+	/// Create threshold parameters for a signing session with specific active parties
+	pub fn for_signing(t: u8, n: u8, active_parties: u8) -> ThresholdResult<Self> {
+		validate_threshold_params(t, n)?;
+
+		if active_parties < t {
+			return Err(crate::common::ThresholdError::InsufficientParties {
+				provided: active_parties as usize,
+				required: t,
+			});
+		}
+
+		if active_parties > n {
+			return Err(crate::common::ThresholdError::InvalidParameters {
+				threshold: t,
+				parties: n,
+				reason: "active parties cannot exceed total parties",
+			});
+		}
+
+		// Get the canonical K parameter
+		let canonical_k = Self::get_canonical_k(t, n)?;
+		Ok(Self { t, n, k: active_parties, canonical_k })
+	}
+
+	/// Get response size for this threshold configuration
+	pub fn response_size<P: MlDsaParams>(&self) -> usize {
+		self.canonical_k as usize * P::SINGLE_RESPONSE_SIZE
+	}
+
+	/// Get commitment size for this threshold configuration
+	pub fn commitment_size<P: MlDsaParams>(&self) -> usize {
+		self.canonical_k as usize * P::SINGLE_COMMITMENT_SIZE
+	}
+
+	/// Check if enough parties are participating for threshold
+	pub fn has_threshold(&self, num_parties: usize) -> bool {
+		num_parties >= self.t as usize
+	}
+
 	/// Get the threshold value
 	pub fn threshold(&self) -> u8 {
 		self.t
@@ -141,6 +180,11 @@ impl ThresholdParams {
 	/// Get the total number of parties
 	pub fn total_parties(&self) -> u8 {
 		self.n
+	}
+
+	/// Get the number of active parties
+	pub fn active_parties(&self) -> u8 {
+		self.k
 	}
 
 	/// Get the canonical K parameter (number of iterations per party)
