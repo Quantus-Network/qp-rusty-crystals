@@ -171,6 +171,6 @@ Licensed under the same terms as the parent qp-rusty-crystals project.
 
 ## References
 
-- "Efficient Threshold ML-DSA up to 6 parties" research paper
-- FIPS 204: ML-DSA Standard
-- CIRCL cryptographic library (Go reference implementation)
+- ["Efficient Threshold ML-DSA up to 6 parties" research paper](https://mithril-th.org/)
+- [FIPS 204: ML-DSA Standard](https://csrc.nist.gov/pubs/fips/204/final)
+- [CIRCL cryptographic library](https://pkg.go.dev/github.com/cloudflare/circl)

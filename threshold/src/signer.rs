@@ -45,8 +45,9 @@ use crate::config::ThresholdConfig;
 use crate::error::{ThresholdError, ThresholdResult};
 use crate::keys::{PrivateKeyShare, PublicKey};
 use crate::protocol::signing::{
-    combine_signature, generate_round1, generate_round3_response, pack_responses,
-    pack_round1_commitment, process_round2, unpack_responses, Round1Data, Round2Data,
+    aggregate_commitments_dilithium, combine_signature, generate_round1, generate_round3_response,
+    pack_responses, pack_round1_commitment, process_round2, unpack_commitment_dilithium,
+    unpack_responses, Round1Data, Round2Data,
 };
 
 /// A threshold signer for a single party.
@@ -427,10 +428,10 @@ impl ThresholdSigner {
                     let end = start + single_commitment_size;
 
                     if end <= r2.commitment_data.len() && k_idx < round2_data.w_aggregated.len() {
-                        if let Ok(w_other) = crate::ml_dsa_87::unpack_commitment_dilithium(
+                        if let Ok(w_other) = unpack_commitment_dilithium(
                             &r2.commitment_data[start..end],
                         ) {
-                            crate::ml_dsa_87::aggregate_commitments_dilithium(
+                            aggregate_commitments_dilithium(
                                 &mut round2_data.w_aggregated[k_idx],
                                 &w_other,
                             );

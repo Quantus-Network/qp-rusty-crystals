@@ -180,6 +180,7 @@ impl PrivateKeyShare {
     }
 
     /// Get the private key seed (for internal use).
+    #[allow(dead_code)]
     pub(crate) fn key(&self) -> &[u8; 32] {
         &self.key
     }

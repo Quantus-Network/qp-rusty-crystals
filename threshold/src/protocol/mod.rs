@@ -5,4 +5,5 @@
 //! part of the public API.
 
 pub(crate) mod primitives;
+pub(crate) mod secret_sharing;
 pub(crate) mod signing;

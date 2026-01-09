@@ -124,15 +124,8 @@ mod keygen;
 // Internal protocol implementation
 pub(crate) mod protocol;
 
-// Keep these modules for internal use
 // circl_ntt is public for cross-language NTT testing with Go reference
 pub mod circl_ntt;
-pub(crate) mod field;
-
-// Internal implementation modules (not part of public API)
-pub(crate) mod ml_dsa_87;
-pub(crate) mod common;
-pub(crate) mod params;
 
 // ============================================================================
 // Public API
