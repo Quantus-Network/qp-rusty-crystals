@@ -892,17 +892,19 @@ pub mod secret_sharing {
 
 			// Add to total secret (no reduction during accumulation, like Go)
 			// Add both normal and NTT forms
+			// Use wrapping_add to handle overflow for large configurations (4-of-6, 5-of-6, etc.)
+			// The normalization step later will bring values back to proper range
 			for i in 0..dilithium_params::L {
 				for j in 0..(dilithium_params::N as usize) {
-					s1_total.vec[i].coeffs[j] += s1_share.vec[i].coeffs[j];
-					s1h_total.vec[i].coeffs[j] += s1h_share.vec[i].coeffs[j];
+					s1_total.vec[i].coeffs[j] = s1_total.vec[i].coeffs[j].wrapping_add(s1_share.vec[i].coeffs[j]);
+					s1h_total.vec[i].coeffs[j] = s1h_total.vec[i].coeffs[j].wrapping_add(s1h_share.vec[i].coeffs[j]);
 				}
 			}
 
 			for i in 0..dilithium_params::K {
 				for j in 0..(dilithium_params::N as usize) {
-					s2_total.vec[i].coeffs[j] += s2_share.vec[i].coeffs[j];
-					s2h_total.vec[i].coeffs[j] += s2h_share.vec[i].coeffs[j];
+					s2_total.vec[i].coeffs[j] = s2_total.vec[i].coeffs[j].wrapping_add(s2_share.vec[i].coeffs[j]);
+					s2h_total.vec[i].coeffs[j] = s2h_total.vec[i].coeffs[j].wrapping_add(s2h_share.vec[i].coeffs[j]);
 				}
 			}
 
@@ -1090,15 +1092,16 @@ pub mod secret_sharing {
 				}
 
 				// Add in NTT domain (pointwise addition)
+				// Use wrapping_add to handle overflow for large configurations
 				for i in 0..dilithium_params::L {
 					for j in 0..(dilithium_params::N as usize) {
-						s1_combined.vec[i].coeffs[j] += s1_ntt.vec[i].coeffs[j];
+						s1_combined.vec[i].coeffs[j] = s1_combined.vec[i].coeffs[j].wrapping_add(s1_ntt.vec[i].coeffs[j]);
 					}
 				}
 
 				for i in 0..dilithium_params::K {
 					for j in 0..(dilithium_params::N as usize) {
-						s2_combined.vec[i].coeffs[j] += s2_ntt.vec[i].coeffs[j];
+						s2_combined.vec[i].coeffs[j] = s2_combined.vec[i].coeffs[j].wrapping_add(s2_ntt.vec[i].coeffs[j]);
 					}
 				}
 			}
