@@ -113,8 +113,8 @@
 // Public API module for ML-DSA-87 security level
 pub mod ml_dsa_87;
 
-// Internal modules
-mod circl_ntt;
+// Internal modules (circl_ntt made public for cross-language NTT testing)
+pub mod circl_ntt;
 mod common;
 pub mod field;
 pub mod params;

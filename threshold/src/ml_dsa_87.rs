@@ -86,6 +86,55 @@ pub use crate::params::{common::*, MlDsa87Params as Params};
 // Re-export SEED_SIZE for test compatibility
 pub use crate::params::common::SEED_SIZE;
 
+// Constants for decompose (ML-DSA-87)
+const ALPHA: u32 = 2 * 261888; // 2 * Gamma2 = 523776
+const Q_U32: u32 = 8380417;
+
+/// Go-compatible decompose function.
+/// Splits 0 ≤ a < q into a₀ and a₁ with a = a₁*α + a₀ with -α/2 < a₀ ≤ α/2,
+/// except for when we would have a₁ = (q-1)/α in which case a₁=0 is taken
+/// and -α/2 ≤ a₀ < 0.  Returns a₀ + q.  Note 0 ≤ a₁ < (q-1)/α.
+/// Recall α = 2γ₂.
+///
+/// This exactly matches the Go implementation in thmldsa87/internal/rounding.go
+pub fn decompose_go(a: u32) -> (u32, u32) {
+    // a₁ = ⌈a / 128⌉
+    let mut a1 = (a + 127) >> 7;
+
+    // For Alpha == 523776 (ML-DSA-87):
+    // 1025/2²² is close enough to 1/4092 so that a₁
+    // becomes a/α rounded down.
+    a1 = ((a1 as u64 * 1025 + (1 << 21)) >> 22) as u32;
+
+    // For the corner-case a₁ = (q-1)/α = 16, we have to set a₁=0.
+    a1 &= 15;
+
+    let mut a0_plus_q = a.wrapping_sub(a1.wrapping_mul(ALPHA));
+
+    // In the corner-case, when we set a₁=0, we will incorrectly
+    // have a₀ > (q-1)/2 and we'll need to subtract q.  As we
+    // return a₀ + q, that comes down to adding q if a₀ < (q-1)/2.
+    let threshold = (Q_U32 - 1) / 2;
+    // Use i32 arithmetic to handle the comparison correctly
+    let cond = ((a0_plus_q as i32).wrapping_sub(threshold as i32)) >> 31; // -1 if a0_plus_q < threshold, 0 otherwise
+    a0_plus_q = a0_plus_q.wrapping_add((cond as u32) & Q_U32);
+
+    (a0_plus_q, a1)
+}
+
+/// Decompose a VecK using Go-compatible decompose.
+/// After this call, v1 contains w1 values and v0 contains w0+Q values.
+pub fn veck_decompose_go(v: &polyvec::Polyveck, v0: &mut polyvec::Polyveck, v1: &mut polyvec::Polyveck) {
+    for i in 0..dilithium_params::K {
+        for j in 0..dilithium_params::N as usize {
+            let a = v.vec[i].coeffs[j] as u32;
+            let (a0_plus_q, a1) = decompose_go(a);
+            v0.vec[i].coeffs[j] = a0_plus_q as i32;
+            v1.vec[i].coeffs[j] = a1 as i32;
+        }
+    }
+}
+
 /// Reduces coefficient to be ≤ 2Q following reference implementation
 
 /// Reduces x to a value ≤ 2Q following ML-DSA reference implementation
@@ -943,9 +992,38 @@ pub mod secret_sharing {
 		parties: u8,
 	) -> ThresholdResult<(polyvec::Polyvecl, polyvec::Polyveck)> {
 		// Base case: when threshold is 1 or equals total parties
+		// In this case, each party uses their single share directly
+		// But we still need to convert to NTT domain like Go does
 		if threshold == 1 || threshold == parties {
-			for (_, share) in shares {
-				return Ok((share.s1_share.clone(), share.s2_share.clone()));
+			// For t=n case, use the share that corresponds to all active parties
+			// The share key is a bitmask of which parties are involved
+			// For 2-of-2 with parties 0,1 active, the key is 0b11 = 3
+			let active_key: u8 = active_parties.iter().fold(0u8, |acc, &p| acc | (1 << p));
+
+			// Try to find the share with the active key first
+			let share = shares.get(&active_key).or_else(|| {
+				// Fallback: use any available share (like Go does with map iteration)
+				shares.values().next()
+			});
+
+			if let Some(share) = share {
+				// Convert to NTT domain to match Go's recoverShare which returns s1h, s2h
+				let mut s1_ntt = share.s1_share.clone();
+				let mut s2_ntt = share.s2_share.clone();
+
+				for i in 0..dilithium_params::L {
+					crate::circl_ntt::ntt(&mut s1_ntt.vec[i]);
+				}
+				for i in 0..dilithium_params::K {
+					crate::circl_ntt::ntt(&mut s2_ntt.vec[i]);
+				}
+
+				// NOTE: Go's recoverShare does NOT normalize in the base case (T==N).
+				// It returns the pre-computed NTT values as-is, which may have
+				// coefficients > Q. Normalization only happens in the general case
+				// after combining multiple shares.
+
+				return Ok((s1_ntt, s2_ntt));
 			}
 		}
 
@@ -1407,6 +1485,11 @@ impl FVec {
 		Self { data: self.data.clone() }
 	}
 
+	/// Get first n samples from this FVec (for testing)
+	pub fn get_samples(&self, n: usize) -> Vec<f64> {
+		self.data.iter().take(n).copied().collect()
+	}
+
 	/// Create FVec from polynomial vectors
 	pub fn from_polyvecs(s1: &polyvec::Polyvecl, s2: &polyvec::Polyveck) -> Self {
 		let size = dilithium_params::N as usize * (dilithium_params::L + dilithium_params::K);
@@ -1850,9 +1933,21 @@ impl Round1State {
 			}
 		}
 
-		// Pack w for commitment hash (use first w for now)
-		let mut w_packed = vec![0u8; dilithium_params::K * (dilithium_params::N as usize) * 4];
-		Self::pack_w_dilithium(&w, &mut w_packed);
+		// Pack w for commitment hash using 23-bit packing (matching Go)
+		// Size = K_iterations * K * PolyQSize = k * 8 * 736 bytes
+		const POLY_Q_SIZE: usize = (256 * 23) / 8; // 736 bytes
+		let single_commitment_size = dilithium_params::K * POLY_Q_SIZE; // 8 * 736 = 5888
+		let w_packed_size = k * single_commitment_size;
+		let mut w_packed = vec![0u8; w_packed_size];
+
+		// Pack all K iterations of w
+		let mut offset = 0;
+		for k_idx in 0..k {
+			if k_idx < w_commitments.len() && offset + single_commitment_size <= w_packed.len() {
+				Self::pack_w_dilithium(&w_commitments[k_idx], &mut w_packed[offset..offset + single_commitment_size]);
+				offset += single_commitment_size;
+			}
+		}
 
 		// Generate commitment hash
 		let mut commitment = vec![0u8; 32];
@@ -2093,9 +2188,21 @@ impl Round1State {
 		let nonce = nonce_base * config.k_iterations;
 		fvec.sample_hyperball(config.r_prime, config.nu, rho_prime, nonce);
 
-		// Pack w for commitment hash (use first w for now)
-		let mut w_packed = vec![0u8; dilithium_params::K * (dilithium_params::N as usize) * 4];
-		Self::pack_w_dilithium(&w, &mut w_packed);
+		// Pack w for commitment hash using 23-bit packing (matching Go)
+		// Size = K_iterations * K * PolyQSize = k * 8 * 736 bytes
+		const POLY_Q_SIZE: usize = (256 * 23) / 8; // 736 bytes
+		let single_commitment_size = dilithium_params::K * POLY_Q_SIZE; // 8 * 736 = 5888
+		let w_packed_size = (config.k_iterations as usize) * single_commitment_size;
+		let mut w_packed = vec![0u8; w_packed_size];
+
+		// Pack all K iterations of w
+		let mut offset = 0;
+		for k_idx in 0..config.k_iterations as usize {
+			if k_idx < w_commitments.len() && offset + single_commitment_size <= w_packed.len() {
+				Self::pack_w_dilithium(&w_commitments[k_idx], &mut w_packed[offset..offset + single_commitment_size]);
+				offset += single_commitment_size;
+			}
+		}
 
 		// Generate commitment hash
 		let mut commitment = vec![0u8; 32];
@@ -2130,30 +2237,77 @@ impl Round1State {
 		Self::new_with_seed(sk, config, seed)
 	}
 
-	/// Pack polynomial vector w into bytes using dilithium format
+	/// Pack polynomial vector w into bytes using 23-bit packing (matching Go's PackW/PolyPackW)
+	/// Each coefficient uses 23 bits, packed into PolyQSize = 256 * 23 / 8 = 736 bytes per polynomial
 	pub fn pack_w_dilithium(w: &polyvec::Polyveck, buf: &mut [u8]) {
+		const POLY_Q_SIZE: usize = (256 * 23) / 8; // 736 bytes per polynomial
+		let mut offset = 0;
+
 		for i in 0..dilithium_params::K {
-			for j in 0..(dilithium_params::N as usize) {
-				let idx = (i * (dilithium_params::N as usize) + j) * 4;
-				if idx + 4 <= buf.len() {
-					let bytes = w.vec[i].coeffs[j].to_le_bytes();
-					buf[idx..idx + 4].copy_from_slice(&bytes);
+			if offset + POLY_Q_SIZE > buf.len() {
+				break;
+			}
+			// Pack polynomial using 23-bit coefficients (same as poly_pack_w)
+			let poly = &w.vec[i];
+			let poly_buf = &mut buf[offset..offset + POLY_Q_SIZE];
+
+			let mut v: u32 = 0;
+			let mut j: u32 = 0;
+			let mut k: usize = 0;
+
+			for coeff_idx in 0..dilithium_params::N as usize {
+				// Coefficients should be in [0, Q) range from normalization
+				let coeff = (poly.coeffs[coeff_idx] as u32) & ((1 << 23) - 1);
+				v |= coeff << j;
+				j += 23;
+
+				while j >= 8 {
+					poly_buf[k] = v as u8;
+					v >>= 8;
+					j -= 8;
+					k += 1;
 				}
 			}
+
+			// Pack remaining bits
+			if j > 0 && k < poly_buf.len() {
+				poly_buf[k] = v as u8;
+			}
+
+			offset += POLY_Q_SIZE;
 		}
 	}
 
-	/// Unpack polynomial vector w from bytes (dilithium format)
+	/// Unpack polynomial vector w from bytes (23-bit packing, matching Go's UnpackW)
 	fn unpack_w_dilithium(buf: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
+		const POLY_Q_SIZE: usize = (256 * 23) / 8; // 736 bytes per polynomial
 		let mut w = polyvec::Polyveck::default();
+		let mut offset = 0;
+
 		for i in 0..dilithium_params::K {
-			for j in 0..(dilithium_params::N as usize) {
-				let idx = (i * (dilithium_params::N as usize) + j) * 4;
-				if idx + 4 <= buf.len() {
-					let bytes = [buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]];
-					w.vec[i].coeffs[j] = i32::from_le_bytes(bytes);
+			if offset + POLY_Q_SIZE > buf.len() {
+				break;
+			}
+			let poly_buf = &buf[offset..offset + POLY_Q_SIZE];
+
+			// Unpack 23-bit coefficients
+			for coeff_idx in 0..dilithium_params::N as usize {
+				let bit_offset = coeff_idx * 23;
+				let byte_offset = bit_offset / 8;
+				let bit_shift = bit_offset % 8;
+
+				if byte_offset + 3 <= poly_buf.len() {
+					let mut val = (poly_buf[byte_offset] as u32)
+						| ((poly_buf[byte_offset + 1] as u32) << 8)
+						| ((poly_buf[byte_offset + 2] as u32) << 16);
+					if byte_offset + 3 < poly_buf.len() {
+						val |= (poly_buf[byte_offset + 3] as u32) << 24;
+					}
+					w.vec[i].coeffs[coeff_idx] = ((val >> bit_shift) & 0x7FFFFF) as i32;
 				}
 			}
+
+			offset += POLY_Q_SIZE;
 		}
 		Ok(w)
 	}
@@ -2274,7 +2428,7 @@ impl Round2State {
 		}
 
 		// Compute message hash μ
-		let mu = Self::compute_mu(sk, message, context);
+		let mu = Self::compute_mu_internal(sk, message, context);
 
 		// Aggregate w values from all parties (including our own) for all K iterations
 		// Use w_commitments if available (populated in Round 1), otherwise fallback to single w
@@ -2357,23 +2511,29 @@ impl Round2State {
 	}
 
 	/// Compute message hash μ using ML-DSA specification
-	fn compute_mu(sk: &PrivateKey, message: &[u8], context: &[u8]) -> [u8; 64] {
-		let mut input = Vec::new();
-		input.extend_from_slice(&sk.tr);
-		input.push(0u8); // Domain separator for pure signatures
-		input.push(context.len() as u8);
-		if !context.is_empty() {
-			input.extend_from_slice(context);
-		}
-		input.extend_from_slice(message);
-
-		let mut mu = [0u8; 64];
-		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, &input, input.len());
-		fips202::shake256_finalize(&mut state);
-		fips202::shake256_squeeze(&mut mu, 64, &mut state);
-		mu
+	fn compute_mu_internal(sk: &PrivateKey, message: &[u8], context: &[u8]) -> [u8; 64] {
+		compute_mu(&sk.tr, message, context)
 	}
+}
+
+/// Compute message hash μ using ML-DSA specification
+/// μ = SHAKE256(tr || 0x00 || ctx_len || ctx || msg)
+pub fn compute_mu(tr: &[u8; 64], message: &[u8], context: &[u8]) -> [u8; 64] {
+	let mut input = Vec::new();
+	input.extend_from_slice(tr);
+	input.push(0u8); // Domain separator for pure signatures
+	input.push(context.len() as u8);
+	if !context.is_empty() {
+		input.extend_from_slice(context);
+	}
+	input.extend_from_slice(message);
+
+	let mut mu = [0u8; 64];
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, &input, input.len());
+	fips202::shake256_finalize(&mut state);
+	fips202::shake256_squeeze(&mut mu, 64, &mut state);
+	mu
 }
 
 /// Round 3 state for generating signature responses
@@ -2533,8 +2693,9 @@ impl Round3State {
 					poly::caddq(&mut w1.vec[j]);
 				}
 
-				// Use k_decompose which properly handles the assignment order
-				polyvec::k_decompose(&mut w1, &mut w0);
+				// Use Go-compatible decompose to match reference implementation exactly
+				let w_input = w1.clone();
+				veck_decompose_go(&w_input, &mut w0, &mut w1);
 
 			// Step 2: Generate challenge c~ = H(μ || w1)
 			let mut w1_packed =
@@ -3295,8 +3456,9 @@ fn create_signature_from_pair_reference(
 		poly::caddq(&mut w1.vec[i]);
 	}
 
-	// Use k_decompose which properly handles the assignment order
-	polyvec::k_decompose(&mut w1, &mut w0);
+	// Use Go-compatible decompose to match reference implementation exactly
+	let w_input = w1.clone();
+	veck_decompose_go(&w_input, &mut w0, &mut w1);
 
 	// Step 2: Compute challenge c~ = H(μ || w1) like reference
 	let mut w1_packed = vec![0u8; dilithium_params::K * dilithium_params::POLYW1_PACKEDBYTES];
@@ -3929,6 +4091,431 @@ pub fn test_compute_response(
 		sk.id, z_final);
 
 		Ok(z)
+}
+
+/// Compute responses for a party - matches Go's ComputeResponses API for deterministic testing.
+///
+/// This function takes the same inputs as Go's ComputeResponses:
+/// - `sk`: Private key for this party
+/// - `act`: Bitmask of active parties (e.g., 0b11 for parties 0 and 1)
+/// - `mu`: The 64-byte message hash (H(tr || M'))
+/// - `wfinals`: Aggregated w values, one per K iteration
+/// - `stws`: Hyperball samples from Round1, one per K iteration
+/// - `config`: Threshold configuration
+///
+/// Returns a vector of response vectors (one VecL per K iteration).
+/// Empty vectors indicate rejection sampling failure for that iteration.
+pub fn compute_responses_deterministic(
+	sk: &PrivateKey,
+	act: u8,
+	mu: &[u8; 64],
+	wfinals: &[polyvec::Polyveck],
+	stws: &[FVec],
+	config: &ThresholdConfig,
+) -> Vec<polyvec::Polyvecl> {
+	// Check that the party is in the active set
+	if act & (1 << sk.id) == 0 {
+		panic!("Specified user is not part of the signing set");
+	}
+
+	// Build the active parties list from the bitmap
+	let mut active_party_list = Vec::new();
+	for i in 0..config.base.n {
+		if act & (1 << i) != 0 {
+			active_party_list.push(i);
+		}
+	}
+
+	// Recover the partial secret of the current user corresponding to the signer set
+	let (s1h, s2h) = secret_sharing::recover_share_hardcoded(
+		&sk.shares,
+		sk.id,
+		&active_party_list,
+		config.base.t,
+		config.base.n,
+	)
+	.expect("Failed to recover share");
+
+	let k = config.base.canonical_k() as usize;
+	let mut zs: Vec<polyvec::Polyvecl> = vec![polyvec::Polyvecl::default(); k];
+
+	// For each commitment iteration
+	for i in 0..k {
+		if i >= wfinals.len() || i >= stws.len() {
+			continue;
+		}
+
+		// Decompose w into w0 and w1
+		let mut w0 = polyvec::Polyveck::default();
+		let mut w1 = polyvec::Polyveck::default();
+		veck_decompose_go(&wfinals[i], &mut w0, &mut w1);
+
+		// c~ = H(μ || w1)
+		let mut w1_packed = vec![0u8; dilithium_params::K * dilithium_params::POLYW1_PACKEDBYTES];
+		polyvec::k_pack_w1(&mut w1_packed, &w1);
+
+		let mut c_bytes = [0u8; dilithium_params::C_DASH_BYTES];
+		let mut keccak_state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut keccak_state, mu, 64);
+		fips202::shake256_absorb(&mut keccak_state, &w1_packed, w1_packed.len());
+		fips202::shake256_finalize(&mut keccak_state);
+		fips202::shake256_squeeze(&mut c_bytes, dilithium_params::C_DASH_BYTES, &mut keccak_state);
+
+		// Derive challenge polynomial
+		let mut ch = poly::Poly::default();
+		poly::challenge(&mut ch, &c_bytes);
+
+		// Convert to NTT domain
+		crate::circl_ntt::ntt(&mut ch);
+
+		// Compute c·s1
+		let mut z = polyvec::Polyvecl::default();
+		for j in 0..dilithium_params::L {
+			crate::circl_ntt::mul_hat(&mut z.vec[j], &ch, &s1h.vec[j]);
+			crate::circl_ntt::inv_ntt(&mut z.vec[j]);
+		}
+		// Normalize z
+		for j in 0..dilithium_params::L {
+			for coeff in z.vec[j].coeffs.iter_mut() {
+				let c = *coeff;
+				let c_u32 = if c < 0 { (c + dilithium_params::Q as i32) as u32 } else { c as u32 };
+				*coeff = mod_q(c_u32) as i32;
+			}
+		}
+
+		// Compute c·s2
+		let mut y = polyvec::Polyveck::default();
+		for j in 0..dilithium_params::K {
+			crate::circl_ntt::mul_hat(&mut y.vec[j], &ch, &s2h.vec[j]);
+			crate::circl_ntt::inv_ntt(&mut y.vec[j]);
+		}
+		// Normalize y
+		for j in 0..dilithium_params::K {
+			for coeff in y.vec[j].coeffs.iter_mut() {
+				let c = *coeff;
+				let c_u32 = if c < 0 { (c + dilithium_params::Q as i32) as u32 } else { c as u32 };
+				*coeff = mod_q(c_u32) as i32;
+			}
+		}
+
+		// Convert to FVec and add hyperball sample
+		let mut zf = FVec::from_polyvecs(&z, &y);
+		zf.add(&stws[i]);
+
+		// Rejection sampling check
+		if zf.excess(config.r, config.nu) {
+			// Skip this iteration (leave zs[i] as default/zero)
+			continue;
+		}
+
+		// Round back to integers
+		let mut z_out = polyvec::Polyvecl::default();
+		let mut y_out = polyvec::Polyveck::default();
+		zf.round(&mut z_out, &mut y_out);
+
+		// Convert from centered format to [0, Q) format like Go
+		for j in 0..dilithium_params::L {
+			for coeff in z_out.vec[j].coeffs.iter_mut() {
+				if *coeff < 0 {
+					*coeff += dilithium_params::Q as i32;
+				}
+			}
+		}
+
+		zs[i] = z_out;
+	}
+
+	zs
+}
+
+/// Aggregate responses from multiple parties - matches Go's AggregateResponses API.
+///
+/// Adds `zs` into `zfinals` element-wise.
+pub fn aggregate_responses(zfinals: &mut [polyvec::Polyvecl], zs: &[polyvec::Polyvecl]) {
+	for i in 0..zs.len().min(zfinals.len()) {
+		for j in 0..dilithium_params::L {
+			for k in 0..dilithium_params::N as usize {
+				zfinals[i].vec[j].coeffs[k] += zs[i].vec[j].coeffs[k];
+			}
+		}
+		// Normalize
+		for j in 0..dilithium_params::L {
+			for coeff in zfinals[i].vec[j].coeffs.iter_mut() {
+				let c = *coeff;
+				let c_u32 = if c < 0 { (c + dilithium_params::Q as i32) as u32 } else { c as u32 };
+				*coeff = mod_q(c_u32) as i32;
+			}
+		}
+	}
+}
+
+/// Pack responses into bytes - matches Go's PackResponses API.
+///
+/// Each VecL is packed using PackLeGamma1 format.
+pub fn pack_responses(zs: &[polyvec::Polyvecl]) -> Vec<u8> {
+	let single_response_size = dilithium_params::L * dilithium_params::POLYZ_PACKEDBYTES;
+	let mut buf = vec![0u8; zs.len() * single_response_size];
+
+	for (i, z) in zs.iter().enumerate() {
+		let offset = i * single_response_size;
+		// Convert to centered format for packing
+		let mut z_centered = z.clone();
+		for j in 0..dilithium_params::L {
+			for coeff in z_centered.vec[j].coeffs.iter_mut() {
+				// Convert from [0, Q) to centered [-Q/2, Q/2]
+				if *coeff > (dilithium_params::Q as i32) / 2 {
+					*coeff -= dilithium_params::Q as i32;
+				}
+			}
+		}
+		// Pack each polynomial individually
+		for j in 0..dilithium_params::L {
+			let poly_offset = offset + j * dilithium_params::POLYZ_PACKEDBYTES;
+			poly::z_pack(
+				&mut buf[poly_offset..poly_offset + dilithium_params::POLYZ_PACKEDBYTES],
+				&z_centered.vec[j],
+			);
+		}
+	}
+
+	buf
+}
+
+/// Pack w values to buffer - matches Go's PackWToBuf API.
+///
+/// Packs each VecK using 23-bit coefficients.
+pub fn pack_w_to_buf(wfinals: &[polyvec::Polyveck]) -> Vec<u8> {
+	let poly_w_size = (dilithium_params::N as usize * 23 + 7) / 8; // 736 bytes per poly
+	let single_w_size = dilithium_params::K * poly_w_size;
+	let mut buf = vec![0u8; wfinals.len() * single_w_size];
+
+	for (i, w) in wfinals.iter().enumerate() {
+		let offset = i * single_w_size;
+		for j in 0..dilithium_params::K {
+			let poly_offset = offset + j * poly_w_size;
+			poly_pack_w(&w.vec[j], &mut buf[poly_offset..poly_offset + poly_w_size]);
+		}
+	}
+
+	buf
+}
+
+/// Combine aggregated commitments and responses into a signature - matches Go's CombineFromParts API.
+///
+/// This function takes:
+/// - `pk`: Public key
+/// - `message`: Message to sign
+/// - `context`: Context bytes (can be empty)
+/// - `wfinals`: Aggregated w values (one per K iteration)
+/// - `zfinals`: Aggregated z values (one per K iteration)
+/// - `config`: Threshold configuration
+///
+/// Returns (signature, success) tuple.
+pub fn combine_from_parts(
+	pk: &PublicKey,
+	message: &[u8],
+	context: &[u8],
+	wfinals: &[polyvec::Polyveck],
+	zfinals: &[polyvec::Polyvecl],
+	config: &ThresholdConfig,
+) -> (Vec<u8>, bool) {
+	// Compute μ = H(tr || 0 || len(ctx) || ctx || msg) like Go's Combine
+	let mut mu = [0u8; 64];
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, &pk.tr, 64);
+	fips202::shake256_absorb(&mut state, &[0u8], 1); // Domain separator
+	fips202::shake256_absorb(&mut state, &[context.len() as u8], 1);
+	if !context.is_empty() {
+		fips202::shake256_absorb(&mut state, context, context.len());
+	}
+	fips202::shake256_absorb(&mut state, message, message.len());
+	fips202::shake256_finalize(&mut state);
+	fips202::shake256_squeeze(&mut mu, 64, &mut state);
+
+	let k_iterations = config.base.canonical_k() as usize;
+
+	// For each commitment iteration
+	for i in 0..k_iterations.min(wfinals.len()).min(zfinals.len()) {
+		// Decompose w into w0 and w1
+		let mut w0 = polyvec::Polyveck::default();
+		let mut w1 = polyvec::Polyveck::default();
+		veck_decompose_go(&wfinals[i], &mut w0, &mut w1);
+
+		// Ensure ||z||_∞ < γ1 - β
+		let gamma1_minus_beta = (dilithium_params::GAMMA1 - dilithium_params::BETA) as i32;
+		let mut z_exceeds = false;
+		for j in 0..dilithium_params::L {
+			for k in 0..dilithium_params::N as usize {
+				let coeff = zfinals[i].vec[j].coeffs[k];
+				// Convert from [0, Q) to centered form for comparison
+				let centered = if coeff > (dilithium_params::Q as i32) / 2 {
+					coeff - dilithium_params::Q as i32
+				} else {
+					coeff
+				};
+				if centered.abs() >= gamma1_minus_beta {
+					z_exceeds = true;
+					break;
+				}
+			}
+			if z_exceeds {
+				break;
+			}
+		}
+		if z_exceeds {
+			continue;
+		}
+
+		// Compute Az (z in NTT domain)
+		let mut zh = zfinals[i].clone();
+		// Convert to centered form then NTT
+		for j in 0..dilithium_params::L {
+			for k in 0..dilithium_params::N as usize {
+				if zh.vec[j].coeffs[k] > (dilithium_params::Q as i32) / 2 {
+					zh.vec[j].coeffs[k] -= dilithium_params::Q as i32;
+				}
+			}
+			crate::circl_ntt::ntt(&mut zh.vec[j]);
+		}
+
+		let mut az = polyvec::Polyveck::default();
+		for j in 0..dilithium_params::K {
+			for l in 0..dilithium_params::L {
+				let mut tmp = poly::Poly::default();
+				// Access a_ntt using get() method and convert to dilithium poly
+				let threshold_poly = pk.a_ntt.get(j, l);
+				let mut a_poly = poly::Poly::default();
+				for k in 0..dilithium_params::N as usize {
+					a_poly.coeffs[k] = threshold_poly.get(k).value() as i32;
+				}
+				crate::circl_ntt::mul_hat(&mut tmp, &a_poly, &zh.vec[l]);
+				for k in 0..dilithium_params::N as usize {
+					az.vec[j].coeffs[k] += tmp.coeffs[k];
+				}
+			}
+		}
+
+		// c~ = H(μ || w1)
+		let mut w1_packed = vec![0u8; dilithium_params::K * dilithium_params::POLYW1_PACKEDBYTES];
+		polyvec::k_pack_w1(&mut w1_packed, &w1);
+
+		let mut c_bytes = [0u8; dilithium_params::C_DASH_BYTES];
+		let mut keccak_state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut keccak_state, &mu, 64);
+		fips202::shake256_absorb(&mut keccak_state, &w1_packed, w1_packed.len());
+		fips202::shake256_finalize(&mut keccak_state);
+		fips202::shake256_squeeze(&mut c_bytes, dilithium_params::C_DASH_BYTES, &mut keccak_state);
+
+		// Derive challenge polynomial
+		let mut ch = poly::Poly::default();
+		poly::challenge(&mut ch, &c_bytes);
+		crate::circl_ntt::ntt(&mut ch);
+
+		// Compute Az - 2^d * c * t1
+		let mut az2dct1 = polyvec::Polyveck::default();
+		// First compute 2^d * t1
+		for j in 0..dilithium_params::K {
+			for k in 0..dilithium_params::N as usize {
+				// Access t1 using get() method
+				let t1_val = pk.t1.get(j).get(k).value();
+				az2dct1.vec[j].coeffs[k] = (t1_val << dilithium_params::D) as i32;
+			}
+			crate::circl_ntt::ntt(&mut az2dct1.vec[j]);
+			// Multiply by c (need to clone to avoid borrow issues)
+			let tmp = az2dct1.vec[j].clone();
+			crate::circl_ntt::mul_hat(&mut az2dct1.vec[j], &tmp, &ch);
+		}
+
+		// Az - 2^d * c * t1
+		for j in 0..dilithium_params::K {
+			for k in 0..dilithium_params::N as usize {
+				az2dct1.vec[j].coeffs[k] = az.vec[j].coeffs[k] - az2dct1.vec[j].coeffs[k];
+			}
+			// ReduceLe2Q
+			poly::reduce(&mut az2dct1.vec[j]);
+			crate::circl_ntt::inv_ntt(&mut az2dct1.vec[j]);
+			// NormalizeAssumingLe2Q
+			normalize_assuming_le2q(&mut az2dct1.vec[j]);
+		}
+
+		// f = Az2dct1 - wfinals[i]
+		let mut f = polyvec::Polyveck::default();
+		for j in 0..dilithium_params::K {
+			for k in 0..dilithium_params::N as usize {
+				f.vec[j].coeffs[k] = az2dct1.vec[j].coeffs[k] - wfinals[i].vec[j].coeffs[k];
+			}
+			// Normalize
+			for k in 0..dilithium_params::N as usize {
+				let c = f.vec[j].coeffs[k];
+				let c_u32 = if c < 0 { (c + dilithium_params::Q as i32) as u32 } else { c as u32 };
+				f.vec[j].coeffs[k] = mod_q(c_u32) as i32;
+			}
+		}
+
+		// Ensure ||f||_∞ < γ2
+		let gamma2 = dilithium_params::GAMMA2 as i32;
+		let mut f_exceeds = false;
+		for j in 0..dilithium_params::K {
+			for k in 0..dilithium_params::N as usize {
+				let coeff = f.vec[j].coeffs[k];
+				let centered = if coeff > (dilithium_params::Q as i32) / 2 {
+					coeff - dilithium_params::Q as i32
+				} else {
+					coeff
+				};
+				if centered.abs() >= gamma2 {
+					f_exceeds = true;
+					break;
+				}
+			}
+			if f_exceeds {
+				break;
+			}
+		}
+		if f_exceeds {
+			continue;
+		}
+
+		// w0pf = w0 + f
+		let mut w0pf = polyvec::Polyveck::default();
+		for j in 0..dilithium_params::K {
+			for k in 0..dilithium_params::N as usize {
+				w0pf.vec[j].coeffs[k] = w0.vec[j].coeffs[k] + f.vec[j].coeffs[k];
+			}
+			// Normalize
+			for k in 0..dilithium_params::N as usize {
+				let c = w0pf.vec[j].coeffs[k];
+				let c_u32 = if c < 0 { (c + dilithium_params::Q as i32) as u32 } else { c as u32 };
+				w0pf.vec[j].coeffs[k] = mod_q(c_u32) as i32;
+			}
+		}
+
+		// Compute hint
+		let mut hint = polyvec::Polyveck::default();
+		let hint_pop = compute_dilithium_hint(&mut hint, &w0pf, &w1);
+
+		if hint_pop <= dilithium_params::OMEGA {
+			// Convert z to centered form for packing
+			let mut z_centered = zfinals[i].clone();
+			for j in 0..dilithium_params::L {
+				for k in 0..dilithium_params::N as usize {
+					if z_centered.vec[j].coeffs[k] > (dilithium_params::Q as i32) / 2 {
+						z_centered.vec[j].coeffs[k] -= dilithium_params::Q as i32;
+					}
+				}
+			}
+
+			// Pack signature
+			let mut c_full = [0u8; 64];
+			c_full[..dilithium_params::C_DASH_BYTES].copy_from_slice(&c_bytes);
+			match pack_dilithium_signature(&c_full, &z_centered, &hint) {
+				Ok(sig) => return (sig, true),
+				Err(_) => continue,
+			}
+		}
+	}
+
+	(vec![], false)
 }
 
 /// Test helper for creating Round2State
