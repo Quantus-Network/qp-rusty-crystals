@@ -140,7 +140,7 @@ pub fn generate_with_dealer(
     fips202::shake256_squeeze(&mut tr, TR_SIZE, &mut h_tr);
 
     // Create public key
-    let public_key = PublicKey::new(pk_packed, tr, rho);
+    let public_key = PublicKey::new(pk_packed, tr);
 
     // 9. Create private key shares
     let mut private_keys = Vec::with_capacity(parties as usize);

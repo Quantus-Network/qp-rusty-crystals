@@ -28,12 +28,6 @@ pub struct ThresholdConfig {
     n: u8,
     /// Number of iterations (K parameter from reference implementation).
     k_iterations: u16,
-    /// Primary radius parameter for hyperball sampling.
-    r: f64,
-    /// Secondary radius parameter for hyperball sampling.
-    r_prime: f64,
-    /// Nu parameter (typically 3.0).
-    nu: f64,
 }
 
 impl ThresholdConfig {
@@ -54,23 +48,23 @@ impl ThresholdConfig {
     pub fn new(t: u8, n: u8) -> ThresholdResult<Self> {
         validate_threshold_params(t, n)?;
 
-        // ML-DSA-87 specific parameters based on reference implementation
-        let (k_iterations, r, r_prime) = match (t, n) {
-            (2, 2) => (3, 503119.0, 503192.0),
-            (2, 3) => (4, 631601.0, 631703.0),
-            (3, 3) => (6, 483107.0, 483180.0),
-            (2, 4) => (4, 632903.0, 633006.0),
-            (3, 4) => (11, 551752.0, 551854.0),
-            (4, 4) => (14, 487958.0, 488031.0),
-            (2, 5) => (5, 607694.0, 607820.0),
-            (3, 5) => (26, 577400.0, 577546.0),
-            (4, 5) => (70, 518384.0, 518510.0),
-            (5, 5) => (35, 468214.0, 468287.0),
-            (2, 6) => (5, 665106.0, 665232.0),
-            (3, 6) => (39, 577541.0, 577704.0),
-            (4, 6) => (208, 517689.0, 517853.0),
-            (5, 6) => (295, 479692.0, 479819.0),
-            (6, 6) => (87, 424124.0, 424197.0),
+        // ML-DSA-87 specific K iterations based on reference implementation
+        let k_iterations = match (t, n) {
+            (2, 2) => 3,
+            (2, 3) => 4,
+            (3, 3) => 6,
+            (2, 4) => 4,
+            (3, 4) => 11,
+            (4, 4) => 14,
+            (2, 5) => 5,
+            (3, 5) => 26,
+            (4, 5) => 70,
+            (5, 5) => 35,
+            (2, 6) => 5,
+            (3, 6) => 39,
+            (4, 6) => 208,
+            (5, 6) => 295,
+            (6, 6) => 87,
             _ => {
                 return Err(ThresholdError::InvalidParameters {
                     threshold: t,
@@ -80,14 +74,7 @@ impl ThresholdConfig {
             }
         };
 
-        Ok(Self {
-            t,
-            n,
-            k_iterations,
-            r,
-            r_prime,
-            nu: 3.0,
-        })
+        Ok(Self { t, n, k_iterations })
     }
 
     /// Get the threshold value (minimum parties required to sign).
@@ -106,30 +93,6 @@ impl ThresholdConfig {
     #[inline]
     pub fn k_iterations(&self) -> u16 {
         self.k_iterations
-    }
-
-    /// Get the primary radius parameter for hyperball sampling.
-    #[inline]
-    pub(crate) fn r(&self) -> f64 {
-        self.r
-    }
-
-    /// Get the secondary radius parameter for hyperball sampling.
-    #[inline]
-    pub(crate) fn r_prime(&self) -> f64 {
-        self.r_prime
-    }
-
-    /// Get the nu parameter.
-    #[inline]
-    pub(crate) fn nu(&self) -> f64 {
-        self.nu
-    }
-
-    /// Check if enough parties are participating for threshold.
-    #[inline]
-    pub fn has_threshold(&self, num_parties: usize) -> bool {
-        num_parties >= self.t as usize
     }
 }
 
@@ -218,13 +181,5 @@ mod tests {
     fn test_invalid_threshold_exceeds_parties() {
         let result = ThresholdConfig::new(5, 3);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_has_threshold() {
-        let config = ThresholdConfig::new(3, 5).unwrap();
-        assert!(!config.has_threshold(2));
-        assert!(config.has_threshold(3));
-        assert!(config.has_threshold(5));
     }
 }

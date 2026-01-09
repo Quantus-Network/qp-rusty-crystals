@@ -1,168 +1,163 @@
 //! Integration tests for threshold ML-DSA implementation
 //!
 //! These tests validate the complete end-to-end threshold signature protocol
-//! using the flow verified to match the Go reference implementation.
+//! using the new ThresholdSigner API.
 
-use qp_rusty_crystals_threshold::ml_dsa_87::{
-    self, aggregate_commitments_dilithium, aggregate_responses, combine_from_parts, compute_mu,
-    compute_responses_deterministic, verify_signature, Round1State, ThresholdConfig,
+use qp_rusty_crystals_threshold::{
+    generate_with_dealer, verify_signature, ThresholdConfig, ThresholdSigner,
 };
+
+/// A simple RNG wrapper that implements the traits needed by ThresholdSigner.
+struct TestRng {
+    inner: rand::rngs::ThreadRng,
+}
+
+impl TestRng {
+    fn new() -> Self {
+        Self {
+            inner: rand::thread_rng(),
+        }
+    }
+}
+
+impl rand_core::RngCore for TestRng {
+    fn next_u32(&mut self) -> u32 {
+        use rand::RngCore;
+        self.inner.next_u32()
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        use rand::RngCore;
+        self.inner.next_u64()
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        use rand::RngCore;
+        self.inner.fill_bytes(dest)
+    }
+}
+
+impl rand_core::CryptoRng for TestRng {}
 
 /// Helper to encode bytes as hex string
 fn hex_encode(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Run the complete threshold signing protocol with deterministic seeds
-/// This uses the exact flow verified to match Go in our deterministic tests
-fn run_threshold_protocol_deterministic(
+/// Run the complete threshold signing protocol using the new API.
+/// Returns Ok(signature_bytes) on success or Err(message) on failure.
+fn run_threshold_protocol_new_api(
     threshold: u8,
     total_parties: u8,
     seed: &[u8; 32],
-    party_rhops: &[[u8; 64]],
     message: &[u8],
     context: &[u8],
 ) -> Result<Vec<u8>, String> {
-    // Try multiple attempts with different nonce bases (like Go's retry loop)
-    run_threshold_protocol_with_nonce(threshold, total_parties, seed, party_rhops, message, context, 0)
-}
-
-/// Run with a specific nonce base - allows retrying with different random values
-fn run_threshold_protocol_with_nonce(
-    threshold: u8,
-    total_parties: u8,
-    seed: &[u8; 32],
-    party_rhops: &[[u8; 64]],
-    message: &[u8],
-    context: &[u8],
-    nonce_base: u16,
-) -> Result<Vec<u8>, String> {
-    // Step 1: Generate threshold keys
     let config = ThresholdConfig::new(threshold, total_parties)
         .map_err(|e| format!("Config error: {:?}", e))?;
 
-    let (pk, sks) = ml_dsa_87::generate_threshold_key(seed, &config)
+    let (public_key, shares) = generate_with_dealer(seed, config)
         .map_err(|e| format!("Key generation error: {:?}", e))?;
 
-    // For t < n, only the first `threshold` parties participate in signing
-    // Active parties bitmask: first t parties (e.g., for 2-of-3: parties 0,1 -> bitmask 0b011 = 3)
-    let act: u8 = (1u8 << threshold) - 1;
+    // Create signers for the first `threshold` parties (active signers)
+    let mut signers: Vec<ThresholdSigner> = shares
+        .into_iter()
+        .take(threshold as usize)
+        .map(|share| ThresholdSigner::new(share, public_key.clone(), config))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Signer creation error: {:?}", e))?;
 
-    // Step 2: Round 1 - Only ACTIVE parties generate commitments
-    let mut round1_states = Vec::new();
-    let mut round1_commitments = Vec::new();
+    let mut rng = TestRng::new();
 
-    for party_id in 0..threshold {
-        let rhop = &party_rhops[party_id as usize];
-        let (commitment, state) =
-            Round1State::new_with_rhoprime(&sks[party_id as usize], &config, rhop, nonce_base)
-                .map_err(|e| format!("Party {} Round1 error: {:?}", party_id, e))?;
+    // Round 1: All active parties generate commitments
+    let r1_broadcasts: Vec<_> = signers
+        .iter_mut()
+        .map(|s| s.round1_commit(&mut rng))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Round 1 error: {:?}", e))?;
 
-        round1_states.push(state);
-        round1_commitments.push(commitment);
-    }
+    // Round 2: All active parties reveal their commitments
+    let r2_broadcasts: Vec<_> = signers
+        .iter_mut()
+        .enumerate()
+        .map(|(i, s)| {
+            let others: Vec<_> = r1_broadcasts
+                .iter()
+                .filter(|r| r.party_id != i as u8)
+                .cloned()
+                .collect();
+            s.round2_reveal(message, context, &others)
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Round 2 error: {:?}", e))?;
 
-    // Step 3: Aggregate w values from ACTIVE parties only
-    // Start with party 0's w, then add other active parties
-    let mut w_agg = round1_states[0].w.clone();
-    for i in 1..threshold as usize {
-        aggregate_commitments_dilithium(&mut w_agg, &round1_states[i].w);
-    }
+    // Round 3: All active parties compute their responses
+    let r3_broadcasts: Vec<_> = signers
+        .iter_mut()
+        .enumerate()
+        .map(|(i, s)| {
+            let others: Vec<_> = r2_broadcasts
+                .iter()
+                .filter(|r| r.party_id != i as u8)
+                .cloned()
+                .collect();
+            s.round3_respond(&others)
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Round 3 error: {:?}", e))?;
 
-    // Prepare wfinals (single iteration for now)
-    let wfinals = vec![w_agg.clone()];
+    // Combine: Any party can combine (we use party 0)
+    let signature = signers[0]
+        .combine(&r2_broadcasts, &r3_broadcasts)
+        .map_err(|e| format!("Combine error: {:?}", e))?;
 
-    // Step 4: Compute mu
-    let mu = compute_mu(&pk.tr, message, context);
-
-    // Step 5: Round 3 - Each ACTIVE party computes their response
-    let mut all_responses = Vec::new();
-    for party_id in 0..threshold {
-        let z = compute_responses_deterministic(
-            &sks[party_id as usize],
-            act,
-            &mu,
-            &wfinals,
-            &round1_states[party_id as usize].hyperball_samples,
-            &config,
-        );
-
-        // Check if response is valid (not all zeros)
-        let is_valid = !z.is_empty() && z[0].vec[0].coeffs.iter().any(|&c| c != 0);
-        if !is_valid {
-            return Err(format!(
-                "Party {} failed rejection sampling",
-                party_id
-            ));
-        }
-
-        all_responses.push(z);
-    }
-
-    // Step 6: Aggregate responses
-    let mut z_agg = all_responses[0].clone();
-    for i in 1..threshold as usize {
-        aggregate_responses(&mut z_agg, &all_responses[i]);
-    }
-
-    // Step 7: Combine into final signature
-    let (signature, ok) = combine_from_parts(&pk, message, context, &wfinals, &z_agg, &config);
-
-    if !ok {
-        return Err("Combine failed".to_string());
-    }
-
-    // Step 8: Verify the signature
-    if !verify_signature(&pk, message, context, &signature) {
+    // Verify the signature
+    if !verify_signature(&public_key, message, context, &signature) {
         return Err("Signature verification failed".to_string());
     }
 
-    Ok(signature)
-}
-
-/// Generate deterministic rhop values for parties
-fn generate_party_rhops(num_parties: u8, base_offset: u8) -> Vec<[u8; 64]> {
-    let mut rhops = Vec::new();
-    for party_id in 0..num_parties {
-        let mut rhop = [0u8; 64];
-        // Use wrapping arithmetic to avoid overflow
-        let offset = base_offset.wrapping_add(party_id.wrapping_mul(100));
-        for i in 0..64 {
-            rhop[i] = (i as u8).wrapping_add(offset);
-        }
-        rhops.push(rhop);
-    }
-    rhops
+    Ok(signature.as_bytes().to_vec())
 }
 
 // ============================================================================
-// Deterministic Tests (using fixed seeds - should always pass)
+// Deterministic Tests (using fixed seeds - should always pass with retries)
 // ============================================================================
 
 #[test]
 fn test_2_of_2_deterministic() {
     println!("\n=== 2-of-2 DETERMINISTIC TEST ===\n");
 
-    // Use the exact same parameters as our verified deterministic tests
     let mut seed = [0u8; 32];
     for i in 0..32 {
         seed[i] = i as u8;
     }
 
-    let party_rhops = generate_party_rhops(2, 100);
     let message = b"test message";
     let context: &[u8] = b"";
 
-    match run_threshold_protocol_deterministic(2, 2, &seed, &party_rhops, message, context) {
-        Ok(signature) => {
-            println!("✅ 2-of-2 deterministic: Signature created and verified!");
-            println!("   Signature length: {} bytes", signature.len());
-            println!("   Signature[0..32]: {}", hex_encode(&signature[..32.min(signature.len())]));
-        }
-        Err(e) => {
-            panic!("❌ 2-of-2 deterministic failed: {}", e);
+    let max_attempts = 50;
+    for attempt in 0..max_attempts {
+        match run_threshold_protocol_new_api(2, 2, &seed, message, context) {
+            Ok(signature) => {
+                println!(
+                    "✅ 2-of-2 deterministic: Signature created and verified on attempt {}!",
+                    attempt + 1
+                );
+                println!("   Signature length: {} bytes", signature.len());
+                println!(
+                    "   Signature[0..32]: {}",
+                    hex_encode(&signature[..32.min(signature.len())])
+                );
+                return;
+            }
+            Err(e) => {
+                if attempt < 5 || attempt % 10 == 0 {
+                    println!("   Attempt {} failed: {}", attempt + 1, e);
+                }
+            }
         }
     }
+    panic!("❌ 2-of-2 deterministic failed after {} attempts", max_attempts);
 }
 
 #[test]
@@ -174,16 +169,17 @@ fn test_2_of_3_deterministic() {
         seed[i] = i as u8;
     }
 
-    let party_rhops = generate_party_rhops(3, 100);
     let message = b"test message for 2-of-3";
     let context: &[u8] = b"";
 
-    // Try multiple nonce bases to handle rejection sampling (like Go's retry loop)
     let max_attempts = 100;
     for attempt in 0..max_attempts {
-        match run_threshold_protocol_with_nonce(2, 3, &seed, &party_rhops, message, context, attempt) {
+        match run_threshold_protocol_new_api(2, 3, &seed, message, context) {
             Ok(signature) => {
-                println!("✅ 2-of-3 deterministic: Signature created and verified on attempt {}!", attempt + 1);
+                println!(
+                    "✅ 2-of-3 deterministic: Signature created and verified on attempt {}!",
+                    attempt + 1
+                );
                 println!("   Signature length: {} bytes", signature.len());
                 return;
             }
@@ -206,16 +202,17 @@ fn test_3_of_5_deterministic() {
         seed[i] = i as u8;
     }
 
-    let party_rhops = generate_party_rhops(5, 100);
     let message = b"test message for 3-of-5";
     let context: &[u8] = b"";
 
-    // Try multiple nonce bases to handle rejection sampling (like Go's retry loop)
     let max_attempts = 200;
     for attempt in 0..max_attempts {
-        match run_threshold_protocol_with_nonce(3, 5, &seed, &party_rhops, message, context, attempt) {
+        match run_threshold_protocol_new_api(3, 5, &seed, message, context) {
             Ok(signature) => {
-                println!("✅ 3-of-5 deterministic: Signature created and verified on attempt {}!", attempt + 1);
+                println!(
+                    "✅ 3-of-5 deterministic: Signature created and verified on attempt {}!",
+                    attempt + 1
+                );
                 println!("   Signature length: {} bytes", signature.len());
                 return;
             }
@@ -242,22 +239,13 @@ fn test_2_of_2_random() {
     let max_attempts = 10;
 
     for attempt in 1..=max_attempts {
-        // Generate random seed
         let mut seed = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut seed);
-
-        // Generate random rhops
-        let mut party_rhops = Vec::new();
-        for _ in 0..2 {
-            let mut rhop = [0u8; 64];
-            rand::thread_rng().fill_bytes(&mut rhop);
-            party_rhops.push(rhop);
-        }
 
         let message = b"random test message";
         let context: &[u8] = b"";
 
-        match run_threshold_protocol_deterministic(2, 2, &seed, &party_rhops, message, context) {
+        match run_threshold_protocol_new_api(2, 2, &seed, message, context) {
             Ok(signature) => {
                 println!(
                     "✅ 2-of-2 random: Signature created and verified on attempt {}!",
@@ -272,10 +260,7 @@ fn test_2_of_2_random() {
         }
     }
 
-    panic!(
-        "❌ 2-of-2 random failed after {} attempts",
-        max_attempts
-    );
+    panic!("❌ 2-of-2 random failed after {} attempts", max_attempts);
 }
 
 #[test]
@@ -290,17 +275,10 @@ fn test_2_of_3_random() {
         let mut seed = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut seed);
 
-        let mut party_rhops = Vec::new();
-        for _ in 0..3 {
-            let mut rhop = [0u8; 64];
-            rand::thread_rng().fill_bytes(&mut rhop);
-            party_rhops.push(rhop);
-        }
-
         let message = b"random test message for 2-of-3";
         let context: &[u8] = b"";
 
-        match run_threshold_protocol_deterministic(2, 3, &seed, &party_rhops, message, context) {
+        match run_threshold_protocol_new_api(2, 3, &seed, message, context) {
             Ok(signature) => {
                 println!(
                     "✅ 2-of-3 random: Signature created and verified on attempt {}!",
@@ -315,10 +293,7 @@ fn test_2_of_3_random() {
         }
     }
 
-    panic!(
-        "❌ 2-of-3 random failed after {} attempts",
-        max_attempts
-    );
+    panic!("❌ 2-of-3 random failed after {} attempts", max_attempts);
 }
 
 #[test]
@@ -334,17 +309,10 @@ fn test_3_of_5_random() {
         let mut seed = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut seed);
 
-        let mut party_rhops = Vec::new();
-        for _ in 0..5 {
-            let mut rhop = [0u8; 64];
-            rand::thread_rng().fill_bytes(&mut rhop);
-            party_rhops.push(rhop);
-        }
-
         let message = b"random test message for 3-of-5";
         let context: &[u8] = b"";
 
-        match run_threshold_protocol_deterministic(3, 5, &seed, &party_rhops, message, context) {
+        match run_threshold_protocol_new_api(3, 5, &seed, message, context) {
             Ok(signature) => {
                 println!(
                     "✅ 3-of-5 random: Signature created and verified on attempt {}!",
@@ -359,10 +327,7 @@ fn test_3_of_5_random() {
         }
     }
 
-    panic!(
-        "❌ 3-of-5 random failed after {} attempts",
-        max_attempts
-    );
+    panic!("❌ 3-of-5 random failed after {} attempts", max_attempts);
 }
 
 // ============================================================================
@@ -378,20 +343,22 @@ fn test_with_context() {
         seed[i] = i as u8;
     }
 
-    let party_rhops = generate_party_rhops(2, 100);
     let message = b"message with context";
     let context = b"my-application-context";
 
-    match run_threshold_protocol_deterministic(2, 2, &seed, &party_rhops, message, context) {
-        Ok(signature) => {
-            println!("✅ With context: Signature created and verified!");
-            println!("   Context: {:?}", String::from_utf8_lossy(context));
-            println!("   Signature length: {} bytes", signature.len());
-        }
-        Err(e) => {
-            panic!("❌ With context test failed: {}", e);
+    let max_attempts = 50;
+    for _attempt in 0..max_attempts {
+        match run_threshold_protocol_new_api(2, 2, &seed, message, context) {
+            Ok(signature) => {
+                println!("✅ With context: Signature created and verified!");
+                println!("   Context: {:?}", String::from_utf8_lossy(context));
+                println!("   Signature length: {} bytes", signature.len());
+                return;
+            }
+            Err(_) => continue,
         }
     }
+    panic!("❌ With context test failed after {} attempts", max_attempts);
 }
 
 #[test]
@@ -403,19 +370,21 @@ fn test_empty_message() {
         seed[i] = i as u8;
     }
 
-    let party_rhops = generate_party_rhops(2, 100);
     let message: &[u8] = b"";
     let context: &[u8] = b"";
 
-    match run_threshold_protocol_deterministic(2, 2, &seed, &party_rhops, message, context) {
-        Ok(signature) => {
-            println!("✅ Empty message: Signature created and verified!");
-            println!("   Signature length: {} bytes", signature.len());
-        }
-        Err(e) => {
-            panic!("❌ Empty message test failed: {}", e);
+    let max_attempts = 50;
+    for _attempt in 0..max_attempts {
+        match run_threshold_protocol_new_api(2, 2, &seed, message, context) {
+            Ok(signature) => {
+                println!("✅ Empty message: Signature created and verified!");
+                println!("   Signature length: {} bytes", signature.len());
+                return;
+            }
+            Err(_) => continue,
         }
     }
+    panic!("❌ Empty message test failed after {} attempts", max_attempts);
 }
 
 #[test]
@@ -427,21 +396,23 @@ fn test_long_message() {
         seed[i] = i as u8;
     }
 
-    let party_rhops = generate_party_rhops(2, 100);
     // Create a 10KB message
     let message: Vec<u8> = (0..10240).map(|i| (i % 256) as u8).collect();
     let context: &[u8] = b"";
 
-    match run_threshold_protocol_deterministic(2, 2, &seed, &party_rhops, &message, context) {
-        Ok(signature) => {
-            println!("✅ Long message (10KB): Signature created and verified!");
-            println!("   Message length: {} bytes", message.len());
-            println!("   Signature length: {} bytes", signature.len());
-        }
-        Err(e) => {
-            panic!("❌ Long message test failed: {}", e);
+    let max_attempts = 50;
+    for _attempt in 0..max_attempts {
+        match run_threshold_protocol_new_api(2, 2, &seed, &message, context) {
+            Ok(signature) => {
+                println!("✅ Long message (10KB): Signature created and verified!");
+                println!("   Message length: {} bytes", message.len());
+                println!("   Signature length: {} bytes", signature.len());
+                return;
+            }
+            Err(_) => continue,
         }
     }
+    panic!("❌ Long message test failed after {} attempts", max_attempts);
 }
 
 // ============================================================================
@@ -458,19 +429,28 @@ fn test_signature_verification_with_wrong_message() {
     }
 
     let config = ThresholdConfig::new(2, 2).expect("Valid config");
-    let (pk, _) = ml_dsa_87::generate_threshold_key(&seed, &config).expect("Key gen");
+    let (public_key, _) = generate_with_dealer(&seed, config).expect("Key gen");
 
-    let party_rhops = generate_party_rhops(2, 100);
     let message = b"original message";
     let context: &[u8] = b"";
 
-    let signature =
-        run_threshold_protocol_deterministic(2, 2, &seed, &party_rhops, message, context)
-            .expect("Signature creation should succeed");
+    // Get a valid signature first
+    let max_attempts = 50;
+    let mut signature = None;
+    for _ in 0..max_attempts {
+        if let Ok(sig) = run_threshold_protocol_new_api(2, 2, &seed, message, context) {
+            signature = Some(sig);
+            break;
+        }
+    }
+
+    let signature = signature.expect("Should get a valid signature");
+    let sig = qp_rusty_crystals_threshold::Signature::from_bytes(&signature)
+        .expect("Valid signature bytes");
 
     // Verify with wrong message should fail
     let wrong_message = b"wrong message";
-    let is_valid = verify_signature(&pk, wrong_message, context, &signature);
+    let is_valid = verify_signature(&public_key, wrong_message, context, &sig);
 
     if is_valid {
         panic!("❌ Signature should NOT verify with wrong message!");
@@ -489,19 +469,28 @@ fn test_signature_verification_with_wrong_context() {
     }
 
     let config = ThresholdConfig::new(2, 2).expect("Valid config");
-    let (pk, _) = ml_dsa_87::generate_threshold_key(&seed, &config).expect("Key gen");
+    let (public_key, _) = generate_with_dealer(&seed, config).expect("Key gen");
 
-    let party_rhops = generate_party_rhops(2, 100);
     let message = b"test message";
     let context = b"correct-context";
 
-    let signature =
-        run_threshold_protocol_deterministic(2, 2, &seed, &party_rhops, message, context)
-            .expect("Signature creation should succeed");
+    // Get a valid signature first
+    let max_attempts = 50;
+    let mut signature = None;
+    for _ in 0..max_attempts {
+        if let Ok(sig) = run_threshold_protocol_new_api(2, 2, &seed, message, context) {
+            signature = Some(sig);
+            break;
+        }
+    }
+
+    let signature = signature.expect("Should get a valid signature");
+    let sig = qp_rusty_crystals_threshold::Signature::from_bytes(&signature)
+        .expect("Valid signature bytes");
 
     // Verify with wrong context should fail
     let wrong_context = b"wrong-context";
-    let is_valid = verify_signature(&pk, message, wrong_context, &signature);
+    let is_valid = verify_signature(&public_key, message, wrong_context, &sig);
 
     if is_valid {
         panic!("❌ Signature should NOT verify with wrong context!");
@@ -527,47 +516,40 @@ fn test_threshold_matrix() {
     let context: &[u8] = b"";
 
     // Test configurations: (threshold, total_parties, max_attempts)
-    // max_attempts is based on k_iterations from ThresholdConfig - higher k needs more retries
-    // k_iterations values: 2-of-2=3, 2-of-3=4, 3-of-3=6, 2-of-4=4, 3-of-4=11, 4-of-4=14,
-    //                      2-of-5=5, 3-of-5=26, 4-of-5=70, 5-of-5=35,
-    //                      2-of-6=5, 3-of-6=39, 4-of-6=208, 5-of-6=295, 6-of-6=87
-    let configs: [(u8, u8, u16); 15] = [
-        (2, 2, 50),    // k=3
-        (2, 3, 50),    // k=4
-        (3, 3, 100),   // k=6
-        (2, 4, 50),    // k=4
-        (3, 4, 100),   // k=11
-        (4, 4, 150),   // k=14
-        (2, 5, 50),    // k=5
-        (3, 5, 150),   // k=26
-        (4, 5, 300),   // k=70
-        (5, 5, 200),   // k=35
-        (2, 6, 50),    // k=5
-        (3, 6, 200),   // k=39
-        (4, 6, 500),   // k=208
-        (5, 6, 570),   // k=295 (use Go's max of 570)
-        (6, 6, 400),   // k=87
+    // Higher thresholds need more attempts due to rejection sampling
+    let configs: [(u8, u8, u32); 15] = [
+        (2, 2, 50),
+        (2, 3, 100),
+        (3, 3, 150),
+        (2, 4, 100),
+        (3, 4, 200),
+        (4, 4, 250),
+        (2, 5, 100),
+        (3, 5, 300),
+        (4, 5, 500),
+        (5, 5, 400),
+        (2, 6, 100),
+        (3, 6, 400),
+        (4, 6, 700),
+        (5, 6, 800),
+        (6, 6, 600),
     ];
 
     let mut passed = 0;
     let mut failed = 0;
 
     for (threshold, total_parties, max_attempts) in configs.iter() {
-        let party_rhops = generate_party_rhops(*total_parties, 100);
-
         let mut success = false;
-        for nonce in 0..(*max_attempts) {
-            match run_threshold_protocol_with_nonce(
-                *threshold,
-                *total_parties,
-                &seed,
-                &party_rhops,
-                message,
-                context,
-                nonce,
-            ) {
+        for attempt in 0..(*max_attempts) {
+            match run_threshold_protocol_new_api(*threshold, *total_parties, &seed, message, context)
+            {
                 Ok(_) => {
-                    println!("✅ {}-of-{}: PASSED (attempt {})", threshold, total_parties, nonce + 1);
+                    println!(
+                        "✅ {}-of-{}: PASSED (attempt {})",
+                        threshold,
+                        total_parties,
+                        attempt + 1
+                    );
                     passed += 1;
                     success = true;
                     break;
@@ -579,7 +561,10 @@ fn test_threshold_matrix() {
         }
 
         if !success {
-            println!("❌ {}-of-{}: FAILED after {} attempts", threshold, total_parties, max_attempts);
+            println!(
+                "❌ {}-of-{}: FAILED after {} attempts",
+                threshold, total_parties, max_attempts
+            );
             failed += 1;
         }
     }

@@ -29,14 +29,12 @@ pub struct PublicKey {
     /// Public key hash (TR), used in signing.
     #[cfg_attr(feature = "serde", serde(with = "serde_arrays"))]
     tr: [u8; TR_SIZE],
-    /// Random seed rho for matrix A generation.
-    rho: [u8; 32],
 }
 
 impl PublicKey {
     /// Create a new public key from its components.
-    pub(crate) fn new(bytes: [u8; PUBLIC_KEY_SIZE], tr: [u8; TR_SIZE], rho: [u8; 32]) -> Self {
-        Self { bytes, tr, rho }
+    pub(crate) fn new(bytes: [u8; PUBLIC_KEY_SIZE], tr: [u8; TR_SIZE]) -> Self {
+        Self { bytes, tr }
     }
 
     /// Get the packed public key bytes.
@@ -52,11 +50,6 @@ impl PublicKey {
         &self.tr
     }
 
-    /// Get the random seed rho.
-    pub(crate) fn rho(&self) -> &[u8; 32] {
-        &self.rho
-    }
-
     /// Create a public key from bytes.
     ///
     /// This recomputes the TR hash from the public key bytes.
@@ -68,10 +61,6 @@ impl PublicKey {
         let mut pk_bytes = [0u8; PUBLIC_KEY_SIZE];
         pk_bytes.copy_from_slice(bytes);
 
-        // Extract rho from the first 32 bytes of the public key
-        let mut rho = [0u8; 32];
-        rho.copy_from_slice(&bytes[..32]);
-
         // Compute TR = SHAKE256(pk)
         let mut tr = [0u8; TR_SIZE];
         let mut state = qp_rusty_crystals_dilithium::fips202::KeccakState::default();
@@ -82,7 +71,6 @@ impl PublicKey {
         Ok(Self {
             bytes: pk_bytes,
             tr,
-            rho,
         })
     }
 }

@@ -3,9 +3,7 @@
 //! These tests demonstrate and validate the `ThresholdSigner` API,
 //! which provides a cleaner interface for threshold signing.
 
-use qp_rusty_crystals_threshold::{
-    generate_with_dealer, ThresholdConfig, ThresholdSigner,
-};
+use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig, ThresholdSigner};
 
 /// A simple RNG wrapper that implements the traits needed by ThresholdSigner.
 /// This bridges the rand_core version gap between rand 0.8 and rand_core 0.9.
@@ -202,6 +200,8 @@ fn test_different_seeds_different_keys() {
     // Different seeds should produce different public keys
     assert_ne!(pk1.as_bytes(), pk2.as_bytes());
 }
+
+// Full end-to-end signing tests are now in integration_tests.rs
 
 #[cfg(feature = "serde")]
 mod serde_tests {

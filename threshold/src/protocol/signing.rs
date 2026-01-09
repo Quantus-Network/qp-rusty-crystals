@@ -56,11 +56,7 @@ impl Zeroize for Round2Data {
 }
 
 /// Convert new PrivateKeyShare to old PrivateKey format.
-pub(crate) fn to_old_private_key(
-    share: &PrivateKeyShare,
-    public_key: &PublicKey,
-    config: &ThresholdConfig,
-) -> ThresholdResult<PrivateKey> {
+pub(crate) fn to_old_private_key(share: &PrivateKeyShare) -> ThresholdResult<PrivateKey> {
     // Convert SecretShareData to old SecretShare format
     let mut old_shares: HashMap<u8, ml_dsa_87::secret_sharing::SecretShare> = HashMap::new();
 
@@ -160,7 +156,7 @@ pub(crate) fn to_old_public_key(public_key: &PublicKey) -> ThresholdResult<OldPu
     })
 }
 
-/// Convert old ThresholdConfig to new format (they're compatible).
+/// Convert new ThresholdConfig to old format.
 pub(crate) fn to_old_config(config: &ThresholdConfig) -> ThresholdResult<ml_dsa_87::ThresholdConfig> {
     ml_dsa_87::ThresholdConfig::new(config.threshold(), config.total_parties())
         .map_err(|e| ThresholdError::InvalidConfiguration(format!("{:?}", e)))
@@ -169,11 +165,10 @@ pub(crate) fn to_old_config(config: &ThresholdConfig) -> ThresholdResult<ml_dsa_
 /// Generate Round 1 commitment data.
 pub(crate) fn generate_round1(
     private_key: &PrivateKeyShare,
-    public_key: &PublicKey,
     config: &ThresholdConfig,
     seed: &[u8; 32],
 ) -> ThresholdResult<Round1Data> {
-    let old_sk = to_old_private_key(private_key, public_key, config)?;
+    let old_sk = to_old_private_key(private_key)?;
     let old_config = to_old_config(config)?;
 
     let (commitment_hash, state) = Round1State::new(&old_sk, &old_config, seed)
@@ -210,8 +205,6 @@ pub(crate) fn process_round2(
     crate::error::validate_context(context)?;
 
     let old_pk = to_old_public_key(public_key)?;
-    let old_config = to_old_config(config)?;
-
     let k = config.k_iterations() as usize;
 
     // Start with our own w_commitments
@@ -264,12 +257,11 @@ pub(crate) fn process_round2(
 /// Generate Round 3 response using the existing working function.
 pub(crate) fn generate_round3_response(
     private_key: &PrivateKeyShare,
-    public_key: &PublicKey,
     config: &ThresholdConfig,
     round1: &Round1Data,
     round2: &Round2Data,
 ) -> ThresholdResult<Vec<polyvec::Polyvecl>> {
-    let old_sk = to_old_private_key(private_key, public_key, config)?;
+    let old_sk = to_old_private_key(private_key)?;
     let old_config = to_old_config(config)?;
 
     // Use the existing working function
@@ -286,8 +278,7 @@ pub(crate) fn generate_round3_response(
 }
 
 /// Pack responses for broadcast.
-pub(crate) fn pack_responses(responses: &[polyvec::Polyvecl], config: &ThresholdConfig) -> Vec<u8> {
-    // Use the existing pack_responses function which returns a Vec<u8>
+pub(crate) fn pack_responses(responses: &[polyvec::Polyvecl]) -> Vec<u8> {
     ml_dsa_87::pack_responses(responses)
 }
 

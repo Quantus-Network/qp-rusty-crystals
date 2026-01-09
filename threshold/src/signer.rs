@@ -209,7 +209,7 @@ impl ThresholdSigner {
         rng.fill_bytes(&mut seed);
 
         // Generate Round 1 data
-        let round1_data = generate_round1(&self.private_key, &self.public_key, &self.config, &seed)?;
+        let round1_data = generate_round1(&self.private_key, &self.config, &seed)?;
 
         let broadcast = Round1Broadcast::new(
             self.private_key.party_id(),
@@ -446,14 +446,13 @@ impl ThresholdSigner {
         // Generate response
         let responses = generate_round3_response(
             &self.private_key,
-            &self.public_key,
             &self.config,
             &round1_data,
             &round2_data,
         )?;
 
         // Pack responses for broadcast
-        let packed_response = pack_responses(&responses, &self.config);
+        let packed_response = pack_responses(&responses);
         let broadcast = Round3Broadcast::new(self.private_key.party_id(), packed_response);
 
         // Update state
@@ -474,7 +473,7 @@ impl ThresholdSigner {
     ///
     /// # Arguments
     ///
-    /// * `all_round2` - All Round 2 broadcasts (including our own)
+    /// * `_all_round2` - All Round 2 broadcasts (currently unused, kept for API compatibility)
     /// * `all_round3` - All Round 3 broadcasts (including our own)
     ///
     /// # Errors
@@ -485,7 +484,7 @@ impl ThresholdSigner {
     /// - Signature constraint validation fails
     pub fn combine(
         &self,
-        all_round2: &[Round2Broadcast],
+        _all_round2: &[Round2Broadcast],
         all_round3: &[Round3Broadcast],
     ) -> ThresholdResult<Signature> {
         // Check state and get stored message/context
@@ -504,30 +503,9 @@ impl ThresholdSigner {
             }
         };
 
-        // Aggregate w from all Round 2 broadcasts
-        let k = self.config.k_iterations() as usize;
-        let single_commitment_size = 8 * 736; // K * POLY_Q_SIZE
-        let mut w_aggregated = round2_data.w_aggregated.clone();
-
-        for r2 in all_round2 {
-            if r2.party_id != self.private_key.party_id() && !r2.commitment_data.is_empty() {
-                for k_idx in 0..k {
-                    let start = k_idx * single_commitment_size;
-                    let end = start + single_commitment_size;
-
-                    if end <= r2.commitment_data.len() && k_idx < w_aggregated.len() {
-                        if let Ok(w_other) = crate::ml_dsa_87::unpack_commitment_dilithium(
-                            &r2.commitment_data[start..end],
-                        ) {
-                            crate::ml_dsa_87::aggregate_commitments_dilithium(
-                                &mut w_aggregated[k_idx],
-                                &w_other,
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        // Use the already-aggregated w values from round3_respond
+        // (w values were aggregated when processing Round 2 broadcasts in round3_respond)
+        let w_aggregated = round2_data.w_aggregated.clone();
 
         // Collect all responses including our own
         let mut all_responses: Vec<Vec<polyvec::Polyvecl>> = Vec::new();
@@ -561,7 +539,7 @@ impl ThresholdSigner {
         &self,
         message: &[u8],
         context: &[u8],
-        all_round2: &[Round2Broadcast],
+        _all_round2: &[Round2Broadcast],
         all_round3: &[Round3Broadcast],
     ) -> ThresholdResult<Signature> {
         // Check state
@@ -579,30 +557,9 @@ impl ThresholdSigner {
             }
         };
 
-        // Aggregate w from all Round 2 broadcasts
-        let k = self.config.k_iterations() as usize;
-        let single_commitment_size = 8 * 736; // K * POLY_Q_SIZE
-        let mut w_aggregated = round2_data.w_aggregated.clone();
-
-        for r2 in all_round2 {
-            if r2.party_id != self.private_key.party_id() && !r2.commitment_data.is_empty() {
-                for k_idx in 0..k {
-                    let start = k_idx * single_commitment_size;
-                    let end = start + single_commitment_size;
-
-                    if end <= r2.commitment_data.len() && k_idx < w_aggregated.len() {
-                        if let Ok(w_other) = crate::ml_dsa_87::unpack_commitment_dilithium(
-                            &r2.commitment_data[start..end],
-                        ) {
-                            crate::ml_dsa_87::aggregate_commitments_dilithium(
-                                &mut w_aggregated[k_idx],
-                                &w_other,
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        // Use the already-aggregated w values from round3_respond
+        // (w values were aggregated when processing Round 2 broadcasts in round3_respond)
+        let w_aggregated = round2_data.w_aggregated.clone();
 
         // Collect all responses including our own
         let mut all_responses: Vec<Vec<polyvec::Polyvecl>> = Vec::new();

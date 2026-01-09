@@ -129,16 +129,10 @@ pub(crate) mod protocol;
 pub mod circl_ntt;
 pub(crate) mod field;
 
-// Legacy module - will be removed in future version
-// Keeping it for now to maintain test compatibility during migration
-#[doc(hidden)]
-pub mod ml_dsa_87;
-
-// Also keep common and params for internal compatibility
-#[doc(hidden)]
-pub mod common;
-#[doc(hidden)]
-pub mod params;
+// Internal implementation modules (not part of public API)
+pub(crate) mod ml_dsa_87;
+pub(crate) mod common;
+pub(crate) mod params;
 
 // ============================================================================
 // Public API

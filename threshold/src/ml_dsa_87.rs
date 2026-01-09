@@ -70,7 +70,7 @@
 
 use crate::{
 	common::{ThresholdError, ThresholdResult},
-	field::{FieldElement, Polynomial, VecK, VecL},
+	field::{FieldElement, Polynomial, VecK},
 	params::{MlDsaParams, ThresholdParams as BaseThresholdParams},
 };
 use qp_rusty_crystals_dilithium::fips202;
@@ -1481,23 +1481,6 @@ impl FVec {
 
 		Self { data: data.into_boxed_slice() }
 	}
-}
-
-// Key types are already public, no need to re-export them
-
-/// Secret share for threshold scheme
-#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
-pub struct SecretShare {
-	/// Share identifier (subset of signers)
-	pub subset_id: u8,
-	/// Secret vector s1
-	pub s1: VecL<{ Params::L }>,
-	/// Secret vector s2
-	pub s2: VecK<{ Params::K }>,
-	/// s1 in NTT form
-	pub s1_ntt: VecL<{ Params::L }>,
-	/// s2 in NTT form
-	pub s2_ntt: VecK<{ Params::K }>,
 }
 
 /// Matrix A for ML-DSA-87
