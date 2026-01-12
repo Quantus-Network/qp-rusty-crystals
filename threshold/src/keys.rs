@@ -107,8 +107,9 @@ pub struct PrivateKeyShare {
     tr: [u8; TR_SIZE],
     /// Secret shares for this party, keyed by signer subset ID.
     /// Each share contains (s1_share, s2_share) polynomial vectors.
+    /// Uses u16 as subset mask to support up to 16 parties.
     #[cfg_attr(feature = "serde", serde(with = "secret_shares_serde"))]
-    shares: std::collections::HashMap<u8, SecretShareData>,
+    shares: std::collections::HashMap<u16, SecretShareData>,
 }
 
 /// Internal secret share data for a specific signer subset.
@@ -141,7 +142,7 @@ impl PrivateKeyShare {
         key: [u8; 32],
         rho: [u8; 32],
         tr: [u8; TR_SIZE],
-        shares: std::collections::HashMap<u8, SecretShareData>,
+        shares: std::collections::HashMap<u16, SecretShareData>,
     ) -> Self {
         Self {
             party_id,
@@ -186,7 +187,7 @@ impl PrivateKeyShare {
     }
 
     /// Get the secret shares (for internal use).
-    pub(crate) fn shares(&self) -> &std::collections::HashMap<u8, SecretShareData> {
+    pub(crate) fn shares(&self) -> &std::collections::HashMap<u16, SecretShareData> {
         &self.shares
     }
 }
@@ -228,21 +229,21 @@ mod secret_shares_serde {
     use std::collections::HashMap;
 
     pub fn serialize<S>(
-        shares: &HashMap<u8, SecretShareData>,
+        shares: &HashMap<u16, SecretShareData>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let vec: Vec<(u8, &SecretShareData)> = shares.iter().map(|(k, v)| (*k, v)).collect();
+        let vec: Vec<(u16, &SecretShareData)> = shares.iter().map(|(k, v)| (*k, v)).collect();
         vec.serialize(serializer)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<u8, SecretShareData>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<u16, SecretShareData>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let vec: Vec<(u8, SecretShareData)> = Vec::deserialize(deserializer)?;
+        let vec: Vec<(u16, SecretShareData)> = Vec::deserialize(deserializer)?;
         Ok(vec.into_iter().collect())
     }
 }

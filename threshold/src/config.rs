@@ -27,7 +27,7 @@ pub struct ThresholdConfig {
     /// Total number of parties.
     n: u8,
     /// Number of iterations (K parameter from reference implementation).
-    k_iterations: u16,
+    k_iterations: u32,
 }
 
 impl ThresholdConfig {
@@ -42,13 +42,24 @@ impl ThresholdConfig {
     ///
     /// Returns an error if:
     /// - `t < 2` (threshold must be at least 2)
-    /// - `n > 6` (maximum 6 parties supported)
+    /// - `n > 7` (maximum 7 parties supported)
     /// - `t > n` (threshold cannot exceed total parties)
     /// - The (t, n) combination is not supported
+    ///
+    /// # Note on k_iterations
+    ///
+    /// The K parameter determines how many parallel signing attempts are made.
+    /// Values for n ≤ 6 come from the reference Threshold-ML-DSA implementation
+    /// and are derived from security analysis of rejection sampling probability.
+    ///
+    /// **Note**: Values for n = 7 are EXPERIMENTAL and not from the
+    /// reference implementation. They may need adjustment based on testing.
     pub fn new(t: u8, n: u8) -> ThresholdResult<Self> {
         validate_threshold_params(t, n)?;
 
-        // ML-DSA-87 specific K iterations based on reference implementation
+        // ML-DSA-87 specific K iterations
+        // Values for n <= 6: from reference Threshold-ML-DSA implementation
+        // Values for n > 6: EXPERIMENTAL estimates (not validated)
         let k_iterations = match (t, n) {
             (2, 2) => 3,
             (2, 3) => 4,
@@ -65,6 +76,18 @@ impl ThresholdConfig {
             (4, 6) => 208,
             (5, 6) => 295,
             (6, 6) => 87,
+            // ================================================================
+            // EXPERIMENTAL: n = 7 values are NOT from the reference implementation
+            // These are estimates and may need adjustment based on testing.
+            // The reference implementation only supports n <= 6.
+            // ================================================================
+            // n = 7 (EXPERIMENTAL)
+            (2, 7) => 6,
+            (3, 7) => 50,
+            (4, 7) => 150,
+            (5, 7) => 300,
+            (6, 7) => 250,
+            (7, 7) => 360,
             _ => {
                 return Err(ThresholdError::InvalidParameters {
                     threshold: t,
@@ -91,7 +114,7 @@ impl ThresholdConfig {
 
     /// Get the number of iterations (K parameter).
     #[inline]
-    pub fn k_iterations(&self) -> u16 {
+    pub fn k_iterations(&self) -> u32 {
         self.k_iterations
     }
 }
@@ -157,6 +180,13 @@ mod tests {
             (4, 6),
             (5, 6),
             (6, 6),
+            // n = 7 (EXPERIMENTAL)
+            (2, 7),
+            (3, 7),
+            (4, 7),
+            (5, 7),
+            (6, 7),
+            (7, 7),
         ];
 
         for (t, n) in valid_configs {
@@ -173,7 +203,7 @@ mod tests {
 
     #[test]
     fn test_invalid_too_many_parties() {
-        let result = ThresholdConfig::new(3, 7);
+        let result = ThresholdConfig::new(3, 8);
         assert!(result.is_err());
     }
 

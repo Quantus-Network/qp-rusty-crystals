@@ -16,7 +16,7 @@ use crate::protocol::primitives::{
     compute_dilithium_hint, mod_q, normalize_assuming_le2q, pack_signature, poly_dot_hat_circl,
     poly_pack_w, reduce_le2q, unpack_polyveck_w, veck_decompose_go, FVec, K, L, N, Q,
 };
-use crate::protocol::secret_sharing::{recover_share_hardcoded, SecretShare};
+use crate::protocol::secret_sharing::{recover_share, SecretShare};
 
 // ============================================================================
 // Internal State Types
@@ -51,8 +51,8 @@ pub(crate) struct Round2Data {
     pub(crate) mu: [u8; 64],
     /// Aggregated w values for all K iterations.
     pub(crate) w_aggregated: Vec<polyvec::Polyveck>,
-    /// Active party bitmask.
-    pub(crate) active_parties_mask: u8,
+    /// Active party bitmask (u16 to support up to 16 parties).
+    pub(crate) active_parties_mask: u16,
 }
 
 impl Zeroize for Round2Data {
@@ -92,8 +92,9 @@ pub(crate) fn compute_mu(tr: &[u8; 64], message: &[u8], context: &[u8]) -> [u8; 
 }
 
 /// Convert PrivateKeyShare to the internal share format.
-fn convert_shares(share: &PrivateKeyShare) -> HashMap<u8, SecretShare> {
-    let mut shares: HashMap<u8, SecretShare> = HashMap::new();
+/// Uses u16 subset masks to support up to 16 parties.
+fn convert_shares(share: &PrivateKeyShare) -> HashMap<u16, SecretShare> {
+    let mut shares: HashMap<u16, SecretShare> = HashMap::new();
 
     for (subset_id, share_data) in share.shares() {
         let mut s1_share = polyvec::Polyvecl::default();
@@ -114,7 +115,7 @@ fn convert_shares(share: &PrivateKeyShare) -> HashMap<u8, SecretShare> {
         shares.insert(
             *subset_id,
             SecretShare {
-                party_id: *subset_id,
+                party_id: *subset_id as u8,
                 s1_share,
                 s2_share,
             },
@@ -380,8 +381,8 @@ pub(crate) fn process_round2(
         w_aggregated.push(polyvec::Polyveck::default());
     }
 
-    // Build active parties mask
-    let mut active_parties_mask: u8 = 1 << private_key.party_id();
+    // Build active parties mask (u16 to support up to 16 parties)
+    let mut active_parties_mask: u16 = 1 << private_key.party_id();
     for &party_id in other_party_ids {
         active_parties_mask |= 1 << party_id;
     }
@@ -438,7 +439,7 @@ pub(crate) fn generate_round3_response(
     }
 
     // Recover the partial secret for this party
-    let (s1h, s2h) = recover_share_hardcoded(
+    let (s1h, s2h) = recover_share(
         &shares,
         private_key.party_id(),
         &active_party_list,

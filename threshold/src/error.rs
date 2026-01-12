@@ -190,7 +190,7 @@ impl fmt::Display for ThresholdError {
 impl std::error::Error for ThresholdError {}
 
 /// Maximum number of parties supported by the threshold scheme.
-pub const MAX_PARTIES: u8 = 6;
+pub const MAX_PARTIES: u8 = 7;
 
 /// Minimum threshold value (at least 2 parties required).
 pub const MIN_THRESHOLD: u8 = 2;
@@ -209,7 +209,7 @@ pub fn validate_threshold_params(t: u8, n: u8) -> ThresholdResult<()> {
         return Err(ThresholdError::InvalidParameters {
             threshold: t,
             parties: n,
-            reason: "too many parties (max 6)",
+            reason: "too many parties (max 7)",
         });
     }
 
@@ -249,7 +249,7 @@ mod tests {
         assert!(validate_threshold_params(1, 3).is_err());
 
         // Too many parties
-        assert!(validate_threshold_params(3, 7).is_err());
+        assert!(validate_threshold_params(3, 8).is_err());
 
         // Threshold exceeds parties
         assert!(validate_threshold_params(5, 3).is_err());

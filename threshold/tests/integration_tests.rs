@@ -3,6 +3,8 @@
 //! These tests validate the complete end-to-end threshold signature protocol
 //! using the new ThresholdSigner API.
 
+use std::time::{Duration, Instant};
+
 use qp_rusty_crystals_threshold::{
     generate_with_dealer, verify_signature, ThresholdConfig, ThresholdSigner,
 };
@@ -516,54 +518,81 @@ fn test_threshold_matrix() {
     let context: &[u8] = b"";
 
     // Test configurations: (threshold, total_parties, max_attempts)
-    // Higher thresholds need more attempts due to rejection sampling
-    let configs: [(u8, u8, u32); 15] = [
+    // max_attempts is the number of full protocol retries
+    // k_iterations (from config) is parallel attempts within each protocol run
+    let configs: [(u8, u8, u32); 21] = [
+        // n = 2
         (2, 2, 50),
+        // n = 3
         (2, 3, 100),
         (3, 3, 150),
+        // n = 4
         (2, 4, 100),
         (3, 4, 200),
         (4, 4, 250),
+        // n = 5
         (2, 5, 100),
         (3, 5, 300),
         (4, 5, 500),
         (5, 5, 400),
+        // n = 6
         (2, 6, 100),
         (3, 6, 400),
         (4, 6, 700),
         (5, 6, 800),
         (6, 6, 600),
+        // n = 7 (EXPERIMENTAL - k_iterations are estimates)
+        (2, 7, 200),
+        (3, 7, 500),
+        (4, 7, 1000),
+        (5, 7, 1500),
+        (6, 7, 1200),
+        (7, 7, 800),
     ];
 
     let mut passed = 0;
     let mut failed = 0;
+    let mut total_time = Duration::ZERO;
 
     for (threshold, total_parties, max_attempts) in configs.iter() {
+        let start = Instant::now();
         let mut success = false;
+        let mut final_attempt = 0;
+
         for attempt in 0..(*max_attempts) {
+            // let attempt_start = Instant::now();
             match run_threshold_protocol_new_api(*threshold, *total_parties, &seed, message, context)
             {
                 Ok(_) => {
-                    println!(
-                        "✅ {}-of-{}: PASSED (attempt {})",
-                        threshold,
-                        total_parties,
-                        attempt + 1
-                    );
-                    passed += 1;
+                    final_attempt = attempt + 1;
                     success = true;
                     break;
                 }
-                Err(_) => {
-                    // Continue trying
+                Err(_e) => {
+                    // Log every 10th attempt or first few
+                    // if attempt < 5 || attempt % 10 == 0 {
+                    //     println!(
+                    //         "  {}-of-{} attempt {} failed in {:.2?}: {:?}",
+                    //         threshold, total_parties, attempt + 1, attempt_start.elapsed(), e
+                    //     );
+                    // }
                 }
             }
         }
 
-        if !success {
+        let elapsed = start.elapsed();
+        total_time += elapsed;
+
+        if success {
             println!(
-                "❌ {}-of-{}: FAILED after {} attempts",
-                threshold, total_parties, max_attempts
+                "✅ {}-of-{}: PASSED (attempt {}, {:.2?})",
+                threshold, total_parties, final_attempt, elapsed
+            );
+            passed += 1;
+        } else {
+            println!(
+                "❌ {}-of-{}: FAILED after {} attempts ({:.2?})",
+                threshold, total_parties, max_attempts, elapsed
             );
             failed += 1;
         }
@@ -572,6 +601,64 @@ fn test_threshold_matrix() {
     println!("\n=== MATRIX RESULTS ===");
     println!("Passed: {}", passed);
     println!("Failed: {}", failed);
+    println!("Total time: {:.2?}", total_time);
 
     assert_eq!(failed, 0, "Some threshold configurations failed");
+}
+
+/// Test that configuration validation works for n up to 7
+#[test]
+fn test_config_validation_extended() {
+    use qp_rusty_crystals_threshold::ThresholdConfig;
+
+    // All these should succeed (n <= 7)
+    let valid_configs = [
+        (2, 7), (7, 7),
+    ];
+
+    for (t, n) in valid_configs {
+        let result = ThresholdConfig::new(t, n);
+        assert!(
+            result.is_ok(),
+            "Config ({}, {}) should be valid but got error: {:?}",
+            t, n, result.err()
+        );
+    }
+
+    // n = 8 should fail
+    let result = ThresholdConfig::new(2, 8);
+    assert!(result.is_err(), "Config (2, 8) should be invalid");
+}
+
+/// Test key generation with extended party counts
+#[test]
+fn test_keygen_extended() {
+    use qp_rusty_crystals_threshold::{ThresholdConfig, generate_with_dealer};
+
+    let seed = [42u8; 32];
+
+    // Test extended configurations (n = 7)
+    let configs = [(2, 7), (4, 7), (7, 7)];
+
+    for (t, n) in configs {
+        let config = ThresholdConfig::new(t, n).expect("Config should be valid");
+        let result = generate_with_dealer(&seed, config);
+
+        assert!(
+            result.is_ok(),
+            "Key generation for ({}, {}) should succeed: {:?}",
+            t, n, result.err()
+        );
+
+        let (public_key, shares) = result.unwrap();
+
+        assert_eq!(shares.len(), n as usize, "Should have {} shares", n);
+        assert!(!public_key.as_bytes().is_empty(), "Public key should not be empty");
+
+        for (i, share) in shares.iter().enumerate() {
+            assert_eq!(share.party_id(), i as u8);
+            assert_eq!(share.threshold(), t);
+            assert_eq!(share.total_parties(), n);
+        }
+    }
 }

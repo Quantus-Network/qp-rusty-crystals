@@ -147,8 +147,8 @@ pub fn generate_with_dealer(
     for party_id in 0..parties {
         let party_shares_map = party_shares.get(&party_id).cloned().unwrap_or_default();
 
-        // Convert to SecretShareData format
-        let mut shares_data: HashMap<u8, SecretShareData> = HashMap::new();
+        // Convert to SecretShareData format (u16 for subset masks to support up to 16 parties)
+        let mut shares_data: HashMap<u16, SecretShareData> = HashMap::new();
         for (subset_id, share) in party_shares_map {
             let s1_data: Vec<[i32; 256]> = (0..L)
                 .map(|i| {
@@ -200,10 +200,10 @@ fn generate_threshold_shares(
     polyvec::Polyvecl,                                    // s1_total
     polyvec::Polyveck,                                    // s2_total
     polyvec::Polyvecl,                                    // s1h_total (NTT form)
-    HashMap<u8, HashMap<u8, SecretShare>>,                // party_shares
+    HashMap<u8, HashMap<u16, SecretShare>>,               // party_shares (u16 subset masks)
 )> {
     // Initialize party shares
-    let mut party_shares: HashMap<u8, HashMap<u8, SecretShare>> = HashMap::new();
+    let mut party_shares: HashMap<u8, HashMap<u16, SecretShare>> = HashMap::new();
     for i in 0..parties {
         party_shares.insert(i, HashMap::new());
     }
@@ -214,8 +214,9 @@ fn generate_threshold_shares(
     let mut s1h_total = polyvec::Polyvecl::default();
 
     // Generate shares for all possible "honest signer" combinations
-    let mut honest_signers = (1u8 << (parties - threshold + 1)) - 1;
-    let max_combinations = 1u8 << parties;
+    // Use u16 to support up to 16 parties
+    let mut honest_signers: u16 = (1u16 << (parties - threshold + 1)) - 1;
+    let max_combinations: u16 = 1u16 << parties;
 
     while honest_signers < max_combinations {
         // Generate random seed for this share

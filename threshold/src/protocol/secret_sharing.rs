@@ -1,10 +1,12 @@
 //! Secret sharing primitives for threshold ML-DSA-87.
 //!
 //! This module provides the secret share recovery functionality used in the
-//! threshold signing protocol. It uses hardcoded sharing patterns to avoid
+//! threshold signing protocol. It uses computed sharing patterns to avoid
 //! the coefficient explosion problem with general Lagrange interpolation.
+//!
+//! Subset masks use u16 to support up to 16 parties (currently supporting n ≤ 12).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use qp_rusty_crystals_dilithium::{params as dilithium_params, polyvec};
 
@@ -23,56 +25,99 @@ pub struct SecretShare {
     pub s2_share: polyvec::Polyveck,
 }
 
-/// Get hardcoded sharing patterns for specific (threshold, parties) combinations.
+/// Compute sharing patterns for a (threshold, parties) configuration.
 ///
-/// These patterns avoid the large Lagrange coefficients by using precomputed
-/// share combinations. Based on Threshold-ML-DSA implementation.
-pub(crate) fn get_sharing_patterns(threshold: u8, parties: u8) -> Result<Vec<Vec<u8>>, &'static str> {
-    // These patterns must match the Go implementation CODE (not comments)
-    // The Go code uses different patterns than what's in the comments
-    match (threshold, parties) {
-        (2, 2) => Ok(vec![vec![3]]),
-        (2, 3) => Ok(vec![vec![3, 5], vec![6]]),
-        (2, 4) => Ok(vec![vec![11, 13], vec![7, 14]]),
-        (3, 3) => Ok(vec![vec![7]]),
-        (3, 4) => Ok(vec![vec![3, 9], vec![6, 10], vec![12, 5]]),
-        (2, 5) => Ok(vec![vec![27, 29, 23], vec![30, 15]]),
-        (3, 5) => Ok(vec![vec![25, 11, 19, 13], vec![7, 14, 22, 26], vec![28, 21]]),
-        (4, 4) => Ok(vec![vec![15]]),
-        (4, 5) => Ok(vec![vec![3, 9, 17], vec![6, 10, 18], vec![12, 5, 20], vec![24]]),
-        (5, 5) => Ok(vec![vec![31]]),
-        (2, 6) => Ok(vec![vec![61, 47, 55], vec![62, 31, 59]]),
-        (3, 6) => Ok(vec![
-            vec![27, 23, 43, 57, 39],
-            vec![51, 58, 46, 30, 54],
-            vec![45, 53, 29, 15, 60],
-        ]),
-        (4, 6) => Ok(vec![
-            vec![19, 13, 35, 7, 49],
-            vec![42, 26, 38, 50, 22],
-            vec![52, 21, 44, 28, 37],
-            vec![25, 11, 14, 56, 41],
-        ]),
-        (5, 6) => Ok(vec![
-            vec![3, 5, 33],
-            vec![6, 10, 34],
-            vec![12, 20, 36],
-            vec![9, 24, 40],
-            vec![48, 17, 18],
-        ]),
-        (6, 6) => Ok(vec![vec![63]]),
-        _ => Err("Unsupported threshold/parties combination"),
+/// These patterns determine which subset shares each party position uses during
+/// signing. The algorithm ensures:
+/// 1. Every "honest signer" subset (size = n - t + 1) is assigned to exactly one position
+/// 2. Position i only receives subsets that contain party i (in canonical ordering)
+///
+/// # Arguments
+/// * `threshold` - The threshold value t (minimum parties to sign)
+/// * `parties` - The total number of parties n
+///
+/// # Returns
+/// A vector of t patterns, where patterns[i] contains the subset masks for position i.
+pub(crate) fn compute_sharing_patterns(threshold: u8, parties: u8) -> Result<Vec<Vec<u16>>, &'static str> {
+    if threshold < 2 {
+        return Err("Threshold must be at least 2");
     }
+    if threshold > parties {
+        return Err("Threshold cannot exceed number of parties");
+    }
+    if parties > 16 {
+        return Err("Maximum 16 parties supported");
+    }
+
+    let t = threshold as usize;
+    let n = parties as usize;
+
+    // Special case: t == n means all parties required
+    // Only one subset: all parties (2^n - 1)
+    if t == n {
+        return Ok(vec![vec![(1u16 << n) - 1]]);
+    }
+
+    // Generate all subsets of size (n - t + 1) using Gosper's hack
+    let subset_size = n - t + 1;
+    let subsets = generate_subsets_of_size(n, subset_size);
+
+    // Initialize patterns for each position
+    let mut patterns: Vec<Vec<u16>> = vec![Vec::new(); t];
+    let mut used: HashSet<u16> = HashSet::new();
+
+    // Assign subsets to positions greedily:
+    // Position i gets all unassigned subsets that contain party i
+    for pos in 0..t {
+        for &subset in &subsets {
+            if !used.contains(&subset) && (subset & (1 << pos)) != 0 {
+                patterns[pos].push(subset);
+                used.insert(subset);
+            }
+        }
+    }
+
+    // Verify all subsets were assigned
+    if used.len() != subsets.len() {
+        return Err("Failed to assign all subsets to positions");
+    }
+
+    Ok(patterns)
 }
 
-/// Recover share using hardcoded sharing patterns instead of Lagrange interpolation.
+/// Generate all subsets of exactly `size` elements from `n` elements.
+/// Uses Gosper's hack to efficiently enumerate subsets.
+fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
+    if size > n || size == 0 {
+        return Vec::new();
+    }
+
+    let mut subsets = Vec::new();
+    let max_val: u16 = 1 << n;
+
+    // Start with the smallest subset of the given size
+    let mut subset: u16 = (1 << size) - 1;
+
+    while subset < max_val {
+        subsets.push(subset);
+
+        // Gosper's hack to get next subset of same size
+        let c = subset & (!subset + 1); // lowest set bit
+        let r = subset + c; // next higher number with same bits, except one moved left
+        subset = (((r ^ subset) >> 2) / c) | r;
+    }
+
+    subsets
+}
+
+/// Recover share using computed sharing patterns instead of Lagrange interpolation.
 ///
 /// This avoids the coefficient explosion problem with general Lagrange interpolation
-/// by using precomputed share combinations that match the Go reference implementation.
+/// by using share combinations computed at runtime.
 ///
 /// # Arguments
 ///
-/// * `shares` - Map of shares keyed by subset ID (bitmask)
+/// * `shares` - Map of shares keyed by subset ID (bitmask, u16 for up to 16 parties)
 /// * `party_id` - The party ID recovering the share
 /// * `active_parties` - List of active party IDs participating in signing
 /// * `threshold` - The threshold value (t)
@@ -81,8 +126,8 @@ pub(crate) fn get_sharing_patterns(threshold: u8, parties: u8) -> Result<Vec<Vec
 /// # Returns
 ///
 /// A tuple of (s1_ntt, s2_ntt) representing the recovered secret shares in NTT domain.
-pub fn recover_share_hardcoded(
-    shares: &HashMap<u8, SecretShare>,
+pub fn recover_share(
+    shares: &HashMap<u16, SecretShare>,
     party_id: u8,
     active_parties: &[u8],
     threshold: u8,
@@ -95,7 +140,7 @@ pub fn recover_share_hardcoded(
         // For t=n case, use the share that corresponds to all active parties
         // The share key is a bitmask of which parties are involved
         // For 2-of-2 with parties 0,1 active, the key is 0b11 = 3
-        let active_key: u8 = active_parties.iter().fold(0u8, |acc, &p| acc | (1 << p));
+        let active_key: u16 = active_parties.iter().fold(0u16, |acc, &p| acc | (1 << p));
 
         // Try to find the share with the active key first
         let share = shares.get(&active_key).or_else(|| {
@@ -119,8 +164,8 @@ pub fn recover_share_hardcoded(
         }
     }
 
-    // Get the hardcoded sharing patterns
-    let sharing_patterns = get_sharing_patterns(threshold, parties)
+    // Compute the sharing patterns dynamically
+    let sharing_patterns = compute_sharing_patterns(threshold, parties)
         .map_err(|e| ThresholdError::InvalidConfiguration(e.to_string()))?;
 
     // Create permutation to cover the signing set (active_parties)
@@ -161,7 +206,7 @@ pub fn recover_share_hardcoded(
 
     for &pattern_u in &sharing_patterns[current_i] {
         // Translate the share index u to the share index u_ by applying the permutation
-        let mut u_translated = 0u8;
+        let mut u_translated = 0u16;
         for i in 0..parties {
             if pattern_u & (1 << i) != 0 {
                 u_translated |= 1 << perm[i as usize];
@@ -235,44 +280,106 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sharing_patterns_exist() {
-        // Test that all supported configurations have patterns
-        let configs = [
-            (2, 2),
-            (2, 3),
-            (3, 3),
-            (2, 4),
-            (3, 4),
-            (4, 4),
-            (2, 5),
-            (3, 5),
-            (4, 5),
-            (5, 5),
-            (2, 6),
-            (3, 6),
-            (4, 6),
-            (5, 6),
-            (6, 6),
+    fn test_generate_subsets_of_size() {
+        // C(4, 2) = 6 subsets of size 2
+        let subsets = generate_subsets_of_size(4, 2);
+        assert_eq!(subsets.len(), 6);
+
+        // All should have exactly 2 bits set
+        for s in &subsets {
+            assert_eq!(s.count_ones(), 2);
+        }
+
+        // C(5, 3) = 10 subsets of size 3
+        let subsets = generate_subsets_of_size(5, 3);
+        assert_eq!(subsets.len(), 10);
+    }
+
+    #[test]
+    fn test_compute_sharing_patterns_t_equals_n() {
+        // When t = n, there should be exactly one pattern with all bits set
+        let test_cases = [
+            (2, 2, 0b11u16),
+            (3, 3, 0b111u16),
+            (6, 6, 0b111111u16),
+            (8, 8, 0b11111111u16),
+            (12, 12, 0b111111111111u16),
         ];
 
-        for (t, n) in configs {
-            let result = get_sharing_patterns(t, n);
-            assert!(
-                result.is_ok(),
-                "Expected sharing pattern for ({}, {})",
-                t,
-                n
+        for (t, n, expected_mask) in test_cases {
+            let patterns = compute_sharing_patterns(t, n).unwrap();
+            assert_eq!(patterns.len(), 1, "t=n should have 1 position for ({}, {})", t, n);
+            assert_eq!(patterns[0].len(), 1, "t=n should have 1 pattern for ({}, {})", t, n);
+            assert_eq!(
+                patterns[0][0], expected_mask,
+                "Pattern mask mismatch for ({}, {}): expected {}, got {}",
+                t, n, expected_mask, patterns[0][0]
             );
         }
     }
 
     #[test]
+    fn test_compute_sharing_patterns_coverage() {
+        // Test that all subsets are covered exactly once
+        let test_cases = [(2, 3), (2, 4), (3, 5), (4, 6), (6, 12)];
+
+        for (t, n) in test_cases {
+            let patterns = compute_sharing_patterns(t, n).unwrap();
+
+            // Should have t positions
+            assert_eq!(patterns.len(), t as usize, "Should have {} positions for ({}, {})", t, t, n);
+
+            // Collect all subsets from all positions
+            let mut all_subsets: Vec<u16> = patterns.iter().flatten().copied().collect();
+            let total_subsets = all_subsets.len();
+
+            // Check no duplicates
+            all_subsets.sort();
+            all_subsets.dedup();
+            assert_eq!(all_subsets.len(), total_subsets, "Duplicate subsets found for ({}, {})", t, n);
+
+            // Each position i should only have subsets containing bit i
+            for (pos, pos_patterns) in patterns.iter().enumerate() {
+                for &subset in pos_patterns {
+                    assert!(
+                        (subset & (1 << pos)) != 0,
+                        "Position {} has subset {} which doesn't contain bit {} for ({}, {})",
+                        pos, subset, pos, t, n
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_compute_sharing_patterns_all_configs() {
+        // Test that patterns can be computed for all valid configurations up to n=15
+        // (n=16 would overflow u16 in the subset mask calculation)
+        // Note: MAX_PARTIES is 7 for the public API, but secret sharing supports up to 15 internally
+        for n in 2..=15u8 {
+            for t in 2..=n {
+                let result = compute_sharing_patterns(t, n);
+                assert!(
+                    result.is_ok(),
+                    "Failed to compute pattern for ({}, {}): {:?}",
+                    t, n, result.err()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_invalid_sharing_patterns() {
-        // Test unsupported configuration
-        let result = get_sharing_patterns(1, 3);
+        // Threshold too small
+        let result = compute_sharing_patterns(1, 3);
         assert!(result.is_err());
 
-        let result = get_sharing_patterns(7, 7);
+        // Threshold > parties
+        let result = compute_sharing_patterns(5, 3);
+        assert!(result.is_err());
+
+        // Too many parties
+        let result = compute_sharing_patterns(2, 17);
         assert!(result.is_err());
     }
 }

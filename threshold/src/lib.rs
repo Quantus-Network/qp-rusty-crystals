@@ -11,7 +11,7 @@
 //! - Any t or more parties can cooperate to produce a valid signature
 //! - Fewer than t parties cannot produce a signature or learn the secret key
 //!
-//! This implementation supports configurations up to (6, 6) and produces
+//! This implementation supports configurations up to (7, 7) and produces
 //! signatures that are compatible with standard ML-DSA-87 verification.
 //!
 //! ## Quick Start
@@ -224,7 +224,7 @@ mod verification {
 // ============================================================================
 
 /// Maximum number of parties supported by the threshold scheme.
-pub const MAX_PARTIES: u8 = 6;
+pub const MAX_PARTIES: u8 = 7;
 
 /// Minimum threshold value (at least 2 parties required).
 pub const MIN_THRESHOLD: u8 = 2;
