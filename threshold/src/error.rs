@@ -109,6 +109,31 @@ pub enum ThresholdError {
         /// Party ID that sent duplicate.
         party_id: u8,
     },
+    // ========================================================================
+    // DKG-specific errors
+    // ========================================================================
+    /// DKG protocol error.
+    DkgError(String),
+    /// DKG commitment hash mismatch.
+    DkgCommitmentMismatch {
+        /// Party ID with mismatched commitment.
+        party_id: u8,
+    },
+    /// DKG contribution bounds violation.
+    DkgInvalidBounds {
+        /// Party ID with invalid bounds.
+        party_id: u8,
+    },
+    /// DKG consensus failure - parties disagree on public key.
+    DkgConsensusFailure {
+        /// Parties with mismatched public keys.
+        parties: Vec<u8>,
+    },
+    /// DKG party reported failure.
+    DkgPartyFailure {
+        /// Parties that reported failure.
+        parties: Vec<u8>,
+    },
 }
 
 impl fmt::Display for ThresholdError {
@@ -181,6 +206,21 @@ impl fmt::Display for ThresholdError {
             }
             ThresholdError::DuplicateBroadcast { party_id } => {
                 write!(f, "Duplicate broadcast from party {}", party_id)
+            }
+            ThresholdError::DkgError(msg) => {
+                write!(f, "DKG error: {}", msg)
+            }
+            ThresholdError::DkgCommitmentMismatch { party_id } => {
+                write!(f, "DKG commitment mismatch for party {}", party_id)
+            }
+            ThresholdError::DkgInvalidBounds { party_id } => {
+                write!(f, "DKG invalid coefficient bounds for party {}", party_id)
+            }
+            ThresholdError::DkgConsensusFailure { parties } => {
+                write!(f, "DKG consensus failure, mismatched parties: {:?}", parties)
+            }
+            ThresholdError::DkgPartyFailure { parties } => {
+                write!(f, "DKG party failure: {:?}", parties)
             }
         }
     }

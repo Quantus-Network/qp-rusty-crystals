@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use qp_rusty_crystals_threshold::{
     generate_with_dealer, verify_signature, ThresholdConfig, ThresholdSigner,
+    keygen::dkg::run_local_dkg,
 };
 
 /// A simple RNG wrapper that implements the traits needed by ThresholdSigner.
@@ -66,6 +67,85 @@ fn run_threshold_protocol_new_api(
         .into_iter()
         .take(threshold as usize)
         .map(|share| ThresholdSigner::new(share, public_key.clone(), config))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Signer creation error: {:?}", e))?;
+
+    let mut rng = TestRng::new();
+
+    // Round 1: All active parties generate commitments
+    let r1_broadcasts: Vec<_> = signers
+        .iter_mut()
+        .map(|s| s.round1_commit(&mut rng))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Round 1 error: {:?}", e))?;
+
+    // Round 2: All active parties reveal their commitments
+    let r2_broadcasts: Vec<_> = signers
+        .iter_mut()
+        .enumerate()
+        .map(|(i, s)| {
+            let others: Vec<_> = r1_broadcasts
+                .iter()
+                .filter(|r| r.party_id != i as u8)
+                .cloned()
+                .collect();
+            s.round2_reveal(message, context, &others)
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Round 2 error: {:?}", e))?;
+
+    // Round 3: All active parties compute their responses
+    let r3_broadcasts: Vec<_> = signers
+        .iter_mut()
+        .enumerate()
+        .map(|(i, s)| {
+            let others: Vec<_> = r2_broadcasts
+                .iter()
+                .filter(|r| r.party_id != i as u8)
+                .cloned()
+                .collect();
+            s.round3_respond(&others)
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Round 3 error: {:?}", e))?;
+
+    // Combine: Any party can combine (we use party 0)
+    let signature = signers[0]
+        .combine(&r2_broadcasts, &r3_broadcasts)
+        .map_err(|e| format!("Combine error: {:?}", e))?;
+
+    // Verify the signature
+    if !verify_signature(&public_key, message, context, &signature) {
+        return Err("Signature verification failed".to_string());
+    }
+
+    Ok(signature.as_bytes().to_vec())
+}
+
+
+
+/// Run threshold signing protocol using DKG-generated keys.
+fn run_threshold_protocol_with_dkg(
+    threshold: u8,
+    total_parties: u8,
+    seed: &[u8; 32],
+    message: &[u8],
+    context: &[u8],
+) -> Result<Vec<u8>, String> {
+    let config = ThresholdConfig::new(threshold, total_parties)
+        .map_err(|e| format!("Config error: {:?}", e))?;
+
+    // Run DKG to generate keys
+    let dkg_outputs = run_local_dkg(threshold, total_parties, *seed)
+        .map_err(|e| format!("DKG error: {:?}", e))?;
+
+    let public_key = dkg_outputs[0].public_key.clone();
+
+    // Create signers for the first `threshold` parties (active signers)
+    let mut signers: Vec<ThresholdSigner> = dkg_outputs
+        .into_iter()
+        .take(threshold as usize)
+        .map(|output| ThresholdSigner::new(output.private_share, public_key.clone(), config))
         .collect::<Result<_, _>>()
         .map_err(|e| format!("Signer creation error: {:?}", e))?;
 
@@ -507,7 +587,7 @@ fn test_signature_verification_with_wrong_context() {
 
 #[test]
 fn test_threshold_matrix() {
-    println!("\n=== THRESHOLD MATRIX TEST ===\n");
+    println!("\n=== THRESHOLD MATRIX TEST (Dealer) ===\n");
 
     let mut seed = [0u8; 32];
     for i in 0..32 {
@@ -604,6 +684,100 @@ fn test_threshold_matrix() {
     println!("Total time: {:.2?}", total_time);
 
     assert_eq!(failed, 0, "Some threshold configurations failed");
+}
+
+/// Test threshold signing with DKG-generated keys across multiple configurations.
+#[test]
+fn test_threshold_matrix_dkg() {
+    println!("\n=== THRESHOLD MATRIX TEST (DKG) ===\n");
+
+    let mut seed = [0u8; 32];
+    for i in 0..32 {
+        seed[i] = (i as u8).wrapping_add(100); // Different seed than dealer test
+    }
+
+    let message = b"matrix test message with dkg";
+    let context: &[u8] = b"";
+
+    // Test configurations: (threshold, total_parties, max_attempts)
+    // Using same configs as dealer test
+    let configs: [(u8, u8, u32); 21] = [
+        // n = 2
+        (2, 2, 50),
+        // n = 3
+        (2, 3, 100),
+        (3, 3, 150),
+        // n = 4
+        (2, 4, 100),
+        (3, 4, 200),
+        (4, 4, 250),
+        // n = 5
+        (2, 5, 100),
+        (3, 5, 300),
+        (4, 5, 500),
+        (5, 5, 400),
+        // n = 6
+        (2, 6, 100),
+        (3, 6, 400),
+        (4, 6, 700),
+        (5, 6, 800),
+        (6, 6, 600),
+        // n = 7 (EXPERIMENTAL - k_iterations are estimates)
+        (2, 7, 200),
+        (3, 7, 500),
+        (4, 7, 1000),
+        (5, 7, 1500),
+        (6, 7, 1200),
+        (7, 7, 800),
+    ];
+
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut total_time = Duration::ZERO;
+
+    for (threshold, total_parties, max_attempts) in configs.iter() {
+        let start = Instant::now();
+        let mut success = false;
+        let mut final_attempt = 0;
+
+        for attempt in 0..(*max_attempts) {
+            match run_threshold_protocol_with_dkg(*threshold, *total_parties, &seed, message, context)
+            {
+                Ok(_) => {
+                    final_attempt = attempt + 1;
+                    success = true;
+                    break;
+                }
+                Err(_e) => {
+                    // Rejection sampling may require multiple attempts
+                }
+            }
+        }
+
+        let elapsed = start.elapsed();
+        total_time += elapsed;
+
+        if success {
+            println!(
+                "✅ {}-of-{}: PASSED (attempt {}, {:.2?})",
+                threshold, total_parties, final_attempt, elapsed
+            );
+            passed += 1;
+        } else {
+            println!(
+                "❌ {}-of-{}: FAILED after {} attempts ({:.2?})",
+                threshold, total_parties, max_attempts, elapsed
+            );
+            failed += 1;
+        }
+    }
+
+    println!("\n=== DKG MATRIX RESULTS ===");
+    println!("Passed: {}", passed);
+    println!("Failed: {}", failed);
+    println!("Total time: {:.2?}", total_time);
+
+    assert_eq!(failed, 0, "Some threshold configurations failed with DKG");
 }
 
 /// Test that configuration validation works for n up to 7

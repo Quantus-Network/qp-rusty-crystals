@@ -119,7 +119,7 @@ mod keys;
 mod signer;
 
 // Key generation
-mod keygen;
+pub mod keygen;
 
 // Internal protocol implementation
 pub(crate) mod protocol;

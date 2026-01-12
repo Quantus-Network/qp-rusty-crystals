@@ -1,8 +1,10 @@
 //! Key generation for threshold ML-DSA-87.
 //!
 //! This module provides methods for generating threshold key shares.
-//! Currently, only trusted dealer key generation is implemented.
-//! Distributed key generation (DKG) may be added in the future.
+//! Two approaches are available:
+//!
+//! 1. **Trusted Dealer** - A single party generates all shares
+//! 2. **Distributed Key Generation (DKG)** - Parties collaboratively generate shares
 //!
 //! # Trusted Dealer
 //!
@@ -22,21 +24,40 @@
 //! // Each party should securely store their share and delete it from the dealer.
 //! ```
 //!
-//! # Future: Distributed Key Generation
+//! # Distributed Key Generation (DKG)
 //!
-//! A future version may include DKG protocols that allow parties to generate
-//! their shares without a trusted dealer. The API would look like:
+//! The DKG protocol allows parties to collaboratively generate key shares
+//! without any single party knowing the complete secret. This is the
+//! recommended approach for production deployments.
 //!
 //! ```ignore
+//! use qp_rusty_crystals_threshold::keygen::dkg::{DilithiumDkg, DkgConfig, Action};
+//! use rand::rngs::OsRng;
+//!
 //! // Each party runs this independently
-//! let dkg = DistributedKeyGen::new(party_id, config);
-//! let r1 = dkg.round1(&mut rng)?;
-//! // ... exchange messages ...
-//! let r2 = dkg.round2(&other_r1)?;
-//! // ... exchange messages ...
-//! let (public_key, my_share) = dkg.finalize(&other_r2)?;
+//! let config = DkgConfig::new(threshold_config, my_party_id, all_participants)?;
+//! let mut dkg = DilithiumDkg::new(config, OsRng);
+//!
+//! loop {
+//!     match dkg.poke()? {
+//!         Action::Wait => { /* wait for messages */ }
+//!         Action::SendMany(data) => { /* broadcast to all */ }
+//!         Action::SendPrivate(to, data) => { /* send to specific party */ }
+//!         Action::Return(output) => {
+//!             // DKG complete!
+//!             let public_key = output.public_key;
+//!             let my_share = output.private_share;
+//!             break;
+//!         }
+//!     }
+//!     // When messages arrive: dkg.message(from, data);
+//! }
 //! ```
+//!
+//! The DKG protocol follows the poke/message pattern used by NEAR MPC,
+//! making it compatible with NEAR's `run_protocol` infrastructure.
 
 mod dealer;
+pub mod dkg;
 
 pub use dealer::generate_with_dealer;
