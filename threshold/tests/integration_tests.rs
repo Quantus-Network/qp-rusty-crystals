@@ -10,38 +10,6 @@ use qp_rusty_crystals_threshold::{
     keygen::dkg::run_local_dkg,
 };
 
-/// A simple RNG wrapper that implements the traits needed by ThresholdSigner.
-struct TestRng {
-    inner: rand::rngs::ThreadRng,
-}
-
-impl TestRng {
-    fn new() -> Self {
-        Self {
-            inner: rand::thread_rng(),
-        }
-    }
-}
-
-impl rand_core::RngCore for TestRng {
-    fn next_u32(&mut self) -> u32 {
-        use rand::RngCore;
-        self.inner.next_u32()
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        use rand::RngCore;
-        self.inner.next_u64()
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        use rand::RngCore;
-        self.inner.fill_bytes(dest)
-    }
-}
-
-impl rand_core::CryptoRng for TestRng {}
-
 /// Helper to encode bytes as hex string
 fn hex_encode(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02x}", b)).collect()
@@ -70,7 +38,7 @@ fn run_threshold_protocol_new_api(
         .collect::<Result<_, _>>()
         .map_err(|e| format!("Signer creation error: {:?}", e))?;
 
-    let mut rng = TestRng::new();
+    let mut rng = rand::thread_rng();
 
     // Round 1: All active parties generate commitments
     let r1_broadcasts: Vec<_> = signers
@@ -149,7 +117,7 @@ fn run_threshold_protocol_with_dkg(
         .collect::<Result<_, _>>()
         .map_err(|e| format!("Signer creation error: {:?}", e))?;
 
-    let mut rng = TestRng::new();
+    let mut rng = rand::thread_rng();
 
     // Round 1: All active parties generate commitments
     let r1_broadcasts: Vec<_> = signers

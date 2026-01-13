@@ -9,5 +9,5 @@ getrandom.workspace = true
 qp-rusty-crystals-dilithium = { workspace = true, default-features = true }
 qp-rusty-crystals-hdwallet = { workspace = true }
 rand = { workspace = true, features = ["std", "std_rng"] }
-aes = "0.8"
-cipher = "0.4"
+aes = "=0.8.4"
+cipher = "=0.4.4"

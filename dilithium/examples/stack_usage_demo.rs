@@ -10,7 +10,7 @@ use std::{panic, sync::mpsc, thread, time::Duration};
 use rand::Rng;
 
 fn get_random_bytes() -> SensitiveBytes32 {
-	let mut rng = rand::rng();
+	let mut rng = rand::thread_rng();
 	let mut bytes = [0u8; 32];
 	rng.fill(&mut bytes);
 	(&mut bytes).into()

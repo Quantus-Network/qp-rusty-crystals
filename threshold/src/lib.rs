@@ -112,17 +112,24 @@
 #![warn(missing_docs, rust_2018_idioms)]
 
 // Core modules
-mod broadcast;
+pub mod broadcast;
 mod config;
 mod error;
-mod keys;
+pub mod keys;
 mod signer;
+
+// Serde helpers for large arrays
+#[cfg(feature = "serde")]
+pub(crate) mod serde_helpers;
 
 // Key generation
 pub mod keygen;
 
 // Internal protocol implementation
 pub(crate) mod protocol;
+
+// Signing protocol adapter for NEAR MPC integration
+pub mod signing_protocol;
 
 // circl_ntt is public for cross-language NTT testing with Go reference
 pub mod circl_ntt;

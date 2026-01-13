@@ -18,20 +18,22 @@ thiserror = { workspace = true }
 
 # Serialization
 serde = { workspace = true, optional = true }
+bincode = { workspace = true, optional = true }
 
 # Local dependencies - reuse dilithium implementation
 qp-rusty-crystals-dilithium = { workspace = true }
 
 # Cryptographic utilities
-subtle = { version = "2.5", default-features = false }
+subtle = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 hex = { workspace = true }
 hex-literal = { workspace = true }
 serde_json = { workspace = true }
+rand_chacha = { workspace = true }
 
 [features]
 default = ["std"]
 std = ["rand/std", "rand_core/std"]
-serde = ["dep:serde"]
+serde = ["dep:serde", "dep:bincode"]

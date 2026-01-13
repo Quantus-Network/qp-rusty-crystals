@@ -12,9 +12,6 @@ use std::collections::HashMap;
 
 use rand::{Rng, SeedableRng};
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
 use crate::error::ThresholdError;
 
 use super::state::{DkgState, DkgStateData};

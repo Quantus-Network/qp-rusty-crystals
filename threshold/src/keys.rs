@@ -9,6 +9,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "serde")]
+use crate::serde_helpers::{serde_byte_array, serde_poly_vec, serde_u16_hashmap};
+
 /// Size of the packed ML-DSA-87 public key in bytes.
 pub const PUBLIC_KEY_SIZE: usize = 2592;
 
@@ -25,9 +28,10 @@ pub const TR_SIZE: usize = 64;
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PublicKey {
     /// Packed public key bytes (standard ML-DSA-87 format).
+    #[cfg_attr(feature = "serde", serde(with = "serde_byte_array"))]
     bytes: [u8; PUBLIC_KEY_SIZE],
     /// Public key hash (TR), used in signing.
-    #[cfg_attr(feature = "serde", serde(with = "serde_arrays"))]
+    #[cfg_attr(feature = "serde", serde(with = "serde_byte_array"))]
     tr: [u8; TR_SIZE],
 }
 
@@ -89,7 +93,7 @@ impl PublicKey {
 /// - Never log or print this value
 /// - Store securely (encrypted at rest)
 /// - The `Zeroize` trait ensures memory is cleared on drop
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PrivateKeyShare {
     /// Party identifier (0 to n-1).
@@ -103,22 +107,24 @@ pub struct PrivateKeyShare {
     /// Random seed rho (same as public key).
     rho: [u8; 32],
     /// Hash of public key for signing.
-    #[cfg_attr(feature = "serde", serde(with = "serde_arrays"))]
+    #[cfg_attr(feature = "serde", serde(with = "serde_byte_array"))]
     tr: [u8; TR_SIZE],
     /// Secret shares for this party, keyed by signer subset ID.
     /// Each share contains (s1_share, s2_share) polynomial vectors.
     /// Uses u16 as subset mask to support up to 16 parties.
-    #[cfg_attr(feature = "serde", serde(with = "secret_shares_serde"))]
+    #[cfg_attr(feature = "serde", serde(with = "serde_u16_hashmap"))]
     shares: std::collections::HashMap<u16, SecretShareData>,
 }
 
 /// Internal secret share data for a specific signer subset.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub(crate) struct SecretShareData {
     /// Share of s1 polynomial vector (L polynomials).
+    #[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
     pub(crate) s1: Vec<[i32; 256]>,
     /// Share of s2 polynomial vector (K polynomials).
+    #[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
     pub(crate) s2: Vec<[i32; 256]>,
 }
 
@@ -221,62 +227,7 @@ impl std::fmt::Debug for PrivateKeyShare {
     }
 }
 
-/// Serde support for HashMap<u8, SecretShareData>
-#[cfg(feature = "serde")]
-mod secret_shares_serde {
-    use super::SecretShareData;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::HashMap;
 
-    pub fn serialize<S>(
-        shares: &HashMap<u16, SecretShareData>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let vec: Vec<(u16, &SecretShareData)> = shares.iter().map(|(k, v)| (*k, v)).collect();
-        vec.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<u16, SecretShareData>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let vec: Vec<(u16, SecretShareData)> = Vec::deserialize(deserializer)?;
-        Ok(vec.into_iter().collect())
-    }
-}
-
-/// Serde support for fixed-size arrays larger than 32 bytes
-#[cfg(feature = "serde")]
-mod serde_arrays {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S, const N: usize>(arr: &[u8; N], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        arr.as_slice().serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D, const N: usize>(deserializer: D) -> Result<[u8; N], D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let vec: Vec<u8> = Vec::deserialize(deserializer)?;
-        if vec.len() != N {
-            return Err(serde::de::Error::custom(format!(
-                "expected {} bytes, got {}",
-                N,
-                vec.len()
-            )));
-        }
-        let mut arr = [0u8; N];
-        arr.copy_from_slice(&vec);
-        Ok(arr)
-    }
-}
 
 #[cfg(test)]
 mod tests {

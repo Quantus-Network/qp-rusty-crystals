@@ -5,39 +5,6 @@
 
 use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig, ThresholdSigner};
 
-/// A simple RNG wrapper that implements the traits needed by ThresholdSigner.
-/// This bridges the rand_core version gap between rand 0.8 and rand_core 0.9.
-struct TestRng {
-    inner: rand::rngs::ThreadRng,
-}
-
-impl TestRng {
-    fn new() -> Self {
-        Self {
-            inner: rand::thread_rng(),
-        }
-    }
-}
-
-impl rand_core::RngCore for TestRng {
-    fn next_u32(&mut self) -> u32 {
-        use rand::RngCore;
-        self.inner.next_u32()
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        use rand::RngCore;
-        self.inner.next_u64()
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        use rand::RngCore;
-        self.inner.fill_bytes(dest)
-    }
-}
-
-impl rand_core::CryptoRng for TestRng {}
-
 /// Test basic key generation with the new API.
 #[test]
 fn test_key_generation() {
@@ -92,7 +59,7 @@ fn test_round1_commit() {
 
     let mut signer = ThresholdSigner::new(shares[0].clone(), public_key, config).expect("signer");
 
-    let mut rng = TestRng::new();
+    let mut rng = rand::thread_rng();
     let r1 = signer.round1_commit(&mut rng).expect("round1");
 
     assert_eq!(r1.party_id, 0);
@@ -112,7 +79,7 @@ fn test_round1_randomness() {
         ThresholdSigner::new(shares[0].clone(), public_key.clone(), config).expect("signer");
     let mut signer2 = ThresholdSigner::new(shares[0].clone(), public_key, config).expect("signer");
 
-    let mut rng = TestRng::new();
+    let mut rng = rand::thread_rng();
     let r1_a = signer1.round1_commit(&mut rng).expect("round1");
     let r1_b = signer2.round1_commit(&mut rng).expect("round1");
 
@@ -145,7 +112,7 @@ fn test_state_machine_round1_twice() {
 
     let mut signer = ThresholdSigner::new(shares[0].clone(), public_key, config).expect("signer");
 
-    let mut rng = TestRng::new();
+    let mut rng = rand::thread_rng();
     let _r1 = signer.round1_commit(&mut rng).expect("round1");
 
     // Try to call round1 again - should fail
@@ -163,7 +130,7 @@ fn test_signer_reset() {
 
     let mut signer = ThresholdSigner::new(shares[0].clone(), public_key, config).expect("signer");
 
-    let mut rng = TestRng::new();
+    let mut rng = rand::thread_rng();
     let _r1 = signer.round1_commit(&mut rng).expect("round1");
 
     // Reset the signer

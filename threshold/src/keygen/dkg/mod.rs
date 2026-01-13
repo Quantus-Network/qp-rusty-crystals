@@ -278,15 +278,6 @@ mod tests {
         let message = b"Test message for DKG signing";
         let context = b"test-context";
 
-        // Create RNG wrapper for signing - wrap thread_rng to satisfy rand_core traits
-        struct SigningRng(rand::rngs::ThreadRng);
-        impl rand_core::RngCore for SigningRng {
-            fn next_u32(&mut self) -> u32 { rand::RngCore::next_u32(&mut self.0) }
-            fn next_u64(&mut self) -> u64 { rand::RngCore::next_u64(&mut self.0) }
-            fn fill_bytes(&mut self, dest: &mut [u8]) { rand::RngCore::fill_bytes(&mut self.0, dest) }
-        }
-        impl rand_core::CryptoRng for SigningRng {}
-
         // Retry signing up to 100 times (rejection sampling may fail)
         let mut success = false;
         for _ in 0..100 {
@@ -297,7 +288,7 @@ mod tests {
                 .map(|output| ThresholdSigner::new(output.private_share.clone(), public_key.clone(), config).unwrap())
                 .collect();
 
-            let mut rng = SigningRng(rand::thread_rng());
+            let mut rng = rand::thread_rng();
 
             // Round 1: Generate commitments
             let r1_broadcasts: Vec<_> = signers

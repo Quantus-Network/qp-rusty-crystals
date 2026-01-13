@@ -8,6 +8,9 @@ use std::collections::HashMap;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "serde")]
+use crate::serde_helpers::serde_poly_vec;
+
 use crate::config::ThresholdConfig;
 use crate::keys::{PrivateKeyShare, PublicKey};
 
@@ -108,8 +111,10 @@ impl DkgConfig {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct SubsetContribution {
     /// Share of s1 polynomial vector (L polynomials, each with N coefficients).
+    #[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
     pub s1: Vec<[i32; N]>,
     /// Share of s2 polynomial vector (K polynomials, each with N coefficients).
+    #[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
     pub s2: Vec<[i32; N]>,
 }
 
