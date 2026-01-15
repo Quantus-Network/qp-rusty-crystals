@@ -85,17 +85,17 @@
 //!
 //! In a real distributed system, each party runs on a separate machine:
 //!
-//! 1. **Key Generation**: A trusted dealer generates shares and securely
-//!    distributes them to each party (or use DKG when available).
+//! 1. **Key Generation**: A trusted dealer generates shares and securely distributes them to each
+//!    party (or use DKG when available).
 //!
-//! 2. **Round 1**: Each party generates a `Round1Broadcast` and sends it to
-//!    all other participating parties.
+//! 2. **Round 1**: Each party generates a `Round1Broadcast` and sends it to all other participating
+//!    parties.
 //!
-//! 3. **Round 2**: After receiving all Round 1 broadcasts, each party
-//!    generates a `Round2Broadcast` and sends it to all others.
+//! 3. **Round 2**: After receiving all Round 1 broadcasts, each party generates a `Round2Broadcast`
+//!    and sends it to all others.
 //!
-//! 4. **Round 3**: After receiving all Round 2 broadcasts, each party
-//!    generates a `Round3Broadcast` and sends it to all others.
+//! 4. **Round 3**: After receiving all Round 2 broadcasts, each party generates a `Round3Broadcast`
+//!    and sends it to all others.
 //!
 //! 5. **Combine**: Any party can combine the broadcasts into a final signature.
 //!
@@ -161,69 +161,64 @@ pub use verification::verify_signature;
 
 /// Signature verification.
 mod verification {
-    use crate::keys::PublicKey;
-    use crate::broadcast::Signature;
-    use qp_rusty_crystals_dilithium::params as dilithium_params;
+	use crate::{broadcast::Signature, keys::PublicKey};
+	use qp_rusty_crystals_dilithium::params as dilithium_params;
 
-    /// Verify a threshold signature.
-    ///
-    /// This function verifies a signature produced by the threshold signing
-    /// protocol. The signature is compatible with standard ML-DSA-87, so it
-    /// can also be verified using the `qp-rusty-crystals-dilithium` crate.
-    ///
-    /// # Arguments
-    ///
-    /// * `public_key` - The threshold public key
-    /// * `message` - The message that was signed
-    /// * `context` - The context string used during signing (max 255 bytes)
-    /// * `signature` - The signature to verify
-    ///
-    /// # Returns
-    ///
-    /// `true` if the signature is valid, `false` otherwise.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use qp_rusty_crystals_threshold::{verify_signature, PublicKey, Signature};
-    ///
-    /// let is_valid = verify_signature(&public_key, b"message", b"context", &signature);
-    /// if is_valid {
-    ///     println!("Signature is valid!");
-    /// }
-    /// ```
-    pub fn verify_signature(
-        public_key: &PublicKey,
-        message: &[u8],
-        context: &[u8],
-        signature: &Signature,
-    ) -> bool {
-        // Validate context length
-        if context.len() > 255 {
-            return false;
-        }
+	/// Verify a threshold signature.
+	///
+	/// This function verifies a signature produced by the threshold signing
+	/// protocol. The signature is compatible with standard ML-DSA-87, so it
+	/// can also be verified using the `qp-rusty-crystals-dilithium` crate.
+	///
+	/// # Arguments
+	///
+	/// * `public_key` - The threshold public key
+	/// * `message` - The message that was signed
+	/// * `context` - The context string used during signing (max 255 bytes)
+	/// * `signature` - The signature to verify
+	///
+	/// # Returns
+	///
+	/// `true` if the signature is valid, `false` otherwise.
+	///
+	/// # Example
+	///
+	/// ```ignore
+	/// use qp_rusty_crystals_threshold::{verify_signature, PublicKey, Signature};
+	///
+	/// let is_valid = verify_signature(&public_key, b"message", b"context", &signature);
+	/// if is_valid {
+	///     println!("Signature is valid!");
+	/// }
+	/// ```
+	pub fn verify_signature(
+		public_key: &PublicKey,
+		message: &[u8],
+		context: &[u8],
+		signature: &Signature,
+	) -> bool {
+		// Validate context length
+		if context.len() > 255 {
+			return false;
+		}
 
-        // Check signature length
-        if signature.as_bytes().len() != dilithium_params::SIGNBYTES {
-            return false;
-        }
+		// Check signature length
+		if signature.as_bytes().len() != dilithium_params::SIGNBYTES {
+			return false;
+		}
 
-        // Use dilithium crate for verification
-        let dilithium_pk = match qp_rusty_crystals_dilithium::ml_dsa_87::PublicKey::from_bytes(
-            public_key.as_bytes(),
-        ) {
-            Ok(pk) => pk,
-            Err(_) => return false,
-        };
+		// Use dilithium crate for verification
+		let dilithium_pk = match qp_rusty_crystals_dilithium::ml_dsa_87::PublicKey::from_bytes(
+			public_key.as_bytes(),
+		) {
+			Ok(pk) => pk,
+			Err(_) => return false,
+		};
 
-        let ctx_option = if context.is_empty() {
-            None
-        } else {
-            Some(context)
-        };
+		let ctx_option = if context.is_empty() { None } else { Some(context) };
 
-        dilithium_pk.verify(message, signature.as_bytes(), ctx_option)
-    }
+		dilithium_pk.verify(message, signature.as_bytes(), ctx_option)
+	}
 }
 
 // ============================================================================
@@ -238,21 +233,21 @@ pub const MIN_THRESHOLD: u8 = 2;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+	use super::*;
 
-    #[test]
-    fn test_constants() {
-        assert!(MAX_PARTIES >= MIN_THRESHOLD);
-        assert!(MIN_THRESHOLD >= 2);
-    }
+	#[test]
+	fn test_constants() {
+		assert!(MAX_PARTIES >= MIN_THRESHOLD);
+		assert!(MIN_THRESHOLD >= 2);
+	}
 
-    #[test]
-    fn test_config_creation() {
-        let config = ThresholdConfig::new(2, 3);
-        assert!(config.is_ok());
+	#[test]
+	fn test_config_creation() {
+		let config = ThresholdConfig::new(2, 3);
+		assert!(config.is_ok());
 
-        let config = config.unwrap();
-        assert_eq!(config.threshold(), 2);
-        assert_eq!(config.total_parties(), 3);
-    }
+		let config = config.unwrap();
+		assert_eq!(config.threshold(), 2);
+		assert_eq!(config.total_parties(), 3);
+	}
 }

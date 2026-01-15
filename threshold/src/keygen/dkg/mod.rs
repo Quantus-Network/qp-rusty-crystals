@@ -7,18 +7,17 @@
 //!
 //! The DKG protocol consists of 4 rounds:
 //!
-//! 1. **Round 1 - Session ID**: Each party contributes random bytes to form
-//!    a unique session ID, preventing replay attacks.
+//! 1. **Round 1 - Session ID**: Each party contributes random bytes to form a unique session ID,
+//!    preventing replay attacks.
 //!
-//! 2. **Round 2 - Commitment**: Each party generates random contributions for
-//!    each subset they belong to and broadcasts a hash commitment.
+//! 2. **Round 2 - Commitment**: Each party generates random contributions for each subset they
+//!    belong to and broadcasts a hash commitment.
 //!
-//! 3. **Round 3 - Reveal**: Each party reveals their contributions. Others
-//!    verify that the revealed data matches the committed hash.
+//! 3. **Round 3 - Reveal**: Each party reveals their contributions. Others verify that the revealed
+//!    data matches the committed hash.
 //!
-//! 4. **Round 4 - Confirmation**: Each party computes their final shares and
-//!    the public key, then broadcasts a confirmation with the public key hash
-//!    to ensure consensus.
+//! 4. **Round 4 - Confirmation**: Each party computes their final shares and the public key, then
+//!    broadcasts a confirmation with the public key hash to ensure consensus.
 //!
 //! # Usage
 //!
@@ -92,8 +91,8 @@ mod types;
 pub use protocol::{Action, DilithiumDkg, DkgProtocolError};
 pub use state::{DkgState, DkgStateData};
 pub use types::{
-    DkgConfig, DkgMessage, DkgOutput, DkgRound1Broadcast, DkgRound2Broadcast, DkgRound3Broadcast,
-    DkgRound4Broadcast, ParticipantId, PartyContributions, SubsetContribution, SubsetMask,
+	DkgConfig, DkgMessage, DkgOutput, DkgRound1Broadcast, DkgRound2Broadcast, DkgRound3Broadcast,
+	DkgRound4Broadcast, ParticipantId, PartyContributions, SubsetContribution, SubsetMask,
 };
 
 /// Convenience function to run a complete local DKG for testing.
@@ -119,223 +118,212 @@ pub use types::{
 /// assert_eq!(outputs.len(), 3);
 /// ```
 pub fn run_local_dkg(
-    threshold: u8,
-    total_parties: u8,
-    seed: [u8; 32],
+	threshold: u8,
+	total_parties: u8,
+	seed: [u8; 32],
 ) -> Result<Vec<DkgOutput>, DkgProtocolError> {
-    use crate::config::ThresholdConfig;
+	use crate::config::ThresholdConfig;
 
-    let threshold_config = ThresholdConfig::new(threshold, total_parties)
-        .map_err(|e| DkgProtocolError::InternalError(e.to_string()))?;
+	let threshold_config = ThresholdConfig::new(threshold, total_parties)
+		.map_err(|e| DkgProtocolError::InternalError(e.to_string()))?;
 
-    let participants: Vec<ParticipantId> = (0..total_parties).collect();
+	let participants: Vec<ParticipantId> = (0..total_parties).collect();
 
-    // Create DKG instances for each party
-    let mut dkgs: Vec<DilithiumDkg> = participants
-        .iter()
-        .enumerate()
-        .map(|(i, &party_id)| {
-            let config = DkgConfig::new(threshold_config, party_id, participants.clone()).unwrap();
-            // Each party gets a different seed
-            let mut party_seed = seed;
-            party_seed[0] = party_seed[0].wrapping_add(i as u8);
-            DilithiumDkg::new(config, party_seed)
-        })
-        .collect();
+	// Create DKG instances for each party
+	let mut dkgs: Vec<DilithiumDkg> = participants
+		.iter()
+		.enumerate()
+		.map(|(i, &party_id)| {
+			let config = DkgConfig::new(threshold_config, party_id, participants.clone()).unwrap();
+			// Each party gets a different seed
+			let mut party_seed = seed;
+			party_seed[0] = party_seed[0].wrapping_add(i as u8);
+			DilithiumDkg::new(config, party_seed)
+		})
+		.collect();
 
-    let mut outputs: Vec<Option<DkgOutput>> = vec![None; total_parties as usize];
-    let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> =
-        vec![Vec::new(); total_parties as usize];
+	let mut outputs: Vec<Option<DkgOutput>> = vec![None; total_parties as usize];
+	let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> =
+		vec![Vec::new(); total_parties as usize];
 
-    // Run until all parties complete
-    let mut iterations = 0;
-    const MAX_ITERATIONS: usize = 1000;
+	// Run until all parties complete
+	let mut iterations = 0;
+	const MAX_ITERATIONS: usize = 1000;
 
-    while outputs.iter().any(|o| o.is_none()) {
-        iterations += 1;
-        if iterations > MAX_ITERATIONS {
-            return Err(DkgProtocolError::InternalError(
-                "DKG did not complete in time".into(),
-            ));
-        }
+	while outputs.iter().any(|o| o.is_none()) {
+		iterations += 1;
+		if iterations > MAX_ITERATIONS {
+			return Err(DkgProtocolError::InternalError("DKG did not complete in time".into()));
+		}
 
-        // Deliver pending messages
-        for party_id in 0..total_parties as usize {
-            let messages = std::mem::take(&mut pending_messages[party_id]);
-            for (from, data) in messages {
-                dkgs[party_id].message(from, data);
-            }
-        }
+		// Deliver pending messages
+		for party_id in 0..total_parties as usize {
+			let messages = std::mem::take(&mut pending_messages[party_id]);
+			for (from, data) in messages {
+				dkgs[party_id].message(from, data);
+			}
+		}
 
-        // Poke each party
-        for party_id in 0..total_parties as usize {
-            if outputs[party_id].is_some() {
-                continue;
-            }
+		// Poke each party
+		for party_id in 0..total_parties as usize {
+			if outputs[party_id].is_some() {
+				continue;
+			}
 
-            match dkgs[party_id].poke()? {
-                Action::Wait => {}
-                Action::SendMany(data) => {
-                    let from = party_id as ParticipantId;
-                    for other in 0..total_parties as usize {
-                        if other != party_id {
-                            pending_messages[other].push((from, data.clone()));
-                        }
-                    }
-                }
-                Action::SendPrivate(to, data) => {
-                    let from = party_id as ParticipantId;
-                    pending_messages[to as usize].push((from, data));
-                }
-                Action::Return(output) => {
-                    outputs[party_id] = Some(output);
-                }
-            }
-        }
-    }
+			match dkgs[party_id].poke()? {
+				Action::Wait => {},
+				Action::SendMany(data) => {
+					let from = party_id as ParticipantId;
+					for other in 0..total_parties as usize {
+						if other != party_id {
+							pending_messages[other].push((from, data.clone()));
+						}
+					}
+				},
+				Action::SendPrivate(to, data) => {
+					let from = party_id as ParticipantId;
+					pending_messages[to as usize].push((from, data));
+				},
+				Action::Return(output) => {
+					outputs[party_id] = Some(output);
+				},
+			}
+		}
+	}
 
-    Ok(outputs.into_iter().map(|o| o.unwrap()).collect())
+	Ok(outputs.into_iter().map(|o| o.unwrap()).collect())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+	use super::*;
 
-    #[test]
-    fn test_local_dkg_2_of_3() {
-        let outputs = run_local_dkg(2, 3, [42u8; 32]).unwrap();
+	#[test]
+	fn test_local_dkg_2_of_3() {
+		let outputs = run_local_dkg(2, 3, [42u8; 32]).unwrap();
 
-        assert_eq!(outputs.len(), 3);
+		assert_eq!(outputs.len(), 3);
 
-        // All parties should have the same public key
-        let pk0 = outputs[0].public_key.as_bytes();
-        let pk1 = outputs[1].public_key.as_bytes();
-        let pk2 = outputs[2].public_key.as_bytes();
+		// All parties should have the same public key
+		let pk0 = outputs[0].public_key.as_bytes();
+		let pk1 = outputs[1].public_key.as_bytes();
+		let pk2 = outputs[2].public_key.as_bytes();
 
-        assert_eq!(pk0, pk1);
-        assert_eq!(pk1, pk2);
+		assert_eq!(pk0, pk1);
+		assert_eq!(pk1, pk2);
 
-        // Each party should have correct metadata
-        for (i, output) in outputs.iter().enumerate() {
-            assert_eq!(output.private_share.party_id(), i as u8);
-            assert_eq!(output.private_share.threshold(), 2);
-            assert_eq!(output.private_share.total_parties(), 3);
-        }
-    }
+		// Each party should have correct metadata
+		for (i, output) in outputs.iter().enumerate() {
+			assert_eq!(output.private_share.party_id(), i as u8);
+			assert_eq!(output.private_share.threshold(), 2);
+			assert_eq!(output.private_share.total_parties(), 3);
+		}
+	}
 
-    #[test]
-    fn test_local_dkg_3_of_5() {
-        let outputs = run_local_dkg(3, 5, [123u8; 32]).unwrap();
+	#[test]
+	fn test_local_dkg_3_of_5() {
+		let outputs = run_local_dkg(3, 5, [123u8; 32]).unwrap();
 
-        assert_eq!(outputs.len(), 5);
+		assert_eq!(outputs.len(), 5);
 
-        // All parties should have the same public key
-        let pk0 = outputs[0].public_key.as_bytes();
-        for output in &outputs[1..] {
-            assert_eq!(pk0, output.public_key.as_bytes());
-        }
-    }
+		// All parties should have the same public key
+		let pk0 = outputs[0].public_key.as_bytes();
+		for output in &outputs[1..] {
+			assert_eq!(pk0, output.public_key.as_bytes());
+		}
+	}
 
-    #[test]
-    fn test_local_dkg_deterministic() {
-        // Same seed should produce same keys
-        let outputs1 = run_local_dkg(2, 3, [1u8; 32]).unwrap();
-        let outputs2 = run_local_dkg(2, 3, [1u8; 32]).unwrap();
+	#[test]
+	fn test_local_dkg_deterministic() {
+		// Same seed should produce same keys
+		let outputs1 = run_local_dkg(2, 3, [1u8; 32]).unwrap();
+		let outputs2 = run_local_dkg(2, 3, [1u8; 32]).unwrap();
 
-        assert_eq!(
-            outputs1[0].public_key.as_bytes(),
-            outputs2[0].public_key.as_bytes()
-        );
-    }
+		assert_eq!(outputs1[0].public_key.as_bytes(), outputs2[0].public_key.as_bytes());
+	}
 
-    #[test]
-    fn test_local_dkg_different_seeds() {
-        // Different seeds should produce different keys
-        let outputs1 = run_local_dkg(2, 3, [1u8; 32]).unwrap();
-        let outputs2 = run_local_dkg(2, 3, [2u8; 32]).unwrap();
+	#[test]
+	fn test_local_dkg_different_seeds() {
+		// Different seeds should produce different keys
+		let outputs1 = run_local_dkg(2, 3, [1u8; 32]).unwrap();
+		let outputs2 = run_local_dkg(2, 3, [2u8; 32]).unwrap();
 
-        assert_ne!(
-            outputs1[0].public_key.as_bytes(),
-            outputs2[0].public_key.as_bytes()
-        );
-    }
+		assert_ne!(outputs1[0].public_key.as_bytes(), outputs2[0].public_key.as_bytes());
+	}
 
-    /// Test that DKG-generated keys work with ThresholdSigner for signing
-    #[test]
-    fn test_dkg_signing_integration() {
-        use crate::{ThresholdConfig, ThresholdSigner, verify_signature};
+	/// Test that DKG-generated keys work with ThresholdSigner for signing
+	#[test]
+	fn test_dkg_signing_integration() {
+		use crate::{verify_signature, ThresholdConfig, ThresholdSigner};
 
-        // Run DKG to generate keys
-        let dkg_outputs = run_local_dkg(2, 3, [99u8; 32]).unwrap();
+		// Run DKG to generate keys
+		let dkg_outputs = run_local_dkg(2, 3, [99u8; 32]).unwrap();
 
-        // All parties should have the same public key
-        let public_key = dkg_outputs[0].public_key.clone();
-        for output in &dkg_outputs[1..] {
-            assert_eq!(public_key.as_bytes(), output.public_key.as_bytes());
-        }
+		// All parties should have the same public key
+		let public_key = dkg_outputs[0].public_key.clone();
+		for output in &dkg_outputs[1..] {
+			assert_eq!(public_key.as_bytes(), output.public_key.as_bytes());
+		}
 
-        let config = ThresholdConfig::new(2, 3).unwrap();
-        let message = b"Test message for DKG signing";
-        let context = b"test-context";
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let message = b"Test message for DKG signing";
+		let context = b"test-context";
 
-        // Retry signing up to 100 times (rejection sampling may fail)
-        let mut success = false;
-        for _ in 0..100 {
-            // Create fresh signers for each attempt
-            let mut signers: Vec<ThresholdSigner> = dkg_outputs
-                .iter()
-                .take(2)
-                .map(|output| ThresholdSigner::new(output.private_share.clone(), public_key.clone(), config).unwrap())
-                .collect();
+		// Retry signing up to 100 times (rejection sampling may fail)
+		let mut success = false;
+		for _ in 0..100 {
+			// Create fresh signers for each attempt
+			let mut signers: Vec<ThresholdSigner> = dkg_outputs
+				.iter()
+				.take(2)
+				.map(|output| {
+					ThresholdSigner::new(output.private_share.clone(), public_key.clone(), config)
+						.unwrap()
+				})
+				.collect();
 
-            let mut rng = rand::thread_rng();
+			let mut rng = rand::thread_rng();
 
-            // Round 1: Generate commitments
-            let r1_broadcasts: Vec<_> = signers
-                .iter_mut()
-                .map(|s| s.round1_commit(&mut rng).unwrap())
-                .collect();
+			// Round 1: Generate commitments
+			let r1_broadcasts: Vec<_> =
+				signers.iter_mut().map(|s| s.round1_commit(&mut rng).unwrap()).collect();
 
-            // Round 2: Reveal commitments
-            let r2_broadcasts: Vec<_> = signers
-                .iter_mut()
-                .enumerate()
-                .map(|(i, s)| {
-                    let others: Vec<_> = r1_broadcasts
-                        .iter()
-                        .filter(|r| r.party_id != i as u8)
-                        .cloned()
-                        .collect();
-                    s.round2_reveal(message, context, &others).unwrap()
-                })
-                .collect();
+			// Round 2: Reveal commitments
+			let r2_broadcasts: Vec<_> = signers
+				.iter_mut()
+				.enumerate()
+				.map(|(i, s)| {
+					let others: Vec<_> =
+						r1_broadcasts.iter().filter(|r| r.party_id != i as u8).cloned().collect();
+					s.round2_reveal(message, context, &others).unwrap()
+				})
+				.collect();
 
-            // Round 3: Compute responses
-            let r3_broadcasts: Vec<_> = signers
-                .iter_mut()
-                .enumerate()
-                .map(|(i, s)| {
-                    let others: Vec<_> = r2_broadcasts
-                        .iter()
-                        .filter(|r| r.party_id != i as u8)
-                        .cloned()
-                        .collect();
-                    s.round3_respond(&others).unwrap()
-                })
-                .collect();
+			// Round 3: Compute responses
+			let r3_broadcasts: Vec<_> = signers
+				.iter_mut()
+				.enumerate()
+				.map(|(i, s)| {
+					let others: Vec<_> =
+						r2_broadcasts.iter().filter(|r| r.party_id != i as u8).cloned().collect();
+					s.round3_respond(&others).unwrap()
+				})
+				.collect();
 
-            // Try to combine signature (may fail due to rejection sampling)
-            if let Ok(signature) = signers[0].combine_with_message(message, context, &r2_broadcasts, &r3_broadcasts) {
-                // Verify signature
-                assert!(
-                    verify_signature(&public_key, message, context, &signature),
-                    "Signature from DKG-generated keys should verify"
-                );
-                success = true;
-                break;
-            }
-        }
+			// Try to combine signature (may fail due to rejection sampling)
+			if let Ok(signature) =
+				signers[0].combine_with_message(message, context, &r2_broadcasts, &r3_broadcasts)
+			{
+				// Verify signature
+				assert!(
+					verify_signature(&public_key, message, context, &signature),
+					"Signature from DKG-generated keys should verify"
+				);
+				success = true;
+				break;
+			}
+		}
 
-        assert!(success, "Signing with DKG keys should succeed within 100 attempts");
-    }
+		assert!(success, "Signing with DKG keys should succeed within 100 attempts");
+	}
 }
