@@ -129,6 +129,9 @@ pub mod keygen;
 // Internal protocol implementation
 pub(crate) mod protocol;
 
+// Resharing (committee handoff) protocol
+pub mod resharing;
+
 // Signing protocol adapter for NEAR MPC integration
 pub mod signing_protocol;
 

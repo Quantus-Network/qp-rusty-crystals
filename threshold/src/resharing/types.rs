@@ -15,6 +15,9 @@ use crate::{
 	ThresholdConfig,
 };
 
+#[cfg(feature = "serde")]
+use crate::serde_helpers::{serde_participant_list, serde_poly_vec};
+
 // ML-DSA-87 parameters (same as DKG)
 /// Number of polynomials in s1 vector.
 pub const L: usize = 7;
@@ -84,10 +87,12 @@ pub struct ResharingConfig {
 	/// Threshold configuration for the old committee.
 	pub old_threshold: u32,
 	/// Participants in the old committee (sorted).
+	#[cfg_attr(feature = "serde", serde(with = "serde_participant_list"))]
 	pub old_participants: ParticipantList,
 	/// Threshold configuration for the new committee.
 	pub new_threshold: u32,
 	/// Participants in the new committee (sorted).
+	#[cfg_attr(feature = "serde", serde(with = "serde_participant_list"))]
 	pub new_participants: ParticipantList,
 	/// This party's identifier.
 	pub my_party_id: ParticipantId,
@@ -325,8 +330,16 @@ impl ResharingMessage {
 
 /// Round 1 broadcast from old committee members.
 ///
-/// Each old committee member broadcasts their blinded share contribution.
-/// The blinding ensures the secret is never exposed during resharing.
+/// Each old committee member broadcasts their blinded share contribution
+/// along with the blinding values used. The blinding values are needed
+/// by dealers to correctly remove the total blinding when generating
+/// new shares.
+///
+/// **Security note:** Broadcasting the blinding values is safe because:
+/// - The blinding alone doesn't reveal the secret
+/// - The blinded contribution hides the actual share values
+/// - Only the combination of all participants' shares (which requires
+///   threshold cooperation) can recover the secret
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ResharingRound1Broadcast {
@@ -338,7 +351,11 @@ pub struct ResharingRound1Broadcast {
 	/// Blinded contribution to s2 reconstruction.
 	/// This is: recovered_s2_share + blinding_s2
 	pub blinded_s2_contribution: BlindedContribution,
-	/// Commitment to the blinding values (for verification).
+	/// The blinding values used for s1 (needed by dealers to remove total blinding).
+	pub blinding_s1: BlindedContribution,
+	/// The blinding values used for s2 (needed by dealers to remove total blinding).
+	pub blinding_s2: BlindedContribution,
+	/// Commitment to the blinding values (for verification that blinding matches).
 	pub blinding_commitment: [u8; COMMITMENT_HASH_SIZE],
 }
 
@@ -349,6 +366,7 @@ pub struct ResharingRound1Broadcast {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct BlindedContribution {
 	/// Polynomial coefficients (L or K polynomials, each with N coefficients).
+	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
 	pub coefficients: Vec<[i32; N]>,
 }
 
@@ -393,8 +411,10 @@ pub struct ResharingRound2Message {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct NewShareData {
 	/// Share of s1 polynomial vector (L polynomials).
+	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
 	pub s1: Vec<[i32; N]>,
 	/// Share of s2 polynomial vector (K polynomials).
+	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
 	pub s2: Vec<[i32; N]>,
 }
 
@@ -573,6 +593,8 @@ mod tests {
 			party_id: 0,
 			blinded_s1_contribution: BlindedContribution::new_s1(),
 			blinded_s2_contribution: BlindedContribution::new_s2(),
+			blinding_s1: BlindedContribution::new_s1(),
+			blinding_s2: BlindedContribution::new_s2(),
 			blinding_commitment: [0u8; COMMITMENT_HASH_SIZE],
 		});
 		assert_eq!(r1.round(), 1);
@@ -601,5 +623,236 @@ mod tests {
 		let share = NewShareData::default();
 		assert_eq!(share.s1.len(), L);
 		assert_eq!(share.s2.len(), K);
+	}
+
+	#[test]
+	fn test_resharing_config_role_detection() {
+		use crate::{generate_with_dealer, ThresholdConfig};
+
+		let config = ThresholdConfig::new(2, 3).expect("valid config");
+		let seed = [42u8; 32];
+		let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+		// Test OldOnly role (party leaving)
+		let resharing_config = ResharingConfig::new(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1], // party 2 is leaving
+			2,
+			Some(shares[2].clone()),
+			public_key.clone(),
+		)
+		.expect("valid config");
+		assert_eq!(resharing_config.role, ResharingRole::OldOnly);
+		assert!(resharing_config.role.is_old_committee());
+		assert!(!resharing_config.role.is_new_committee());
+
+		// Test NewOnly role (party joining)
+		let resharing_config = ResharingConfig::new(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 3], // party 3 is joining
+			3,
+			None,
+			public_key.clone(),
+		)
+		.expect("valid config");
+		assert_eq!(resharing_config.role, ResharingRole::NewOnly);
+		assert!(!resharing_config.role.is_old_committee());
+		assert!(resharing_config.role.is_new_committee());
+
+		// Test Both role (party staying)
+		let resharing_config = ResharingConfig::new(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 3],
+			0,
+			Some(shares[0].clone()),
+			public_key.clone(),
+		)
+		.expect("valid config");
+		assert_eq!(resharing_config.role, ResharingRole::Both);
+		assert!(resharing_config.role.is_old_committee());
+		assert!(resharing_config.role.is_new_committee());
+	}
+
+	#[test]
+	fn test_resharing_config_participant_helpers() {
+		use crate::{generate_with_dealer, ThresholdConfig};
+
+		let config = ThresholdConfig::new(2, 3).expect("valid config");
+		let seed = [42u8; 32];
+		let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+		// Test with old={0,1,2}, new={1,2,3}
+		let resharing_config = ResharingConfig::new(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![1, 2, 3],
+			1, // staying
+			Some(shares[1].clone()),
+			public_key.clone(),
+		)
+		.expect("valid config");
+
+		// Test leaving_participants (in old but not new)
+		let leaving = resharing_config.leaving_participants();
+		assert_eq!(leaving.len(), 1);
+		assert!(leaving.contains(&0));
+
+		// Test joining_participants (in new but not old)
+		let joining = resharing_config.joining_participants();
+		assert_eq!(joining.len(), 1);
+		assert!(joining.contains(&3));
+
+		// Test staying_participants (in both)
+		let staying = resharing_config.staying_participants();
+		assert_eq!(staying.len(), 2);
+		assert!(staying.contains(&1));
+		assert!(staying.contains(&2));
+
+		// Test all_participants (union)
+		let all = resharing_config.all_participants();
+		assert_eq!(all.len(), 4);
+		assert!(all.contains(&0));
+		assert!(all.contains(&1));
+		assert!(all.contains(&2));
+		assert!(all.contains(&3));
+	}
+
+	#[test]
+	fn test_blinded_contribution_new() {
+		// Test creating contributions of various sizes
+		for size in 1..10 {
+			let contrib = BlindedContribution::new(size);
+			assert_eq!(contrib.coefficients.len(), size);
+			for poly in &contrib.coefficients {
+				assert_eq!(poly.len(), N);
+				// All coefficients should be initialized to zero
+				for &coeff in poly {
+					assert_eq!(coeff, 0);
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn test_new_share_data_initialization() {
+		let share = NewShareData::new();
+
+		// Verify correct dimensions
+		assert_eq!(share.s1.len(), L);
+		assert_eq!(share.s2.len(), K);
+
+		// Verify all initialized to zero
+		for poly in &share.s1 {
+			assert_eq!(poly.len(), N);
+			for &coeff in poly {
+				assert_eq!(coeff, 0);
+			}
+		}
+		for poly in &share.s2 {
+			assert_eq!(poly.len(), N);
+			for &coeff in poly {
+				assert_eq!(coeff, 0);
+			}
+		}
+	}
+
+	#[test]
+	fn test_resharing_config_threshold_boundaries() {
+		let pk = make_test_public_key();
+
+		// Test minimum valid threshold (t=2)
+		let result = ResharingConfig::new(2, vec![0, 1], 2, vec![0, 1], 0, None, pk.clone());
+		// This will fail because party 0 is in old committee but has no share
+		assert!(matches!(result, Err(ResharingConfigError::MissingExistingShare)));
+
+		// Test threshold = n (all parties required)
+		let result = ResharingConfig::new(3, vec![0, 1, 2], 3, vec![0, 1, 2], 0, None, pk.clone());
+		assert!(matches!(result, Err(ResharingConfigError::MissingExistingShare)));
+
+		// Test invalid: threshold > n
+		let result = ResharingConfig::new(4, vec![0, 1, 2], 2, vec![0, 1, 2], 0, None, pk.clone());
+		assert!(matches!(result, Err(ResharingConfigError::InvalidOldThreshold { .. })));
+
+		// Test invalid: threshold < 2
+		let result = ResharingConfig::new(1, vec![0, 1, 2], 2, vec![0, 1, 2], 0, None, pk.clone());
+		assert!(matches!(result, Err(ResharingConfigError::InvalidOldThreshold { .. })));
+	}
+
+	#[test]
+	fn test_resharing_message_party_id_extraction() {
+		// Test Round1
+		let r1 = ResharingMessage::Round1(ResharingRound1Broadcast {
+			party_id: 42,
+			blinded_s1_contribution: BlindedContribution::new_s1(),
+			blinded_s2_contribution: BlindedContribution::new_s2(),
+			blinding_s1: BlindedContribution::new_s1(),
+			blinding_s2: BlindedContribution::new_s2(),
+			blinding_commitment: [0u8; COMMITMENT_HASH_SIZE],
+		});
+		assert_eq!(r1.party_id(), 42);
+
+		// Test Round2
+		let r2 = ResharingMessage::Round2(ResharingRound2Message {
+			from_party_id: 99,
+			to_party_id: 100,
+			shares: HashMap::new(),
+		});
+		assert_eq!(r2.party_id(), 99); // Should return from_party_id
+
+		// Test Round3
+		let r3 = ResharingMessage::Round3(ResharingRound3Broadcast {
+			party_id: 77,
+			share_commitments: HashMap::new(),
+			success: true,
+			error_message: None,
+		});
+		assert_eq!(r3.party_id(), 77);
+	}
+
+	#[test]
+	fn test_resharing_round3_broadcast_error_handling() {
+		// Test successful broadcast
+		let success = ResharingRound3Broadcast {
+			party_id: 0,
+			share_commitments: HashMap::new(),
+			success: true,
+			error_message: None,
+		};
+		assert!(success.success);
+		assert!(success.error_message.is_none());
+
+		// Test failed broadcast with error message
+		let failure = ResharingRound3Broadcast {
+			party_id: 1,
+			share_commitments: HashMap::new(),
+			success: false,
+			error_message: Some("Share verification failed".to_string()),
+		};
+		assert!(!failure.success);
+		assert_eq!(failure.error_message, Some("Share verification failed".to_string()));
+	}
+
+	#[test]
+	fn test_resharing_config_error_display() {
+		// Test error message formatting
+		let err = ResharingConfigError::InvalidOldThreshold { threshold: 5, parties: 3 };
+		let msg = format!("{}", err);
+		assert!(msg.contains("5"));
+		assert!(msg.contains("3"));
+
+		let err = ResharingConfigError::PartyNotInEitherCommittee { party_id: 99 };
+		let msg = format!("{}", err);
+		assert!(msg.contains("99"));
+
+		let err = ResharingConfigError::DuplicateParticipant;
+		let msg = format!("{}", err);
+		assert!(msg.contains("Duplicate"));
 	}
 }

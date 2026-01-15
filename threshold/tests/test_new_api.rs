@@ -175,6 +175,7 @@ fn test_different_seeds_different_keys() {
 #[cfg(feature = "serde")]
 mod serde_tests {
 	use super::*;
+	use qp_rusty_crystals_threshold::{Round1Broadcast, Round2Broadcast, Round3Broadcast};
 
 	#[test]
 	fn test_round1_broadcast_serialization() {

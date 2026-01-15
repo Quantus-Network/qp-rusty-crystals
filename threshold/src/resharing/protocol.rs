@@ -23,6 +23,7 @@ use std::collections::HashMap;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+use crate::keys::PrivateKeyShare;
 use crate::participants::ParticipantId;
 
 use super::types::{
@@ -30,6 +31,9 @@ use super::types::{
 	ResharingRound1Broadcast, ResharingRound2Message, ResharingRound3Broadcast, SubsetMask,
 	COMMITMENT_HASH_SIZE, K, L, N,
 };
+
+// Q is the prime modulus for ML-DSA-87
+const Q: i32 = 8380417;
 
 // ============================================================================
 // Action Enum
@@ -73,7 +77,12 @@ pub enum ResharingProtocolError {
 	/// A party reported failure.
 	PartyFailure(Vec<ParticipantId>),
 	/// Not enough parties participated.
-	InsufficientParties { required: usize, received: usize },
+	InsufficientParties {
+		/// The minimum number of parties required.
+		required: usize,
+		/// The number of parties that actually participated.
+		received: usize,
+	},
 	/// Internal error.
 	InternalError(String),
 }
@@ -182,9 +191,11 @@ pub struct ResharingProtocol {
 	round1_broadcasts: HashMap<ParticipantId, ResharingRound1Broadcast>,
 
 	// Round 2 data
-	/// Our Round 2 messages to send (if we're a dealer).
+	/// Our Round 2 messages to send (if we're THE designated dealer).
+	/// Only the party with the smallest ID among old committee is the dealer.
 	my_round2_messages: Vec<ResharingRound2Message>,
 	/// Collected Round 2 messages we received (if we're in new committee).
+	/// We only receive from the designated dealer.
 	round2_messages: HashMap<ParticipantId, ResharingRound2Message>,
 	/// Number of Round 2 messages sent.
 	round2_sent_count: usize,
@@ -198,6 +209,8 @@ pub struct ResharingProtocol {
 	// Final output
 	/// The new shares we've received/computed (if we're in new committee).
 	new_shares: HashMap<SubsetMask, NewShareData>,
+	/// The completed output (stored when protocol finishes).
+	completed_output: Option<ResharingOutput>,
 }
 
 impl ResharingProtocol {
@@ -226,6 +239,7 @@ impl ResharingProtocol {
 			my_round3: None,
 			round3_broadcasts: HashMap::new(),
 			new_shares: HashMap::new(),
+			completed_output: None,
 		}
 	}
 
@@ -244,6 +258,34 @@ impl ResharingProtocol {
 		&self.config
 	}
 
+	/// Take the completed output from the protocol.
+	///
+	/// This can only be called after the protocol has completed successfully
+	/// (state is `Done`). Returns `None` if the protocol hasn't completed
+	/// or if the output has already been taken.
+	///
+	/// # Returns
+	///
+	/// The resharing output containing the new private key share (if this
+	/// party is in the new committee), the public key, and new configuration.
+	pub fn take_output(&mut self) -> Option<ResharingOutput> {
+		if matches!(self.state, ResharingState::Done) {
+			self.completed_output.take()
+		} else {
+			None
+		}
+	}
+
+	/// Check if the protocol has completed successfully.
+	pub fn is_done(&self) -> bool {
+		matches!(self.state, ResharingState::Done)
+	}
+
+	/// Check if the protocol has failed.
+	pub fn is_failed(&self) -> bool {
+		matches!(self.state, ResharingState::Failed(_))
+	}
+
 	/// Check if we have enough Round 1 messages.
 	fn have_enough_round1(&self) -> bool {
 		self.round1_broadcasts.len() >= self.config.old_threshold as usize
@@ -251,8 +293,14 @@ impl ResharingProtocol {
 
 	/// Check if we have enough Round 2 messages.
 	fn have_enough_round2(&self) -> bool {
-		// We need messages from at least threshold old committee members
-		self.round2_messages.len() >= self.config.old_threshold as usize
+		// We only need to receive from the designated dealer (1 message)
+		// The designated dealer is the first party in the sorted old_participants list
+		let designated_dealer = self.config.old_participants.get(0);
+		if let Some(dealer_id) = designated_dealer {
+			self.round2_messages.contains_key(&dealer_id)
+		} else {
+			false
+		}
 	}
 
 	/// Check if we have all Round 3 messages.
@@ -327,15 +375,15 @@ impl ResharingProtocol {
 		// Deserialize and route the message
 		let msg = match Self::deserialize_message(&data) {
 			Ok(m) => m,
-			Err(e) => {
-				tracing::warn!("Failed to deserialize message from {}: {}", from, e);
+			Err(_) => {
+				// Failed to deserialize message - ignore it
 				return;
 			},
 		};
 
 		// Verify sender matches message
 		if msg.party_id() != from {
-			tracing::warn!("Message party_id {} doesn't match sender {}", msg.party_id(), from);
+			// Message party_id doesn't match sender - ignore it
 			return;
 		}
 
@@ -378,11 +426,13 @@ impl ResharingProtocol {
 		// Compute commitment to blinding values
 		let blinding_commitment = self.compute_blinding_commitment(&blinding_s1, &blinding_s2);
 
-		// Create Round 1 broadcast
+		// Create Round 1 broadcast (includes blinding values for other dealers)
 		let broadcast = ResharingRound1Broadcast {
 			party_id: self.config.my_party_id,
 			blinded_s1_contribution: BlindedContribution { coefficients: blinded_s1 },
 			blinded_s2_contribution: BlindedContribution { coefficients: blinded_s2 },
+			blinding_s1: BlindedContribution { coefficients: blinding_s1.clone() },
+			blinding_s2: BlindedContribution { coefficients: blinding_s2.clone() },
 			blinding_commitment,
 		};
 
@@ -415,12 +465,22 @@ impl ResharingProtocol {
 
 		// Verify sender is in old committee
 		if !self.config.old_participants.contains(from) {
-			tracing::warn!("Round 1 message from non-old-committee member: {}", from);
+			// Round 1 message from non-old-committee member - ignore it
 			return;
 		}
 
 		// Ignore duplicates
 		if self.round1_broadcasts.contains_key(&from) {
+			return;
+		}
+
+		// Verify that the revealed blinding values match the commitment
+		let expected_commitment = self.compute_blinding_commitment(
+			&broadcast.blinding_s1.coefficients,
+			&broadcast.blinding_s2.coefficients,
+		);
+		if expected_commitment != broadcast.blinding_commitment {
+			// Blinding commitment mismatch - party may be cheating, ignore message
 			return;
 		}
 
@@ -432,11 +492,24 @@ impl ResharingProtocol {
 	// Round 2: Re-dealing
 	// ========================================================================
 
+	/// Check if this party is the designated dealer.
+	/// Only the party with the smallest ID among old committee members is the dealer.
+	/// This ensures only ONE party generates and distributes new shares, avoiding
+	/// the shares being multiplied by the number of dealers.
+	fn is_designated_dealer(&self) -> bool {
+		if !self.config.role.is_old_committee() {
+			return false;
+		}
+		// The designated dealer is the first party in the sorted old_participants list
+		self.config.old_participants.get(0) == Some(self.config.my_party_id)
+	}
+
 	fn handle_round2_generate(
 		&mut self,
 	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// Only old committee members who participated in Round 1 can deal
-		if !self.config.role.is_old_committee() {
+		// Only the designated dealer generates and distributes new shares
+		// Other old committee members participated in reconstruction but don't deal
+		if !self.is_designated_dealer() {
 			self.state = ResharingState::Round2Waiting;
 			return Ok(Action::Wait);
 		}
@@ -456,24 +529,32 @@ impl ResharingProtocol {
 	}
 
 	fn handle_round2_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// If we still have Round 2 messages to send, send them
-		if self.round2_sent_count < self.my_round2_messages.len() {
+		// If we're the dealer and still have Round 2 messages to send, send them
+		if self.is_designated_dealer() && self.round2_sent_count < self.my_round2_messages.len() {
 			return self.send_next_round2_message();
 		}
 
 		// Check if we've received enough messages (for new committee members)
+		// We only need to receive from the designated dealer (1 message)
 		if self.config.role.is_new_committee() && self.have_enough_round2() {
 			self.state = ResharingState::Round3Generate;
 			return self.poke();
 		}
 
 		// Old-only parties go straight to waiting for completion
-		if !self.config.role.is_new_committee()
-			&& self.round2_sent_count >= self.my_round2_messages.len()
-		{
-			// Old-only parties don't participate in Round 3
-			self.state = ResharingState::Combining;
-			return self.poke();
+		// (either after dealing if designated dealer, or immediately otherwise)
+		if !self.config.role.is_new_committee() {
+			if self.is_designated_dealer() {
+				// Dealer waits until all messages are sent
+				if self.round2_sent_count >= self.my_round2_messages.len() {
+					self.state = ResharingState::Combining;
+					return self.poke();
+				}
+			} else {
+				// Non-dealer old-only parties skip to combining immediately
+				self.state = ResharingState::Combining;
+				return self.poke();
+			}
 		}
 
 		Ok(Action::Wait)
@@ -497,24 +578,32 @@ impl ResharingProtocol {
 	}
 
 	fn handle_round2_message(&mut self, from: ParticipantId, msg: ResharingRound2Message) {
-		// Ignore if not in expected state
-		if !matches!(self.state, ResharingState::Round2Generate | ResharingState::Round2Waiting) {
+		// Accept Round2 messages even if we're still finishing Round1, since messages may arrive
+		// before we've transitioned to Round2. We just store them for later processing.
+		// Only reject if we're already past Round2 or done/failed.
+		if matches!(
+			self.state,
+			ResharingState::Round3Generate
+				| ResharingState::Round3Waiting
+				| ResharingState::Combining
+				| ResharingState::Done
+		) {
+			return;
+		}
+		if matches!(self.state, ResharingState::Failed(_)) {
 			return;
 		}
 
-		// Verify sender is in old committee
-		if !self.config.old_participants.contains(from) {
-			tracing::warn!("Round 2 message from non-old-committee member: {}", from);
+		// Verify sender is the designated dealer (first party in old_participants)
+		let designated_dealer = self.config.old_participants.get(0);
+		if designated_dealer != Some(from) {
+			// Round 2 message from non-dealer - ignore it
 			return;
 		}
 
 		// Verify message is for us
 		if msg.to_party_id != self.config.my_party_id {
-			tracing::warn!(
-				"Round 2 message intended for {} received by {}",
-				msg.to_party_id,
-				self.config.my_party_id
-			);
+			// Round 2 message intended for another party - ignore it
 			return;
 		}
 
@@ -524,17 +613,21 @@ impl ResharingProtocol {
 		}
 
 		// Store the message and accumulate shares
+		// Note: With single dealer, we only receive from one party, so no accumulation needed
+		// But we still reduce modulo Q for safety
 		for (subset_mask, share_data) in &msg.shares {
 			let entry = self.new_shares.entry(*subset_mask).or_insert_with(NewShareData::new);
-			// Add the share data (will be combined later)
+			// Add the share data and reduce modulo Q
 			for i in 0..L {
 				for j in 0..N {
 					entry.s1[i][j] = entry.s1[i][j].wrapping_add(share_data.s1[i][j]);
+					entry.s1[i][j] = reduce_coeff_mod_q(entry.s1[i][j]);
 				}
 			}
 			for i in 0..K {
 				for j in 0..N {
 					entry.s2[i][j] = entry.s2[i][j].wrapping_add(share_data.s2[i][j]);
+					entry.s2[i][j] = reduce_coeff_mod_q(entry.s2[i][j]);
 				}
 			}
 		}
@@ -588,14 +681,22 @@ impl ResharingProtocol {
 	}
 
 	fn handle_round3_message(&mut self, from: ParticipantId, broadcast: ResharingRound3Broadcast) {
-		// Ignore if not in expected state
-		if !matches!(self.state, ResharingState::Round3Generate | ResharingState::Round3Waiting) {
+		// Accept Round3 messages even if we're still in Round2, since messages may arrive
+		// before we've transitioned to Round3. We just store them for later processing.
+		// Only reject if we're in very early states or already done/failed.
+		if matches!(
+			self.state,
+			ResharingState::Round1Generate | ResharingState::Round1Waiting | ResharingState::Done
+		) {
+			return;
+		}
+		if matches!(self.state, ResharingState::Failed(_)) {
 			return;
 		}
 
 		// Verify sender is in new committee
 		if !self.config.new_participants.contains(from) {
-			tracing::warn!("Round 3 message from non-new-committee member: {}", from);
+			// Round 3 message from non-new-committee member - ignore it
 			return;
 		}
 
@@ -633,6 +734,9 @@ impl ResharingProtocol {
 
 		// Build the output
 		let output = self.build_output()?;
+
+		// Store a copy of the output for later retrieval via take_output()
+		self.completed_output = Some(output.clone());
 
 		self.state = ResharingState::Done;
 		Ok(Action::Return(output))
@@ -692,6 +796,11 @@ impl ResharingProtocol {
 	}
 
 	/// Compute blinded contribution: recovered_share + blinding.
+	///
+	/// IMPORTANT: To avoid double-counting shared subsets in RSS, each subset
+	/// is assigned to exactly one contributing party. A party only contributes
+	/// a subset if they are the "owner" - the party with the smallest ID among
+	/// those holding the subset who are participating in resharing.
 	fn compute_blinded_contribution(
 		&self,
 		blinding_s1: &[[i32; N]],
@@ -702,41 +811,93 @@ impl ResharingProtocol {
 			ResharingProtocolError::InternalError("Missing existing share".to_string())
 		})?;
 
-		// Recover our share contribution
-		// For now, we'll use a simplified approach - in full implementation,
-		// this would use recover_share from secret_sharing.rs
 		let shares = existing_share.shares();
+		let my_party_id = self.config.my_party_id;
 
-		// Sum all our subset shares to get our contribution
+		// Get my index within the old participants list
+		let my_index = self.config.old_participants.index_of(my_party_id).ok_or_else(|| {
+			ResharingProtocolError::InternalError("Party not in old participants".to_string())
+		})?;
+
+		// Sum only the subset shares we are responsible for
+		// A party is responsible for a subset if they have the smallest index
+		// among all old committee members holding that subset
 		let mut contribution_s1 = vec![[0i32; N]; L];
 		let mut contribution_s2 = vec![[0i32; N]; K];
 
-		for (_subset_mask, share_data) in shares {
-			for i in 0..L.min(share_data.s1.len()) {
-				for j in 0..N {
-					contribution_s1[i][j] = contribution_s1[i][j].wrapping_add(share_data.s1[i][j]);
+		for (&subset_mask, share_data) in shares {
+			// Determine who owns this subset (smallest index among holders)
+			let owner_index = self.find_subset_owner(subset_mask);
+
+			// Only contribute if we are the owner
+			if owner_index == Some(my_index) {
+				for i in 0..L.min(share_data.s1.len()) {
+					for j in 0..N {
+						contribution_s1[i][j] =
+							contribution_s1[i][j].wrapping_add(share_data.s1[i][j]);
+					}
 				}
-			}
-			for i in 0..K.min(share_data.s2.len()) {
-				for j in 0..N {
-					contribution_s2[i][j] = contribution_s2[i][j].wrapping_add(share_data.s2[i][j]);
+				for i in 0..K.min(share_data.s2.len()) {
+					for j in 0..N {
+						contribution_s2[i][j] =
+							contribution_s2[i][j].wrapping_add(share_data.s2[i][j]);
+					}
 				}
 			}
 		}
 
-		// Add blinding
+		// Add blinding (all parties add their blinding, regardless of subset ownership)
+		// and reduce modulo Q to keep coefficients in valid range
 		for i in 0..L {
 			for j in 0..N {
 				contribution_s1[i][j] = contribution_s1[i][j].wrapping_add(blinding_s1[i][j]);
+				contribution_s1[i][j] = reduce_coeff_mod_q(contribution_s1[i][j]);
 			}
 		}
 		for i in 0..K {
 			for j in 0..N {
 				contribution_s2[i][j] = contribution_s2[i][j].wrapping_add(blinding_s2[i][j]);
+				contribution_s2[i][j] = reduce_coeff_mod_q(contribution_s2[i][j]);
 			}
 		}
 
 		Ok((contribution_s1, contribution_s2))
+	}
+
+	/// Find the owner of a subset - the party with the smallest index among
+	/// all old committee members who hold this subset.
+	///
+	/// The subset mask uses bit positions corresponding to indices in the
+	/// old participants list (from the original keygen).
+	fn find_subset_owner(&self, subset_mask: u16) -> Option<usize> {
+		// Get the DKG participants from the existing share to understand the
+		// original subset indexing
+		let existing_share = self.config.existing_share.as_ref()?;
+		let dkg_participants = existing_share.dkg_participants();
+
+		// Find the smallest index among parties that:
+		// 1. Hold this subset (bit is set in mask)
+		// 2. Are in the old committee (participating in resharing)
+		let mut min_index: Option<usize> = None;
+
+		for (bit_pos, party_id) in dkg_participants.iter().enumerate() {
+			// Check if this party holds the subset
+			if (subset_mask & (1 << bit_pos)) != 0 {
+				// Check if this party is in the old committee
+				if self.config.old_participants.contains(party_id) {
+					// Get their index in old_participants
+					if let Some(old_idx) = self.config.old_participants.index_of(party_id) {
+						match min_index {
+							None => min_index = Some(old_idx),
+							Some(current_min) if old_idx < current_min => min_index = Some(old_idx),
+							_ => {},
+						}
+					}
+				}
+			}
+		}
+
+		min_index
 	}
 
 	/// Compute commitment to blinding values.
@@ -789,6 +950,7 @@ impl ResharingProtocol {
 	}
 
 	/// Aggregate Round 1 contributions to get blinded total secret.
+	/// Coefficients are reduced modulo Q after aggregation to prevent overflow.
 	fn aggregate_round1_contributions(
 		&self,
 	) -> Result<(Vec<[i32; N]>, Vec<[i32; N]>), ResharingProtocolError> {
@@ -810,28 +972,57 @@ impl ResharingProtocol {
 			}
 		}
 
+		// Reduce coefficients modulo Q to keep them in valid range
+		for i in 0..L {
+			for j in 0..N {
+				total_s1[i][j] = reduce_coeff_mod_q(total_s1[i][j]);
+			}
+		}
+		for i in 0..K {
+			for j in 0..N {
+				total_s2[i][j] = reduce_coeff_mod_q(total_s2[i][j]);
+			}
+		}
+
 		Ok((total_s1, total_s2))
 	}
 
 	/// Compute the total blinding value to remove from the aggregated contributions.
+	///
+	/// This sums the blinding values from ALL Round 1 participants, which are
+	/// included in each Round 1 broadcast. This ensures all dealers can compute
+	/// the same total blinding to remove.
 	fn compute_total_blinding(&self) -> (Vec<[i32; N]>, Vec<[i32; N]>) {
-		// For simplicity, we sum the blinding values we know about
-		// In a full implementation, this would be coordinated across dealers
 		let mut total_s1 = vec![[0i32; N]; L];
 		let mut total_s2 = vec![[0i32; N]; K];
 
-		if let Some(ref blinding_s1) = self.my_blinding_s1 {
-			for i in 0..L {
+		// Sum blinding values from all Round 1 broadcasts
+		for broadcast in self.round1_broadcasts.values() {
+			// Add blinding_s1 from this participant
+			for i in 0..L.min(broadcast.blinding_s1.coefficients.len()) {
 				for j in 0..N {
-					total_s1[i][j] = total_s1[i][j].wrapping_add(blinding_s1[i][j]);
+					total_s1[i][j] =
+						total_s1[i][j].wrapping_add(broadcast.blinding_s1.coefficients[i][j]);
+				}
+			}
+			// Add blinding_s2 from this participant
+			for i in 0..K.min(broadcast.blinding_s2.coefficients.len()) {
+				for j in 0..N {
+					total_s2[i][j] =
+						total_s2[i][j].wrapping_add(broadcast.blinding_s2.coefficients[i][j]);
 				}
 			}
 		}
-		if let Some(ref blinding_s2) = self.my_blinding_s2 {
-			for i in 0..K {
-				for j in 0..N {
-					total_s2[i][j] = total_s2[i][j].wrapping_add(blinding_s2[i][j]);
-				}
+
+		// Reduce coefficients modulo Q
+		for i in 0..L {
+			for j in 0..N {
+				total_s1[i][j] = reduce_coeff_mod_q(total_s1[i][j]);
+			}
+		}
+		for i in 0..K {
+			for j in 0..N {
+				total_s2[i][j] = reduce_coeff_mod_q(total_s2[i][j]);
 			}
 		}
 
@@ -852,17 +1043,20 @@ impl ResharingProtocol {
 		let new_n = self.config.new_participants.len() as u32;
 
 		// Compute the actual secret: blinded_total - total_blinding
+		// Reduce modulo Q to ensure coefficients are in valid range
 		let mut secret_s1 = vec![[0i32; N]; L];
 		let mut secret_s2 = vec![[0i32; N]; K];
 
 		for i in 0..L {
 			for j in 0..N {
-				secret_s1[i][j] = blinded_s1_total[i][j].wrapping_sub(total_blinding_s1[i][j]);
+				let diff = blinded_s1_total[i][j].wrapping_sub(total_blinding_s1[i][j]);
+				secret_s1[i][j] = reduce_coeff_mod_q(diff);
 			}
 		}
 		for i in 0..K {
 			for j in 0..N {
-				secret_s2[i][j] = blinded_s2_total[i][j].wrapping_sub(total_blinding_s2[i][j]);
+				let diff = blinded_s2_total[i][j].wrapping_sub(total_blinding_s2[i][j]);
+				secret_s2[i][j] = reduce_coeff_mod_q(diff);
 			}
 		}
 
@@ -1084,11 +1278,17 @@ impl ResharingProtocol {
 		}
 
 		// Get rho and tr from existing share or public key
+		// rho is the first 32 bytes of the packed public key (used for matrix A expansion)
+		// tr is the hash of the public key (used in signing)
 		let (rho, tr) = if let Some(ref existing) = self.config.existing_share {
 			(*existing.rho(), *existing.tr())
 		} else {
-			// For new parties, derive from public key
-			([0u8; 32], *self.config.public_key.tr())
+			// For new parties, extract rho from public key bytes
+			// In ML-DSA-87, pk = (rho || packed_t1), so rho is the first 32 bytes
+			let pk_bytes = self.config.public_key.as_bytes();
+			let mut rho = [0u8; 32];
+			rho.copy_from_slice(&pk_bytes[..32]);
+			(rho, *self.config.public_key.tr())
 		};
 
 		// Generate a new party key
@@ -1122,6 +1322,17 @@ impl ResharingProtocol {
 
 /// Generate all subsets of size `size` from `n` elements.
 /// Returns subset masks as u16.
+/// Reduce a coefficient to the range [0, Q).
+/// Handles both positive values that exceed Q and negative values.
+#[inline]
+fn reduce_coeff_mod_q(x: i32) -> i32 {
+	let mut r = x % Q;
+	if r < 0 {
+		r += Q;
+	}
+	r
+}
+
 fn generate_subsets(n: usize, size: usize) -> Vec<SubsetMask> {
 	if size > n || size == 0 {
 		return Vec::new();
@@ -1206,6 +1417,119 @@ mod tests {
 		match ret {
 			Action::Return(val) => assert_eq!(val, 123),
 			_ => panic!("Expected Return"),
+		}
+	}
+
+	#[test]
+	fn test_reduce_coeff_mod_q() {
+		// Test positive values within range
+		assert_eq!(reduce_coeff_mod_q(0), 0);
+		assert_eq!(reduce_coeff_mod_q(1), 1);
+		assert_eq!(reduce_coeff_mod_q(Q - 1), Q - 1);
+
+		// Test values equal to Q
+		assert_eq!(reduce_coeff_mod_q(Q), 0);
+
+		// Test values greater than Q
+		assert_eq!(reduce_coeff_mod_q(Q + 1), 1);
+		assert_eq!(reduce_coeff_mod_q(2 * Q), 0);
+		assert_eq!(reduce_coeff_mod_q(2 * Q + 100), 100);
+
+		// Test negative values
+		assert_eq!(reduce_coeff_mod_q(-1), Q - 1);
+		assert_eq!(reduce_coeff_mod_q(-Q), 0);
+		assert_eq!(reduce_coeff_mod_q(-Q - 1), Q - 1);
+		assert_eq!(reduce_coeff_mod_q(-100), Q - 100);
+
+		// Test with various random-ish values
+		assert_eq!(reduce_coeff_mod_q(12345678), 12345678 % Q);
+		assert_eq!(reduce_coeff_mod_q(-12345678), (Q - (12345678 % Q)) % Q);
+	}
+
+	#[test]
+	fn test_reduce_coeff_mod_q_randomized() {
+		// Test with a range of values to ensure consistency
+		for i in -1000..1000 {
+			let result = reduce_coeff_mod_q(i);
+			assert!(result >= 0, "Result should be non-negative for input {}", i);
+			assert!(result < Q, "Result should be less than Q for input {}", i);
+
+			// Verify the result is congruent to the input mod Q
+			let expected = ((i % Q) + Q) % Q;
+			assert_eq!(result, expected, "Mismatch for input {}", i);
+		}
+
+		// Test edge cases around Q boundaries
+		for offset in -10..10 {
+			let input = Q + offset;
+			let result = reduce_coeff_mod_q(input);
+			assert!(result >= 0 && result < Q);
+
+			let input2 = -Q + offset;
+			let result2 = reduce_coeff_mod_q(input2);
+			assert!(result2 >= 0 && result2 < Q);
+		}
+	}
+
+	#[test]
+	fn test_generate_subsets_edge_cases() {
+		// Empty cases
+		assert!(generate_subsets(0, 0).is_empty());
+		assert!(generate_subsets(0, 1).is_empty());
+		assert!(generate_subsets(3, 0).is_empty());
+		assert!(generate_subsets(3, 4).is_empty()); // size > n
+
+		// Single element subsets
+		let subsets = generate_subsets(3, 1);
+		assert_eq!(subsets.len(), 3);
+		assert!(subsets.contains(&0b001));
+		assert!(subsets.contains(&0b010));
+		assert!(subsets.contains(&0b100));
+
+		// Full set (n choose n = 1)
+		let subsets = generate_subsets(4, 4);
+		assert_eq!(subsets.len(), 1);
+		assert!(subsets.contains(&0b1111));
+
+		// Verify binomial coefficients for various (n, k)
+		assert_eq!(generate_subsets(5, 2).len(), 10); // C(5,2) = 10
+		assert_eq!(generate_subsets(6, 3).len(), 20); // C(6,3) = 20
+		assert_eq!(generate_subsets(7, 4).len(), 35); // C(7,4) = 35
+	}
+
+	#[test]
+	fn test_generate_subsets_correctness() {
+		// For each generated subset, verify it has exactly 'size' bits set
+		for n in 2..8 {
+			for size in 1..=n {
+				let subsets = generate_subsets(n, size);
+				for &subset in &subsets {
+					let bit_count = (0..n).filter(|&i| (subset & (1 << i)) != 0).count();
+					assert_eq!(
+						bit_count, size,
+						"Subset {:b} should have {} bits set, has {}",
+						subset, size, bit_count
+					);
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn test_generate_subsets_no_duplicates() {
+		// Verify no duplicate subsets are generated
+		for n in 2..8 {
+			for size in 1..=n {
+				let subsets = generate_subsets(n, size);
+				let unique: std::collections::HashSet<_> = subsets.iter().collect();
+				assert_eq!(
+					subsets.len(),
+					unique.len(),
+					"Found duplicates for n={}, size={}",
+					n,
+					size
+				);
+			}
 		}
 	}
 
