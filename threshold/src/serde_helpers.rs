@@ -97,3 +97,27 @@ pub mod serde_u16_hashmap {
 		Ok(vec.into_iter().collect())
 	}
 }
+
+/// Serde support for `ParticipantList`.
+#[cfg(feature = "serde")]
+pub mod serde_participant_list {
+	use super::*;
+	use crate::participants::{ParticipantId, ParticipantList};
+
+	pub fn serialize<S>(list: &ParticipantList, serializer: S) -> Result<S::Ok, S::Error>
+	where
+		S: Serializer,
+	{
+		// Serialize as Vec<ParticipantId> (the sorted list)
+		list.as_slice().serialize(serializer)
+	}
+
+	pub fn deserialize<'de, D>(deserializer: D) -> Result<ParticipantList, D::Error>
+	where
+		D: Deserializer<'de>,
+	{
+		let vec: Vec<ParticipantId> = Vec::deserialize(deserializer)?;
+		ParticipantList::new(&vec)
+			.ok_or_else(|| serde::de::Error::custom("duplicate participant IDs in ParticipantList"))
+	}
+}

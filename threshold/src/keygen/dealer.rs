@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 
+use crate::participants::{ParticipantId, ParticipantList};
+
 use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec};
 
 use crate::{
@@ -171,6 +173,11 @@ pub fn generate_with_dealer(
 			shares_data.insert(subset_id, SecretShareData { s1: s1_data, s2: s2_data });
 		}
 
+		// For dealer-generated keys, participants have sequential IDs (0, 1, 2, ..., n-1)
+		let dkg_participants =
+			ParticipantList::new(&(0..parties).map(|i| i as ParticipantId).collect::<Vec<_>>())
+				.expect("sequential IDs are always valid");
+
 		let sk = PrivateKeyShare::new(
 			party_id,
 			parties,
@@ -179,6 +186,7 @@ pub fn generate_with_dealer(
 			rho,
 			tr,
 			shares_data,
+			dkg_participants,
 		);
 		private_keys.push(sk);
 	}
@@ -196,16 +204,16 @@ struct SecretShare {
 /// Generate threshold shares using the reference implementation approach.
 fn generate_threshold_shares(
 	state: &mut fips202::KeccakState,
-	threshold: u8,
-	parties: u8,
+	threshold: u32,
+	parties: u32,
 ) -> ThresholdResult<(
-	polyvec::Polyvecl,                      // s1_total
-	polyvec::Polyveck,                      // s2_total
-	polyvec::Polyvecl,                      // s1h_total (NTT form)
-	HashMap<u8, HashMap<u16, SecretShare>>, // party_shares (u16 subset masks)
+	polyvec::Polyvecl,                       // s1_total
+	polyvec::Polyveck,                       // s2_total
+	polyvec::Polyvecl,                       // s1h_total (NTT form)
+	HashMap<u32, HashMap<u16, SecretShare>>, // party_shares (u16 subset masks)
 )> {
 	// Initialize party shares
-	let mut party_shares: HashMap<u8, HashMap<u16, SecretShare>> = HashMap::new();
+	let mut party_shares: HashMap<u32, HashMap<u16, SecretShare>> = HashMap::new();
 	for i in 0..parties {
 		party_shares.insert(i, HashMap::new());
 	}
@@ -249,7 +257,7 @@ fn generate_threshold_shares(
 		// Distribute to all parties in this combination
 		for i in 0..parties {
 			if (honest_signers & (1 << i)) != 0 {
-				if let Some(party_map) = party_shares.get_mut(&i) {
+				if let Some(party_map) = party_shares.get_mut(&(i as u32)) {
 					party_map.insert(honest_signers, share.clone());
 				}
 			}
@@ -373,7 +381,7 @@ mod tests {
 
 		// Check party IDs
 		for (i, share) in shares.iter().enumerate() {
-			assert_eq!(share.party_id(), i as u8);
+			assert_eq!(share.party_id(), i as u32);
 			assert_eq!(share.threshold(), 2);
 			assert_eq!(share.total_parties(), 3);
 		}

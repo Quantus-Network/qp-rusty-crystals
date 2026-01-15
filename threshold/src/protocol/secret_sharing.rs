@@ -12,6 +12,7 @@ use qp_rusty_crystals_dilithium::{params as dilithium_params, polyvec};
 
 use crate::{
 	error::{ThresholdError, ThresholdResult},
+	participants::{ParticipantId, ParticipantList},
 	protocol::primitives::mod_q,
 };
 
@@ -20,7 +21,7 @@ use crate::{
 pub struct SecretShare {
 	/// Party identifier for this secret share.
 	#[allow(dead_code)]
-	pub party_id: u8,
+	pub party_id: u32,
 	/// Share of the s1 polynomial vector.
 	pub s1_share: polyvec::Polyvecl,
 	/// Share of the s2 polynomial vector.
@@ -41,8 +42,8 @@ pub struct SecretShare {
 /// # Returns
 /// A vector of t patterns, where patterns[i] contains the subset masks for position i.
 pub(crate) fn compute_sharing_patterns(
-	threshold: u8,
-	parties: u8,
+	threshold: u32,
+	parties: u32,
 ) -> Result<Vec<Vec<u16>>, &'static str> {
 	if threshold < 2 {
 		return Err("Threshold must be at least 2");
@@ -122,30 +123,38 @@ fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
 ///
 /// # Arguments
 ///
-/// * `shares` - Map of shares keyed by subset ID (bitmask, u16 for up to 16 parties)
-/// * `party_id` - The party ID recovering the share
-/// * `active_parties` - List of active party IDs participating in signing
+/// * `shares` - Map of shares keyed by subset ID (bitmask based on DKG indices)
+/// * `party_id` - The party ID recovering the share (arbitrary ID, e.g., NEAR participant ID)
+/// * `active_parties` - List of active party IDs participating in signing (arbitrary IDs)
 /// * `threshold` - The threshold value (t)
 /// * `parties` - Total number of parties (n)
+/// * `dkg_participants` - The participant list from DKG, mapping arbitrary IDs to indices
 ///
 /// # Returns
 ///
 /// A tuple of (s1_ntt, s2_ntt) representing the recovered secret shares in NTT domain.
 pub fn recover_share(
 	shares: &HashMap<u16, SecretShare>,
-	party_id: u8,
-	active_parties: &[u8],
-	threshold: u8,
-	parties: u8,
+	party_id: ParticipantId,
+	active_parties: &[ParticipantId],
+	threshold: u32,
+	parties: u32,
+	dkg_participants: &ParticipantList,
 ) -> ThresholdResult<(polyvec::Polyvecl, polyvec::Polyveck)> {
 	// Base case: when threshold equals total parties
 	// In this case, each party uses their single share directly
 	// But we still need to convert to NTT domain like Go does
 	if threshold == parties {
 		// For t=n case, use the share that corresponds to all active parties
-		// The share key is a bitmask of which parties are involved
-		// For 2-of-2 with parties 0,1 active, the key is 0b11 = 3
-		let active_key: u16 = active_parties.iter().fold(0u16, |acc, &p| acc | (1 << p));
+		// The share key is a bitmask of which parties are involved (using DKG indices)
+		// For 2-of-2 with parties at indices 0,1 active, the key is 0b11 = 3
+		let active_key: u16 = active_parties.iter().fold(0u16, |acc, &p| {
+			if let Some(idx) = dkg_participants.index_of(p) {
+				acc | (1 << idx)
+			} else {
+				acc
+			}
+		});
 
 		// Try to find the share with the active key first
 		let share = shares.get(&active_key).or_else(|| {
@@ -173,21 +182,39 @@ pub fn recover_share(
 	let sharing_patterns = compute_sharing_patterns(threshold, parties)
 		.map_err(|e| ThresholdError::InvalidConfiguration(e.to_string()))?;
 
-	// Create permutation to cover the signing set (active_parties)
-	let mut perm = vec![0u8; parties as usize];
-	let mut i1 = 0;
-	let mut i2 = threshold as usize;
-
-	// Find the position of party_id within active_parties
-	let current_i = active_parties.iter().position(|&p| p == party_id).ok_or_else(|| {
+	// Get the DKG index for my party_id
+	let my_dkg_index = dkg_participants.index_of(party_id).ok_or_else(|| {
 		ThresholdError::InvalidConfiguration(format!(
-			"Party {} is not in active parties list",
+			"Party {} not found in DKG participants",
 			party_id
 		))
 	})?;
 
-	for j in 0..parties {
-		if active_parties.contains(&j) {
+	// Get DKG indices for all active parties
+	let active_indices: Vec<usize> =
+		active_parties.iter().filter_map(|&p| dkg_participants.index_of(p)).collect();
+
+	// Create permutation to cover the signing set (using DKG indices)
+	let mut perm = vec![0usize; parties as usize];
+	let mut i1 = 0;
+	let mut i2 = threshold as usize;
+
+	// Find the position of my_dkg_index within active_indices (sorted)
+	let mut sorted_active_indices = active_indices.clone();
+	sorted_active_indices.sort();
+	let current_i =
+		sorted_active_indices
+			.iter()
+			.position(|&idx| idx == my_dkg_index)
+			.ok_or_else(|| {
+				ThresholdError::InvalidConfiguration(format!(
+					"Party {} (index {}) is not in active parties list",
+					party_id, my_dkg_index
+				))
+			})?;
+
+	for j in 0..parties as usize {
+		if sorted_active_indices.contains(&j) {
 			perm[i1] = j;
 			i1 += 1;
 		} else {
@@ -208,10 +235,11 @@ pub fn recover_share(
 
 	for &pattern_u in &sharing_patterns[current_i] {
 		// Translate the share index u to the share index u_ by applying the permutation
+		// The permutation maps positions to DKG indices
 		let mut u_translated = 0u16;
-		for i in 0..parties {
+		for i in 0..parties as usize {
 			if pattern_u & (1 << i) != 0 {
-				u_translated |= 1 << perm[i as usize];
+				u_translated |= 1 << (perm[i] as u16);
 			}
 		}
 
@@ -303,7 +331,7 @@ mod tests {
 		];
 
 		for (t, n, expected_mask) in test_cases {
-			let patterns = compute_sharing_patterns(t, n).unwrap();
+			let patterns = compute_sharing_patterns(t as u32, n as u32).unwrap();
 			assert_eq!(patterns.len(), 1, "t=n should have 1 position for ({}, {})", t, n);
 			assert_eq!(patterns[0].len(), 1, "t=n should have 1 pattern for ({}, {})", t, n);
 			assert_eq!(
@@ -320,7 +348,7 @@ mod tests {
 		let test_cases = [(2, 3), (2, 4), (3, 5), (4, 6), (6, 12)];
 
 		for (t, n) in test_cases {
-			let patterns = compute_sharing_patterns(t, n).unwrap();
+			let patterns = compute_sharing_patterns(t as u32, n as u32).unwrap();
 
 			// Should have t positions
 			assert_eq!(
@@ -372,7 +400,7 @@ mod tests {
 		// internally
 		for n in 2..=15u8 {
 			for t in 2..=n {
-				let result = compute_sharing_patterns(t, n);
+				let result = compute_sharing_patterns(t as u32, n as u32);
 				assert!(
 					result.is_ok(),
 					"Failed to compute pattern for ({}, {}): {:?}",
@@ -387,15 +415,15 @@ mod tests {
 	#[test]
 	fn test_invalid_sharing_patterns() {
 		// Threshold too small
-		let result = compute_sharing_patterns(1, 3);
+		let result = compute_sharing_patterns(1u32, 3u32);
 		assert!(result.is_err());
 
 		// Threshold > parties
-		let result = compute_sharing_patterns(5, 3);
+		let result = compute_sharing_patterns(5u32, 3u32);
 		assert!(result.is_err());
 
 		// Too many parties
-		let result = compute_sharing_patterns(2, 17);
+		let result = compute_sharing_patterns(2u32, 17u32);
 		assert!(result.is_err());
 	}
 }

@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 
+use crate::participants::{ParticipantId, ParticipantList};
+
 use qp_rusty_crystals_dilithium::{fips202, params as dilithium_params, poly, polyvec};
 use zeroize::Zeroize;
 
@@ -56,8 +58,10 @@ pub(crate) struct Round2Data {
 	pub(crate) mu: [u8; 64],
 	/// Aggregated w values for all K iterations.
 	pub(crate) w_aggregated: Vec<polyvec::Polyveck>,
-	/// Active party bitmask (u16 to support up to 16 parties).
-	pub(crate) active_parties_mask: u16,
+	/// Active participants in this signing session.
+	/// Stores the actual participant IDs (which can be arbitrary u32 values).
+	/// The ParticipantList provides index mapping for internal bitmask operations.
+	pub(crate) active_participants: ParticipantList,
 }
 
 impl Zeroize for Round2Data {
@@ -69,7 +73,8 @@ impl Zeroize for Round2Data {
 			}
 		}
 		self.w_aggregated.clear();
-		self.active_parties_mask = 0;
+		// ParticipantList doesn't contain secrets, but clear it anyway
+		self.active_participants = ParticipantList::new(&[]).unwrap();
 	}
 }
 
@@ -117,7 +122,7 @@ fn convert_shares(share: &PrivateKeyShare) -> HashMap<u16, SecretShare> {
 			}
 		}
 
-		shares.insert(*subset_id, SecretShare { party_id: *subset_id as u8, s1_share, s2_share });
+		shares.insert(*subset_id, SecretShare { party_id: *subset_id as u32, s1_share, s2_share });
 	}
 
 	shares
@@ -285,7 +290,7 @@ pub(crate) fn generate_round1(
 	let mut commitment_hash = [0u8; 32];
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, private_key.tr(), 64);
-	fips202::shake256_absorb(&mut state, &[private_key.party_id()], 1);
+	fips202::shake256_absorb(&mut state, &private_key.party_id().to_le_bytes(), 4);
 	fips202::shake256_absorb(&mut state, &w_packed, w_packed.len());
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut commitment_hash, 32, &mut state);
@@ -360,7 +365,7 @@ pub(crate) fn process_round2(
 	round1: &Round1Data,
 	message: &[u8],
 	context: &[u8],
-	other_party_ids: &[u8],
+	other_party_ids: &[ParticipantId],
 	other_commitments: &[Vec<u8>],
 ) -> ThresholdResult<Round2Data> {
 	crate::error::validate_context(context)?;
@@ -375,11 +380,13 @@ pub(crate) fn process_round2(
 		w_aggregated.push(polyvec::Polyveck::default());
 	}
 
-	// Build active parties mask (u16 to support up to 16 parties)
-	let mut active_parties_mask: u16 = 1 << private_key.party_id();
-	for &party_id in other_party_ids {
-		active_parties_mask |= 1 << party_id;
-	}
+	// Build active participants list from our ID and other party IDs
+	// This supports arbitrary participant IDs (not necessarily sequential)
+	let mut all_party_ids: Vec<ParticipantId> = vec![private_key.party_id()];
+	all_party_ids.extend_from_slice(other_party_ids);
+	let active_participants = ParticipantList::new(&all_party_ids).ok_or_else(|| {
+		ThresholdError::InvalidConfiguration("Duplicate party IDs in signing session".to_string())
+	})?;
 
 	// Aggregate commitments from other parties
 	let single_commitment_size = K * 736; // K * POLY_Q_SIZE
@@ -403,7 +410,7 @@ pub(crate) fn process_round2(
 	tr.copy_from_slice(public_key.tr());
 	let mu = compute_mu(&tr, message, context);
 
-	Ok(Round2Data { mu, w_aggregated, active_parties_mask })
+	Ok(Round2Data { mu, w_aggregated, active_participants })
 }
 
 // ============================================================================
@@ -420,27 +427,19 @@ pub(crate) fn generate_round3_response(
 	// Convert shares
 	let shares = convert_shares(private_key);
 
-	// Build active parties list
-	// IMPORTANT: Use private_key.total_parties() (the DKG n) instead of config.total_parties()
-	// to support subset signing. When signing with a subset of parties, the config may have
-	// a smaller total_parties, but we need to check all possible DKG party IDs in case
-	// a party with a higher ID (e.g., party 3 in a 3-of-4 setup) is signing.
-	let mut active_party_list = Vec::new();
-	for i in 0..private_key.total_parties() {
-		if round2.active_parties_mask & (1 << i) != 0 {
-			active_party_list.push(i);
-		}
-	}
+	// Get active parties directly from the ParticipantList
+	// This supports arbitrary participant IDs (not necessarily sequential)
+	let active_party_ids: Vec<ParticipantId> = round2.active_participants.iter().collect();
 
 	// Recover the partial secret for this party
-	// Use private_key.total_parties() (DKG n) for share recovery, not config.total_parties()
-	// This ensures correct share lookup when signing with a subset of DKG participants
+	// The recover_share function uses dkg_participants to map arbitrary IDs to indices
 	let (s1h, s2h) = recover_share(
 		&shares,
 		private_key.party_id(),
-		&active_party_list,
+		&active_party_ids,
 		private_key.threshold(),
 		private_key.total_parties(),
+		private_key.dkg_participants(),
 	)?;
 
 	let k = config.k_iterations() as usize;

@@ -18,8 +18,8 @@ fn hex_encode(data: &[u8]) -> String {
 /// Run the complete threshold signing protocol using the new API.
 /// Returns Ok(signature_bytes) on success or Err(message) on failure.
 fn run_threshold_protocol_new_api(
-	threshold: u8,
-	total_parties: u8,
+	threshold: u32,
+	total_parties: u32,
 	seed: &[u8; 32],
 	message: &[u8],
 	context: &[u8],
@@ -53,7 +53,7 @@ fn run_threshold_protocol_new_api(
 		.enumerate()
 		.map(|(i, s)| {
 			let others: Vec<_> =
-				r1_broadcasts.iter().filter(|r| r.party_id != i as u8).cloned().collect();
+				r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
 			s.round2_reveal(message, context, &others)
 		})
 		.collect::<Result<_, _>>()
@@ -65,7 +65,7 @@ fn run_threshold_protocol_new_api(
 		.enumerate()
 		.map(|(i, s)| {
 			let others: Vec<_> =
-				r2_broadcasts.iter().filter(|r| r.party_id != i as u8).cloned().collect();
+				r2_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
 			s.round3_respond(&others)
 		})
 		.collect::<Result<_, _>>()
@@ -86,8 +86,8 @@ fn run_threshold_protocol_new_api(
 
 /// Run threshold signing protocol using DKG-generated keys.
 fn run_threshold_protocol_with_dkg(
-	threshold: u8,
-	total_parties: u8,
+	threshold: u32,
+	total_parties: u32,
 	seed: &[u8; 32],
 	message: &[u8],
 	context: &[u8],
@@ -124,7 +124,7 @@ fn run_threshold_protocol_with_dkg(
 		.enumerate()
 		.map(|(i, s)| {
 			let others: Vec<_> =
-				r1_broadcasts.iter().filter(|r| r.party_id != i as u8).cloned().collect();
+				r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
 			s.round2_reveal(message, context, &others)
 		})
 		.collect::<Result<_, _>>()
@@ -136,7 +136,7 @@ fn run_threshold_protocol_with_dkg(
 		.enumerate()
 		.map(|(i, s)| {
 			let others: Vec<_> =
-				r2_broadcasts.iter().filter(|r| r.party_id != i as u8).cloned().collect();
+				r2_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
 			s.round3_respond(&others)
 		})
 		.collect::<Result<_, _>>()
@@ -551,7 +551,7 @@ fn test_threshold_matrix() {
 	// Test configurations: (threshold, total_parties, max_attempts)
 	// max_attempts is the number of full protocol retries
 	// k_iterations (from config) is parallel attempts within each protocol run
-	let configs: [(u8, u8, u32); 21] = [
+	let configs: [(u32, u32, u32); 21] = [
 		// n = 2
 		(2, 2, 50),
 		// n = 3
@@ -657,7 +657,7 @@ fn test_threshold_matrix_dkg() {
 
 	// Test configurations: (threshold, total_parties, max_attempts)
 	// Using same configs as dealer test
-	let configs: [(u8, u8, u32); 21] = [
+	let configs: [(u32, u32, u32); 21] = [
 		// n = 2
 		(2, 2, 50),
 		// n = 3
@@ -793,7 +793,7 @@ fn test_keygen_extended() {
 		assert!(!public_key.as_bytes().is_empty(), "Public key should not be empty");
 
 		for (i, share) in shares.iter().enumerate() {
-			assert_eq!(share.party_id(), i as u8);
+			assert_eq!(share.party_id(), i as u32);
 			assert_eq!(share.threshold(), t);
 			assert_eq!(share.total_parties(), n);
 		}
@@ -812,9 +812,9 @@ fn test_keygen_extended() {
 /// * `dkg_total` - Total parties from DKG (n)
 /// * `signing_parties` - Which party IDs participate in signing (must be >= threshold)
 fn run_subset_signing(
-	dkg_threshold: u8,
-	dkg_total: u8,
-	signing_parties: &[u8],
+	dkg_threshold: u32,
+	dkg_total: u32,
+	signing_parties: &[u32],
 	seed: &[u8; 32],
 	message: &[u8],
 	context: &[u8],
@@ -830,7 +830,7 @@ fn run_subset_signing(
 	// Create signing config with the actual number of signing parties
 	// This is the key change: total_parties in signing config is the subset size,
 	// but we use the DKG threshold
-	let signing_total = signing_parties.len() as u8;
+	let signing_total = signing_parties.len() as u32;
 	let signing_config = ThresholdConfig::new(dkg_threshold, signing_total)
 		.map_err(|e| format!("Signing config error: {:?}", e))?;
 
@@ -909,7 +909,7 @@ fn test_subset_signing_3_of_4_consecutive() {
 
 	// DKG with 4 parties, threshold 3
 	// Sign with parties 0, 1, 2 (skip party 3)
-	let signing_parties = [0u8, 1, 2];
+	let signing_parties = [0u32, 1, 2];
 
 	let max_attempts = 200;
 	for attempt in 0..max_attempts {
@@ -946,7 +946,7 @@ fn test_subset_signing_3_of_4_non_consecutive() {
 
 	// DKG with 4 parties, threshold 3
 	// Sign with parties 0, 1, 3 (skip party 2)
-	let signing_parties = [0u8, 1, 3];
+	let signing_parties = [0u32, 1, 3];
 
 	let max_attempts = 200;
 	for attempt in 0..max_attempts {
@@ -983,7 +983,7 @@ fn test_subset_signing_3_of_5() {
 
 	// DKG with 5 parties, threshold 3
 	// Sign with parties 0, 2, 4 (skipping parties 1 and 3)
-	let signing_parties = [0u8, 2, 4];
+	let signing_parties = [0u32, 2, 4];
 
 	let max_attempts = 300;
 	for attempt in 0..max_attempts {

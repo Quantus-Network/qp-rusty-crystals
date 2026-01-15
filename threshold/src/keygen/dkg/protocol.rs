@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use rand::{Rng, SeedableRng};
 
-use crate::error::ThresholdError;
+use crate::{error::ThresholdError, participants::ParticipantList};
 
 use super::{
 	state::{DkgState, DkgStateData},
@@ -77,8 +77,9 @@ impl std::fmt::Display for DkgProtocolError {
 		match self {
 			DkgProtocolError::InvalidState(s) => write!(f, "Invalid state: {}", s),
 			DkgProtocolError::UnknownParty(p) => write!(f, "Unknown party: {}", p),
-			DkgProtocolError::DuplicateMessage(p) =>
-				write!(f, "Duplicate message from party: {}", p),
+			DkgProtocolError::DuplicateMessage(p) => {
+				write!(f, "Duplicate message from party: {}", p)
+			},
 			DkgProtocolError::CommitmentMismatch(p) => {
 				write!(f, "Commitment mismatch for party: {}", p)
 			},
@@ -435,18 +436,18 @@ impl DilithiumDkg {
 		match msg {
 			DkgMessage::Round1(m) => {
 				buf.push(1u8); // Round tag
-				buf.push(m.party_id);
+				buf.extend_from_slice(&m.party_id.to_le_bytes());
 				buf.extend_from_slice(&m.session_id_contribution);
 			},
 			DkgMessage::Round2(m) => {
 				buf.push(2u8);
-				buf.push(m.party_id);
+				buf.extend_from_slice(&m.party_id.to_le_bytes());
 				buf.extend_from_slice(&m.commitment_hash);
 			},
 			DkgMessage::Round3(m) => {
 				buf.push(3u8);
-				buf.push(m.party_id);
-				buf.push(m.contributions.party_id);
+				buf.extend_from_slice(&m.party_id.to_le_bytes());
+				buf.extend_from_slice(&m.contributions.party_id.to_le_bytes());
 				buf.extend_from_slice(&m.contributions.rho_contribution);
 				// Serialize subset contributions count
 				let count = m.contributions.subset_contributions.len() as u16;
@@ -470,7 +471,7 @@ impl DilithiumDkg {
 			},
 			DkgMessage::Round4(m) => {
 				buf.push(4u8);
-				buf.push(m.party_id);
+				buf.extend_from_slice(&m.party_id.to_le_bytes());
 				buf.push(if m.success { 1u8 } else { 0u8 });
 				buf.extend_from_slice(&m.public_key_hash);
 			},
@@ -491,24 +492,24 @@ impl DilithiumDkg {
 
 		match round {
 			1 => {
-				if data.len() < 1 + SESSION_ID_SIZE {
+				if data.len() < 4 + SESSION_ID_SIZE {
 					return Err(DkgProtocolError::SerializationError("Round1 too short".into()));
 				}
-				let party_id = data[0];
+				let party_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
 				let mut session_id = [0u8; SESSION_ID_SIZE];
-				session_id.copy_from_slice(&data[1..1 + SESSION_ID_SIZE]);
+				session_id.copy_from_slice(&data[4..4 + SESSION_ID_SIZE]);
 				Ok(DkgMessage::Round1(DkgRound1Broadcast {
 					party_id,
 					session_id_contribution: session_id,
 				}))
 			},
 			2 => {
-				if data.len() < 1 + COMMITMENT_HASH_SIZE {
+				if data.len() < 4 + COMMITMENT_HASH_SIZE {
 					return Err(DkgProtocolError::SerializationError("Round2 too short".into()));
 				}
-				let party_id = data[0];
+				let party_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
 				let mut hash = [0u8; COMMITMENT_HASH_SIZE];
-				hash.copy_from_slice(&data[1..1 + COMMITMENT_HASH_SIZE]);
+				hash.copy_from_slice(&data[4..4 + COMMITMENT_HASH_SIZE]);
 				Ok(DkgMessage::Round2(DkgRound2Broadcast { party_id, commitment_hash: hash }))
 			},
 			3 => {
@@ -516,13 +517,13 @@ impl DilithiumDkg {
 				self.deserialize_round3_custom(data)
 			},
 			4 => {
-				if data.len() < 2 + COMMITMENT_HASH_SIZE {
+				if data.len() < 5 + COMMITMENT_HASH_SIZE {
 					return Err(DkgProtocolError::SerializationError("Round4 too short".into()));
 				}
-				let party_id = data[0];
-				let success = data[1] != 0;
+				let party_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+				let success = data[4] != 0;
 				let mut hash = [0u8; COMMITMENT_HASH_SIZE];
-				hash.copy_from_slice(&data[2..2 + COMMITMENT_HASH_SIZE]);
+				hash.copy_from_slice(&data[5..5 + COMMITMENT_HASH_SIZE]);
 				Ok(DkgMessage::Round4(DkgRound4Broadcast {
 					party_id,
 					success,
@@ -537,14 +538,24 @@ impl DilithiumDkg {
 	fn deserialize_round3_custom(&self, data: &[u8]) -> Result<DkgMessage, DkgProtocolError> {
 		let mut offset = 0;
 
-		if data.len() < 2 + RHO_CONTRIBUTION_SIZE + 2 {
+		if data.len() < 8 + RHO_CONTRIBUTION_SIZE + 2 {
 			return Err(DkgProtocolError::SerializationError("Round3 too short".into()));
 		}
 
-		let party_id = data[offset];
-		offset += 1;
-		let contrib_party_id = data[offset];
-		offset += 1;
+		let party_id = u32::from_le_bytes([
+			data[offset],
+			data[offset + 1],
+			data[offset + 2],
+			data[offset + 3],
+		]);
+		offset += 4;
+		let contrib_party_id = u32::from_le_bytes([
+			data[offset],
+			data[offset + 1],
+			data[offset + 2],
+			data[offset + 3],
+		]);
+		offset += 4;
 
 		let mut rho = [0u8; RHO_CONTRIBUTION_SIZE];
 		rho.copy_from_slice(&data[offset..offset + RHO_CONTRIBUTION_SIZE]);
@@ -653,8 +664,8 @@ impl DilithiumDkg {
 	fn compute_subsets_for_party(
 		&self,
 		party_id: ParticipantId,
-		threshold: u8,
-		parties: u8,
+		threshold: u32,
+		parties: u32,
 	) -> Vec<SubsetMask> {
 		let subset_size = (parties - threshold + 1) as usize;
 		let mut subsets = Vec::new();
@@ -725,7 +736,7 @@ impl DilithiumDkg {
 		let mut state = fips202::KeccakState::default();
 
 		// Include party ID
-		fips202::shake256_absorb(&mut state, &[contributions.party_id], 1);
+		fips202::shake256_absorb(&mut state, &contributions.party_id.to_le_bytes(), 4);
 
 		// Include rho contribution
 		fips202::shake256_absorb(
@@ -862,7 +873,9 @@ impl DilithiumDkg {
 					continue;
 				}
 
-				if let Some(party_contrib) = self.state_data.round3.contributions.get(&party_id) {
+				if let Some(party_contrib) =
+					self.state_data.round3.contributions.get(&(party_id as u32))
+				{
 					if let Some(subset_contrib) =
 						party_contrib.subset_contributions.get(subset_mask)
 					{
@@ -996,7 +1009,7 @@ impl DilithiumDkg {
 		{
 			let mut state = fips202::KeccakState::default();
 			fips202::shake256_absorb(&mut state, &rho, 32);
-			fips202::shake256_absorb(&mut state, &[my_id], 1);
+			fips202::shake256_absorb(&mut state, &my_id.to_le_bytes(), 4);
 			if let Some(session_id) = &self.state_data.round1.combined_session_id {
 				fips202::shake256_absorb(&mut state, session_id, SESSION_ID_SIZE);
 			}
@@ -1004,8 +1017,23 @@ impl DilithiumDkg {
 			fips202::shake256_squeeze(&mut party_key, 32, &mut state);
 		}
 
-		let private_share =
-			PrivateKeyShare::new(my_id, parties, threshold, party_key, rho, tr, combined_shares);
+		// Create ParticipantList from the DKG participants
+		// This maps arbitrary party IDs to sequential indices for share operations
+		let dkg_participants =
+			ParticipantList::new(&self.config().all_participants).ok_or_else(|| {
+				DkgProtocolError::InternalError("Invalid DKG participants".to_string())
+			})?;
+
+		let private_share = PrivateKeyShare::new(
+			my_id,
+			parties as u32,
+			threshold as u32,
+			party_key,
+			rho,
+			tr,
+			combined_shares,
+			dkg_participants,
+		);
 
 		Ok(DkgOutput { public_key, private_share })
 	}
@@ -1030,9 +1058,9 @@ mod tests {
 	use super::*;
 	use crate::config::ThresholdConfig;
 
-	fn make_test_config(party_id: u8) -> DkgConfig {
+	fn make_test_config(party_id: u32) -> DkgConfig {
 		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
-		DkgConfig::new(threshold_config, party_id, vec![0, 1, 2]).unwrap()
+		DkgConfig::new(threshold_config, party_id, vec![0u32, 1, 2]).unwrap()
 	}
 
 	#[test]
@@ -1111,7 +1139,7 @@ mod tests {
 		match msg {
 			DkgMessage::Round1(m) => {
 				buf.push(1u8);
-				buf.push(m.party_id);
+				buf.extend_from_slice(&m.party_id.to_le_bytes());
 				buf.extend_from_slice(&m.session_id_contribution);
 			},
 			_ => unimplemented!(),

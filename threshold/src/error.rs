@@ -11,37 +11,37 @@ pub enum ThresholdError {
 	/// Invalid threshold parameters (t, n).
 	InvalidParameters {
 		/// Threshold value.
-		threshold: u8,
+		threshold: u32,
 		/// Total number of parties.
-		parties: u8,
+		parties: u32,
 		/// Description of the validation error.
 		reason: &'static str,
 	},
 	/// Invalid party ID.
 	InvalidPartyId {
 		/// The invalid party ID.
-		party_id: u8,
+		party_id: u32,
 		/// Maximum valid party ID.
-		max_id: u8,
+		max_id: u32,
 	},
 	/// Insufficient number of parties for threshold.
 	InsufficientParties {
 		/// Number of parties provided.
 		provided: usize,
 		/// Required threshold.
-		required: u8,
+		required: u32,
 	},
 	/// Invalid signature share.
 	InvalidSignatureShare {
 		/// Party ID that provided the invalid share.
-		party_id: u8,
+		party_id: u32,
 		/// Reason for invalidity.
 		reason: &'static str,
 	},
 	/// Invalid commitment.
 	InvalidCommitment {
 		/// Party ID that provided the invalid commitment.
-		party_id: u8,
+		party_id: u32,
 		/// Expected size.
 		expected_size: usize,
 		/// Actual size.
@@ -64,7 +64,7 @@ pub enum ThresholdError {
 	/// Commitment verification failed.
 	CommitmentVerificationFailed {
 		/// Party ID.
-		party_id: u8,
+		party_id: u32,
 	},
 	/// Random number generation failed.
 	RandomnessError,
@@ -102,12 +102,12 @@ pub enum ThresholdError {
 	/// Missing broadcast from a party.
 	MissingBroadcast {
 		/// Party ID that is missing.
-		party_id: u8,
+		party_id: u32,
 	},
 	/// Duplicate broadcast from a party.
 	DuplicateBroadcast {
 		/// Party ID that sent duplicate.
-		party_id: u8,
+		party_id: u32,
 	},
 	// ========================================================================
 	// DKG-specific errors
@@ -117,22 +117,22 @@ pub enum ThresholdError {
 	/// DKG commitment hash mismatch.
 	DkgCommitmentMismatch {
 		/// Party ID with mismatched commitment.
-		party_id: u8,
+		party_id: u32,
 	},
 	/// DKG contribution bounds violation.
 	DkgInvalidBounds {
 		/// Party ID with invalid bounds.
-		party_id: u8,
+		party_id: u32,
 	},
 	/// DKG consensus failure - parties disagree on public key.
 	DkgConsensusFailure {
 		/// Parties with mismatched public keys.
-		parties: Vec<u8>,
+		parties: Vec<u32>,
 	},
 	/// DKG party reported failure.
 	DkgPartyFailure {
 		/// Parties that reported failure.
-		parties: Vec<u8>,
+		parties: Vec<u32>,
 	},
 }
 
@@ -230,13 +230,13 @@ impl fmt::Display for ThresholdError {
 impl std::error::Error for ThresholdError {}
 
 /// Maximum number of parties supported by the threshold scheme.
-pub const MAX_PARTIES: u8 = 7;
+pub const MAX_PARTIES: u32 = 7;
 
 /// Minimum threshold value (at least 2 parties required).
-pub const MIN_THRESHOLD: u8 = 2;
+pub const MIN_THRESHOLD: u32 = 2;
 
 /// Validate threshold parameters.
-pub fn validate_threshold_params(t: u8, n: u8) -> ThresholdResult<()> {
+pub fn validate_threshold_params(t: u32, n: u32) -> ThresholdResult<()> {
 	if t < MIN_THRESHOLD {
 		return Err(ThresholdError::InvalidParameters {
 			threshold: t,

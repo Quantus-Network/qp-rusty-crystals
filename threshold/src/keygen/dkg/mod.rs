@@ -118,8 +118,8 @@ pub use types::{
 /// assert_eq!(outputs.len(), 3);
 /// ```
 pub fn run_local_dkg(
-	threshold: u8,
-	total_parties: u8,
+	threshold: u32,
+	total_parties: u32,
 	seed: [u8; 32],
 ) -> Result<Vec<DkgOutput>, DkgProtocolError> {
 	use crate::config::ThresholdConfig;
@@ -127,7 +127,7 @@ pub fn run_local_dkg(
 	let threshold_config = ThresholdConfig::new(threshold, total_parties)
 		.map_err(|e| DkgProtocolError::InternalError(e.to_string()))?;
 
-	let participants: Vec<ParticipantId> = (0..total_parties).collect();
+	let participants: Vec<ParticipantId> = (0..total_parties as u32).collect();
 
 	// Create DKG instances for each party
 	let mut dkgs: Vec<DilithiumDkg> = participants
@@ -214,7 +214,7 @@ mod tests {
 
 		// Each party should have correct metadata
 		for (i, output) in outputs.iter().enumerate() {
-			assert_eq!(output.private_share.party_id(), i as u8);
+			assert_eq!(output.private_share.party_id(), i as u32);
 			assert_eq!(output.private_share.threshold(), 2);
 			assert_eq!(output.private_share.total_parties(), 3);
 		}
@@ -294,7 +294,7 @@ mod tests {
 				.enumerate()
 				.map(|(i, s)| {
 					let others: Vec<_> =
-						r1_broadcasts.iter().filter(|r| r.party_id != i as u8).cloned().collect();
+						r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
 					s.round2_reveal(message, context, &others).unwrap()
 				})
 				.collect();
@@ -305,7 +305,7 @@ mod tests {
 				.enumerate()
 				.map(|(i, s)| {
 					let others: Vec<_> =
-						r2_broadcasts.iter().filter(|r| r.party_id != i as u8).cloned().collect();
+						r2_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
 					s.round3_respond(&others).unwrap()
 				})
 				.collect();

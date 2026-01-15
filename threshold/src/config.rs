@@ -23,9 +23,9 @@ use crate::error::{validate_threshold_params, ThresholdError, ThresholdResult};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThresholdConfig {
 	/// Threshold value (minimum parties required to sign).
-	t: u8,
+	t: u32,
 	/// Total number of parties.
-	n: u8,
+	n: u32,
 	/// Number of iterations (K parameter from reference implementation).
 	k_iterations: u32,
 }
@@ -54,7 +54,7 @@ impl ThresholdConfig {
 	///
 	/// **Note**: Values for n = 7 are EXPERIMENTAL and not from the
 	/// reference implementation. They may need adjustment based on testing.
-	pub fn new(t: u8, n: u8) -> ThresholdResult<Self> {
+	pub fn new(t: u32, n: u32) -> ThresholdResult<Self> {
 		validate_threshold_params(t, n)?;
 
 		// ML-DSA-87 specific K iterations
@@ -101,13 +101,13 @@ impl ThresholdConfig {
 
 	/// Get the threshold value (minimum parties required to sign).
 	#[inline]
-	pub fn threshold(&self) -> u8 {
+	pub fn threshold(&self) -> u32 {
 		self.t
 	}
 
 	/// Get the total number of parties.
 	#[inline]
-	pub fn total_parties(&self) -> u8 {
+	pub fn total_parties(&self) -> u32 {
 		self.n
 	}
 
@@ -140,8 +140,8 @@ impl<'de> serde::Deserialize<'de> for ThresholdConfig {
 	{
 		#[derive(serde::Deserialize)]
 		struct ConfigData {
-			threshold: u8,
-			total_parties: u8,
+			threshold: u32,
+			total_parties: u32,
 		}
 
 		let data = ConfigData::deserialize(deserializer)?;

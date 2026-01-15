@@ -54,11 +54,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
 	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature},
+	participants::{ParticipantId, ParticipantList},
 	signer::ThresholdSigner,
 };
-
-/// Participant identifier (0 to n-1).
-pub type ParticipantId = u8;
 
 // ============================================================================
 // Action Enum (matches DKG pattern)
@@ -218,8 +216,8 @@ pub struct DilithiumSignProtocol {
 	signer: ThresholdSigner,
 	/// Current protocol state.
 	state: SignProtocolState,
-	/// All participants in this signing session.
-	participants: Vec<ParticipantId>,
+	/// All participants in this signing session (with ID-to-index mapping).
+	participants: ParticipantList,
 	/// This party's identifier.
 	my_participant_id: ParticipantId,
 	/// The message to sign.
@@ -250,12 +248,12 @@ impl DilithiumSignProtocol {
 	/// * `signer` - The threshold signer for this party
 	/// * `message` - The message to sign
 	/// * `context` - The context string (can be empty, max 255 bytes)
-	/// * `participants` - All participant IDs in this signing session
+	/// * `participants` - All participant IDs in this signing session (can be arbitrary u32 values)
 	/// * `my_participant_id` - This party's identifier
 	///
 	/// # Panics
 	///
-	/// Panics if `my_participant_id` is not in `participants`.
+	/// Panics if `my_participant_id` is not in `participants` or if there are duplicate IDs.
 	pub fn new(
 		signer: ThresholdSigner,
 		message: Vec<u8>,
@@ -263,15 +261,17 @@ impl DilithiumSignProtocol {
 		participants: Vec<ParticipantId>,
 		my_participant_id: ParticipantId,
 	) -> Self {
+		let participant_list =
+			ParticipantList::new(&participants).expect("participants must not contain duplicates");
 		assert!(
-			participants.contains(&my_participant_id),
+			participant_list.contains(my_participant_id),
 			"my_participant_id must be in participants"
 		);
 
 		Self {
 			signer,
 			state: SignProtocolState::Round1Generate,
-			participants,
+			participants: participant_list,
 			my_participant_id,
 			message,
 			context,
@@ -295,7 +295,7 @@ impl DilithiumSignProtocol {
 	}
 
 	/// Get all participants.
-	pub fn participants(&self) -> &[ParticipantId] {
+	pub fn participants(&self) -> &ParticipantList {
 		&self.participants
 	}
 
@@ -328,12 +328,12 @@ impl DilithiumSignProtocol {
 		match msg {
 			SigningMessage::Round1(r1) => {
 				result.push(1u8);
-				result.push(r1.party_id);
+				result.extend_from_slice(&r1.party_id.to_le_bytes());
 				result.extend_from_slice(&r1.commitment_hash);
 			},
 			SigningMessage::Round2(r2) => {
 				result.push(2u8);
-				result.push(r2.party_id);
+				result.extend_from_slice(&r2.party_id.to_le_bytes());
 				// Length-prefix the commitment data
 				let len = r2.commitment_data.len() as u32;
 				result.extend_from_slice(&len.to_le_bytes());
@@ -341,7 +341,7 @@ impl DilithiumSignProtocol {
 			},
 			SigningMessage::Round3(r3) => {
 				result.push(3u8);
-				result.push(r3.party_id);
+				result.extend_from_slice(&r3.party_id.to_le_bytes());
 				// Length-prefix the response data
 				let len = r3.response.len() as u32;
 				result.extend_from_slice(&len.to_le_bytes());
@@ -363,49 +363,49 @@ impl DilithiumSignProtocol {
 
 		match tag {
 			1 => {
-				// Round 1: party_id (1 byte) + commitment_hash (32 bytes)
-				if rest.len() < 33 {
+				// Round 1: party_id (4 bytes) + commitment_hash (32 bytes)
+				if rest.len() < 36 {
 					return Err(SignProtocolError::SerializationError(
 						"Round 1 message too short".to_string(),
 					));
 				}
-				let party_id = rest[0];
+				let party_id = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
 				let mut commitment_hash = [0u8; 32];
-				commitment_hash.copy_from_slice(&rest[1..33]);
+				commitment_hash.copy_from_slice(&rest[4..36]);
 				Ok(SigningMessage::Round1(Round1Broadcast { party_id, commitment_hash }))
 			},
 			2 => {
-				// Round 2: party_id (1 byte) + len (4 bytes) + data
-				if rest.len() < 5 {
+				// Round 2: party_id (4 bytes) + len (4 bytes) + data
+				if rest.len() < 8 {
 					return Err(SignProtocolError::SerializationError(
 						"Round 2 message too short".to_string(),
 					));
 				}
-				let party_id = rest[0];
-				let len = u32::from_le_bytes([rest[1], rest[2], rest[3], rest[4]]) as usize;
-				if rest.len() < 5 + len {
+				let party_id = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+				let len = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]) as usize;
+				if rest.len() < 8 + len {
 					return Err(SignProtocolError::SerializationError(
 						"Round 2 message data truncated".to_string(),
 					));
 				}
-				let commitment_data = rest[5..5 + len].to_vec();
+				let commitment_data = rest[8..8 + len].to_vec();
 				Ok(SigningMessage::Round2(Round2Broadcast { party_id, commitment_data }))
 			},
 			3 => {
-				// Round 3: party_id (1 byte) + len (4 bytes) + data
-				if rest.len() < 5 {
+				// Round 3: party_id (4 bytes) + len (4 bytes) + data
+				if rest.len() < 8 {
 					return Err(SignProtocolError::SerializationError(
 						"Round 3 message too short".to_string(),
 					));
 				}
-				let party_id = rest[0];
-				let len = u32::from_le_bytes([rest[1], rest[2], rest[3], rest[4]]) as usize;
-				if rest.len() < 5 + len {
+				let party_id = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+				let len = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]) as usize;
+				if rest.len() < 8 + len {
 					return Err(SignProtocolError::SerializationError(
 						"Round 3 message data truncated".to_string(),
 					));
 				}
-				let response = rest[5..5 + len].to_vec();
+				let response = rest[8..8 + len].to_vec();
 				Ok(SigningMessage::Round3(Round3Broadcast { party_id, response }))
 			},
 			_ =>
@@ -583,7 +583,7 @@ impl DilithiumSignProtocol {
 		}
 
 		// Ignore messages from non-participants
-		if !self.participants.contains(&from) {
+		if !self.participants.contains(from) {
 			return;
 		}
 
@@ -787,7 +787,7 @@ mod tests {
 		);
 
 		assert_eq!(protocol.my_participant_id(), 0);
-		assert_eq!(protocol.participants(), &[0, 1, 2]);
+		assert_eq!(protocol.participants().as_slice(), &[0, 1, 2]);
 	}
 
 	#[test]

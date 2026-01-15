@@ -36,14 +36,14 @@ pub const SIGNATURE_SIZE: usize = 4627;
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Round1Broadcast {
 	/// The party ID that generated this broadcast.
-	pub party_id: u8,
+	pub party_id: u32,
 	/// Hash of the commitment (SHAKE256 output).
 	pub commitment_hash: [u8; 32],
 }
 
 impl Round1Broadcast {
 	/// Create a new Round 1 broadcast.
-	pub fn new(party_id: u8, commitment_hash: [u8; 32]) -> Self {
+	pub fn new(party_id: u32, commitment_hash: [u8; 32]) -> Self {
 		Self { party_id, commitment_hash }
 	}
 }
@@ -61,14 +61,14 @@ impl Round1Broadcast {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Round2Broadcast {
 	/// The party ID that generated this broadcast.
-	pub party_id: u8,
+	pub party_id: u32,
 	/// Packed commitment polynomials (K iterations of w values).
 	pub commitment_data: Vec<u8>,
 }
 
 impl Round2Broadcast {
 	/// Create a new Round 2 broadcast.
-	pub fn new(party_id: u8, commitment_data: Vec<u8>) -> Self {
+	pub fn new(party_id: u32, commitment_data: Vec<u8>) -> Self {
 		Self { party_id, commitment_data }
 	}
 }
@@ -87,14 +87,14 @@ impl Round2Broadcast {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Round3Broadcast {
 	/// The party ID that generated this broadcast.
-	pub party_id: u8,
+	pub party_id: u32,
 	/// Packed response polynomials (K iterations of z values).
 	pub response: Vec<u8>,
 }
 
 impl Round3Broadcast {
 	/// Create a new Round 3 broadcast.
-	pub fn new(party_id: u8, response: Vec<u8>) -> Self {
+	pub fn new(party_id: u32, response: Vec<u8>) -> Self {
 		Self { party_id, response }
 	}
 }

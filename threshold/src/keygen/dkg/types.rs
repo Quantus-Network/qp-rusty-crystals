@@ -16,8 +16,11 @@ use crate::{
 	keys::{PrivateKeyShare, PublicKey},
 };
 
-/// Participant identifier (0 to n-1).
-pub type ParticipantId = u8;
+/// Participant identifier.
+///
+/// This is a u32 to match NEAR's participant ID type directly.
+/// The actual party ID values are still constrained to 0..n-1 (where n <= MAX_PARTIES).
+pub type ParticipantId = u32;
 
 /// Subset mask - a bitmask indicating which parties are in a subset.
 /// Uses u16 to support up to 16 parties.
@@ -83,12 +86,12 @@ impl DkgConfig {
 	}
 
 	/// Get the threshold value (minimum parties to sign).
-	pub fn threshold(&self) -> u8 {
+	pub fn threshold(&self) -> u32 {
 		self.threshold_config.threshold()
 	}
 
 	/// Get the total number of parties.
-	pub fn total_parties(&self) -> u8 {
+	pub fn total_parties(&self) -> u32 {
 		self.threshold_config.total_parties()
 	}
 

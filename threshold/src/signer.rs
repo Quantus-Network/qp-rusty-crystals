@@ -171,7 +171,7 @@ impl ThresholdSigner {
 	}
 
 	/// Get this party's ID.
-	pub fn party_id(&self) -> u8 {
+	pub fn party_id(&self) -> u32 {
 		self.private_key.party_id()
 	}
 
@@ -283,7 +283,7 @@ impl ThresholdSigner {
 		let commitment_data = pack_round1_commitment(&round1_data, &self.config);
 
 		// Collect other parties' IDs
-		let other_party_ids: Vec<u8> = other_round1.iter().map(|r1| r1.party_id).collect();
+		let other_party_ids: Vec<u32> = other_round1.iter().map(|r1| r1.party_id).collect();
 
 		// Process Round 2 (without other commitment data yet - we'll get it in round3)
 		let round2_data = process_round2(
@@ -355,7 +355,7 @@ impl ThresholdSigner {
 		let commitment_data = pack_round1_commitment(&round1_data, &self.config);
 
 		// Collect other parties' data
-		let other_party_ids: Vec<u8> = other_broadcasts.iter().map(|r2| r2.party_id).collect();
+		let other_party_ids: Vec<u32> = other_broadcasts.iter().map(|r2| r2.party_id).collect();
 		let other_commitment_data: Vec<Vec<u8>> =
 			other_broadcasts.iter().map(|r2| r2.commitment_data.clone()).collect();
 
@@ -441,9 +441,8 @@ impl ThresholdSigner {
 						}
 					}
 				}
-
-				// Update active parties mask
-				round2_data.active_parties_mask |= 1 << r2.party_id;
+				// Note: active_participants is already complete from process_round2
+				// No need to update it here - all participants were known from Round 1
 			}
 		}
 

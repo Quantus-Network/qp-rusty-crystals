@@ -6,11 +6,15 @@
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::participants::{ParticipantId, ParticipantList};
+
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "serde")]
-use crate::serde_helpers::{serde_byte_array, serde_poly_vec, serde_u16_hashmap};
+use crate::serde_helpers::{
+	serde_byte_array, serde_participant_list, serde_poly_vec, serde_u16_hashmap,
+};
 
 /// Size of the packed ML-DSA-87 public key in bytes.
 pub const PUBLIC_KEY_SIZE: usize = 2592;
@@ -93,12 +97,16 @@ impl PublicKey {
 #[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PrivateKeyShare {
-	/// Party identifier (0 to n-1).
-	party_id: u8,
+	/// Party identifier (can be arbitrary u32, e.g., NEAR participant ID).
+	party_id: ParticipantId,
 	/// Total number of parties.
-	total_parties: u8,
+	total_parties: u32,
 	/// Threshold value.
-	threshold: u8,
+	threshold: u32,
+	/// DKG participants list - maps arbitrary party IDs to sequential indices.
+	/// The sequential indices (0, 1, 2, ...) are used for share subset masks.
+	#[cfg_attr(feature = "serde", serde(with = "serde_participant_list"))]
+	dkg_participants: ParticipantList,
 	/// Private key seed.
 	key: [u8; 32],
 	/// Random seed rho (same as public key).
@@ -139,29 +147,42 @@ impl Zeroize for SecretShareData {
 impl PrivateKeyShare {
 	/// Create a new private key share.
 	pub(crate) fn new(
-		party_id: u8,
-		total_parties: u8,
-		threshold: u8,
+		party_id: ParticipantId,
+		total_parties: u32,
+		threshold: u32,
 		key: [u8; 32],
 		rho: [u8; 32],
 		tr: [u8; TR_SIZE],
 		shares: std::collections::HashMap<u16, SecretShareData>,
+		dkg_participants: ParticipantList,
 	) -> Self {
-		Self { party_id, total_parties, threshold, key, rho, tr, shares }
+		Self { party_id, total_parties, threshold, key, rho, tr, shares, dkg_participants }
 	}
 
-	/// Get this party's ID.
-	pub fn party_id(&self) -> u8 {
+	/// Get this party's ID (can be arbitrary, e.g., NEAR participant ID).
+	pub fn party_id(&self) -> ParticipantId {
 		self.party_id
 	}
 
+	/// Get this party's DKG index (0 to n-1).
+	/// This is used internally for share lookup via subset masks.
+	pub fn dkg_index(&self) -> Option<usize> {
+		self.dkg_participants.index_of(self.party_id)
+	}
+
+	/// Get the DKG participants list.
+	/// This maps arbitrary party IDs to sequential indices for share operations.
+	pub fn dkg_participants(&self) -> &ParticipantList {
+		&self.dkg_participants
+	}
+
 	/// Get the total number of parties.
-	pub fn total_parties(&self) -> u8 {
+	pub fn total_parties(&self) -> u32 {
 		self.total_parties
 	}
 
 	/// Get the threshold value.
-	pub fn threshold(&self) -> u8 {
+	pub fn threshold(&self) -> u32 {
 		self.threshold
 	}
 
@@ -235,6 +256,7 @@ mod tests {
 
 	#[test]
 	fn test_private_key_debug_redacts_secrets() {
+		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
 		let pk_share = PrivateKeyShare::new(
 			0,
 			3,
@@ -243,6 +265,7 @@ mod tests {
 			[0u8; 32],
 			[0u8; TR_SIZE],
 			std::collections::HashMap::new(),
+			dkg_participants,
 		);
 		let debug_str = format!("{:?}", pk_share);
 		assert!(debug_str.contains("REDACTED"));
@@ -251,6 +274,7 @@ mod tests {
 
 	#[test]
 	fn test_private_key_zeroize() {
+		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
 		let mut pk_share = PrivateKeyShare::new(
 			0,
 			3,
@@ -259,6 +283,7 @@ mod tests {
 			[0x43u8; 32],
 			[0x44u8; TR_SIZE],
 			std::collections::HashMap::new(),
+			dkg_participants,
 		);
 		pk_share.zeroize();
 		assert_eq!(pk_share.key, [0u8; 32]);

@@ -116,6 +116,7 @@ pub mod broadcast;
 mod config;
 mod error;
 pub mod keys;
+pub mod participants;
 mod signer;
 
 // Serde helpers for large arrays
@@ -143,6 +144,9 @@ pub use config::ThresholdConfig;
 
 // Error types
 pub use error::{ThresholdError, ThresholdResult};
+
+// Participant management
+pub use participants::{ParticipantId, ParticipantList};
 
 // Key types
 pub use keys::{PrivateKeyShare, PublicKey};
