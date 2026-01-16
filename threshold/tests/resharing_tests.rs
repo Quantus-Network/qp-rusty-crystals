@@ -385,13 +385,17 @@ fn test_resharing_protocol_round1_generation() {
 	match action {
 		Action::SendMany(data) => {
 			assert!(!data.is_empty());
-			// Verify it's a valid Round 1 message
-			let msg: ResharingMessage = bincode::deserialize(&data).expect("should deserialize");
-			match msg {
-				ResharingMessage::Round1(broadcast) => {
-					assert_eq!(broadcast.party_id, 0);
-				},
-				_ => panic!("Expected Round1 message"),
+			// Verify it's a valid Round 1 message (only when serde is enabled)
+			#[cfg(feature = "serde")]
+			{
+				let msg: ResharingMessage =
+					bincode::deserialize(&data).expect("should deserialize");
+				match msg {
+					ResharingMessage::Round1(broadcast) => {
+						assert_eq!(broadcast.party_id, 0);
+					},
+					_ => panic!("Expected Round1 message"),
+				}
 			}
 		},
 		_ => panic!("Expected SendMany action"),

@@ -252,14 +252,15 @@ impl DilithiumDkg {
 				Ok(Action::SendMany(self.serialize_message(&DkgMessage::Round2(msg))?))
 			},
 
-			DkgState::Round2Waiting =>
+			DkgState::Round2Waiting => {
 				if self.state_data.can_advance() {
 					self.state_data.transition_to(DkgState::Round3Revealing);
 					self.sent_current_round = false;
 					self.poke()
 				} else {
 					Ok(Action::Wait)
-				},
+				}
+			},
 
 			DkgState::Round3Revealing => {
 				if self.sent_current_round {
@@ -359,8 +360,9 @@ impl DilithiumDkg {
 				Ok(Action::Return(output))
 			},
 
-			DkgState::Failed(reason) =>
-				Err(DkgProtocolError::InvalidState(format!("Protocol failed: {}", reason))),
+			DkgState::Failed(reason) => {
+				Err(DkgProtocolError::InvalidState(format!("Protocol failed: {}", reason)))
+			},
 		}
 	}
 
@@ -661,12 +663,22 @@ impl DilithiumDkg {
 	}
 
 	/// Compute all subset masks that contain a given party.
+	///
+	/// This function uses the party's **index** (from ParticipantList) for bitmask
+	/// operations, not the raw party ID. This allows arbitrary party IDs (like
+	/// NEAR's large IDs) to work correctly.
 	fn compute_subsets_for_party(
 		&self,
 		party_id: ParticipantId,
 		threshold: u32,
 		parties: u32,
 	) -> Vec<SubsetMask> {
+		// Get the party's index (0, 1, 2, ...) for bitmask operations
+		let party_index = self
+			.state_data
+			.party_index(party_id)
+			.expect("party_id should be in participant list");
+
 		let subset_size = (parties - threshold + 1) as usize;
 		let mut subsets = Vec::new();
 
@@ -675,8 +687,8 @@ impl DilithiumDkg {
 		let max_val: SubsetMask = 1 << parties;
 
 		while subset < max_val {
-			// Check if this party is in the subset
-			if (subset & (1 << party_id)) != 0 {
+			// Check if this party (by index) is in the subset
+			if (subset & (1 << party_index)) != 0 {
 				subsets.push(subset);
 			}
 
@@ -868,13 +880,18 @@ impl DilithiumDkg {
 			let mut s2_combined = vec![[0i32; N]; K];
 
 			// Sum contributions from all parties in this subset
-			for party_id in 0..parties {
-				if (subset_mask & (1 << party_id)) == 0 {
+			// Iterate by index (0, 1, 2, ...) for bitmask checks, then look up actual party ID
+			for party_index in 0..parties as usize {
+				if (subset_mask & (1 << party_index)) == 0 {
 					continue;
 				}
 
+				// Get the actual party ID for this index
+				let actual_party_id =
+					self.state_data.party_id_at(party_index).expect("party_index should be valid");
+
 				if let Some(party_contrib) =
-					self.state_data.round3.contributions.get(&(party_id as u32))
+					self.state_data.round3.contributions.get(&actual_party_id)
 				{
 					if let Some(subset_contrib) =
 						party_contrib.subset_contributions.get(subset_mask)
@@ -1109,9 +1126,9 @@ mod tests {
 			session_id_contribution: [2u8; 32],
 		});
 
-		// Use custom serialization for test
-		let data1 = serialize_test_message(&msg1);
-		let data2 = serialize_test_message(&msg2);
+		// Use the DKG's serialization method to ensure compatibility
+		let data1 = dkg.serialize_message(&msg1).unwrap();
+		let data2 = dkg.serialize_message(&msg2).unwrap();
 
 		dkg.message(1, data1);
 		dkg.message(2, data2);
@@ -1132,18 +1149,5 @@ mod tests {
 		assert_eq!(subsets.len(), 2);
 		assert!(subsets.contains(&0b011)); // Party 0 and 1
 		assert!(subsets.contains(&0b101)); // Party 0 and 2
-	}
-
-	fn serialize_test_message(msg: &DkgMessage) -> Vec<u8> {
-		let mut buf = Vec::new();
-		match msg {
-			DkgMessage::Round1(m) => {
-				buf.push(1u8);
-				buf.extend_from_slice(&m.party_id.to_le_bytes());
-				buf.extend_from_slice(&m.session_id_contribution);
-			},
-			_ => unimplemented!(),
-		}
-		buf
 	}
 }

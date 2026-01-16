@@ -13,6 +13,8 @@ use super::types::{
 	DkgRound4Broadcast, ParticipantId, PartyContributions, COMMITMENT_HASH_SIZE, SESSION_ID_SIZE,
 };
 
+use crate::participants::ParticipantList;
+
 /// The current state of the DKG protocol.
 #[derive(Debug, Clone)]
 pub enum DkgState {
@@ -309,6 +311,10 @@ pub struct DkgStateData {
 	pub config: DkgConfig,
 	/// Current protocol state.
 	pub state: DkgState,
+	/// Participant list for ID-to-index mapping.
+	/// This allows arbitrary party IDs (like NEAR's large IDs) to be mapped
+	/// to sequential indices (0, 1, 2, ...) for bitmask operations.
+	pub participants: ParticipantList,
 	/// Data from Round 1.
 	pub round1: Round1Data,
 	/// Data from Round 2.
@@ -323,16 +329,41 @@ pub struct DkgStateData {
 
 impl DkgStateData {
 	/// Create a new DKG state data structure.
+	///
+	/// # Panics
+	/// Panics if the participant list cannot be created (e.g., duplicate IDs).
 	pub fn new(config: DkgConfig) -> Self {
+		let participants = ParticipantList::new(&config.all_participants)
+			.expect("DkgConfig should have valid participant IDs");
 		Self {
 			config,
 			state: DkgState::Initialized,
+			participants,
 			round1: Round1Data::new(),
 			round2: Round2Data::new(),
 			round3: Round3Data::new(),
 			round4: Round4Data::new(),
 			output: None,
 		}
+	}
+
+	/// Get the index for a party ID.
+	/// Returns None if the party ID is not in the participant list.
+	pub fn party_index(&self, party_id: ParticipantId) -> Option<usize> {
+		self.participants.index_of(party_id)
+	}
+
+	/// Get the party ID for an index.
+	/// Returns None if the index is out of bounds.
+	pub fn party_id_at(&self, index: usize) -> Option<ParticipantId> {
+		self.participants.get(index)
+	}
+
+	/// Get the index for this party (my_party_id).
+	pub fn my_index(&self) -> usize {
+		self.participants
+			.index_of(self.config.my_party_id)
+			.expect("my_party_id should be in participant list")
 	}
 
 	/// Get the expected number of participants.

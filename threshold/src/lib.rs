@@ -132,6 +132,9 @@ pub(crate) mod protocol;
 // Resharing (committee handoff) protocol
 pub mod resharing;
 
+// Key derivation for HD wallets
+pub mod derivation;
+
 // Signing protocol adapter for NEAR MPC integration
 pub mod signing_protocol;
 
@@ -162,6 +165,9 @@ pub use signer::ThresholdSigner;
 
 // Key generation
 pub use keygen::generate_with_dealer;
+
+// Key derivation
+pub use derivation::{derive_dkg_contribution, derive_tweak, DerivedKeyId};
 
 // Verification
 pub use verification::verify_signature;
