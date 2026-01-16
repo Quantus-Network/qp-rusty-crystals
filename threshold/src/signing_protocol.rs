@@ -12,6 +12,13 @@
 //!
 //! After Round 3, any party can combine the shares into a final signature.
 //!
+//! ## Message Buffering
+//!
+//! In distributed systems, messages may arrive out of order. For example, a fast
+//! node might send its Round 2 message before a slower node has finished processing
+//! all Round 1 messages. To handle this, we buffer messages that arrive for future
+//! rounds and process them when we transition to the appropriate state.
+//!
 //! # Usage
 //!
 //! ```ignore
@@ -186,6 +193,61 @@ pub enum SignProtocolState {
 // Protocol Implementation
 // ============================================================================
 
+/// Buffer for messages that arrive before we're ready to process them.
+///
+/// In distributed systems, messages may arrive out of order. For example:
+/// - Node A is still in Round1Waiting (hasn't received all Round1 messages)
+/// - Node B has moved to Round2 and sends its Round2 message
+/// - Node A receives the Round2 message but can't process it yet
+///
+/// Instead of dropping these messages, we buffer them and process them
+/// when we transition to the appropriate state.
+#[derive(Debug, Clone, Default)]
+pub struct SignMessageBuffer {
+	/// Buffered Round 2 messages (from parties that are ahead of us).
+	pub round2: Vec<Round2Broadcast>,
+	/// Buffered Round 3 messages.
+	pub round3: Vec<Round3Broadcast>,
+}
+
+impl SignMessageBuffer {
+	/// Create a new empty message buffer.
+	pub fn new() -> Self {
+		Self { round2: Vec::new(), round3: Vec::new() }
+	}
+
+	/// Buffer a Round 2 message for later processing.
+	pub fn buffer_round2(&mut self, msg: Round2Broadcast) {
+		self.round2.push(msg);
+	}
+
+	/// Buffer a Round 3 message for later processing.
+	pub fn buffer_round3(&mut self, msg: Round3Broadcast) {
+		self.round3.push(msg);
+	}
+
+	/// Take all buffered Round 2 messages.
+	pub fn take_round2(&mut self) -> Vec<Round2Broadcast> {
+		std::mem::take(&mut self.round2)
+	}
+
+	/// Take all buffered Round 3 messages.
+	pub fn take_round3(&mut self) -> Vec<Round3Broadcast> {
+		std::mem::take(&mut self.round3)
+	}
+
+	/// Check if the buffer is empty.
+	pub fn is_empty(&self) -> bool {
+		self.round2.is_empty() && self.round3.is_empty()
+	}
+
+	/// Clear all buffered messages.
+	pub fn clear(&mut self) {
+		self.round2.clear();
+		self.round3.clear();
+	}
+}
+
 /// Signing protocol adapter that wraps `ThresholdSigner` in the poke/message pattern.
 ///
 /// This struct implements the threshold signing protocol using the same
@@ -238,6 +300,9 @@ pub struct DilithiumSignProtocol {
 	my_r2: Option<Round2Broadcast>,
 	/// Our own Round 3 broadcast.
 	my_r3: Option<Round3Broadcast>,
+
+	/// Buffer for messages that arrive before we're ready to process them.
+	message_buffer: SignMessageBuffer,
 }
 
 impl DilithiumSignProtocol {
@@ -281,6 +346,7 @@ impl DilithiumSignProtocol {
 			my_r1: None,
 			my_r2: None,
 			my_r3: None,
+			message_buffer: SignMessageBuffer::new(),
 		}
 	}
 
@@ -408,8 +474,9 @@ impl DilithiumSignProtocol {
 				let response = rest[8..8 + len].to_vec();
 				Ok(SigningMessage::Round3(Round3Broadcast { party_id, response }))
 			},
-			_ =>
-				Err(SignProtocolError::SerializationError(format!("Unknown message tag: {}", tag))),
+			_ => {
+				Err(SignProtocolError::SerializationError(format!("Unknown message tag: {}", tag)))
+			},
 		}
 	}
 
@@ -455,6 +522,8 @@ impl DilithiumSignProtocol {
 				if self.have_enough_r1() {
 					// Ready to proceed to Round 2
 					self.state = SignProtocolState::Round2Generate;
+					// Process any buffered Round 2 messages
+					self.process_buffered_round2();
 					self.poke()
 				} else {
 					Ok(Action::Wait)
@@ -494,6 +563,8 @@ impl DilithiumSignProtocol {
 				if self.have_enough_r2() {
 					// Ready to proceed to Round 3
 					self.state = SignProtocolState::Round3Generate;
+					// Process any buffered Round 3 messages
+					self.process_buffered_round3();
 					self.poke()
 				} else {
 					Ok(Action::Wait)
@@ -598,43 +669,87 @@ impl DilithiumSignProtocol {
 			return; // Sender mismatch, ignore
 		}
 
-		// Route to appropriate collection
+		// Route to appropriate collection or buffer for later
 		match msg {
 			SigningMessage::Round1(r1) => {
 				// Accept Round 1 messages during Round 1 waiting or earlier Round 2 states
 				if matches!(
 					self.state,
-					SignProtocolState::Round1Generate |
-						SignProtocolState::Round1Waiting |
-						SignProtocolState::Round2Generate |
-						SignProtocolState::Round2Waiting
+					SignProtocolState::Round1Generate
+						| SignProtocolState::Round1Waiting
+						| SignProtocolState::Round2Generate
+						| SignProtocolState::Round2Waiting
 				) {
 					self.r1_broadcasts.entry(r1.party_id).or_insert(r1);
 				}
+				// Round 1 messages don't need buffering - if we're past Round 1, they're late
 			},
 			SigningMessage::Round2(r2) => {
-				// Accept Round 2 messages during Round 2 waiting or earlier Round 3 states
+				// Accept Round 2 messages during Round 2 or Round 3 states
 				if matches!(
 					self.state,
-					SignProtocolState::Round2Generate |
-						SignProtocolState::Round2Waiting |
-						SignProtocolState::Round3Generate |
-						SignProtocolState::Round3Waiting
+					SignProtocolState::Round2Generate
+						| SignProtocolState::Round2Waiting
+						| SignProtocolState::Round3Generate
+						| SignProtocolState::Round3Waiting
 				) {
 					self.r2_broadcasts.entry(r2.party_id).or_insert(r2);
+				} else if matches!(
+					self.state,
+					SignProtocolState::Round1Generate | SignProtocolState::Round1Waiting
+				) {
+					// Buffer Round 2 messages that arrive while we're still in Round 1
+					#[cfg(debug_assertions)]
+					eprintln!(
+						"Buffering Round 2 message from {} (current state: {:?})",
+						r2.party_id, self.state
+					);
+					self.message_buffer.buffer_round2(r2);
 				}
 			},
 			SigningMessage::Round3(r3) => {
 				// Accept Round 3 messages during Round 3 waiting or combining
 				if matches!(
 					self.state,
-					SignProtocolState::Round3Generate |
-						SignProtocolState::Round3Waiting |
-						SignProtocolState::Combining
+					SignProtocolState::Round3Generate
+						| SignProtocolState::Round3Waiting
+						| SignProtocolState::Combining
 				) {
 					self.r3_broadcasts.entry(r3.party_id).or_insert(r3);
+				} else if matches!(
+					self.state,
+					SignProtocolState::Round1Generate
+						| SignProtocolState::Round1Waiting
+						| SignProtocolState::Round2Generate
+						| SignProtocolState::Round2Waiting
+				) {
+					// Buffer Round 3 messages that arrive while we're still in earlier rounds
+					#[cfg(debug_assertions)]
+					eprintln!(
+						"Buffering Round 3 message from {} (current state: {:?})",
+						r3.party_id, self.state
+					);
+					self.message_buffer.buffer_round3(r3);
 				}
 			},
+		}
+	}
+
+	/// Process buffered Round 2 messages after transitioning to Round 2.
+	fn process_buffered_round2(&mut self) {
+		let buffered = self.message_buffer.take_round2();
+		for r2 in buffered {
+			// Don't overwrite if we already have a message from this party
+			self.r2_broadcasts.entry(r2.party_id).or_insert(r2);
+		}
+	}
+
+	/// Process buffered Round 3 messages after transitioning to Round 3.
+	fn process_buffered_round3(&mut self) {
+		let buffered = self.message_buffer.take_round3();
+		for r3 in buffered {
+			// Don't overwrite if we already have a message from this party
+			self.r3_broadcasts.entry(r3.party_id).or_insert(r3);
 		}
 	}
 
@@ -650,6 +765,7 @@ impl DilithiumSignProtocol {
 		self.my_r1 = None;
 		self.my_r2 = None;
 		self.my_r3 = None;
+		self.message_buffer.clear();
 		self.signer.reset();
 	}
 }
@@ -1015,5 +1131,209 @@ mod tests {
 		let initial_count = protocol.r1_broadcasts.len();
 		protocol.message(2, data);
 		assert_eq!(protocol.r1_broadcasts.len(), initial_count);
+	}
+
+	#[test]
+	fn test_message_buffer_creation() {
+		let buffer = SignMessageBuffer::new();
+		assert!(buffer.is_empty());
+		assert!(buffer.round2.is_empty());
+		assert!(buffer.round3.is_empty());
+	}
+
+	#[test]
+	fn test_message_buffer_round2() {
+		let mut buffer = SignMessageBuffer::new();
+		assert!(buffer.is_empty());
+
+		let msg = Round2Broadcast::new(1, vec![1, 2, 3, 4]);
+		buffer.buffer_round2(msg);
+
+		assert!(!buffer.is_empty());
+		assert_eq!(buffer.round2.len(), 1);
+
+		let taken = buffer.take_round2();
+		assert_eq!(taken.len(), 1);
+		assert_eq!(taken[0].party_id, 1);
+		assert!(buffer.is_empty());
+	}
+
+	#[test]
+	fn test_message_buffer_round3() {
+		let mut buffer = SignMessageBuffer::new();
+
+		let msg = Round3Broadcast::new(2, vec![5, 6, 7, 8]);
+		buffer.buffer_round3(msg);
+
+		assert!(!buffer.is_empty());
+		assert_eq!(buffer.round3.len(), 1);
+
+		let taken = buffer.take_round3();
+		assert_eq!(taken.len(), 1);
+		assert_eq!(taken[0].party_id, 2);
+		assert!(buffer.is_empty());
+	}
+
+	#[test]
+	fn test_out_of_order_round2_buffering() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1, 2],
+			0,
+		);
+
+		// Start Round 1 - generates and sends our Round 1 message
+		let _ = protocol.poke().unwrap();
+		assert!(matches!(protocol.state(), SignProtocolState::Round1Waiting));
+
+		// Now simulate receiving a Round 2 message BEFORE we've received all Round 1 messages
+		// This is what happens in distributed systems with network delays
+		let r2 = Round2Broadcast::new(1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+		let msg = SigningMessage::Round2(r2);
+		let data = protocol.serialize_message(&msg).unwrap();
+
+		// Send the Round 2 message - it should be buffered, not rejected
+		protocol.message(1, data);
+
+		// Verify the message was buffered (not in r2_broadcasts yet)
+		assert!(!protocol.message_buffer.round2.is_empty());
+		assert_eq!(protocol.message_buffer.round2.len(), 1);
+		assert_eq!(protocol.message_buffer.round2[0].party_id, 1);
+		// Should NOT be in r2_broadcasts yet
+		assert!(!protocol.r2_broadcasts.contains_key(&1));
+	}
+
+	#[test]
+	fn test_out_of_order_round3_buffering() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1, 2],
+			0,
+		);
+
+		// Start Round 1
+		let _ = protocol.poke().unwrap();
+		assert!(matches!(protocol.state(), SignProtocolState::Round1Waiting));
+
+		// Simulate receiving a Round 3 message while still in Round 1
+		let r3 = Round3Broadcast::new(2, vec![10, 20, 30, 40]);
+		let msg = SigningMessage::Round3(r3);
+		let data = protocol.serialize_message(&msg).unwrap();
+
+		// Send the Round 3 message - it should be buffered
+		protocol.message(2, data);
+
+		// Verify the message was buffered
+		assert!(!protocol.message_buffer.round3.is_empty());
+		assert_eq!(protocol.message_buffer.round3.len(), 1);
+		assert_eq!(protocol.message_buffer.round3[0].party_id, 2);
+		// Should NOT be in r3_broadcasts yet
+		assert!(!protocol.r3_broadcasts.contains_key(&2));
+	}
+
+	#[test]
+	fn test_buffered_messages_processed_on_state_transition() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		// Create protocol for party 0
+		let signer0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+		let mut protocol0 = DilithiumSignProtocol::new(
+			signer0,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1, 2],
+			0,
+		);
+
+		// Create protocol for party 1 (to generate valid messages)
+		let signer1 = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
+		let mut protocol1 = DilithiumSignProtocol::new(
+			signer1,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1, 2],
+			1,
+		);
+
+		// Start both protocols - generate Round 1
+		let r1_data0 = match protocol0.poke().unwrap() {
+			Action::SendMany(d) => d,
+			_ => panic!("Expected SendMany"),
+		};
+		let r1_data1 = match protocol1.poke().unwrap() {
+			Action::SendMany(d) => d,
+			_ => panic!("Expected SendMany"),
+		};
+
+		// Party 1 receives Round 1 from party 0 and advances
+		protocol1.message(0, r1_data0.clone());
+
+		// Create a fake Round 1 from party 2
+		let r1_party2 = Round1Broadcast::new(2, [0x42u8; 32]);
+		let r1_msg2 = SigningMessage::Round1(r1_party2);
+		let r1_data2 = protocol1.serialize_message(&r1_msg2).unwrap();
+		protocol1.message(2, r1_data2.clone());
+
+		// Party 1 should now advance to Round 2
+		let r2_data1 = match protocol1.poke().unwrap() {
+			Action::SendMany(d) => d,
+			_ => panic!("Expected SendMany for Round 2"),
+		};
+
+		// Now party 0 receives the Round 2 message from party 1 BEFORE completing Round 1
+		// This should be buffered
+		protocol0.message(1, r2_data1);
+		assert!(!protocol0.message_buffer.round2.is_empty());
+		assert!(!protocol0.r2_broadcasts.contains_key(&1));
+
+		// Now party 0 receives the remaining Round 1 messages
+		protocol0.message(1, r1_data1);
+		protocol0.message(2, r1_data2);
+
+		// Party 0 should now advance to Round 2 and process the buffered Round 2 message
+		let _ = protocol0.poke().unwrap();
+
+		// The buffered message should have been processed
+		assert!(protocol0.message_buffer.round2.is_empty());
+		// And the Round 2 message from party 1 should now be in r2_broadcasts
+		assert!(protocol0.r2_broadcasts.contains_key(&1));
+	}
+
+	#[test]
+	fn test_protocol_reset_clears_buffer() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol =
+			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1, 2], 0);
+
+		// Start Round 1
+		let _ = protocol.poke().unwrap();
+
+		// Buffer some messages
+		let r2 = Round2Broadcast::new(1, vec![1, 2, 3, 4]);
+		let msg = SigningMessage::Round2(r2);
+		let data = protocol.serialize_message(&msg).unwrap();
+		protocol.message(1, data);
+
+		assert!(!protocol.message_buffer.is_empty());
+
+		// Reset should clear the buffer
+		protocol.reset();
+		assert!(protocol.message_buffer.is_empty());
 	}
 }

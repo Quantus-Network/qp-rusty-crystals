@@ -3,13 +3,20 @@
 //! This module defines the state machine for the 4-round DKG protocol.
 //! The state machine tracks which round we're in, what data we've collected
 //! from other parties, and manages transitions between rounds.
+//!
+//! ## Message Buffering
+//!
+//! In distributed systems, messages may arrive out of order. For example, a fast
+//! node might send its Round 2 message before a slower node has finished processing
+//! all Round 1 messages. To handle this, we buffer messages that arrive for future
+//! rounds and process them when we transition to the appropriate state.
 
 use std::collections::HashMap;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::types::{
-	DkgConfig, DkgOutput, DkgRound1Broadcast, DkgRound2Broadcast, DkgRound3Broadcast,
+	DkgConfig, DkgMessage, DkgOutput, DkgRound1Broadcast, DkgRound2Broadcast, DkgRound3Broadcast,
 	DkgRound4Broadcast, ParticipantId, PartyContributions, COMMITMENT_HASH_SIZE, SESSION_ID_SIZE,
 };
 
@@ -96,6 +103,72 @@ impl DkgState {
 			DkgState::Complete => 5,
 			DkgState::Failed(_) => 0,
 		}
+	}
+
+	/// Check if messages for a given round can be accepted in this state.
+	pub fn can_accept_round(&self, msg_round: u8) -> bool {
+		let current_round = self.round_number();
+		// Can accept messages for current round or already-processed rounds (duplicates will be caught later)
+		msg_round <= current_round
+	}
+}
+
+/// Buffer for messages that arrive before we're ready to process them.
+///
+/// In distributed systems, messages may arrive out of order. For example:
+/// - Node A is still in Round1Waiting (hasn't received all Round1 messages)
+/// - Node B has moved to Round2 and sends its Round2 message
+/// - Node A receives the Round2 message but can't process it yet
+///
+/// Instead of dropping these messages, we buffer them and process them
+/// when we transition to the appropriate state.
+#[derive(Debug, Clone, Default)]
+pub struct MessageBuffer {
+	/// Buffered Round 2 messages (from parties that are ahead of us).
+	pub round2: Vec<DkgRound2Broadcast>,
+	/// Buffered Round 3 messages.
+	pub round3: Vec<DkgRound3Broadcast>,
+	/// Buffered Round 4 messages.
+	pub round4: Vec<DkgRound4Broadcast>,
+}
+
+impl MessageBuffer {
+	/// Create a new empty message buffer.
+	pub fn new() -> Self {
+		Self { round2: Vec::new(), round3: Vec::new(), round4: Vec::new() }
+	}
+
+	/// Buffer a message for later processing.
+	pub fn buffer(&mut self, msg: DkgMessage) {
+		match msg {
+			DkgMessage::Round1(_) => {
+				// Round 1 messages should never need buffering since it's the first round
+				// If we receive a Round1 message late, we're already past it
+			},
+			DkgMessage::Round2(m) => self.round2.push(m),
+			DkgMessage::Round3(m) => self.round3.push(m),
+			DkgMessage::Round4(m) => self.round4.push(m),
+		}
+	}
+
+	/// Take all buffered messages for a specific round.
+	pub fn take_round2(&mut self) -> Vec<DkgRound2Broadcast> {
+		std::mem::take(&mut self.round2)
+	}
+
+	/// Take all buffered Round 3 messages.
+	pub fn take_round3(&mut self) -> Vec<DkgRound3Broadcast> {
+		std::mem::take(&mut self.round3)
+	}
+
+	/// Take all buffered Round 4 messages.
+	pub fn take_round4(&mut self) -> Vec<DkgRound4Broadcast> {
+		std::mem::take(&mut self.round4)
+	}
+
+	/// Check if there are any buffered messages.
+	pub fn is_empty(&self) -> bool {
+		self.round2.is_empty() && self.round3.is_empty() && self.round4.is_empty()
 	}
 }
 
@@ -325,6 +398,8 @@ pub struct DkgStateData {
 	pub round4: Round4Data,
 	/// The final output (set when protocol completes).
 	pub output: Option<DkgOutput>,
+	/// Buffer for messages that arrive before we're ready to process them.
+	pub message_buffer: MessageBuffer,
 }
 
 impl DkgStateData {
@@ -344,6 +419,7 @@ impl DkgStateData {
 			round3: Round3Data::new(),
 			round4: Round4Data::new(),
 			output: None,
+			message_buffer: MessageBuffer::new(),
 		}
 	}
 
@@ -371,9 +447,48 @@ impl DkgStateData {
 		self.config.total_parties() as usize
 	}
 
-	/// Transition to a new state.
-	pub fn transition_to(&mut self, new_state: DkgState) {
+	/// Transition to a new state and process any buffered messages for that state.
+	///
+	/// Returns a list of errors from processing buffered messages (if any).
+	/// These are logged but don't prevent the transition.
+	pub fn transition_to(&mut self, new_state: DkgState) -> Vec<String> {
 		self.state = new_state;
+		self.process_buffered_messages()
+	}
+
+	/// Process any buffered messages that are now valid for the current state.
+	fn process_buffered_messages(&mut self) -> Vec<String> {
+		let mut errors = Vec::new();
+
+		match &self.state {
+			DkgState::Round2Generating | DkgState::Round2Waiting => {
+				let buffered = self.message_buffer.take_round2();
+				for msg in buffered {
+					if let Err(e) = self.process_round2(msg) {
+						errors.push(e);
+					}
+				}
+			},
+			DkgState::Round3Revealing | DkgState::Round3Waiting => {
+				let buffered = self.message_buffer.take_round3();
+				for msg in buffered {
+					if let Err(e) = self.process_round3(msg) {
+						errors.push(e);
+					}
+				}
+			},
+			DkgState::Round4Confirming | DkgState::Round4Waiting => {
+				let buffered = self.message_buffer.take_round4();
+				for msg in buffered {
+					if let Err(e) = self.process_round4(msg) {
+						errors.push(e);
+					}
+				}
+			},
+			_ => {},
+		}
+
+		errors
 	}
 
 	/// Mark the protocol as failed with a reason.
@@ -670,5 +785,137 @@ mod tests {
 
 		state_data.round1.add_contribution(2, [2u8; 32]);
 		assert!(state_data.can_advance());
+	}
+
+	#[test]
+	fn test_message_buffer_creation() {
+		let buffer = MessageBuffer::new();
+		assert!(buffer.is_empty());
+		assert!(buffer.round2.is_empty());
+		assert!(buffer.round3.is_empty());
+		assert!(buffer.round4.is_empty());
+	}
+
+	#[test]
+	fn test_message_buffer_round2() {
+		let mut buffer = MessageBuffer::new();
+		assert!(buffer.is_empty());
+
+		let msg =
+			DkgMessage::Round2(DkgRound2Broadcast { party_id: 1, commitment_hash: [42u8; 32] });
+		buffer.buffer(msg);
+
+		assert!(!buffer.is_empty());
+		assert_eq!(buffer.round2.len(), 1);
+		assert!(buffer.round3.is_empty());
+
+		let taken = buffer.take_round2();
+		assert_eq!(taken.len(), 1);
+		assert_eq!(taken[0].party_id, 1);
+		assert!(buffer.is_empty());
+	}
+
+	#[test]
+	fn test_message_buffer_round3() {
+		let mut buffer = MessageBuffer::new();
+
+		let contributions = PartyContributions::new(2);
+		let msg = DkgMessage::Round3(DkgRound3Broadcast { party_id: 2, contributions });
+		buffer.buffer(msg);
+
+		assert!(!buffer.is_empty());
+		assert_eq!(buffer.round3.len(), 1);
+
+		let taken = buffer.take_round3();
+		assert_eq!(taken.len(), 1);
+		assert_eq!(taken[0].party_id, 2);
+		assert!(buffer.is_empty());
+	}
+
+	#[test]
+	fn test_message_buffer_round4() {
+		let mut buffer = MessageBuffer::new();
+
+		let msg = DkgMessage::Round4(DkgRound4Broadcast {
+			party_id: 1,
+			success: true,
+			public_key_hash: [99u8; 32],
+		});
+		buffer.buffer(msg);
+
+		assert!(!buffer.is_empty());
+		assert_eq!(buffer.round4.len(), 1);
+
+		let taken = buffer.take_round4();
+		assert_eq!(taken.len(), 1);
+		assert_eq!(taken[0].party_id, 1);
+		assert!(taken[0].success);
+		assert!(buffer.is_empty());
+	}
+
+	#[test]
+	fn test_message_buffer_round1_ignored() {
+		let mut buffer = MessageBuffer::new();
+
+		// Round 1 messages should not be buffered (first round, never needs buffering)
+		let msg = DkgMessage::Round1(DkgRound1Broadcast {
+			party_id: 1,
+			session_id_contribution: [1u8; 32],
+		});
+		buffer.buffer(msg);
+
+		// Buffer should still be empty since Round1 messages are ignored
+		assert!(buffer.is_empty());
+	}
+
+	#[test]
+	fn test_state_data_has_message_buffer() {
+		let config = make_test_config();
+		let state_data = DkgStateData::new(config);
+
+		assert!(state_data.message_buffer.is_empty());
+	}
+
+	#[test]
+	fn test_transition_processes_buffered_messages() {
+		let config = make_test_config();
+		let mut state_data = DkgStateData::new(config);
+
+		// Start in Round1Generating
+		let _ = state_data.transition_to(DkgState::Round1Generating);
+
+		// Buffer a Round2 message (simulating out-of-order delivery)
+		let msg = DkgRound2Broadcast { party_id: 1, commitment_hash: [42u8; 32] };
+		state_data.message_buffer.round2.push(msg);
+
+		// Transition through Round1 states
+		let _ = state_data.transition_to(DkgState::Round1Waiting);
+		// Add fake Round1 data to allow advancement
+		state_data.round1.add_contribution(0, [0u8; 32]);
+		state_data.round1.add_contribution(1, [1u8; 32]);
+		state_data.round1.add_contribution(2, [2u8; 32]);
+
+		// Now transition to Round2Generating - this should process the buffered message
+		let errors = state_data.transition_to(DkgState::Round2Generating);
+
+		// The buffered message should have been processed
+		assert!(state_data.message_buffer.round2.is_empty());
+		// The message should have been added to round2 data
+		assert!(state_data.round2.commitment_hashes.contains_key(&1));
+		// No errors expected since the message was valid
+		assert!(errors.is_empty());
+	}
+
+	#[test]
+	fn test_dkg_state_can_accept_round() {
+		assert!(DkgState::Round1Waiting.can_accept_round(1));
+		assert!(!DkgState::Round1Waiting.can_accept_round(2));
+
+		assert!(DkgState::Round2Waiting.can_accept_round(1));
+		assert!(DkgState::Round2Waiting.can_accept_round(2));
+		assert!(!DkgState::Round2Waiting.can_accept_round(3));
+
+		assert!(DkgState::Round3Waiting.can_accept_round(3));
+		assert!(!DkgState::Round3Waiting.can_accept_round(4));
 	}
 }

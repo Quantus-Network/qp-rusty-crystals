@@ -194,14 +194,14 @@ impl DilithiumDkg {
 		match &self.state_data.state {
 			DkgState::Initialized => {
 				// Start Round 1
-				self.state_data.transition_to(DkgState::Round1Generating);
+				let _ = self.state_data.transition_to(DkgState::Round1Generating);
 				self.sent_current_round = false;
 				self.poke()
 			},
 
 			DkgState::Round1Generating => {
 				if self.sent_current_round {
-					self.state_data.transition_to(DkgState::Round1Waiting);
+					let _ = self.state_data.transition_to(DkgState::Round1Waiting);
 					return Ok(Action::Wait);
 				}
 
@@ -224,7 +224,10 @@ impl DilithiumDkg {
 				if self.state_data.can_advance() {
 					// Compute combined session ID
 					self.compute_combined_session_id();
-					self.state_data.transition_to(DkgState::Round2Generating);
+					let errors = self.state_data.transition_to(DkgState::Round2Generating);
+					for e in errors {
+						eprintln!("Error processing buffered message: {}", e);
+					}
 					self.sent_current_round = false;
 					self.poke()
 				} else {
@@ -234,7 +237,10 @@ impl DilithiumDkg {
 
 			DkgState::Round2Generating => {
 				if self.sent_current_round {
-					self.state_data.transition_to(DkgState::Round2Waiting);
+					let errors = self.state_data.transition_to(DkgState::Round2Waiting);
+					for e in errors {
+						eprintln!("Error processing buffered message: {}", e);
+					}
 					return Ok(Action::Wait);
 				}
 
@@ -254,7 +260,10 @@ impl DilithiumDkg {
 
 			DkgState::Round2Waiting => {
 				if self.state_data.can_advance() {
-					self.state_data.transition_to(DkgState::Round3Revealing);
+					let errors = self.state_data.transition_to(DkgState::Round3Revealing);
+					for e in errors {
+						eprintln!("Error processing buffered message: {}", e);
+					}
 					self.sent_current_round = false;
 					self.poke()
 				} else {
@@ -264,7 +273,10 @@ impl DilithiumDkg {
 
 			DkgState::Round3Revealing => {
 				if self.sent_current_round {
-					self.state_data.transition_to(DkgState::Round3Waiting);
+					let errors = self.state_data.transition_to(DkgState::Round3Waiting);
+					for e in errors {
+						eprintln!("Error processing buffered message: {}", e);
+					}
 					return Ok(Action::Wait);
 				}
 
@@ -290,7 +302,10 @@ impl DilithiumDkg {
 					// Verify all contributions
 					self.verify_all_contributions()?;
 
-					self.state_data.transition_to(DkgState::Round4Confirming);
+					let errors = self.state_data.transition_to(DkgState::Round4Confirming);
+					for e in errors {
+						eprintln!("Error processing buffered message: {}", e);
+					}
 					self.sent_current_round = false;
 					self.poke()
 				} else {
@@ -300,7 +315,10 @@ impl DilithiumDkg {
 
 			DkgState::Round4Confirming => {
 				if self.sent_current_round {
-					self.state_data.transition_to(DkgState::Round4Waiting);
+					let errors = self.state_data.transition_to(DkgState::Round4Waiting);
+					for e in errors {
+						eprintln!("Error processing buffered message: {}", e);
+					}
 					return Ok(Action::Wait);
 				}
 
@@ -346,7 +364,7 @@ impl DilithiumDkg {
 							DkgProtocolError::InternalError("Missing output".into())
 						})?;
 
-					self.state_data.transition_to(DkgState::Complete);
+					let _ = self.state_data.transition_to(DkgState::Complete);
 					Ok(Action::Return(output))
 				} else {
 					Ok(Action::Wait)
@@ -383,6 +401,23 @@ impl DilithiumDkg {
 		// Verify sender matches message
 		if msg.party_id() != from {
 			eprintln!("Message party_id {} doesn't match sender {}", msg.party_id(), from);
+			return;
+		}
+
+		let msg_round = msg.round();
+		let current_round = self.state_data.state.round_number();
+
+		// If message is for a future round, buffer it for later processing
+		if msg_round > current_round {
+			// Debug: buffering out-of-order message
+			#[cfg(debug_assertions)]
+			eprintln!(
+				"Buffering round {} message from {} (current state: {})",
+				msg_round,
+				from,
+				self.state_data.state.name()
+			);
+			self.state_data.message_buffer.buffer(msg);
 			return;
 		}
 
@@ -1149,5 +1184,84 @@ mod tests {
 		assert_eq!(subsets.len(), 2);
 		assert!(subsets.contains(&0b011)); // Party 0 and 1
 		assert!(subsets.contains(&0b101)); // Party 0 and 2
+	}
+
+	#[test]
+	fn test_message_buffering_out_of_order() {
+		// Test that messages arriving out of order are buffered and processed later
+		let config = make_test_config(0);
+		let mut dkg = DilithiumDkg::new(config, [0u8; 32]);
+
+		// Start round 1 - generates and sends our Round1 message
+		let _ = dkg.poke().unwrap();
+		// Transition to waiting
+		let _ = dkg.poke().unwrap();
+		assert!(matches!(dkg.state(), DkgState::Round1Waiting));
+
+		// Now simulate receiving a Round2 message BEFORE we've received all Round1 messages
+		// This is what happens in distributed systems with network delays
+		let round2_msg = DkgMessage::Round2(super::super::types::DkgRound2Broadcast {
+			party_id: 1,
+			commitment_hash: [42u8; 32],
+		});
+		let round2_data = dkg.serialize_message(&round2_msg).unwrap();
+
+		// Send the Round2 message - it should be buffered, not rejected
+		dkg.message(1, round2_data);
+
+		// Verify the message was buffered
+		assert!(!dkg.state_data.message_buffer.round2.is_empty());
+		assert_eq!(dkg.state_data.message_buffer.round2.len(), 1);
+		assert_eq!(dkg.state_data.message_buffer.round2[0].party_id, 1);
+
+		// Now complete Round1 by receiving Round1 messages from other parties
+		let r1_msg1 = DkgMessage::Round1(super::super::types::DkgRound1Broadcast {
+			party_id: 1,
+			session_id_contribution: [1u8; 32],
+		});
+		let r1_msg2 = DkgMessage::Round1(super::super::types::DkgRound1Broadcast {
+			party_id: 2,
+			session_id_contribution: [2u8; 32],
+		});
+		let r1_data1 = dkg.serialize_message(&r1_msg1).unwrap();
+		let r1_data2 = dkg.serialize_message(&r1_msg2).unwrap();
+
+		dkg.message(1, r1_data1);
+		dkg.message(2, r1_data2);
+
+		// Poke should now advance to Round2
+		let action = dkg.poke().unwrap();
+		assert!(matches!(action, Action::SendMany(_)));
+
+		// The buffered Round2 message should have been processed during the transition
+		assert!(dkg.state_data.message_buffer.round2.is_empty());
+		// And the commitment hash from party 1 should be in round2 data
+		assert!(dkg.state_data.round2.commitment_hashes.contains_key(&1));
+	}
+
+	#[test]
+	fn test_message_buffering_multiple_rounds() {
+		// Test buffering messages from multiple future rounds
+		let config = make_test_config(0);
+		let mut dkg = DilithiumDkg::new(config, [0u8; 32]);
+
+		// Start round 1
+		let _ = dkg.poke().unwrap();
+		let _ = dkg.poke().unwrap();
+		assert!(matches!(dkg.state(), DkgState::Round1Waiting));
+
+		// Buffer Round2, Round3, and Round4 messages (simulating very fast peers)
+		let round2_msg = DkgMessage::Round2(super::super::types::DkgRound2Broadcast {
+			party_id: 1,
+			commitment_hash: [42u8; 32],
+		});
+		let round2_data = dkg.serialize_message(&round2_msg).unwrap();
+		dkg.message(1, round2_data);
+
+		// All should be buffered appropriately
+		assert_eq!(dkg.state_data.message_buffer.round2.len(), 1);
+
+		// Verify state hasn't changed unexpectedly
+		assert!(matches!(dkg.state(), DkgState::Round1Waiting));
 	}
 }
