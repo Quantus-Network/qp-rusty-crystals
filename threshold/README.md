@@ -1,176 +1,121 @@
 # Threshold ML-DSA-87 Signature Scheme
 
-A Rust implementation of threshold ML-DSA-87 (Dilithium) signatures, allowing multiple parties to collectively sign messages without any single party having access to the complete signing key.
+A Rust implementation of threshold ML-DSA-87 (Dilithium) signatures for the NEAR MPC network, allowing multiple parties to collectively sign messages without any single party having access to the complete signing key.
 
 ## ⚠️ Warning
 
-**This implementation is for research and experimentation purposes only. It has not undergone security review and should not be used in production.**
+**This implementation is for research and experimentation purposes only. It has not undergone a security audit and should not be used in production without thorough review.**
 
 ## Overview
 
 In a (t, n) threshold scheme:
-- There are **n** total parties
+- **n** total parties hold key shares
 - Any **t** or more parties can cooperate to produce a valid signature
-- Fewer than **t** parties cannot produce a signature or learn the secret key
+- Fewer than **t** parties cannot sign or learn the secret key
 
-This implementation supports configurations up to (6, 6) and produces signatures compatible with standard ML-DSA-87 verification.
+Signatures are fully compatible with standard ML-DSA-87 verification.
 
-### Features
+## Features
 
-- **ML-DSA-87 Support**: 256-bit security level (NIST Level 5)
-- **Flexible Thresholds**: Any (t, n) configuration where 2 ≤ t ≤ n ≤ 6
-- **3-Round Protocol**: Commitment, reveal, and response phases
-- **Network Ready**: Clear separation of broadcast messages for distributed signing
-- **Memory Safety**: Automatic zeroization of sensitive data
-- **Serde Support**: Optional serialization for network transport
+- **ML-DSA-87**: NIST Level 5 post-quantum security (~256-bit)
+- **Flexible Thresholds**: Supports (t, n) configurations where 2 ≤ t ≤ n ≤ 7
+- **4-Round Protocol**: Commitment, reveal, response, and leader decision phases
+- **Leader-Based Retry**: Automatic retry on rejection sampling failures
+- **Distributed Key Generation (DKG)**: Generate keys without a trusted dealer
+- **Key Resharing**: Transfer keys to a new committee
+- **Key Derivation**: HD-wallet style derived keys for NEAR MPC
+- **Message Buffering**: Handles out-of-order network messages
+- **NEAR MPC Integration**: Ready for use with the NEAR MPC network
 
-## Usage
+## Quick Start
 
-### Key Generation
+### Key Generation (Dealer)
 
 ```rust
 use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig};
 
-// Create a 2-of-3 threshold configuration
-let config = ThresholdConfig::new(2, 3)?;
-let seed = [0u8; 32]; // Use a cryptographically secure random seed!
-
-// Generate keys with a trusted dealer
+let config = ThresholdConfig::new(2, 3)?; // 2-of-3 threshold
+let seed = [0u8; 32]; // Use secure randomness!
 let (public_key, shares) = generate_with_dealer(&seed, config)?;
-
-// Distribute shares securely to each party:
-// - shares[0] goes to party 0
-// - shares[1] goes to party 1
-// - shares[2] goes to party 2
+// Distribute shares[i] to party i
 ```
 
-### Threshold Signing
-
-Each party creates a `ThresholdSigner` and participates in three rounds:
+### Key Generation (DKG)
 
 ```rust
-use qp_rusty_crystals_threshold::{ThresholdSigner, ThresholdConfig};
+use qp_rusty_crystals_threshold::keygen::dkg::run_local_dkg;
 
-// Each party creates their signer (on their own machine)
-let mut signer = ThresholdSigner::new(my_share, public_key, config)?;
+let outputs = run_local_dkg(2, 3, seed)?; // 2-of-3 threshold
+// Each output contains: public_key, private_share
+```
 
-// Round 1: Generate commitment
-let r1_broadcast = signer.round1_commit(&mut rng)?;
-// --> Send r1_broadcast to all other parties
-// --> Receive other parties' Round1Broadcasts
+### Signing (4-Round Protocol)
 
-// Round 2: Reveal commitment  
-let r2_broadcast = signer.round2_reveal(message, context, &other_r1_broadcasts)?;
-// --> Send r2_broadcast to all other parties
-// --> Receive other parties' Round2Broadcasts
+```rust
+use qp_rusty_crystals_threshold::signing_protocol::{DilithiumSignProtocol, run_local_signing};
 
-// Round 3: Compute response
-let r3_broadcast = signer.round3_respond(&other_r2_broadcasts)?;
-// --> Send r3_broadcast to all other parties
-// --> Receive other parties' Round3Broadcasts
+// For local testing:
+let signature = run_local_signing(signers, message, context)?;
 
-// Combine into final signature (any party can do this)
-let signature = signer.combine_with_message(
-    message, context, &all_r2_broadcasts, &all_r3_broadcasts
-)?;
+// For distributed signing, use DilithiumSignProtocol with poke/message pattern
 ```
 
 ### Verification
 
-Signatures are compatible with standard ML-DSA-87:
-
 ```rust
 use qp_rusty_crystals_threshold::verify_signature;
 
-let is_valid = verify_signature(&public_key, message, context, &signature);
+let valid = verify_signature(&public_key, message, context, &signature);
 ```
 
-## API Reference
+## Supported Configurations
 
-### Types
+| Parties (n) | Thresholds (t) |
+|-------------|----------------|
+| 2 | 2 |
+| 3 | 2, 3 |
+| 4 | 2, 3, 4 |
+| 5 | 2, 3, 4, 5 |
+| 6 | 2, 3, 4, 5, 6 |
+| 7 | 2, 3, 4, 5, 6, 7 |
 
-| Type | Description |
-|------|-------------|
-| `ThresholdConfig` | Configuration for (t, n) threshold scheme |
-| `PublicKey` | Threshold public key (can be freely shared) |
-| `PrivateKeyShare` | Secret key share for one party (keep confidential!) |
-| `ThresholdSigner` | Main signing interface for each party |
-| `Round1Broadcast` | Message to broadcast in Round 1 |
-| `Round2Broadcast` | Message to broadcast in Round 2 |
-| `Round3Broadcast` | Message to broadcast in Round 3 |
-| `Signature` | Final signature (standard ML-DSA-87 format) |
-
-### Functions
-
-| Function | Description |
-|----------|-------------|
-| `generate_with_dealer` | Generate keys using a trusted dealer |
-| `verify_signature` | Verify a threshold signature |
-
-## Architecture
-
-```
-threshold/src/
-├── lib.rs              # Public API exports
-├── config.rs           # ThresholdConfig
-├── keys.rs             # PublicKey, PrivateKeyShare
-├── broadcast.rs        # Round1/2/3Broadcast, Signature
-├── signer.rs           # ThresholdSigner
-├── error.rs            # Error types
-├── keygen/
-│   └── dealer.rs       # Trusted dealer key generation
-└── protocol/
-    ├── primitives.rs   # Internal crypto operations
-    └── signing.rs      # Protocol implementation
-```
+Note: n=7 configurations are experimental.
 
 ## Testing
 
 ```bash
 # Run all tests
-cargo test --package qp-rusty-crystals-threshold
+cargo test
 
-# Run new API tests
-cargo test --test test_new_api
+# Run integration tests
+cargo test --test integration_tests -- --nocapture
 
-# Run integration tests (old API)
-cargo test --test integration_tests
+# Run benchmarks
+cargo bench
 ```
 
-## Security Parameters
+## Benchmarks
 
-| Parameter | Value |
-|-----------|-------|
-| Ring Dimension (N) | 256 |
-| Matrix Dimensions | k=8, l=7 |
-| Security Level | ~256-bit (NIST Level 5) |
-| Max Parties | 6 |
-| Supported Thresholds | 2 ≤ t ≤ n ≤ 6 |
+```bash
+# Compare threshold vs standard Dilithium
+cargo bench -- comparison
 
-## Features
+# Benchmark all configurations
+cargo bench -- signing_4round
+```
 
-- `std` (default): Standard library support
-- `serde`: Serialization/deserialization for broadcast types
+## Documentation
 
-## Dependencies
-
-- `qp-rusty-crystals-dilithium`: ML-DSA implementation
-- `zeroize`: Secure memory clearing
-- `rand_core`: Randomness traits
-- `serde` (optional): Serialization
-
-## Future Work
-
-- **Distributed Key Generation (DKG)**: Generate shares without a trusted dealer
-- **Performance**: SIMD optimizations, constant-time operations
-- **Security Audit**: Professional cryptographic review
+- [NEAR Integration Plan](./NEAR_INTEGRATION_PLAN.md) - Integration with NEAR MPC
+- [Key Derivation](./DILITHIUM_KEY_DERIVATION.md) - HD-wallet style derivation
+- [Resharing](./RESHARING_PLAN.md) - Committee handoff protocol
+- [Benchmarks](./BENCHMARK_PLAN.md) - Performance testing
 
 ## License
 
-Licensed under the same terms as the parent qp-rusty-crystals project.
+GPL-3.0 License - see the parent qp-rusty-crystals project.
 
 ## References
 
-- ["Efficient Threshold ML-DSA up to 6 parties" research paper](https://mithril-th.org/)
+- [Threshold ML-DSA Research](https://mithril-th.org/)
 - [FIPS 204: ML-DSA Standard](https://csrc.nist.gov/pubs/fips/204/final)
-- [CIRCL cryptographic library](https://pkg.go.dev/github.com/cloudflare/circl)
