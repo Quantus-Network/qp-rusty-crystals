@@ -15,6 +15,34 @@ In a (t, n) threshold scheme:
 
 Signatures are fully compatible with standard ML-DSA-87 verification.
 
+## Key Concepts for Dilithium Users
+
+If you're familiar with standard ML-DSA/Dilithium but new to threshold signatures, here are the key concepts:
+
+### Secret Sharing
+
+In standard Dilithium, one party holds the complete secret key `(s1, s2)`. In threshold Dilithium, the secret is split into **shares** so that no single party knows the full secret. We use **Replicated Secret Sharing (RSS)** where each party holds shares for multiple subsets of signers, enabling any `t` parties to reconstruct enough information to sign.
+
+### Hyperball Sampling
+
+Standard Dilithium uses rejection sampling on the response vector `z` to ensure signatures don't leak information about the secret key. In threshold signing, each party independently samples randomness, which could cause the combined result to fail rejection bounds more often. **Hyperball sampling** addresses this by having parties sample from a carefully sized hypersphere, ensuring that when contributions are combined, the result stays within acceptable bounds with high probability.
+
+### Distributed Key Generation (DKG)
+
+Instead of a trusted dealer generating and distributing key shares, **DKG** lets parties collaboratively generate shares without any party learning the full secret. Our 4-round DKG protocol uses commitments to prevent parties from biasing the key based on others' contributions.
+
+### Resharing (Committee Handoff)
+
+When the set of parties needs to change (nodes joining, leaving, or being replaced), **resharing** transfers the secret to a new committee while preserving the same public key. The old committee collectively "re-deals" shares to the new committee without ever reconstructing the secret in the clear.
+
+### K Iterations
+
+Due to rejection sampling in threshold signing, any single signing attempt may fail. The protocol runs **K parallel iterations** simultaneously, increasing the probability that at least one succeeds. The K values are tuned per configuration to achieve low retry rates.
+
+### Leader-Based Retry
+
+When all K iterations fail rejection sampling, a **leader** (lowest-ID participant) decides to retry with fresh randomness. This ensures all parties stay synchronized during retries.
+
 ## Features
 
 - **ML-DSA-87**: NIST Level 5 post-quantum security (~256-bit)

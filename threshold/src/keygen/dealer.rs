@@ -201,7 +201,7 @@ struct SecretShare {
 	s2_share: polyvec::Polyveck,
 }
 
-/// Generate threshold shares using the reference implementation approach.
+/// Generate threshold shares for all subset combinations.
 fn generate_threshold_shares(
 	state: &mut fips202::KeccakState,
 	threshold: u32,

@@ -57,49 +57,32 @@ impl ThresholdConfig {
 	pub fn new(t: u32, n: u32) -> ThresholdResult<Self> {
 		validate_threshold_params(t, n)?;
 
-		// ML-DSA-87 specific K iterations
-		// These values are tuned based on empirical testing to target ~0.3-0.5 average retries.
-		// Original reference values for n <= 6 have been adjusted based on observed retry rates.
-		// Values for n > 6 are EXPERIMENTAL estimates.
-		//
-		// Tuning methodology:
-		// - If avg retries > 1.0: increase k significantly
-		// - If avg retries ~0.5-1.0: slight increase or keep
-		// - If avg retries ~0.2-0.5: optimal range, keep
-		// - If avg retries < 0.2: can consider lowering, but be conservative
+		// K iterations determine parallel signing attempts. Values are tuned to
+		// achieve low retry rates (~0.3-0.5 average). Values for n <= 6 are based
+		// on the reference implementation; n = 7 values are experimental.
 		let k_iterations = match (t, n) {
-			// n = 2
-			(2, 2) => 4, // was 3, tuned for ~0.5 avg retries
-			// n = 3
-			(2, 3) => 5,  // was 4, increased - had avg 1.0 retries
-			(3, 3) => 12, // was 8, increased - had avg 1.17 retries
-			// n = 4
-			(2, 4) => 7,  // was 4, tuned for ~0.2 avg retries
-			(3, 4) => 24, // was 18, increased - had avg 1.0 retries
-			(4, 4) => 25, // was 14, tuned for ~0.3 avg retries
-			// n = 5
-			(2, 5) => 6,   // was 5, slight increase
-			(3, 5) => 42,  // was 26, increased significantly - had avg 1.5 retries at k=30
-			(4, 5) => 110, // was 85, increased - had avg 1.17 retries
-			(5, 5) => 60,  // was 45, increased - had avg 1.17 retries
-			// n = 6
-			(2, 6) => 8,   // was 5, tuned for ~0.8 avg retries
-			(3, 6) => 65,  // was 50, increased - had avg 1.0 retries
-			(4, 6) => 350, // was 280, increased - had avg 1.0 retries
-			(5, 6) => 380, // was 295, increase significantly to reduce retries
-			(6, 6) => 180, // was 87, BIG increase - was worst performer
-			// ================================================================
-			// EXPERIMENTAL: n = 7 values are NOT from the reference implementation
-			// These are tuned based on empirical testing.
-			// The reference implementation only supports n <= 6.
-			// ================================================================
-			// n = 7 (EXPERIMENTAL)
-			(2, 7) => 7,   // was 6, slight increase
-			(3, 7) => 55,  // was 50, slight increase
-			(4, 7) => 160, // was 150, slight increase
-			(5, 7) => 320, // was 300, slight increase
-			(6, 7) => 270, // was 250, slight increase
-			(7, 7) => 650, // was 520, increased - had avg 1.17 retries
+			(2, 2) => 4,
+			(2, 3) => 5,
+			(3, 3) => 12,
+			(2, 4) => 7,
+			(3, 4) => 24,
+			(4, 4) => 25,
+			(2, 5) => 6,
+			(3, 5) => 42,
+			(4, 5) => 110,
+			(5, 5) => 60,
+			(2, 6) => 8,
+			(3, 6) => 65,
+			(4, 6) => 350,
+			(5, 6) => 380,
+			(6, 6) => 180,
+			// n = 7 (EXPERIMENTAL - not from reference implementation)
+			(2, 7) => 7,
+			(3, 7) => 55,
+			(4, 7) => 160,
+			(5, 7) => 320,
+			(6, 7) => 270,
+			(7, 7) => 650,
 			_ => {
 				return Err(ThresholdError::InvalidParameters {
 					threshold: t,

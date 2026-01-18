@@ -11,7 +11,7 @@ use qp_rusty_crystals_threshold::{
 };
 
 use qp_rusty_crystals_threshold::resharing::{
-	Action, ResharingConfig, ResharingMessage, ResharingProtocol, ResharingState,
+	Action, ResharingConfig, ResharingProtocol, ResharingState,
 };
 
 /// Helper to run the resharing protocol locally with simulated message passing.

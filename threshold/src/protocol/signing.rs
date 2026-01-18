@@ -17,9 +17,9 @@ use crate::{
 	keys::{PrivateKeyShare, PublicKey},
 	protocol::{
 		primitives::{
-			compute_dilithium_hint, mod_q, normalize_assuming_le2q, pack_signature,
-			poly_dot_hat_circl, poly_pack_w, reduce_le2q, unpack_polyveck_w, veck_decompose_go,
-			FVec, K, L, N, Q,
+			compute_dilithium_hint, compute_ntt_dot_product, decompose_polyveck, mod_q,
+			normalize_assuming_le2q, pack_signature, poly_pack_w, reduce_le2q, unpack_polyveck_w,
+			HyperballSampleVector, K, L, N, Q,
 		},
 		secret_sharing::{recover_share, SecretShare},
 	},
@@ -34,7 +34,7 @@ pub(crate) struct Round1Data {
 	/// K different w commitments for canonical iterations.
 	pub(crate) w_commitments: Vec<polyvec::Polyveck>,
 	/// K different hyperball samples for reuse in Round 3.
-	pub(crate) hyperball_samples: Vec<FVec>,
+	pub(crate) hyperball_samples: Vec<HyperballSampleVector>,
 	/// The commitment hash that was broadcast.
 	pub(crate) commitment_hash: [u8; 32],
 	/// Random bytes used for commitment.
@@ -202,8 +202,8 @@ pub(crate) fn generate_round1(
 
 	// Generate K different (w, y) pairs using different seeds
 	for k_iter in 0..k_iterations {
-		let fvec_size = N * (L + K);
-		let mut fvec = FVec::new(fvec_size);
+		let sample_size = N * (L + K);
+		let mut hyperball_sample = HyperballSampleVector::new(sample_size);
 
 		// Create unique seed for this iteration
 		let mut iter_seed = [0u8; 32];
@@ -221,15 +221,15 @@ pub(crate) fn generate_round1(
 
 		// Sample from hyperball using threshold parameters
 		let (_, r_prime, nu) = get_threshold_params(config);
-		fvec.sample_hyperball(r_prime, nu, &iter_rho_prime, k_iter as u16);
+		hyperball_sample.sample_hyperball(r_prime, nu, &iter_rho_prime, k_iter as u16);
 
 		// Store hyperball sample for reuse in Round 3
-		hyperball_samples.push(fvec.clone());
+		hyperball_samples.push(hyperball_sample.clone());
 
 		// Round to integer polynomials
 		let mut y_k = polyvec::Polyvecl::default();
 		let mut e_k = polyvec::Polyveck::default();
-		fvec.round(&mut y_k, &mut e_k);
+		hyperball_sample.round(&mut y_k, &mut e_k);
 
 		// Compute w_k = A·y_k using NTT
 		let mut w_k = polyvec::Polyveck::default();
@@ -239,7 +239,7 @@ pub(crate) fn generate_round1(
 		}
 
 		for i in 0..K {
-			poly_dot_hat_circl(&mut w_k.vec[i], &a_matrix[i], &y_k_ntt);
+			compute_ntt_dot_product(&mut w_k.vec[i], &a_matrix[i], &y_k_ntt);
 
 			// Apply ReduceLe2Q in NTT domain BEFORE InvNTT
 			for j in 0..N {
@@ -313,7 +313,7 @@ fn pack_w_dilithium(w: &polyvec::Polyveck, buf: &mut [u8]) {
 /// - r_prime is the hyperball sampling radius
 /// - nu is the scaling factor
 fn get_threshold_params(config: &ThresholdConfig) -> (f64, f64, f64) {
-	// These values come from the Go reference implementation
+	// Threshold parameters (r, r', nu) from the reference implementation
 	match (config.threshold(), config.total_parties()) {
 		(2, 2) => (503119.0, 503192.0, 3.0),
 		(2, 3) => (631601.0, 631703.0, 3.0),
@@ -431,9 +431,9 @@ pub(crate) fn generate_round3_response(
 	// This supports arbitrary participant IDs (not necessarily sequential)
 	let active_party_ids: Vec<ParticipantId> = round2.active_participants.iter().collect();
 
-	// Recover the partial secret for this party
+	// Recover the partial secret for this party (in NTT domain)
 	// The recover_share function uses dkg_participants to map arbitrary IDs to indices
-	let (s1h, s2h) = recover_share(
+	let (s1_ntt, s2_ntt) = recover_share(
 		&shares,
 		private_key.party_id(),
 		&active_party_ids,
@@ -456,28 +456,32 @@ pub(crate) fn generate_round3_response(
 		// Decompose w into w0 and w1
 		let mut w0 = polyvec::Polyveck::default();
 		let mut w1 = polyvec::Polyveck::default();
-		veck_decompose_go(&round2.w_aggregated[i], &mut w0, &mut w1);
+		decompose_polyveck(&round2.w_aggregated[i], &mut w0, &mut w1);
 
-		// c~ = H(μ || w1)
+		// Compute challenge: c~ = H(μ || w1)
 		let mut w1_packed = vec![0u8; K * dilithium_params::POLYW1_PACKEDBYTES];
 		polyvec::k_pack_w1(&mut w1_packed, &w1);
 
-		let mut c_bytes = [0u8; dilithium_params::C_DASH_BYTES];
+		let mut challenge_bytes = [0u8; dilithium_params::C_DASH_BYTES];
 		let mut keccak_state = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut keccak_state, &round2.mu, 64);
 		fips202::shake256_absorb(&mut keccak_state, &w1_packed, w1_packed.len());
 		fips202::shake256_finalize(&mut keccak_state);
-		fips202::shake256_squeeze(&mut c_bytes, dilithium_params::C_DASH_BYTES, &mut keccak_state);
+		fips202::shake256_squeeze(
+			&mut challenge_bytes,
+			dilithium_params::C_DASH_BYTES,
+			&mut keccak_state,
+		);
 
-		// Derive challenge polynomial
-		let mut ch = poly::Poly::default();
-		poly::challenge(&mut ch, &c_bytes);
-		crate::circl_ntt::ntt(&mut ch);
+		// Derive challenge polynomial and convert to NTT domain
+		let mut challenge_ntt = poly::Poly::default();
+		poly::challenge(&mut challenge_ntt, &challenge_bytes);
+		crate::circl_ntt::ntt(&mut challenge_ntt);
 
-		// Compute c·s1
+		// Compute z = c·s1 (challenge times secret share)
 		let mut z = polyvec::Polyvecl::default();
 		for j in 0..L {
-			crate::circl_ntt::mul_hat(&mut z.vec[j], &ch, &s1h.vec[j]);
+			crate::circl_ntt::mul_hat(&mut z.vec[j], &challenge_ntt, &s1_ntt.vec[j]);
 			crate::circl_ntt::inv_ntt(&mut z.vec[j]);
 		}
 		// Normalize z
@@ -490,33 +494,32 @@ pub(crate) fn generate_round3_response(
 		}
 
 		// Compute c·s2
-		let mut y = polyvec::Polyveck::default();
+		let mut cs2 = polyvec::Polyveck::default();
 		for j in 0..K {
-			crate::circl_ntt::mul_hat(&mut y.vec[j], &ch, &s2h.vec[j]);
-			crate::circl_ntt::inv_ntt(&mut y.vec[j]);
+			crate::circl_ntt::mul_hat(&mut cs2.vec[j], &challenge_ntt, &s2_ntt.vec[j]);
+			crate::circl_ntt::inv_ntt(&mut cs2.vec[j]);
 		}
-		// Normalize y
+		// Normalize cs2
 		for j in 0..K {
-			for coeff in y.vec[j].coeffs.iter_mut() {
+			for coeff in cs2.vec[j].coeffs.iter_mut() {
 				let c = *coeff;
 				let c_u32 = if c < 0 { (c + Q) as u32 } else { c as u32 };
 				*coeff = mod_q(c_u32) as i32;
 			}
 		}
 
-		// Convert to FVec and add hyperball sample
-		let mut zf = FVec::from_polyvecs(&z, &y);
-		zf.add(&round1.hyperball_samples[i]);
+		// Convert to floating-point and add hyperball sample
+		let mut response_float = HyperballSampleVector::from_polyvecs(&z, &cs2);
+		response_float.add(&round1.hyperball_samples[i]);
 
 		// Rejection sampling check
-		if zf.excess(r, nu) {
+		if response_float.excess(r, nu) {
 			continue;
 		}
 
-		// Round back to integers
+		// Round back to integers (only need z response, not the s2 component)
 		let mut z_out = polyvec::Polyvecl::default();
-		let mut y_out = polyvec::Polyveck::default();
-		zf.round(&mut z_out, &mut y_out);
+		response_float.round_z_response(&mut z_out);
 
 		// Convert from centered format to [0, Q) format
 		for j in 0..L {
@@ -636,7 +639,7 @@ pub(crate) fn combine_signature(
 		// Decompose w into w0 and w1
 		let mut w0 = polyvec::Polyveck::default();
 		let mut w1 = polyvec::Polyveck::default();
-		veck_decompose_go(&w_aggregated[i], &mut w0, &mut w1);
+		decompose_polyveck(&w_aggregated[i], &mut w0, &mut w1);
 
 		// Ensure ||z||_∞ < γ1 - β
 		let gamma1_minus_beta = (dilithium_params::GAMMA1 - dilithium_params::BETA) as i32;
@@ -671,103 +674,104 @@ pub(crate) fn combine_signature(
 
 		let mut az = polyvec::Polyveck::default();
 		for j in 0..K {
-			for l in 0..L {
-				let mut tmp = poly::Poly::default();
-				crate::circl_ntt::mul_hat(&mut tmp, &a_matrix[j].vec[l], &zh.vec[l]);
-				for k in 0..N {
-					az.vec[j].coeffs[k] += tmp.coeffs[k];
-				}
-			}
+			compute_ntt_dot_product(&mut az.vec[j], &a_matrix[j], &zh);
 		}
 
-		// c~ = H(μ || w1)
+		// Compute challenge: c~ = H(μ || w1)
 		let mut w1_packed = vec![0u8; K * dilithium_params::POLYW1_PACKEDBYTES];
 		polyvec::k_pack_w1(&mut w1_packed, &w1);
 
-		let mut c_bytes = [0u8; dilithium_params::C_DASH_BYTES];
+		let mut challenge_bytes = [0u8; dilithium_params::C_DASH_BYTES];
 		let mut keccak_state = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut keccak_state, &mu, 64);
 		fips202::shake256_absorb(&mut keccak_state, &w1_packed, w1_packed.len());
 		fips202::shake256_finalize(&mut keccak_state);
-		fips202::shake256_squeeze(&mut c_bytes, dilithium_params::C_DASH_BYTES, &mut keccak_state);
+		fips202::shake256_squeeze(
+			&mut challenge_bytes,
+			dilithium_params::C_DASH_BYTES,
+			&mut keccak_state,
+		);
 
-		// Derive challenge polynomial
-		let mut ch = poly::Poly::default();
-		poly::challenge(&mut ch, &c_bytes);
-		crate::circl_ntt::ntt(&mut ch);
+		// Derive challenge polynomial and convert to NTT domain
+		let mut challenge_ntt = poly::Poly::default();
+		poly::challenge(&mut challenge_ntt, &challenge_bytes);
+		crate::circl_ntt::ntt(&mut challenge_ntt);
+
+		// Compute 2^d * c * t1 (scaled challenge times public key component)
+		let mut scaled_challenge_t1 = polyvec::Polyveck::default();
+		for j in 0..K {
+			for k in 0..N {
+				scaled_challenge_t1.vec[j].coeffs[k] =
+					(t1.vec[j].coeffs[k] << dilithium_params::D) as i32;
+			}
+			crate::circl_ntt::ntt(&mut scaled_challenge_t1.vec[j]);
+			let tmp = scaled_challenge_t1.vec[j].clone();
+			crate::circl_ntt::mul_hat(&mut scaled_challenge_t1.vec[j], &tmp, &challenge_ntt);
+		}
 
 		// Compute Az - 2^d * c * t1
-		let mut az2dct1 = polyvec::Polyveck::default();
 		for j in 0..K {
 			for k in 0..N {
-				az2dct1.vec[j].coeffs[k] = (t1.vec[j].coeffs[k] << dilithium_params::D) as i32;
+				scaled_challenge_t1.vec[j].coeffs[k] =
+					az.vec[j].coeffs[k] - scaled_challenge_t1.vec[j].coeffs[k];
 			}
-			crate::circl_ntt::ntt(&mut az2dct1.vec[j]);
-			let tmp = az2dct1.vec[j].clone();
-			crate::circl_ntt::mul_hat(&mut az2dct1.vec[j], &tmp, &ch);
+			poly::reduce(&mut scaled_challenge_t1.vec[j]);
+			crate::circl_ntt::inv_ntt(&mut scaled_challenge_t1.vec[j]);
+			normalize_assuming_le2q(&mut scaled_challenge_t1.vec[j]);
 		}
 
-		// Az - 2^d * c * t1
+		// Compute difference: f = (Az - 2^d*c*t1) - w_aggregated
+		let mut difference = polyvec::Polyveck::default();
 		for j in 0..K {
 			for k in 0..N {
-				az2dct1.vec[j].coeffs[k] = az.vec[j].coeffs[k] - az2dct1.vec[j].coeffs[k];
+				difference.vec[j].coeffs[k] =
+					scaled_challenge_t1.vec[j].coeffs[k] - w_aggregated[i].vec[j].coeffs[k];
 			}
-			poly::reduce(&mut az2dct1.vec[j]);
-			crate::circl_ntt::inv_ntt(&mut az2dct1.vec[j]);
-			normalize_assuming_le2q(&mut az2dct1.vec[j]);
-		}
-
-		// f = Az2dct1 - wfinals[i]
-		let mut f = polyvec::Polyveck::default();
-		for j in 0..K {
+			// Normalize coefficients to [0, Q)
 			for k in 0..N {
-				f.vec[j].coeffs[k] = az2dct1.vec[j].coeffs[k] - w_aggregated[i].vec[j].coeffs[k];
-			}
-			// Normalize
-			for k in 0..N {
-				let c = f.vec[j].coeffs[k];
-				let c_u32 = if c < 0 { (c + Q) as u32 } else { c as u32 };
-				f.vec[j].coeffs[k] = mod_q(c_u32) as i32;
+				let coeff = difference.vec[j].coeffs[k];
+				let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
+				difference.vec[j].coeffs[k] = mod_q(coeff_u32) as i32;
 			}
 		}
 
-		// Ensure ||f||_∞ < γ2
+		// Ensure ||difference||_∞ < γ2
 		let gamma2 = dilithium_params::GAMMA2 as i32;
-		let mut f_exceeds = false;
+		let mut difference_exceeds = false;
 		for j in 0..K {
 			for k in 0..N {
-				let coeff = f.vec[j].coeffs[k];
+				let coeff = difference.vec[j].coeffs[k];
 				let centered = if coeff > Q / 2 { coeff - Q } else { coeff };
 				if centered.abs() >= gamma2 {
-					f_exceeds = true;
+					difference_exceeds = true;
 					break;
 				}
 			}
-			if f_exceeds {
+			if difference_exceeds {
 				break;
 			}
 		}
-		if f_exceeds {
+		if difference_exceeds {
 			continue;
 		}
 
-		// w0pf = w0 + f
-		let mut w0pf = polyvec::Polyveck::default();
+		// Compute w0 + difference for hint computation
+		let mut w0_plus_diff = polyvec::Polyveck::default();
 		for j in 0..K {
 			for k in 0..N {
-				w0pf.vec[j].coeffs[k] = w0.vec[j].coeffs[k] + f.vec[j].coeffs[k];
+				w0_plus_diff.vec[j].coeffs[k] = w0.vec[j].coeffs[k] + difference.vec[j].coeffs[k];
 			}
-			// Normalize
+			// Normalize coefficients to [0, Q)
 			for k in 0..N {
-				let c = w0pf.vec[j].coeffs[k];
-				let c_u32 = if c < 0 { (c + Q) as u32 } else { c as u32 };
-				w0pf.vec[j].coeffs[k] = mod_q(c_u32) as i32;
+				let coeff = w0_plus_diff.vec[j].coeffs[k];
+				let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
+				w0_plus_diff.vec[j].coeffs[k] = mod_q(coeff_u32) as i32;
 			}
 		}
 
-		// Compute hint
+		// Compute hint for signature
 		let mut hint = polyvec::Polyveck::default();
-		let hint_pop = compute_dilithium_hint(&mut hint, &w0pf, &w1);
+		let hint_pop = compute_dilithium_hint(&mut hint, &w0_plus_diff, &w1);
 
 		if hint_pop <= dilithium_params::OMEGA {
 			// Convert z to centered form for packing
@@ -780,10 +784,10 @@ pub(crate) fn combine_signature(
 				}
 			}
 
-			// Pack signature
-			let mut c_full = [0u8; 64];
-			c_full[..dilithium_params::C_DASH_BYTES].copy_from_slice(&c_bytes);
-			if let Ok(sig) = pack_signature(&c_full, &z_centered, &hint) {
+			// Pack signature with challenge and hint
+			let mut challenge_full = [0u8; 64];
+			challenge_full[..dilithium_params::C_DASH_BYTES].copy_from_slice(&challenge_bytes);
+			if let Ok(sig) = pack_signature(&challenge_full, &z_centered, &hint) {
 				return Ok(sig);
 			}
 		}

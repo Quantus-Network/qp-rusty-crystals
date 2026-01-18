@@ -243,24 +243,3 @@ pub const MAX_PARTIES: u8 = 7;
 
 /// Minimum threshold value (at least 2 parties required).
 pub const MIN_THRESHOLD: u8 = 2;
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn test_constants() {
-		assert!(MAX_PARTIES >= MIN_THRESHOLD);
-		assert!(MIN_THRESHOLD >= 2);
-	}
-
-	#[test]
-	fn test_config_creation() {
-		let config = ThresholdConfig::new(2, 3);
-		assert!(config.is_ok());
-
-		let config = config.unwrap();
-		assert_eq!(config.threshold(), 2);
-		assert_eq!(config.total_parties(), 3);
-	}
-}

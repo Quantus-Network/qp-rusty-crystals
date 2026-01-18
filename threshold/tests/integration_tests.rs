@@ -1,14 +1,14 @@
-//! Integration tests for threshold ML-DSA implementation
+//! Integration tests for threshold ML-DSA implementation.
 //!
 //! These tests validate the complete end-to-end threshold signature protocol
-//! using the new 4-round ThresholdSigner API with leader-based retry.
+//! using the `ThresholdSigner` API with leader-based retry.
 
 use std::time::{Duration, Instant};
 
 use qp_rusty_crystals_threshold::{
 	generate_with_dealer,
 	keygen::dkg::run_local_dkg,
-	signing_protocol::{run_local_signing, run_local_signing_with_stats, SigningStats},
+	signing_protocol::{run_local_signing, run_local_signing_with_stats},
 	verify_signature, ThresholdConfig, ThresholdSigner,
 };
 
@@ -37,43 +37,6 @@ fn run_threshold_protocol_4_round(
 		.into_iter()
 		.take(threshold as usize)
 		.map(|share| ThresholdSigner::new(share, public_key.clone(), config))
-		.collect::<Result<_, _>>()
-		.map_err(|e| format!("Signer creation error: {:?}", e))?;
-
-	// Run the 4-round signing protocol with leader-based retry
-	let signature = run_local_signing(signers, message, context)
-		.map_err(|e| format!("Signing error: {:?}", e))?;
-
-	// Verify the signature
-	if !verify_signature(&public_key, message, context, &signature) {
-		return Err("Signature verification failed".to_string());
-	}
-
-	Ok(signature.as_bytes().to_vec())
-}
-
-/// Run threshold signing protocol using DKG-generated keys with 4-round protocol.
-fn run_threshold_protocol_with_dkg_4_round(
-	threshold: u32,
-	total_parties: u32,
-	seed: &[u8; 32],
-	message: &[u8],
-	context: &[u8],
-) -> Result<Vec<u8>, String> {
-	let config = ThresholdConfig::new(threshold, total_parties)
-		.map_err(|e| format!("Config error: {:?}", e))?;
-
-	// Run DKG to generate keys
-	let dkg_outputs = run_local_dkg(threshold, total_parties, *seed)
-		.map_err(|e| format!("DKG error: {:?}", e))?;
-
-	let public_key = dkg_outputs[0].public_key.clone();
-
-	// Create signers for the first `threshold` parties (active signers)
-	let signers: Vec<ThresholdSigner> = dkg_outputs
-		.into_iter()
-		.take(threshold as usize)
-		.map(|output| ThresholdSigner::new(output.private_share, public_key.clone(), config))
 		.collect::<Result<_, _>>()
 		.map_err(|e| format!("Signer creation error: {:?}", e))?;
 

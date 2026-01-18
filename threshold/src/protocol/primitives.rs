@@ -46,7 +46,7 @@ pub(crate) fn mod_q(x: u32) -> u32 {
 }
 
 /// Normalize polynomial coefficients assuming they are ≤ 2Q.
-/// Converts to [0, Q) range like Go's NormalizeAssumingLe2Q.
+/// Converts to [0, Q) range. Matches reference implementation behavior.
 pub(crate) fn normalize_assuming_le2q(poly: &mut poly::Poly) {
 	for j in 0..dilithium_params::N as usize {
 		let coeff = poly.coeffs[j];
@@ -61,14 +61,14 @@ pub(crate) fn normalize_assuming_le2q(poly: &mut poly::Poly) {
 // Decomposition Functions (Go-compatible)
 // ============================================================================
 
-/// Go-compatible decompose function.
-/// Splits 0 ≤ a < q into a₀ and a₁ with a = a₁*α + a₀ with -α/2 < a₀ ≤ α/2,
-/// except for when we would have a₁ = (q-1)/α in which case a₁=0 is taken
-/// and -α/2 ≤ a₀ < 0.  Returns a₀ + q.  Note 0 ≤ a₁ < (q-1)/α.
-/// Recall α = 2γ₂.
+/// Decompose a coefficient into low and high parts for ML-DSA rounding.
 ///
-/// This exactly matches the Go implementation in thmldsa87/internal/rounding.go
-pub(crate) fn decompose_go(a: u32) -> (u32, u32) {
+/// Splits 0 ≤ a < q into (a₀, a₁) where a = a₁*α + a₀ with -α/2 < a₀ ≤ α/2,
+/// except when a₁ would equal (q-1)/α, in which case a₁=0 and -α/2 ≤ a₀ < 0.
+/// Returns (a₀ + q, a₁) where 0 ≤ a₁ < 16 and α = 2γ₂ = 523776.
+///
+/// This matches the reference Threshold-ML-DSA implementation for compatibility.
+pub(crate) fn decompose_coefficient(a: u32) -> (u32, u32) {
 	// a₁ = ⌈a / 128⌉
 	let mut a1 = (a + 127) >> 7;
 
@@ -93,8 +93,10 @@ pub(crate) fn decompose_go(a: u32) -> (u32, u32) {
 	(a0_plus_q, a1)
 }
 
-/// Decompose a vector of K polynomials (Go-compatible).
-pub(crate) fn veck_decompose_go(
+/// Decompose a vector of K polynomials into low and high parts.
+///
+/// Matches the reference implementation's rounding behavior for compatibility.
+pub(crate) fn decompose_polyveck(
 	input: &polyvec::Polyveck,
 	w0: &mut polyvec::Polyveck,
 	w1: &mut polyvec::Polyveck,
@@ -102,7 +104,7 @@ pub(crate) fn veck_decompose_go(
 	for i in 0..dilithium_params::K {
 		for j in 0..dilithium_params::N as usize {
 			let a = input.vec[i].coeffs[j] as u32;
-			let (a0, a1) = decompose_go(a);
+			let (a0, a1) = decompose_coefficient(a);
 			w0.vec[i].coeffs[j] = a0 as i32;
 			w1.vec[i].coeffs[j] = a1 as i32;
 		}
@@ -110,12 +112,14 @@ pub(crate) fn veck_decompose_go(
 }
 
 // ============================================================================
-// NTT Wrappers
+// NTT Operations
 // ============================================================================
 
-/// Compute pointwise product in NTT domain using CIRCL-compatible multiplication.
-/// result = sum(a[i] * b[i]) for all polynomials in the vectors.
-pub(crate) fn poly_dot_hat_circl(
+/// Compute dot product of polynomial vectors in NTT domain.
+///
+/// Computes result = Σ(a[i] * b[i]) for all polynomials in the vectors,
+/// using Montgomery multiplication. Compatible with the reference implementation.
+pub(crate) fn compute_ntt_dot_product(
 	result: &mut poly::Poly,
 	a: &polyvec::Polyvecl,
 	b: &polyvec::Polyvecl,
@@ -136,17 +140,20 @@ pub(crate) fn poly_dot_hat_circl(
 }
 
 // ============================================================================
-// FVec - Floating-point vector for hyperball sampling
+// HyperballSampleVector - Floating-point vector for hyperball sampling
 // ============================================================================
 
 /// Floating-point vector for threshold signature hyperball sampling.
-/// This matches the Go implementation's FVec type used for rejection sampling.
-pub struct FVec {
+///
+/// Used for rejection sampling in the threshold signing protocol. Samples are
+/// drawn from a hyperball of specified radius and scaled by nu for the s1
+/// components.
+pub struct HyperballSampleVector {
 	data: Box<[f64]>,
 }
 
-impl FVec {
-	/// Create new FVec with given size.
+impl HyperballSampleVector {
+	/// Create a new vector with given size, initialized to zero.
 	pub fn new(size: usize) -> Self {
 		Self { data: vec![0.0f64; size].into_boxed_slice() }
 	}
@@ -213,6 +220,25 @@ impl FVec {
 		}
 	}
 
+	/// Round the z response component (s1 portion) to integer polynomial.
+	/// Used in signing when only the z response is needed.
+	/// Keeps values in centered representation [-(Q-1)/2, (Q-1)/2].
+	pub fn round_z_response(&self, z: &mut polyvec::Polyvecl) {
+		for i in 0..dilithium_params::L {
+			for j in 0..dilithium_params::N as usize {
+				let idx = i * dilithium_params::N as usize + j;
+				let u = self.data[idx].round() as i32;
+				let mut reduced = u % Q;
+				if reduced > Q / 2 {
+					reduced -= Q;
+				} else if reduced < -(Q / 2) {
+					reduced += Q;
+				}
+				z.vec[i].coeffs[j] = reduced;
+			}
+		}
+	}
+
 	/// Round floating-point values back to integer polynomials.
 	/// Keeps values in centered representation [-(Q-1)/2, (Q-1)/2].
 	pub fn round(&self, s1: &mut polyvec::Polyvecl, s2: &mut polyvec::Polyveck) {
@@ -249,7 +275,7 @@ impl FVec {
 		}
 	}
 
-	/// Check if norm exceeds rejection bounds (like Go's Excess function).
+	/// Check if norm exceeds rejection bounds for rejection sampling.
 	pub fn excess(&self, r: f64, nu: f64) -> bool {
 		let mut sq = 0.0;
 
@@ -270,19 +296,19 @@ impl FVec {
 		sq > r * r
 	}
 
-	/// Add another FVec to this one.
-	pub fn add(&mut self, other: &FVec) {
+	/// Add another vector to this one element-wise.
+	pub fn add(&mut self, other: &HyperballSampleVector) {
 		for i in 0..self.data.len() {
 			self.data[i] += other.data[i];
 		}
 	}
 
-	/// Clone this FVec.
+	/// Clone this vector.
 	pub fn clone(&self) -> Self {
 		Self { data: self.data.clone() }
 	}
 
-	/// Create FVec from polynomial vectors.
+	/// Create a vector from polynomial vectors (s1, s2).
 	pub fn from_polyvecs(s1: &polyvec::Polyvecl, s2: &polyvec::Polyveck) -> Self {
 		let size = dilithium_params::N as usize * (dilithium_params::L + dilithium_params::K);
 		let mut data = vec![0.0f64; size];
@@ -341,14 +367,14 @@ pub(crate) fn compute_dilithium_hint(
 	pop
 }
 
-/// Make hint for a single coefficient pair.
+/// Compute hint bit for a single coefficient pair.
 fn make_hint_single(z0: i32, r1: i32) -> i32 {
-	// Compute highBits(z0 + z1 * ALPHA)
+	// Compute highBits(z0 + r1 * ALPHA)
 	let z0_u32 = if z0 < 0 { (z0 + Q) as u32 } else { z0 as u32 };
-	let z1_times_alpha = (r1 as u32) * ALPHA;
-	let sum = z0_u32.wrapping_add(z1_times_alpha);
+	let r1_times_alpha = (r1 as u32) * ALPHA;
+	let sum = z0_u32.wrapping_add(r1_times_alpha);
 	let sum_mod = mod_q(sum);
-	let (_, high1) = decompose_go(sum_mod);
+	let (_, high1) = decompose_coefficient(sum_mod);
 
 	// Compare with r1
 	if high1 != r1 as u32 {
@@ -479,44 +505,44 @@ mod tests {
 	}
 
 	#[test]
-	fn test_decompose_go() {
-		// Test some known values
-		let (_a0, a1) = decompose_go(0);
+	fn test_decompose_coefficient() {
+		// Test that high part is always < 16
+		let (_a0, a1) = decompose_coefficient(0);
 		assert!(a1 < 16);
 
-		let (_a0, a1) = decompose_go(Q_U32 - 1);
+		let (_a0, a1) = decompose_coefficient(Q_U32 - 1);
 		assert!(a1 < 16);
 
 		// Test various values to ensure a1 is always < 16
 		for a in [0u32, 1, 100, 1000, Q_U32 / 2, Q_U32 - 1, ALPHA, ALPHA * 2, ALPHA * 15] {
-			let (_a0, a1) = decompose_go(a);
+			let (_a0, a1) = decompose_coefficient(a);
 			assert!(a1 < 16, "a1 should be < 16 for a={}, got a1={}", a, a1);
 		}
 	}
 
 	#[test]
-	fn test_fvec_new() {
-		let fvec = FVec::new(100);
-		assert_eq!(fvec.data.len(), 100);
-		for &v in fvec.data.iter() {
+	fn test_hyperball_vector_new() {
+		let vec = HyperballSampleVector::new(100);
+		assert_eq!(vec.data.len(), 100);
+		for &v in vec.data.iter() {
 			assert_eq!(v, 0.0);
 		}
 	}
 
 	#[test]
-	fn test_fvec_add() {
-		let mut fvec1 = FVec::new(10);
-		let mut fvec2 = FVec::new(10);
+	fn test_hyperball_vector_add() {
+		let mut vec1 = HyperballSampleVector::new(10);
+		let mut vec2 = HyperballSampleVector::new(10);
 
 		for i in 0..10 {
-			fvec1.data[i] = i as f64;
-			fvec2.data[i] = (10 - i) as f64;
+			vec1.data[i] = i as f64;
+			vec2.data[i] = (10 - i) as f64;
 		}
 
-		fvec1.add(&fvec2);
+		vec1.add(&vec2);
 
 		for i in 0..10 {
-			assert_eq!(fvec1.data[i], 10.0);
+			assert_eq!(vec1.data[i], 10.0);
 		}
 	}
 

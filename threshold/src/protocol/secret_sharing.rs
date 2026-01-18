@@ -163,7 +163,7 @@ pub fn recover_share(
 		});
 
 		if let Some(share) = share {
-			// Convert to NTT domain to match Go's recoverShare which returns s1h, s2h
+			// Convert to NTT domain for share recovery
 			let mut s1_ntt = share.s1_share.clone();
 			let mut s2_ntt = share.s2_share.clone();
 
@@ -245,8 +245,7 @@ pub fn recover_share(
 
 		// Find the corresponding share
 		if let Some(share) = shares.get(&u_translated) {
-			// Convert share to NTT domain first (like Go's s1h.Add(&s1h, &sk.shares[u_].s1h))
-			// Go stores shares in both normal and NTT domain, and adds in NTT domain
+			// Convert share to NTT domain and accumulate
 			let mut s1_ntt = share.s1_share.clone();
 			let mut s2_ntt = share.s2_share.clone();
 
@@ -275,9 +274,7 @@ pub fn recover_share(
 		}
 	}
 
-	// Apply normalization like Go's s1h.Normalize() and s2h.Normalize()
-	// Note: s1_combined and s2_combined are in NTT domain at this point
-	// Apply mod_q normalization since accumulated NTT values can exceed 2Q
+	// Normalize accumulated NTT values (can exceed 2Q after addition)
 	for i in 0..dilithium_params::L {
 		for j in 0..(dilithium_params::N as usize) {
 			let coeff = s1_combined.vec[i].coeffs[j];

@@ -1,7 +1,7 @@
-//! Port of Go's circl library NTT implementation to Rust.
+//! Number Theoretic Transform (NTT) operations for ML-DSA-87.
 //!
-//! This module ensures compatibility with the Threshold-ML-DSA reference implementation
-//! by providing Number Theoretic Transform (NTT) operations that match the Go circl library.
+//! This module provides NTT operations compatible with the Threshold-ML-DSA
+//! reference implementation (based on the circl library).
 
 use qp_rusty_crystals_dilithium::poly::Poly;
 
@@ -136,7 +136,7 @@ pub fn reduce_le2q(x: u32) -> u32 {
 /// by 2*Q. The resulting coefficients are again in Montgomery representation,
 /// but are only bounded by 18*Q.
 ///
-/// This matches the Go circl library implementation exactly.
+/// Matches the reference implementation for compatibility.
 pub fn ntt(p: &mut Poly) {
 	let coeffs = &mut p.coeffs;
 
@@ -183,7 +183,7 @@ pub fn ntt(p: &mut Poly) {
 /// by 2*Q. The resulting coefficients are again in Montgomery representation
 /// and bounded by 2*Q.
 ///
-/// This matches the Go circl library implementation exactly.
+/// Matches the reference implementation for compatibility.
 pub fn inv_ntt(p: &mut Poly) {
 	let coeffs = &mut p.coeffs;
 
