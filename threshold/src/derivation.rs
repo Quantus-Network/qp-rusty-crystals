@@ -1,6 +1,6 @@
 //! Key derivation utilities for threshold Dilithium.
 //!
-//! This module provides functions for deriving child keys from master keys
+//! This module provides functions for deriving DKG contributions from master keys
 //! in a threshold-secure manner. Unlike ECC schemes where derivation is linear
 //! (derived_share = master_share + tweak), Dilithium requires running a full
 //! DKG protocol for each derived key.
@@ -13,6 +13,12 @@
 //! 3. The resulting shares are stored (cannot be recomputed on-the-fly)
 //! 4. The derived public key is deterministic for the same (master_key, tweak)
 //!
+//! # Tweak Computation
+//!
+//! The tweak should be computed by the caller using the same algorithm as the
+//! NEAR MPC contract (`derive_dilithium_tweak`). This ensures consistency between
+//! the contract (which stores derived public keys) and the MPC nodes (which run DKG).
+//!
 //! # Security
 //!
 //! The DKG contribution uses secret material from the master share, ensuring
@@ -21,56 +27,11 @@
 
 use hkdf::Hkdf;
 use sha2::Sha256;
-use sha3::{Digest, Sha3_256};
 
 use crate::keys::PrivateKeyShare;
 
-/// Domain separator for NEAR MPC Dilithium tweak derivation.
-const TWEAK_DERIVATION_PREFIX: &str = "near-mpc-dilithium v1.0 derivation:";
-
 /// Domain separator for DKG contribution derivation.
 const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v1";
-
-/// Derive a tweak from an account ID and path.
-///
-/// This follows the same pattern as ECC derivation but with a Dilithium-specific
-/// domain separator to ensure derived keys are independent across schemes.
-///
-/// # Arguments
-/// * `account_id` - The NEAR account ID (e.g., "alice.near")
-/// * `path` - The derivation path (e.g., "ethereum", "bitcoin/0")
-///
-/// # Returns
-/// A 32-byte tweak value
-///
-/// # Example
-/// ```
-/// use qp_rusty_crystals_threshold::derivation::derive_tweak;
-///
-/// let tweak = derive_tweak("alice.near", "ethereum");
-/// assert_eq!(tweak.len(), 32);
-///
-/// // Same inputs produce same tweak
-/// let tweak2 = derive_tweak("alice.near", "ethereum");
-/// assert_eq!(tweak, tweak2);
-///
-/// // Different inputs produce different tweaks
-/// let tweak3 = derive_tweak("bob.near", "ethereum");
-/// assert_ne!(tweak, tweak3);
-/// ```
-pub fn derive_tweak(account_id: &str, path: &str) -> [u8; 32] {
-	// Use length-prefixed encoding to prevent ambiguity
-	// Format: prefix || len(account_id) as u32 || account_id || path
-	// This ensures "alice,near" + "eth" differs from "alice" + "near,eth"
-	let account_len = account_id.len() as u32;
-
-	let mut hasher = Sha3_256::new();
-	hasher.update(TWEAK_DERIVATION_PREFIX.as_bytes());
-	hasher.update(&account_len.to_le_bytes());
-	hasher.update(account_id.as_bytes());
-	hasher.update(path.as_bytes());
-	hasher.finalize().into()
-}
 
 /// Derive a DKG contribution from a master share and tweak.
 ///
@@ -85,7 +46,7 @@ pub fn derive_tweak(account_id: &str, path: &str) -> [u8; 32] {
 ///
 /// # Arguments
 /// * `master_share` - This party's master private key share
-/// * `tweak` - The derivation tweak (from account_id + path)
+/// * `tweak` - The derivation tweak (computed from account_id + path by the caller)
 ///
 /// # Returns
 /// A 32-byte contribution for DKG randomness
@@ -98,9 +59,10 @@ pub fn derive_tweak(account_id: &str, path: &str) -> [u8; 32] {
 ///
 /// # Example
 /// ```ignore
-/// use qp_rusty_crystals_threshold::derivation::{derive_tweak, derive_dkg_contribution};
+/// use qp_rusty_crystals_threshold::derivation::derive_dkg_contribution;
 ///
-/// let tweak = derive_tweak("alice.near", "ethereum");
+/// // Tweak is computed by the caller (e.g., from NEAR MPC contract's derive_dilithium_tweak)
+/// let tweak: [u8; 32] = compute_tweak("alice.near", "ethereum");
 /// let contribution = derive_dkg_contribution(&my_master_share, &tweak);
 ///
 /// // Use contribution as seed for DKG randomness
@@ -140,19 +102,13 @@ pub fn derive_dkg_contribution(master_share: &PrivateKeyShare, tweak: &[u8; 32])
 pub struct DerivedKeyId {
 	/// The domain ID (identifies the master key)
 	pub domain_id: u64,
-	/// The derivation tweak (derived from account + path)
+	/// The derivation tweak (derived from account + path by the caller)
 	pub tweak: [u8; 32],
 }
 
 impl DerivedKeyId {
 	/// Create a new derived key identifier.
 	pub fn new(domain_id: u64, tweak: [u8; 32]) -> Self {
-		Self { domain_id, tweak }
-	}
-
-	/// Create a derived key identifier from account and path.
-	pub fn from_account_path(domain_id: u64, account_id: &str, path: &str) -> Self {
-		let tweak = derive_tweak(account_id, path);
 		Self { domain_id, tweak }
 	}
 }
@@ -177,51 +133,21 @@ mod tests {
 		)
 	}
 
-	#[test]
-	fn test_derive_tweak_deterministic() {
-		let tweak1 = derive_tweak("alice.near", "ethereum");
-		let tweak2 = derive_tweak("alice.near", "ethereum");
-		assert_eq!(tweak1, tweak2);
-	}
-
-	#[test]
-	fn test_derive_tweak_different_accounts() {
-		let tweak_alice = derive_tweak("alice.near", "ethereum");
-		let tweak_bob = derive_tweak("bob.near", "ethereum");
-		assert_ne!(tweak_alice, tweak_bob);
-	}
-
-	#[test]
-	fn test_derive_tweak_different_paths() {
-		let tweak_eth = derive_tweak("alice.near", "ethereum");
-		let tweak_btc = derive_tweak("alice.near", "bitcoin");
-		assert_ne!(tweak_eth, tweak_btc);
-	}
-
-	#[test]
-	fn test_derive_tweak_path_variations() {
-		// Ensure different path formats produce different tweaks
-		let tweak1 = derive_tweak("alice.near", "eth");
-		let tweak2 = derive_tweak("alice.near", "eth/0");
-		let tweak3 = derive_tweak("alice.near", "eth/1");
-		assert_ne!(tweak1, tweak2);
-		assert_ne!(tweak2, tweak3);
-		assert_ne!(tweak1, tweak3);
-	}
-
-	#[test]
-	fn test_derive_tweak_no_collision_with_separator() {
-		// Ensure the comma separator prevents collisions
-		// "alice,near" + "eth" should differ from "alice" + "near,eth"
-		let tweak1 = derive_tweak("alice,near", "eth");
-		let tweak2 = derive_tweak("alice", "near,eth");
-		assert_ne!(tweak1, tweak2);
+	/// Create a test tweak (simulates what the contract would compute)
+	fn test_tweak(account: &str, path: &str) -> [u8; 32] {
+		use sha2::{Digest, Sha256};
+		let mut hasher = Sha256::new();
+		hasher.update(b"test-tweak:");
+		hasher.update(account.as_bytes());
+		hasher.update(b":");
+		hasher.update(path.as_bytes());
+		hasher.finalize().into()
 	}
 
 	#[test]
 	fn test_derive_dkg_contribution_deterministic() {
 		let share = create_test_share(0, [42u8; 32]);
-		let tweak = derive_tweak("alice.near", "ethereum");
+		let tweak = test_tweak("alice.near", "ethereum");
 
 		let contribution1 = derive_dkg_contribution(&share, &tweak);
 		let contribution2 = derive_dkg_contribution(&share, &tweak);
@@ -230,7 +156,7 @@ mod tests {
 
 	#[test]
 	fn test_derive_dkg_contribution_different_parties() {
-		let tweak = derive_tweak("alice.near", "ethereum");
+		let tweak = test_tweak("alice.near", "ethereum");
 
 		// Different party IDs with same key should produce different contributions
 		let share0 = create_test_share(0, [42u8; 32]);
@@ -243,7 +169,7 @@ mod tests {
 
 	#[test]
 	fn test_derive_dkg_contribution_different_keys() {
-		let tweak = derive_tweak("alice.near", "ethereum");
+		let tweak = test_tweak("alice.near", "ethereum");
 
 		// Different key material should produce different contributions
 		let share_a = create_test_share(0, [1u8; 32]);
@@ -258,8 +184,8 @@ mod tests {
 	fn test_derive_dkg_contribution_different_tweaks() {
 		let share = create_test_share(0, [42u8; 32]);
 
-		let tweak_eth = derive_tweak("alice.near", "ethereum");
-		let tweak_btc = derive_tweak("alice.near", "bitcoin");
+		let tweak_eth = test_tweak("alice.near", "ethereum");
+		let tweak_btc = test_tweak("alice.near", "bitcoin");
 
 		let contribution_eth = derive_dkg_contribution(&share, &tweak_eth);
 		let contribution_btc = derive_dkg_contribution(&share, &tweak_btc);
@@ -267,23 +193,23 @@ mod tests {
 	}
 
 	#[test]
-	fn test_derived_key_id_from_account_path() {
-		let id1 = DerivedKeyId::from_account_path(0, "alice.near", "ethereum");
-		let id2 = DerivedKeyId::from_account_path(0, "alice.near", "ethereum");
+	fn test_derived_key_id_new() {
+		let tweak = test_tweak("alice.near", "ethereum");
+		let id1 = DerivedKeyId::new(5, tweak);
+		let id2 = DerivedKeyId::new(5, tweak);
 		assert_eq!(id1, id2);
 
-		let id3 = DerivedKeyId::from_account_path(0, "bob.near", "ethereum");
-		assert_ne!(id1, id3);
-
-		let id4 = DerivedKeyId::from_account_path(1, "alice.near", "ethereum");
-		assert_ne!(id1, id4); // Different domain
+		let id3 = DerivedKeyId::new(6, tweak);
+		assert_ne!(id1, id3); // Different domain
 	}
 
 	#[test]
-	fn test_derived_key_id_new() {
-		let tweak = derive_tweak("alice.near", "ethereum");
-		let id1 = DerivedKeyId::new(5, tweak);
-		let id2 = DerivedKeyId::from_account_path(5, "alice.near", "ethereum");
-		assert_eq!(id1, id2);
+	fn test_derived_key_id_different_tweaks() {
+		let tweak1 = test_tweak("alice.near", "ethereum");
+		let tweak2 = test_tweak("bob.near", "ethereum");
+
+		let id1 = DerivedKeyId::new(5, tweak1);
+		let id2 = DerivedKeyId::new(5, tweak2);
+		assert_ne!(id1, id2);
 	}
 }

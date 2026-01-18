@@ -167,7 +167,7 @@ pub use signer::ThresholdSigner;
 pub use keygen::generate_with_dealer;
 
 // Key derivation
-pub use derivation::{derive_dkg_contribution, derive_tweak, DerivedKeyId};
+pub use derivation::{derive_dkg_contribution, DerivedKeyId};
 
 // Verification
 pub use verification::verify_signature;

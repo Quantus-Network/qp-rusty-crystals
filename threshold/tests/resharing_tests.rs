@@ -11,7 +11,7 @@ use qp_rusty_crystals_threshold::{
 };
 
 use qp_rusty_crystals_threshold::resharing::{
-	Action, ResharingConfig, ResharingProtocol, ResharingState,
+	Action, ResharingConfig, ResharingMessage, ResharingProtocol, ResharingState,
 };
 
 /// Helper to run the resharing protocol locally with simulated message passing.
@@ -155,7 +155,6 @@ fn run_resharing_protocol(
 /// Helper to run signing with a subset of signers and verify the result.
 /// Uses retry mechanism since the signing protocol has probabilistic rejection sampling.
 /// Even with valid keys, some randomness combinations fail the bounds checks.
-#[allow(dead_code)]
 fn run_signing_and_verify(
 	shares: &[PrivateKeyShare],
 	public_key: &PublicKey,
@@ -168,7 +167,6 @@ fn run_signing_and_verify(
 
 /// Helper to run signing with explicit retry count.
 /// Returns true if signing succeeds and signature verifies within max_attempts.
-#[allow(dead_code)]
 fn run_signing_and_verify_with_retries(
 	shares: &[PrivateKeyShare],
 	public_key: &PublicKey,

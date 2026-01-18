@@ -196,23 +196,6 @@ fn bench_round1(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Benchmark key derivation operations.
-fn bench_key_derivation(c: &mut Criterion) {
-	use qp_rusty_crystals_threshold::derivation::derive_tweak;
-
-	let mut group = c.benchmark_group("key_derivation");
-	group.measurement_time(Duration::from_secs(5));
-
-	let account_id = "alice.near";
-	let path = "ethereum/0";
-
-	group.bench_function("derive_tweak", |b| {
-		b.iter(|| derive_tweak(account_id, path));
-	});
-
-	group.finish();
-}
-
 /// Benchmark comparison: threshold vs standard Dilithium.
 fn bench_comparison(c: &mut Criterion) {
 	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
@@ -287,21 +270,9 @@ criterion_group! {
 }
 
 criterion_group! {
-	name = utility_benches;
-	config = Criterion::default();
-	targets = bench_key_derivation
-}
-
-criterion_group! {
 	name = comparison_benches;
 	config = Criterion::default();
 	targets = bench_comparison
 }
 
-criterion_main!(
-	keygen_benches,
-	signing_benches,
-	verify_benches,
-	utility_benches,
-	comparison_benches
-);
+criterion_main!(keygen_benches, signing_benches, verify_benches, comparison_benches);

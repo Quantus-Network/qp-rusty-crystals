@@ -310,32 +310,16 @@ impl ResharingProtocol {
 
 	/// Serialize a message for transmission.
 	fn serialize_message(msg: &ResharingMessage) -> Result<Vec<u8>, ResharingProtocolError> {
-		#[cfg(feature = "serde")]
-		{
-			bincode::serialize(msg).map_err(|e| {
-				ResharingProtocolError::SerializationError(format!("Failed to serialize: {}", e))
-			})
-		}
-		#[cfg(not(feature = "serde"))]
-		{
-			let _ = msg;
-			Err(ResharingProtocolError::SerializationError("serde feature not enabled".to_string()))
-		}
+		bincode::serialize(msg).map_err(|e| {
+			ResharingProtocolError::SerializationError(format!("Failed to serialize: {}", e))
+		})
 	}
 
 	/// Deserialize a message from bytes.
 	fn deserialize_message(data: &[u8]) -> Result<ResharingMessage, ResharingProtocolError> {
-		#[cfg(feature = "serde")]
-		{
-			bincode::deserialize(data).map_err(|e| {
-				ResharingProtocolError::SerializationError(format!("Failed to deserialize: {}", e))
-			})
-		}
-		#[cfg(not(feature = "serde"))]
-		{
-			let _ = data;
-			Err(ResharingProtocolError::SerializationError("serde feature not enabled".to_string()))
-		}
+		bincode::deserialize(data).map_err(|e| {
+			ResharingProtocolError::SerializationError(format!("Failed to deserialize: {}", e))
+		})
 	}
 
 	/// Advance the protocol state machine.

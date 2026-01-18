@@ -122,7 +122,7 @@ fn convert_shares(share: &PrivateKeyShare) -> HashMap<u16, SecretShare> {
 			}
 		}
 
-		shares.insert(*subset_id, SecretShare { party_id: *subset_id as u32, s1_share, s2_share });
+		shares.insert(*subset_id, SecretShare { s1_share, s2_share });
 	}
 
 	shares

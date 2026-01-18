@@ -4,12 +4,29 @@
 //! 1. DKG contributions are deterministic and unique per party
 //! 2. Derived keys can be used for threshold signing
 //! 3. The full derivation + signing flow works end-to-end
+//!
+//! Note: The `derive_tweak` function has been removed from the threshold crate
+//! as tweak derivation is now handled by the NEAR MPC contract. These tests
+//! use a local helper function for testing purposes only.
 
 use qp_rusty_crystals_threshold::{
-	derive_dkg_contribution, derive_tweak, generate_with_dealer, verify_signature, DerivedKeyId,
-	PrivateKeyShare, ThresholdConfig, ThresholdSigner,
+	derive_dkg_contribution, generate_with_dealer, verify_signature, DerivedKeyId, PrivateKeyShare,
+	ThresholdConfig, ThresholdSigner,
 };
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+
+/// Helper to create a test tweak (simulates what the contract would compute).
+/// This is for testing purposes only - production code should use the contract's
+/// `derive_dilithium_tweak` function.
+fn test_tweak(account_id: &str, path: &str) -> [u8; 32] {
+	let mut hasher = Sha256::new();
+	hasher.update(b"dilithium-tweak-test:");
+	hasher.update(account_id.as_bytes());
+	hasher.update(b":");
+	hasher.update(path.as_bytes());
+	hasher.finalize().into()
+}
 
 /// Helper to create test shares using dealer-based generation
 fn create_test_shares(seed: [u8; 32], threshold: u32, total: u32) -> Vec<PrivateKeyShare> {
@@ -18,35 +35,11 @@ fn create_test_shares(seed: [u8; 32], threshold: u32, total: u32) -> Vec<Private
 	shares
 }
 
-/// Test that derive_tweak produces deterministic results
-#[test]
-fn test_tweak_derivation_deterministic() {
-	let tweak1 = derive_tweak("alice.near", "ethereum");
-	let tweak2 = derive_tweak("alice.near", "ethereum");
-	assert_eq!(tweak1, tweak2, "Same inputs should produce same tweak");
-}
-
-/// Test that different accounts produce different tweaks
-#[test]
-fn test_tweak_derivation_account_isolation() {
-	let tweak_alice = derive_tweak("alice.near", "ethereum");
-	let tweak_bob = derive_tweak("bob.near", "ethereum");
-	assert_ne!(tweak_alice, tweak_bob, "Different accounts should produce different tweaks");
-}
-
-/// Test that different paths produce different tweaks
-#[test]
-fn test_tweak_derivation_path_isolation() {
-	let tweak_eth = derive_tweak("alice.near", "ethereum");
-	let tweak_btc = derive_tweak("alice.near", "bitcoin");
-	assert_ne!(tweak_eth, tweak_btc, "Different paths should produce different tweaks");
-}
-
 /// Test that DKG contributions are deterministic for the same share + tweak
 #[test]
 fn test_dkg_contribution_deterministic() {
 	let shares = create_test_shares([42u8; 32], 2, 3);
-	let tweak = derive_tweak("alice.near", "ethereum");
+	let tweak = test_tweak("alice.near", "ethereum");
 
 	let contribution1 = derive_dkg_contribution(&shares[0], &tweak);
 	let contribution2 = derive_dkg_contribution(&shares[0], &tweak);
@@ -58,7 +51,7 @@ fn test_dkg_contribution_deterministic() {
 #[test]
 fn test_dkg_contribution_party_isolation() {
 	let shares = create_test_shares([42u8; 32], 2, 3);
-	let tweak = derive_tweak("alice.near", "ethereum");
+	let tweak = test_tweak("alice.near", "ethereum");
 
 	let contribution0 = derive_dkg_contribution(&shares[0], &tweak);
 	let contribution1 = derive_dkg_contribution(&shares[1], &tweak);
@@ -82,8 +75,8 @@ fn test_dkg_contribution_party_isolation() {
 #[test]
 fn test_dkg_contribution_tweak_isolation() {
 	let shares = create_test_shares([42u8; 32], 2, 3);
-	let tweak_eth = derive_tweak("alice.near", "ethereum");
-	let tweak_btc = derive_tweak("alice.near", "bitcoin");
+	let tweak_eth = test_tweak("alice.near", "ethereum");
+	let tweak_btc = test_tweak("alice.near", "bitcoin");
 
 	let contribution_eth = derive_dkg_contribution(&shares[0], &tweak_eth);
 	let contribution_btc = derive_dkg_contribution(&shares[0], &tweak_btc);
@@ -99,7 +92,7 @@ fn test_dkg_contribution_tweak_isolation() {
 fn test_dkg_contribution_key_isolation() {
 	let shares_a = create_test_shares([1u8; 32], 2, 3);
 	let shares_b = create_test_shares([2u8; 32], 2, 3);
-	let tweak = derive_tweak("alice.near", "ethereum");
+	let tweak = test_tweak("alice.near", "ethereum");
 
 	let contribution_a = derive_dkg_contribution(&shares_a[0], &tweak);
 	let contribution_b = derive_dkg_contribution(&shares_b[0], &tweak);
@@ -113,13 +106,16 @@ fn test_dkg_contribution_key_isolation() {
 /// Test DerivedKeyId creation and equality
 #[test]
 fn test_derived_key_id() {
-	let id1 = DerivedKeyId::from_account_path(0, "alice.near", "ethereum");
-	let id2 = DerivedKeyId::from_account_path(0, "alice.near", "ethereum");
-	let id3 = DerivedKeyId::from_account_path(0, "bob.near", "ethereum");
-	let id4 = DerivedKeyId::from_account_path(1, "alice.near", "ethereum");
+	let tweak1 = test_tweak("alice.near", "ethereum");
+	let tweak2 = test_tweak("bob.near", "ethereum");
+
+	let id1 = DerivedKeyId::new(0, tweak1);
+	let id2 = DerivedKeyId::new(0, tweak1);
+	let id3 = DerivedKeyId::new(0, tweak2);
+	let id4 = DerivedKeyId::new(1, tweak1);
 
 	assert_eq!(id1, id2, "Same inputs should produce same ID");
-	assert_ne!(id1, id3, "Different accounts should produce different IDs");
+	assert_ne!(id1, id3, "Different tweaks should produce different IDs");
 	assert_ne!(id1, id4, "Different domains should produce different IDs");
 }
 
@@ -128,8 +124,11 @@ fn test_derived_key_id() {
 fn test_derived_key_id_as_hashmap_key() {
 	let mut map: HashMap<DerivedKeyId, String> = HashMap::new();
 
-	let id1 = DerivedKeyId::from_account_path(0, "alice.near", "ethereum");
-	let id2 = DerivedKeyId::from_account_path(0, "bob.near", "ethereum");
+	let tweak_alice = test_tweak("alice.near", "ethereum");
+	let tweak_bob = test_tweak("bob.near", "ethereum");
+
+	let id1 = DerivedKeyId::new(0, tweak_alice);
+	let id2 = DerivedKeyId::new(0, tweak_bob);
 
 	map.insert(id1.clone(), "alice_eth_key".to_string());
 	map.insert(id2.clone(), "bob_eth_key".to_string());
@@ -138,7 +137,7 @@ fn test_derived_key_id_as_hashmap_key() {
 	assert_eq!(map.get(&id2), Some(&"bob_eth_key".to_string()));
 
 	// Lookup with freshly created ID should work
-	let id1_fresh = DerivedKeyId::from_account_path(0, "alice.near", "ethereum");
+	let id1_fresh = DerivedKeyId::new(0, tweak_alice);
 	assert_eq!(map.get(&id1_fresh), Some(&"alice_eth_key".to_string()));
 }
 
@@ -156,7 +155,7 @@ fn test_derived_key_generation_and_signing() {
 		generate_with_dealer(&master_seed, config).expect("master keygen");
 
 	// Step 2: Derive DKG contributions for a derived key
-	let tweak = derive_tweak("alice.near", "ethereum");
+	let tweak = test_tweak("alice.near", "ethereum");
 
 	let contributions: Vec<[u8; 32]> = master_shares
 		.iter()
@@ -267,7 +266,7 @@ fn test_derived_key_determinism() {
 	let (_master_pubkey, master_shares) =
 		generate_with_dealer(&master_seed, config).expect("master keygen");
 
-	let tweak = derive_tweak("alice.near", "ethereum");
+	let tweak = test_tweak("alice.near", "ethereum");
 
 	// First derivation
 	let contributions1: Vec<[u8; 32]> = master_shares
@@ -324,7 +323,7 @@ fn test_multiple_derived_keys_per_account() {
 	let mut derived_pubkeys = Vec::new();
 
 	for path in &paths {
-		let tweak = derive_tweak("alice.near", path);
+		let tweak = test_tweak("alice.near", path);
 
 		// Derive contributions
 		let contributions: Vec<[u8; 32]> = master_shares

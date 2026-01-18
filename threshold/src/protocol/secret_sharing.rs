@@ -19,9 +19,6 @@ use crate::{
 /// Secret share for a single party.
 #[derive(Clone)]
 pub struct SecretShare {
-	/// Party identifier for this secret share.
-	#[allow(dead_code)]
-	pub party_id: u32,
 	/// Share of the s1 polynomial vector.
 	pub s1_share: polyvec::Polyvecl,
 	/// Share of the s2 polynomial vector.
