@@ -132,13 +132,6 @@ cargo bench -- comparison
 cargo bench -- signing_4round
 ```
 
-## Documentation
-
-- [NEAR Integration Plan](./NEAR_INTEGRATION_PLAN.md) - Integration with NEAR MPC
-- [Key Derivation](./DILITHIUM_KEY_DERIVATION.md) - HD-wallet style derivation
-- [Resharing](./RESHARING_PLAN.md) - Committee handoff protocol
-- [Benchmarks](./BENCHMARK_PLAN.md) - Performance testing
-
 ## License
 
 GPL-3.0 License - see the parent qp-rusty-crystals project.
