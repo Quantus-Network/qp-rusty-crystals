@@ -10,7 +10,10 @@
 //! 2. **Round 2 (Reveal)**: Each party reveals their commitment data
 //! 3. **Round 3 (Response)**: Each party computes and broadcasts their signature share
 //!
-//! After Round 3, any party can combine the shares into a final signature.
+//! After Round 3, the leader attempts to combine the shares into a final signature.
+//! If combination fails (due to rejection sampling), the leader broadcasts a Retry
+//! message and all parties reset and try again. If combination succeeds, the leader
+//! broadcasts the signature to all parties.
 //!
 //! ## Message Buffering
 //!
@@ -83,6 +86,11 @@ pub enum Action<T> {
 	Return(T),
 }
 
+/// Maximum number of retry attempts before giving up.
+/// With high k_iterations, retries should be rare, but we still need a limit
+/// to prevent infinite loops if something is fundamentally broken.
+pub const MAX_RETRY_ATTEMPTS: u32 = 100;
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -124,9 +132,9 @@ impl std::error::Error for SignProtocolError {}
 // ============================================================================
 
 /// Wrapper enum for all signing protocol messages.
+/// Message types for the signing protocol.
 ///
-/// This allows messages to be serialized/deserialized without knowing
-/// the specific round at deserialization time.
+/// These are serialized and sent over the network between parties.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum SigningMessage {
@@ -136,25 +144,39 @@ pub enum SigningMessage {
 	Round2(Round2Broadcast),
 	/// Round 3: Signature response.
 	Round3(Round3Broadcast),
+	/// Round 4: Leader's decision - signature combination succeeded.
+	Round4Complete(Vec<u8>),
+	/// Round 4: Leader's decision - combination failed, retry needed.
+	Round4Retry,
 }
 
 impl SigningMessage {
-	/// Get the party ID of the sender.
-	pub fn party_id(&self) -> ParticipantId {
+	/// Get the party ID of the sender (for Round 1-3 messages).
+	/// Returns None for Round 4 messages (which come from leader).
+	pub fn party_id(&self) -> Option<ParticipantId> {
 		match self {
-			SigningMessage::Round1(msg) => msg.party_id,
-			SigningMessage::Round2(msg) => msg.party_id,
-			SigningMessage::Round3(msg) => msg.party_id,
+			SigningMessage::Round1(r) => Some(r.party_id),
+			SigningMessage::Round2(r) => Some(r.party_id),
+			SigningMessage::Round3(r) => Some(r.party_id),
+			SigningMessage::Round4Complete(_) => None,
+			SigningMessage::Round4Retry => None,
 		}
 	}
 
-	/// Get the round number (1-3).
+	/// Get the round number (1-4).
 	pub fn round(&self) -> u8 {
 		match self {
 			SigningMessage::Round1(_) => 1,
 			SigningMessage::Round2(_) => 2,
 			SigningMessage::Round3(_) => 3,
+			SigningMessage::Round4Complete(_) => 4,
+			SigningMessage::Round4Retry => 4,
 		}
+	}
+
+	/// Check if this is a Round 4 message (leader decision).
+	pub fn is_round4(&self) -> bool {
+		matches!(self, SigningMessage::Round4Complete(_) | SigningMessage::Round4Retry)
 	}
 }
 
@@ -180,12 +202,14 @@ pub enum SignProtocolState {
 	/// Waiting for Round 3 messages from other participants.
 	Round3Waiting,
 
-	/// Ready to combine signature shares.
-	Combining,
+	/// Leader: Ready to attempt combining and decide (Complete or Retry).
+	Round4Deciding,
+	/// Follower: Waiting for leader's Round 4 decision.
+	WaitingForLeaderDecision,
+
 	/// Protocol completed successfully.
 	Done,
-	/// Protocol failed.
-	#[allow(dead_code)]
+	/// Protocol failed after max retries.
 	Failed(String),
 }
 
@@ -282,6 +306,8 @@ pub struct DilithiumSignProtocol {
 	participants: ParticipantList,
 	/// This party's identifier.
 	my_participant_id: ParticipantId,
+	/// The leader's identifier (makes combine/retry decisions).
+	leader_id: ParticipantId,
 	/// The message to sign.
 	message: Vec<u8>,
 	/// The context string for signing.
@@ -303,6 +329,11 @@ pub struct DilithiumSignProtocol {
 
 	/// Buffer for messages that arrive before we're ready to process them.
 	message_buffer: SignMessageBuffer,
+
+	/// Number of retry attempts so far.
+	retry_count: u32,
+	/// Signature received from leader (for followers).
+	received_signature: Option<Signature>,
 }
 
 impl DilithiumSignProtocol {
@@ -315,16 +346,19 @@ impl DilithiumSignProtocol {
 	/// * `context` - The context string (can be empty, max 255 bytes)
 	/// * `participants` - All participant IDs in this signing session (can be arbitrary u32 values)
 	/// * `my_participant_id` - This party's identifier
+	/// * `leader_id` - The leader's identifier (responsible for combine/retry decisions)
 	///
 	/// # Panics
 	///
-	/// Panics if `my_participant_id` is not in `participants` or if there are duplicate IDs.
+	/// Panics if `my_participant_id` is not in `participants`, if `leader_id` is not in
+	/// `participants`, or if there are duplicate IDs.
 	pub fn new(
 		signer: ThresholdSigner,
 		message: Vec<u8>,
 		context: Vec<u8>,
 		participants: Vec<ParticipantId>,
 		my_participant_id: ParticipantId,
+		leader_id: ParticipantId,
 	) -> Self {
 		let participant_list =
 			ParticipantList::new(&participants).expect("participants must not contain duplicates");
@@ -332,12 +366,14 @@ impl DilithiumSignProtocol {
 			participant_list.contains(my_participant_id),
 			"my_participant_id must be in participants"
 		);
+		assert!(participant_list.contains(leader_id), "leader_id must be in participants");
 
 		Self {
 			signer,
 			state: SignProtocolState::Round1Generate,
 			participants: participant_list,
 			my_participant_id,
+			leader_id,
 			message,
 			context,
 			r1_broadcasts: HashMap::new(),
@@ -347,6 +383,8 @@ impl DilithiumSignProtocol {
 			my_r2: None,
 			my_r3: None,
 			message_buffer: SignMessageBuffer::new(),
+			retry_count: 0,
+			received_signature: None,
 		}
 	}
 
@@ -363,6 +401,21 @@ impl DilithiumSignProtocol {
 	/// Get all participants.
 	pub fn participants(&self) -> &ParticipantList {
 		&self.participants
+	}
+
+	/// Get the leader's identifier.
+	pub fn leader_id(&self) -> ParticipantId {
+		self.leader_id
+	}
+
+	/// Check if this party is the leader.
+	pub fn is_leader(&self) -> bool {
+		self.my_participant_id == self.leader_id
+	}
+
+	/// Get the current retry count.
+	pub fn retry_count(&self) -> u32 {
+		self.retry_count
 	}
 
 	/// Get the number of participants required (threshold).
@@ -412,6 +465,17 @@ impl DilithiumSignProtocol {
 				let len = r3.response.len() as u32;
 				result.extend_from_slice(&len.to_le_bytes());
 				result.extend_from_slice(&r3.response);
+			},
+			SigningMessage::Round4Complete(sig_bytes) => {
+				result.push(4u8);
+				// Length-prefix the signature bytes
+				let len = sig_bytes.len() as u32;
+				result.extend_from_slice(&len.to_le_bytes());
+				result.extend_from_slice(sig_bytes);
+			},
+			SigningMessage::Round4Retry => {
+				result.push(5u8);
+				// No additional data needed
 			},
 		}
 
@@ -473,6 +537,26 @@ impl DilithiumSignProtocol {
 				}
 				let response = rest[8..8 + len].to_vec();
 				Ok(SigningMessage::Round3(Round3Broadcast { party_id, response }))
+			},
+			4 => {
+				// Round 4 Complete: len (4 bytes) + signature bytes
+				if rest.len() < 4 {
+					return Err(SignProtocolError::SerializationError(
+						"Round 4 Complete message too short".to_string(),
+					));
+				}
+				let len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+				if rest.len() < 4 + len {
+					return Err(SignProtocolError::SerializationError(
+						"Round 4 Complete message data truncated".to_string(),
+					));
+				}
+				let sig_bytes = rest[4..4 + len].to_vec();
+				Ok(SigningMessage::Round4Complete(sig_bytes))
+			},
+			5 => {
+				// Round 4 Retry: no additional data
+				Ok(SigningMessage::Round4Retry)
 			},
 			_ => {
 				Err(SignProtocolError::SerializationError(format!("Unknown message tag: {}", tag)))
@@ -602,31 +686,82 @@ impl DilithiumSignProtocol {
 
 			SignProtocolState::Round3Waiting => {
 				if self.have_enough_r3() {
-					// Ready to combine signature
-					self.state = SignProtocolState::Combining;
+					// Ready for Round 4 decision
+					if self.is_leader() {
+						self.state = SignProtocolState::Round4Deciding;
+					} else {
+						self.state = SignProtocolState::WaitingForLeaderDecision;
+					}
 					self.poke()
 				} else {
 					Ok(Action::Wait)
 				}
 			},
 
-			SignProtocolState::Combining => {
-				// Collect all Round 2 and Round 3 broadcasts
+			SignProtocolState::Round4Deciding => {
+				// Leader: attempt to combine and decide
 				let r2_vec: Vec<Round2Broadcast> = self.r2_broadcasts.values().cloned().collect();
 				let r3_vec: Vec<Round3Broadcast> = self.r3_broadcasts.values().cloned().collect();
 
-				// Combine into final signature
-				let signature = self
-					.signer
-					.combine_with_message(&self.message, &self.context, &r2_vec, &r3_vec)
-					.map_err(|e| SignProtocolError::SigningError(e.to_string()))?;
+				// Attempt to combine
+				match self.signer.combine_with_message(
+					&self.message,
+					&self.context,
+					&r2_vec,
+					&r3_vec,
+				) {
+					Ok(signature) => {
+						// Success! Broadcast signature to all parties
+						let msg = SigningMessage::Round4Complete(signature.as_bytes().to_vec());
+						let data = self.serialize_message(&msg)?;
+						self.state = SignProtocolState::Done;
+						// Store signature for return after sending
+						self.received_signature = Some(signature);
+						Ok(Action::SendMany(data))
+					},
+					Err(_) => {
+						// Combination failed - check retry limit
+						self.retry_count += 1;
+						if self.retry_count >= MAX_RETRY_ATTEMPTS {
+							self.state = SignProtocolState::Failed(format!(
+								"Signature combination failed after {} attempts",
+								MAX_RETRY_ATTEMPTS
+							));
+							return Err(SignProtocolError::SigningError(format!(
+								"Exceeded maximum retry attempts ({})",
+								MAX_RETRY_ATTEMPTS
+							)));
+						}
 
-				self.state = SignProtocolState::Done;
+						// Broadcast retry request
+						let msg = SigningMessage::Round4Retry;
+						let data = self.serialize_message(&msg)?;
 
-				Ok(Action::Return(signature))
+						// Reset for next attempt
+						self.reset_for_retry();
+
+						Ok(Action::SendMany(data))
+					},
+				}
 			},
 
-			SignProtocolState::Done => Err(SignProtocolError::AlreadyComplete),
+			SignProtocolState::WaitingForLeaderDecision => {
+				// Follower: check if we received leader's decision
+				if let Some(signature) = self.received_signature.take() {
+					self.state = SignProtocolState::Done;
+					return Ok(Action::Return(signature));
+				}
+				// Still waiting
+				Ok(Action::Wait)
+			},
+
+			SignProtocolState::Done => {
+				// If we have a signature (leader after SendMany), return it
+				if let Some(signature) = self.received_signature.take() {
+					return Ok(Action::Return(signature));
+				}
+				Err(SignProtocolError::AlreadyComplete)
+			},
 
 			SignProtocolState::Failed(msg) => Err(SignProtocolError::ProtocolFailed(msg.clone())),
 		}
@@ -664,9 +799,16 @@ impl DilithiumSignProtocol {
 			Err(_) => return, // Silently ignore malformed messages
 		};
 
-		// Verify the claimed sender matches
-		if msg.party_id() != from {
-			return; // Sender mismatch, ignore
+		// For Round 1-3 messages, verify the claimed sender matches
+		if let Some(party_id) = msg.party_id() {
+			if party_id != from {
+				return; // Sender mismatch, ignore
+			}
+		}
+
+		// Round 4 messages must come from leader
+		if msg.is_round4() && from != self.leader_id {
+			return; // Only leader can send Round 4 messages
 		}
 
 		// Route to appropriate collection or buffer for later
@@ -708,12 +850,13 @@ impl DilithiumSignProtocol {
 				}
 			},
 			SigningMessage::Round3(r3) => {
-				// Accept Round 3 messages during Round 3 waiting or combining
+				// Accept Round 3 messages during Round 3 waiting or later
 				if matches!(
 					self.state,
 					SignProtocolState::Round3Generate
 						| SignProtocolState::Round3Waiting
-						| SignProtocolState::Combining
+						| SignProtocolState::Round4Deciding
+						| SignProtocolState::WaitingForLeaderDecision
 				) {
 					self.r3_broadcasts.entry(r3.party_id).or_insert(r3);
 				} else if matches!(
@@ -730,6 +873,31 @@ impl DilithiumSignProtocol {
 						r3.party_id, self.state
 					);
 					self.message_buffer.buffer_round3(r3);
+				}
+			},
+			SigningMessage::Round4Complete(sig_bytes) => {
+				// Only followers process Round4Complete
+				if !self.is_leader()
+					&& matches!(self.state, SignProtocolState::WaitingForLeaderDecision)
+				{
+					if let Some(signature) = Signature::from_bytes(&sig_bytes) {
+						self.received_signature = Some(signature);
+					}
+				}
+			},
+			SigningMessage::Round4Retry => {
+				// Only followers process Round4Retry
+				if !self.is_leader() {
+					// Reset for retry
+					self.retry_count += 1;
+					if self.retry_count >= MAX_RETRY_ATTEMPTS {
+						self.state = SignProtocolState::Failed(format!(
+							"Exceeded maximum retry attempts ({})",
+							MAX_RETRY_ATTEMPTS
+						));
+						return;
+					}
+					self.reset_for_retry();
 				}
 			},
 		}
@@ -766,6 +934,24 @@ impl DilithiumSignProtocol {
 		self.my_r2 = None;
 		self.my_r3 = None;
 		self.message_buffer.clear();
+		self.retry_count = 0;
+		self.received_signature = None;
+		self.signer.reset();
+	}
+
+	/// Reset the protocol for a retry attempt (keeps retry count).
+	///
+	/// This is called when the leader decides to retry after combination failure.
+	fn reset_for_retry(&mut self) {
+		self.state = SignProtocolState::Round1Generate;
+		self.r1_broadcasts.clear();
+		self.r2_broadcasts.clear();
+		self.r3_broadcasts.clear();
+		self.my_r1 = None;
+		self.my_r2 = None;
+		self.my_r3 = None;
+		self.message_buffer.clear();
+		self.received_signature = None;
 		self.signer.reset();
 	}
 }
@@ -811,13 +997,62 @@ pub fn run_local_signing(
 	message: &[u8],
 	context: &[u8],
 ) -> Result<Signature, SignProtocolError> {
+	run_local_signing_with_stats(signers, message, context).map(|(sig, _)| sig)
+}
+
+/// Signing result with statistics about the protocol execution.
+#[derive(Debug, Clone)]
+pub struct SigningStats {
+	/// Number of retries that occurred during signing.
+	pub retry_count: u32,
+}
+
+/// Run a complete local signing protocol for testing, returning statistics.
+///
+/// This function simulates the signing protocol with all parties running locally.
+/// It's useful for testing but should not be used in production where parties
+/// are on separate machines.
+///
+/// # Arguments
+///
+/// * `signers` - Vector of threshold signers (one per participating party)
+/// * `message` - The message to sign
+/// * `context` - The context string
+///
+/// # Returns
+///
+/// A tuple of (signature, stats) on success, where stats contains retry count.
+///
+/// # Example
+///
+/// ```ignore
+/// use qp_rusty_crystals_threshold::signing_protocol::run_local_signing_with_stats;
+/// use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig, ThresholdSigner};
+///
+/// let config = ThresholdConfig::new(2, 3)?;
+/// let (pk, shares) = generate_with_dealer(&[0u8; 32], config)?;
+///
+/// let signers: Vec<_> = shares.into_iter()
+///     .take(2)  // Only need threshold parties
+///     .map(|s| ThresholdSigner::new(s, pk.clone(), config).unwrap())
+///     .collect();
+///
+/// let (signature, stats) = run_local_signing_with_stats(signers, b"message", b"context")?;
+/// println!("Signing completed with {} retries", stats.retry_count);
+/// ```
+pub fn run_local_signing_with_stats(
+	signers: Vec<ThresholdSigner>,
+	message: &[u8],
+	context: &[u8],
+) -> Result<(Signature, SigningStats), SignProtocolError> {
 	let num_parties = signers.len();
 	if num_parties < 2 {
 		return Err(SignProtocolError::MissingData("Need at least 2 signers".to_string()));
 	}
 
-	// Get participant IDs
+	// Get participant IDs - leader is the first (lowest) ID
 	let participants: Vec<ParticipantId> = signers.iter().map(|s| s.party_id()).collect();
+	let leader_id = *participants.iter().min().unwrap();
 
 	// Create protocol instances
 	let mut protocols: Vec<DilithiumSignProtocol> = signers
@@ -830,6 +1065,7 @@ pub fn run_local_signing(
 				context.to_vec(),
 				participants.clone(),
 				my_id,
+				leader_id,
 			)
 		})
 		.collect();
@@ -839,7 +1075,7 @@ pub fn run_local_signing(
 
 	// Run until any party completes
 	let mut iterations = 0;
-	const MAX_ITERATIONS: usize = 1000;
+	const MAX_ITERATIONS: usize = 10000; // Increased for retries
 
 	loop {
 		iterations += 1;
@@ -872,7 +1108,12 @@ pub fn run_local_signing(
 					}
 				},
 				Action::Return(signature) => {
-					return Ok(signature);
+					// Get retry count from the leader (who tracks retries)
+					let leader_idx =
+						participants.iter().position(|&id| id == leader_id).unwrap_or(0);
+					let retry_count = protocols[leader_idx].retry_count();
+					let stats = SigningStats { retry_count };
+					return Ok((signature, stats));
 				},
 			}
 		}
@@ -900,10 +1141,13 @@ mod tests {
 			b"context".to_vec(),
 			vec![0, 1, 2],
 			0,
+			0, // leader_id
 		);
 
 		assert_eq!(protocol.my_participant_id(), 0);
 		assert_eq!(protocol.participants().as_slice(), &[0, 1, 2]);
+		assert_eq!(protocol.leader_id(), 0);
+		assert!(protocol.is_leader());
 	}
 
 	#[test]
@@ -913,7 +1157,7 @@ mod tests {
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
 		let protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0);
+			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0, 0);
 
 		let r1 = Round1Broadcast::new(1, [0x42u8; 32]);
 		let msg = SigningMessage::Round1(r1.clone());
@@ -936,7 +1180,7 @@ mod tests {
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
 		let protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0);
+			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0, 0);
 
 		let r2 = Round2Broadcast::new(2, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 		let msg = SigningMessage::Round2(r2.clone());
@@ -959,7 +1203,7 @@ mod tests {
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
 		let protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0);
+			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0, 0);
 
 		let r3 = Round3Broadcast::new(3, vec![10, 20, 30, 40, 50]);
 		let msg = SigningMessage::Round3(r3.clone());
@@ -1049,7 +1293,7 @@ mod tests {
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
 		let mut protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0);
+			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0, 0);
 
 		// Initially in Round1Generate
 		assert_eq!(*protocol.state(), SignProtocolState::Round1Generate);
@@ -1071,7 +1315,7 @@ mod tests {
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
 		let mut protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0);
+			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0, 0);
 
 		// Advance state
 		let _ = protocol.poke().unwrap();
@@ -1090,7 +1334,7 @@ mod tests {
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
 		let mut protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0);
+			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0, 0);
 
 		// Generate Round 1
 		let action = protocol.poke().unwrap();
@@ -1115,21 +1359,22 @@ mod tests {
 			signer,
 			b"test".to_vec(),
 			b"ctx".to_vec(),
-			vec![0, 1], // Only parties 0 and 1
+			vec![0, 1, 2],
 			0,
+			0, // leader_id
 		);
 
 		// Generate Round 1
 		let _ = protocol.poke().unwrap();
 
-		// Create a message from party 2 (not a participant)
-		let r1 = Round1Broadcast::new(2, [0x42u8; 32]);
+		// Create a message from party 99 (not a participant)
+		let r1 = Round1Broadcast::new(99, [0x42u8; 32]);
 		let msg = SigningMessage::Round1(r1);
 		let data = protocol.serialize_message(&msg).unwrap();
 
 		// Deliver message from non-participant (should be ignored)
 		let initial_count = protocol.r1_broadcasts.len();
-		protocol.message(2, data);
+		protocol.message(99, data);
 		assert_eq!(protocol.r1_broadcasts.len(), initial_count);
 	}
 
@@ -1186,6 +1431,7 @@ mod tests {
 			b"context".to_vec(),
 			vec![0, 1, 2],
 			0,
+			0, // leader_id
 		);
 
 		// Start Round 1 - generates and sends our Round 1 message
@@ -1221,6 +1467,7 @@ mod tests {
 			b"context".to_vec(),
 			vec![0, 1, 2],
 			0,
+			0, // leader_id
 		);
 
 		// Start Round 1
@@ -1256,6 +1503,7 @@ mod tests {
 			b"context".to_vec(),
 			vec![0, 1, 2],
 			0,
+			0, // leader_id
 		);
 
 		// Create protocol for party 1 (to generate valid messages)
@@ -1266,6 +1514,7 @@ mod tests {
 			b"context".to_vec(),
 			vec![0, 1, 2],
 			1,
+			0, // leader_id
 		);
 
 		// Start both protocols - generate Round 1
@@ -1318,8 +1567,14 @@ mod tests {
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
-		let mut protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1, 2], 0);
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1, 2],
+			0,
+			0,
+		);
 
 		// Start Round 1
 		let _ = protocol.poke().unwrap();

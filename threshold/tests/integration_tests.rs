@@ -1,13 +1,15 @@
 //! Integration tests for threshold ML-DSA implementation
 //!
 //! These tests validate the complete end-to-end threshold signature protocol
-//! using the new ThresholdSigner API.
+//! using the new 4-round ThresholdSigner API with leader-based retry.
 
 use std::time::{Duration, Instant};
 
 use qp_rusty_crystals_threshold::{
-	generate_with_dealer, keygen::dkg::run_local_dkg, verify_signature, ThresholdConfig,
-	ThresholdSigner,
+	generate_with_dealer,
+	keygen::dkg::run_local_dkg,
+	signing_protocol::{run_local_signing, run_local_signing_with_stats, SigningStats},
+	verify_signature, ThresholdConfig, ThresholdSigner,
 };
 
 /// Helper to encode bytes as hex string
@@ -15,9 +17,9 @@ fn hex_encode(data: &[u8]) -> String {
 	data.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Run the complete threshold signing protocol using the new API.
+/// Run the complete threshold signing protocol using the 4-round protocol with leader-based retry.
 /// Returns Ok(signature_bytes) on success or Err(message) on failure.
-fn run_threshold_protocol_new_api(
+fn run_threshold_protocol_4_round(
 	threshold: u32,
 	total_parties: u32,
 	seed: &[u8; 32],
@@ -31,50 +33,16 @@ fn run_threshold_protocol_new_api(
 		generate_with_dealer(seed, config).map_err(|e| format!("Key generation error: {:?}", e))?;
 
 	// Create signers for the first `threshold` parties (active signers)
-	let mut signers: Vec<ThresholdSigner> = shares
+	let signers: Vec<ThresholdSigner> = shares
 		.into_iter()
 		.take(threshold as usize)
 		.map(|share| ThresholdSigner::new(share, public_key.clone(), config))
 		.collect::<Result<_, _>>()
 		.map_err(|e| format!("Signer creation error: {:?}", e))?;
 
-	let mut rng = rand::thread_rng();
-
-	// Round 1: All active parties generate commitments
-	let r1_broadcasts: Vec<_> = signers
-		.iter_mut()
-		.map(|s| s.round1_commit(&mut rng))
-		.collect::<Result<_, _>>()
-		.map_err(|e| format!("Round 1 error: {:?}", e))?;
-
-	// Round 2: All active parties reveal their commitments
-	let r2_broadcasts: Vec<_> = signers
-		.iter_mut()
-		.enumerate()
-		.map(|(i, s)| {
-			let others: Vec<_> =
-				r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-			s.round2_reveal(message, context, &others)
-		})
-		.collect::<Result<_, _>>()
-		.map_err(|e| format!("Round 2 error: {:?}", e))?;
-
-	// Round 3: All active parties compute their responses
-	let r3_broadcasts: Vec<_> = signers
-		.iter_mut()
-		.enumerate()
-		.map(|(i, s)| {
-			let others: Vec<_> =
-				r2_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-			s.round3_respond(&others)
-		})
-		.collect::<Result<_, _>>()
-		.map_err(|e| format!("Round 3 error: {:?}", e))?;
-
-	// Combine: Any party can combine (we use party 0)
-	let signature = signers[0]
-		.combine(&r2_broadcasts, &r3_broadcasts)
-		.map_err(|e| format!("Combine error: {:?}", e))?;
+	// Run the 4-round signing protocol with leader-based retry
+	let signature = run_local_signing(signers, message, context)
+		.map_err(|e| format!("Signing error: {:?}", e))?;
 
 	// Verify the signature
 	if !verify_signature(&public_key, message, context, &signature) {
@@ -84,8 +52,8 @@ fn run_threshold_protocol_new_api(
 	Ok(signature.as_bytes().to_vec())
 }
 
-/// Run threshold signing protocol using DKG-generated keys.
-fn run_threshold_protocol_with_dkg(
+/// Run threshold signing protocol using DKG-generated keys with 4-round protocol.
+fn run_threshold_protocol_with_dkg_4_round(
 	threshold: u32,
 	total_parties: u32,
 	seed: &[u8; 32],
@@ -102,50 +70,16 @@ fn run_threshold_protocol_with_dkg(
 	let public_key = dkg_outputs[0].public_key.clone();
 
 	// Create signers for the first `threshold` parties (active signers)
-	let mut signers: Vec<ThresholdSigner> = dkg_outputs
+	let signers: Vec<ThresholdSigner> = dkg_outputs
 		.into_iter()
 		.take(threshold as usize)
 		.map(|output| ThresholdSigner::new(output.private_share, public_key.clone(), config))
 		.collect::<Result<_, _>>()
 		.map_err(|e| format!("Signer creation error: {:?}", e))?;
 
-	let mut rng = rand::thread_rng();
-
-	// Round 1: All active parties generate commitments
-	let r1_broadcasts: Vec<_> = signers
-		.iter_mut()
-		.map(|s| s.round1_commit(&mut rng))
-		.collect::<Result<_, _>>()
-		.map_err(|e| format!("Round 1 error: {:?}", e))?;
-
-	// Round 2: All active parties reveal their commitments
-	let r2_broadcasts: Vec<_> = signers
-		.iter_mut()
-		.enumerate()
-		.map(|(i, s)| {
-			let others: Vec<_> =
-				r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-			s.round2_reveal(message, context, &others)
-		})
-		.collect::<Result<_, _>>()
-		.map_err(|e| format!("Round 2 error: {:?}", e))?;
-
-	// Round 3: All active parties compute their responses
-	let r3_broadcasts: Vec<_> = signers
-		.iter_mut()
-		.enumerate()
-		.map(|(i, s)| {
-			let others: Vec<_> =
-				r2_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-			s.round3_respond(&others)
-		})
-		.collect::<Result<_, _>>()
-		.map_err(|e| format!("Round 3 error: {:?}", e))?;
-
-	// Combine: Any party can combine (we use party 0)
-	let signature = signers[0]
-		.combine(&r2_broadcasts, &r3_broadcasts)
-		.map_err(|e| format!("Combine error: {:?}", e))?;
+	// Run the 4-round signing protocol with leader-based retry
+	let signature = run_local_signing(signers, message, context)
+		.map_err(|e| format!("Signing error: {:?}", e))?;
 
 	// Verify the signature
 	if !verify_signature(&public_key, message, context, &signature) {
@@ -156,12 +90,12 @@ fn run_threshold_protocol_with_dkg(
 }
 
 // ============================================================================
-// Deterministic Tests (using fixed seeds - should always pass with retries)
+// Deterministic Tests (using fixed seeds - 4-round protocol handles retries)
 // ============================================================================
 
 #[test]
 fn test_2_of_2_deterministic() {
-	println!("\n=== 2-of-2 DETERMINISTIC TEST ===\n");
+	println!("\n=== 2-of-2 DETERMINISTIC TEST (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
@@ -171,33 +105,24 @@ fn test_2_of_2_deterministic() {
 	let message = b"test message";
 	let context: &[u8] = b"";
 
-	let max_attempts = 50;
-	for attempt in 0..max_attempts {
-		match run_threshold_protocol_new_api(2, 2, &seed, message, context) {
-			Ok(signature) => {
-				println!(
-					"✅ 2-of-2 deterministic: Signature created and verified on attempt {}!",
-					attempt + 1
-				);
-				println!("   Signature length: {} bytes", signature.len());
-				println!(
-					"   Signature[0..32]: {}",
-					hex_encode(&signature[..32.min(signature.len())])
-				);
-				return;
-			},
-			Err(e) =>
-				if attempt < 5 || attempt % 10 == 0 {
-					println!("   Attempt {} failed: {}", attempt + 1, e);
-				},
-		}
+	let start = Instant::now();
+	match run_threshold_protocol_4_round(2, 2, &seed, message, context) {
+		Ok(signature) => {
+			let elapsed = start.elapsed();
+			println!("✅ 2-of-2 deterministic: Signature created and verified!");
+			println!("   Time: {:?}", elapsed);
+			println!("   Signature length: {} bytes", signature.len());
+			println!("   Signature[0..32]: {}", hex_encode(&signature[..32.min(signature.len())]));
+		},
+		Err(e) => {
+			panic!("❌ 2-of-2 deterministic failed: {}", e);
+		},
 	}
-	panic!("❌ 2-of-2 deterministic failed after {} attempts", max_attempts);
 }
 
 #[test]
 fn test_2_of_3_deterministic() {
-	println!("\n=== 2-of-3 DETERMINISTIC TEST ===\n");
+	println!("\n=== 2-of-3 DETERMINISTIC TEST (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
@@ -207,29 +132,23 @@ fn test_2_of_3_deterministic() {
 	let message = b"test message for 2-of-3";
 	let context: &[u8] = b"";
 
-	let max_attempts = 100;
-	for attempt in 0..max_attempts {
-		match run_threshold_protocol_new_api(2, 3, &seed, message, context) {
-			Ok(signature) => {
-				println!(
-					"✅ 2-of-3 deterministic: Signature created and verified on attempt {}!",
-					attempt + 1
-				);
-				println!("   Signature length: {} bytes", signature.len());
-				return;
-			},
-			Err(e) =>
-				if attempt < 5 || attempt % 20 == 0 {
-					println!("   Attempt {} failed: {}", attempt + 1, e);
-				},
-		}
+	let start = Instant::now();
+	match run_threshold_protocol_4_round(2, 3, &seed, message, context) {
+		Ok(signature) => {
+			let elapsed = start.elapsed();
+			println!("✅ 2-of-3 deterministic: Signature created and verified!");
+			println!("   Time: {:?}", elapsed);
+			println!("   Signature length: {} bytes", signature.len());
+		},
+		Err(e) => {
+			panic!("❌ 2-of-3 deterministic failed: {}", e);
+		},
 	}
-	panic!("❌ 2-of-3 deterministic failed after {} attempts", max_attempts);
 }
 
 #[test]
 fn test_3_of_5_deterministic() {
-	println!("\n=== 3-of-5 DETERMINISTIC TEST ===\n");
+	println!("\n=== 3-of-5 DETERMINISTIC TEST (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
@@ -239,128 +158,100 @@ fn test_3_of_5_deterministic() {
 	let message = b"test message for 3-of-5";
 	let context: &[u8] = b"";
 
-	let max_attempts = 200;
-	for attempt in 0..max_attempts {
-		match run_threshold_protocol_new_api(3, 5, &seed, message, context) {
-			Ok(signature) => {
-				println!(
-					"✅ 3-of-5 deterministic: Signature created and verified on attempt {}!",
-					attempt + 1
-				);
-				println!("   Signature length: {} bytes", signature.len());
-				return;
-			},
-			Err(e) =>
-				if attempt < 5 || attempt % 20 == 0 {
-					println!("   Attempt {} failed: {}", attempt + 1, e);
-				},
-		}
+	let start = Instant::now();
+	match run_threshold_protocol_4_round(3, 5, &seed, message, context) {
+		Ok(signature) => {
+			let elapsed = start.elapsed();
+			println!("✅ 3-of-5 deterministic: Signature created and verified!");
+			println!("   Time: {:?}", elapsed);
+			println!("   Signature length: {} bytes", signature.len());
+		},
+		Err(e) => {
+			panic!("❌ 3-of-5 deterministic failed: {}", e);
+		},
 	}
-	panic!("❌ 3-of-5 deterministic failed after {} attempts", max_attempts);
 }
 
 // ============================================================================
-// Randomized Tests (using random seeds - may need retries due to rejection sampling)
+// Randomized Tests (using random seeds - 4-round protocol handles retries)
 // ============================================================================
 
 #[test]
 fn test_2_of_2_random() {
-	println!("\n=== 2-of-2 RANDOM TEST ===\n");
+	println!("\n=== 2-of-2 RANDOM TEST (4-Round Protocol) ===\n");
 
 	use rand::RngCore;
 
-	let max_attempts = 10;
+	let mut seed = [0u8; 32];
+	rand::thread_rng().fill_bytes(&mut seed);
 
-	for attempt in 1..=max_attempts {
-		let mut seed = [0u8; 32];
-		rand::thread_rng().fill_bytes(&mut seed);
+	let message = b"random test message";
+	let context: &[u8] = b"";
 
-		let message = b"random test message";
-		let context: &[u8] = b"";
-
-		match run_threshold_protocol_new_api(2, 2, &seed, message, context) {
-			Ok(signature) => {
-				println!(
-					"✅ 2-of-2 random: Signature created and verified on attempt {}!",
-					attempt
-				);
-				println!("   Signature length: {} bytes", signature.len());
-				return;
-			},
-			Err(e) => {
-				println!("   Attempt {} failed: {}", attempt, e);
-			},
-		}
+	let start = Instant::now();
+	match run_threshold_protocol_4_round(2, 2, &seed, message, context) {
+		Ok(signature) => {
+			let elapsed = start.elapsed();
+			println!("✅ 2-of-2 random: Signature created and verified!");
+			println!("   Time: {:?}", elapsed);
+			println!("   Signature length: {} bytes", signature.len());
+		},
+		Err(e) => {
+			panic!("❌ 2-of-2 random failed: {}", e);
+		},
 	}
-
-	panic!("❌ 2-of-2 random failed after {} attempts", max_attempts);
 }
 
 #[test]
 fn test_2_of_3_random() {
-	println!("\n=== 2-of-3 RANDOM TEST ===\n");
+	println!("\n=== 2-of-3 RANDOM TEST (4-Round Protocol) ===\n");
 
 	use rand::RngCore;
 
-	let max_attempts = 10;
+	let mut seed = [0u8; 32];
+	rand::thread_rng().fill_bytes(&mut seed);
 
-	for attempt in 1..=max_attempts {
-		let mut seed = [0u8; 32];
-		rand::thread_rng().fill_bytes(&mut seed);
+	let message = b"random test message for 2-of-3";
+	let context: &[u8] = b"";
 
-		let message = b"random test message for 2-of-3";
-		let context: &[u8] = b"";
-
-		match run_threshold_protocol_new_api(2, 3, &seed, message, context) {
-			Ok(signature) => {
-				println!(
-					"✅ 2-of-3 random: Signature created and verified on attempt {}!",
-					attempt
-				);
-				println!("   Signature length: {} bytes", signature.len());
-				return;
-			},
-			Err(e) => {
-				println!("   Attempt {} failed: {}", attempt, e);
-			},
-		}
+	let start = Instant::now();
+	match run_threshold_protocol_4_round(2, 3, &seed, message, context) {
+		Ok(signature) => {
+			let elapsed = start.elapsed();
+			println!("✅ 2-of-3 random: Signature created and verified!");
+			println!("   Time: {:?}", elapsed);
+			println!("   Signature length: {} bytes", signature.len());
+		},
+		Err(e) => {
+			panic!("❌ 2-of-3 random failed: {}", e);
+		},
 	}
-
-	panic!("❌ 2-of-3 random failed after {} attempts", max_attempts);
 }
 
 #[test]
 fn test_3_of_5_random() {
-	println!("\n=== 3-of-5 RANDOM TEST ===\n");
+	println!("\n=== 3-of-5 RANDOM TEST (4-Round Protocol) ===\n");
 
 	use rand::RngCore;
 
-	// 3-of-5 has lower success probability, need more attempts
-	let max_attempts = 50;
+	let mut seed = [0u8; 32];
+	rand::thread_rng().fill_bytes(&mut seed);
 
-	for attempt in 1..=max_attempts {
-		let mut seed = [0u8; 32];
-		rand::thread_rng().fill_bytes(&mut seed);
+	let message = b"random test message for 3-of-5";
+	let context: &[u8] = b"";
 
-		let message = b"random test message for 3-of-5";
-		let context: &[u8] = b"";
-
-		match run_threshold_protocol_new_api(3, 5, &seed, message, context) {
-			Ok(signature) => {
-				println!(
-					"✅ 3-of-5 random: Signature created and verified on attempt {}!",
-					attempt
-				);
-				println!("   Signature length: {} bytes", signature.len());
-				return;
-			},
-			Err(e) => {
-				println!("   Attempt {} failed: {}", attempt, e);
-			},
-		}
+	let start = Instant::now();
+	match run_threshold_protocol_4_round(3, 5, &seed, message, context) {
+		Ok(signature) => {
+			let elapsed = start.elapsed();
+			println!("✅ 3-of-5 random: Signature created and verified!");
+			println!("   Time: {:?}", elapsed);
+			println!("   Signature length: {} bytes", signature.len());
+		},
+		Err(e) => {
+			panic!("❌ 3-of-5 random failed: {}", e);
+		},
 	}
-
-	panic!("❌ 3-of-5 random failed after {} attempts", max_attempts);
 }
 
 // ============================================================================
@@ -369,7 +260,7 @@ fn test_3_of_5_random() {
 
 #[test]
 fn test_with_context() {
-	println!("\n=== TEST WITH CONTEXT ===\n");
+	println!("\n=== TEST WITH CONTEXT (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
@@ -379,24 +270,24 @@ fn test_with_context() {
 	let message = b"message with context";
 	let context = b"my-application-context";
 
-	let max_attempts = 50;
-	for _attempt in 0..max_attempts {
-		match run_threshold_protocol_new_api(2, 2, &seed, message, context) {
-			Ok(signature) => {
-				println!("✅ With context: Signature created and verified!");
-				println!("   Context: {:?}", String::from_utf8_lossy(context));
-				println!("   Signature length: {} bytes", signature.len());
-				return;
-			},
-			Err(_) => continue,
-		}
+	let start = Instant::now();
+	match run_threshold_protocol_4_round(2, 2, &seed, message, context) {
+		Ok(signature) => {
+			let elapsed = start.elapsed();
+			println!("✅ With context: Signature created and verified!");
+			println!("   Context: {:?}", String::from_utf8_lossy(context));
+			println!("   Time: {:?}", elapsed);
+			println!("   Signature length: {} bytes", signature.len());
+		},
+		Err(e) => {
+			panic!("❌ With context test failed: {}", e);
+		},
 	}
-	panic!("❌ With context test failed after {} attempts", max_attempts);
 }
 
 #[test]
 fn test_empty_message() {
-	println!("\n=== TEST EMPTY MESSAGE ===\n");
+	println!("\n=== TEST EMPTY MESSAGE (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
@@ -406,23 +297,23 @@ fn test_empty_message() {
 	let message: &[u8] = b"";
 	let context: &[u8] = b"";
 
-	let max_attempts = 50;
-	for _attempt in 0..max_attempts {
-		match run_threshold_protocol_new_api(2, 2, &seed, message, context) {
-			Ok(signature) => {
-				println!("✅ Empty message: Signature created and verified!");
-				println!("   Signature length: {} bytes", signature.len());
-				return;
-			},
-			Err(_) => continue,
-		}
+	let start = Instant::now();
+	match run_threshold_protocol_4_round(2, 2, &seed, message, context) {
+		Ok(signature) => {
+			let elapsed = start.elapsed();
+			println!("✅ Empty message: Signature created and verified!");
+			println!("   Time: {:?}", elapsed);
+			println!("   Signature length: {} bytes", signature.len());
+		},
+		Err(e) => {
+			panic!("❌ Empty message test failed: {}", e);
+		},
 	}
-	panic!("❌ Empty message test failed after {} attempts", max_attempts);
 }
 
 #[test]
 fn test_long_message() {
-	println!("\n=== TEST LONG MESSAGE ===\n");
+	println!("\n=== TEST LONG MESSAGE (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
@@ -433,19 +324,19 @@ fn test_long_message() {
 	let message: Vec<u8> = (0..10240).map(|i| (i % 256) as u8).collect();
 	let context: &[u8] = b"";
 
-	let max_attempts = 50;
-	for _attempt in 0..max_attempts {
-		match run_threshold_protocol_new_api(2, 2, &seed, &message, context) {
-			Ok(signature) => {
-				println!("✅ Long message (10KB): Signature created and verified!");
-				println!("   Message length: {} bytes", message.len());
-				println!("   Signature length: {} bytes", signature.len());
-				return;
-			},
-			Err(_) => continue,
-		}
+	let start = Instant::now();
+	match run_threshold_protocol_4_round(2, 2, &seed, &message, context) {
+		Ok(signature) => {
+			let elapsed = start.elapsed();
+			println!("✅ Long message (10KB): Signature created and verified!");
+			println!("   Message length: {} bytes", message.len());
+			println!("   Time: {:?}", elapsed);
+			println!("   Signature length: {} bytes", signature.len());
+		},
+		Err(e) => {
+			panic!("❌ Long message test failed: {}", e);
+		},
 	}
-	panic!("❌ Long message test failed after {} attempts", max_attempts);
 }
 
 // ============================================================================
@@ -454,7 +345,7 @@ fn test_long_message() {
 
 #[test]
 fn test_signature_verification_with_wrong_message() {
-	println!("\n=== TEST WRONG MESSAGE VERIFICATION ===\n");
+	println!("\n=== TEST WRONG MESSAGE VERIFICATION (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
@@ -467,17 +358,9 @@ fn test_signature_verification_with_wrong_message() {
 	let message = b"original message";
 	let context: &[u8] = b"";
 
-	// Get a valid signature first
-	let max_attempts = 50;
-	let mut signature = None;
-	for _ in 0..max_attempts {
-		if let Ok(sig) = run_threshold_protocol_new_api(2, 2, &seed, message, context) {
-			signature = Some(sig);
-			break;
-		}
-	}
-
-	let signature = signature.expect("Should get a valid signature");
+	// Get a valid signature using 4-round protocol
+	let signature = run_threshold_protocol_4_round(2, 2, &seed, message, context)
+		.expect("Should get a valid signature");
 	let sig = qp_rusty_crystals_threshold::Signature::from_bytes(&signature)
 		.expect("Valid signature bytes");
 
@@ -494,7 +377,7 @@ fn test_signature_verification_with_wrong_message() {
 
 #[test]
 fn test_signature_verification_with_wrong_context() {
-	println!("\n=== TEST WRONG CONTEXT VERIFICATION ===\n");
+	println!("\n=== TEST WRONG CONTEXT VERIFICATION (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
@@ -507,17 +390,9 @@ fn test_signature_verification_with_wrong_context() {
 	let message = b"test message";
 	let context = b"correct-context";
 
-	// Get a valid signature first
-	let max_attempts = 50;
-	let mut signature = None;
-	for _ in 0..max_attempts {
-		if let Ok(sig) = run_threshold_protocol_new_api(2, 2, &seed, message, context) {
-			signature = Some(sig);
-			break;
-		}
-	}
-
-	let signature = signature.expect("Should get a valid signature");
+	// Get a valid signature using 4-round protocol
+	let signature = run_threshold_protocol_4_round(2, 2, &seed, message, context)
+		.expect("Should get a valid signature");
 	let sig = qp_rusty_crystals_threshold::Signature::from_bytes(&signature)
 		.expect("Valid signature bytes");
 
@@ -538,7 +413,7 @@ fn test_signature_verification_with_wrong_context() {
 
 #[test]
 fn test_threshold_matrix() {
-	println!("\n=== THRESHOLD MATRIX TEST (Dealer) ===\n");
+	println!("\n=== THRESHOLD MATRIX TEST (Dealer + 4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
@@ -548,89 +423,127 @@ fn test_threshold_matrix() {
 	let message = b"matrix test message";
 	let context: &[u8] = b"";
 
-	// Test configurations: (threshold, total_parties, max_attempts)
-	// max_attempts is the number of full protocol retries
-	// k_iterations (from config) is parallel attempts within each protocol run
-	let configs: [(u32, u32, u32); 21] = [
+	// Test configurations: (threshold, total_parties)
+	// The 4-round protocol with leader-based retry handles rejection sampling internally,
+	// so we no longer need external max_attempts loops.
+	let configs: [(u32, u32); 21] = [
 		// n = 2
-		(2, 2, 50),
+		(2, 2),
 		// n = 3
-		(2, 3, 100),
-		(3, 3, 150),
+		(2, 3),
+		(3, 3),
 		// n = 4
-		(2, 4, 100),
-		(3, 4, 200),
-		(4, 4, 250),
+		(2, 4),
+		(3, 4),
+		(4, 4),
 		// n = 5
-		(2, 5, 100),
-		(3, 5, 300),
-		(4, 5, 500),
-		(5, 5, 400),
+		(2, 5),
+		(3, 5),
+		(4, 5),
+		(5, 5),
 		// n = 6
-		(2, 6, 100),
-		(3, 6, 400),
-		(4, 6, 700),
-		(5, 6, 800),
-		(6, 6, 600),
+		(2, 6),
+		(3, 6),
+		(4, 6),
+		(5, 6),
+		(6, 6),
 		// n = 7 (EXPERIMENTAL - k_iterations are estimates)
-		(2, 7, 200),
-		(3, 7, 500),
-		(4, 7, 1000),
-		(5, 7, 1500),
-		(6, 7, 1200),
-		(7, 7, 800),
+		(2, 7),
+		(3, 7),
+		(4, 7),
+		(5, 7),
+		(6, 7),
+		(7, 7),
 	];
 
 	let mut passed = 0;
 	let mut failed = 0;
 	let mut total_time = Duration::ZERO;
+	let mut total_retries = 0u32;
+	let mut max_retries = 0u32;
 
-	for (threshold, total_parties, max_attempts) in configs.iter() {
+	println!("{:<10} {:<10} {:<10} {:<10}", "Config", "Status", "Time", "Retries");
+	println!("{}", "-".repeat(45));
+
+	for (threshold, total_parties) in configs.iter() {
 		let start = Instant::now();
-		let mut success = false;
-		let mut final_attempt = 0;
 
-		for attempt in 0..(*max_attempts) {
-			// let attempt_start = Instant::now();
-			match run_threshold_protocol_new_api(
-				*threshold,
-				*total_parties,
-				&seed,
-				message,
-				context,
-			) {
-				Ok(_) => {
-					final_attempt = attempt + 1;
-					success = true;
-					break;
-				},
-				Err(_e) => {
-					// Log every 10th attempt or first few
-					// if attempt < 5 || attempt % 10 == 0 {
-					//     println!(
-					//         "  {}-of-{} attempt {} failed in {:.2?}: {:?}",
-					//         threshold, total_parties, attempt + 1, attempt_start.elapsed(), e
-					//     );
-					// }
-				},
-			}
-		}
+		// Generate keys with dealer
+		let config = match ThresholdConfig::new(*threshold, *total_parties) {
+			Ok(c) => c,
+			Err(e) => {
+				println!("❌ {}-of-{}: Config error: {:?}", threshold, total_parties, e);
+				failed += 1;
+				continue;
+			},
+		};
 
-		let elapsed = start.elapsed();
-		total_time += elapsed;
+		let (public_key, shares) = match generate_with_dealer(&seed, config) {
+			Ok(result) => result,
+			Err(e) => {
+				println!("❌ {}-of-{}: Keygen error: {:?}", threshold, total_parties, e);
+				failed += 1;
+				continue;
+			},
+		};
 
-		if success {
-			println!(
-				"✅ {}-of-{}: PASSED (attempt {}, {:.2?})",
-				threshold, total_parties, final_attempt, elapsed
-			);
-			passed += 1;
-		} else {
-			println!(
-				"❌ {}-of-{}: FAILED after {} attempts ({:.2?})",
-				threshold, total_parties, max_attempts, elapsed
-			);
-			failed += 1;
+		// Create signers for threshold parties
+		let signers: Vec<ThresholdSigner> = match shares
+			.into_iter()
+			.take(*threshold as usize)
+			.map(|share| ThresholdSigner::new(share, public_key.clone(), config))
+			.collect::<Result<Vec<_>, _>>()
+		{
+			Ok(s) => s,
+			Err(e) => {
+				println!("❌ {}-of-{}: Signer creation error: {:?}", threshold, total_parties, e);
+				failed += 1;
+				continue;
+			},
+		};
+
+		// Run the 4-round signing protocol with leader-based retry
+		match run_local_signing_with_stats(signers, message, context) {
+			Ok((signature, stats)) => {
+				// Verify the signature
+				if verify_signature(&public_key, message, context, &signature) {
+					let elapsed = start.elapsed();
+					total_time += elapsed;
+					total_retries += stats.retry_count;
+					if stats.retry_count > max_retries {
+						max_retries = stats.retry_count;
+					}
+					println!(
+						"{:<10} {:<10} {:<10} {:<10}",
+						format!("{}-of-{}", threshold, total_parties),
+						"✅ PASSED",
+						format!("{:.2?}", elapsed),
+						stats.retry_count
+					);
+					passed += 1;
+				} else {
+					println!(
+						"{:<10} {:<10} {:<10} {:<10}",
+						format!("{}-of-{}", threshold, total_parties),
+						"❌ VERIFY",
+						"-",
+						"-"
+					);
+					failed += 1;
+				}
+			},
+			Err(e) => {
+				let elapsed = start.elapsed();
+				total_time += elapsed;
+				println!(
+					"{:<10} {:<10} {:<10} {:<10}",
+					format!("{}-of-{}", threshold, total_parties),
+					"❌ ERROR",
+					format!("{:.2?}", elapsed),
+					format!("{:?}", e)
+				);
+				failed += 1;
+			},
 		}
 	}
 
@@ -638,6 +551,11 @@ fn test_threshold_matrix() {
 	println!("Passed: {}", passed);
 	println!("Failed: {}", failed);
 	println!("Total time: {:.2?}", total_time);
+	println!("Total retries: {}", total_retries);
+	println!("Max retries (single config): {}", max_retries);
+	if passed > 0 {
+		println!("Avg retries per config: {:.2}", total_retries as f64 / passed as f64);
+	}
 
 	assert_eq!(failed, 0, "Some threshold configurations failed");
 }
@@ -645,100 +563,152 @@ fn test_threshold_matrix() {
 /// Test threshold signing with DKG-generated keys across multiple configurations.
 #[test]
 fn test_threshold_matrix_dkg() {
-	println!("\n=== THRESHOLD MATRIX TEST (DKG) ===\n");
+	println!("\n=== THRESHOLD MATRIX TEST (DKG + 4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
-		seed[i] = (i as u8).wrapping_add(100); // Different seed than dealer test
+		seed[i] = i as u8;
 	}
 
-	let message = b"matrix test message with dkg";
-	let context: &[u8] = b"";
+	let message = b"DKG matrix test message";
+	let context: &[u8] = b"dkg-test";
 
-	// Test configurations: (threshold, total_parties, max_attempts)
-	// Using same configs as dealer test
-	let configs: [(u32, u32, u32); 21] = [
+	// Test configurations: (threshold, total_parties)
+	// The 4-round protocol with leader-based retry handles rejection sampling internally.
+	let configs: [(u32, u32); 21] = [
 		// n = 2
-		(2, 2, 50),
+		(2, 2),
 		// n = 3
-		(2, 3, 100),
-		(3, 3, 150),
+		(2, 3),
+		(3, 3),
 		// n = 4
-		(2, 4, 100),
-		(3, 4, 200),
-		(4, 4, 250),
+		(2, 4),
+		(3, 4),
+		(4, 4),
 		// n = 5
-		(2, 5, 100),
-		(3, 5, 300),
-		(4, 5, 500),
-		(5, 5, 400),
+		(2, 5),
+		(3, 5),
+		(4, 5),
+		(5, 5),
 		// n = 6
-		(2, 6, 100),
-		(3, 6, 400),
-		(4, 6, 700),
-		(5, 6, 800),
-		(6, 6, 600),
+		(2, 6),
+		(3, 6),
+		(4, 6),
+		(5, 6),
+		(6, 6),
 		// n = 7 (EXPERIMENTAL - k_iterations are estimates)
-		(2, 7, 200),
-		(3, 7, 500),
-		(4, 7, 1000),
-		(5, 7, 1500),
-		(6, 7, 1200),
-		(7, 7, 800),
+		(2, 7),
+		(3, 7),
+		(4, 7),
+		(5, 7),
+		(6, 7),
+		(7, 7),
 	];
 
 	let mut passed = 0;
 	let mut failed = 0;
 	let mut total_time = Duration::ZERO;
+	let mut total_retries = 0u32;
+	let mut max_retries = 0u32;
 
-	for (threshold, total_parties, max_attempts) in configs.iter() {
+	println!("{:<10} {:<10} {:<10} {:<10}", "Config", "Status", "Time", "Retries");
+	println!("{}", "-".repeat(45));
+
+	for (threshold, total_parties) in configs.iter() {
 		let start = Instant::now();
-		let mut success = false;
-		let mut final_attempt = 0;
 
-		for attempt in 0..(*max_attempts) {
-			match run_threshold_protocol_with_dkg(
-				*threshold,
-				*total_parties,
-				&seed,
-				message,
-				context,
-			) {
-				Ok(_) => {
-					final_attempt = attempt + 1;
-					success = true;
-					break;
-				},
-				Err(_e) => {
-					// Rejection sampling may require multiple attempts
-				},
-			}
-		}
+		// Run DKG to generate keys
+		let dkg_outputs = match run_local_dkg(*threshold, *total_parties, seed) {
+			Ok(outputs) => outputs,
+			Err(e) => {
+				println!("❌ {}-of-{}: DKG error: {:?}", threshold, total_parties, e);
+				failed += 1;
+				continue;
+			},
+		};
 
-		let elapsed = start.elapsed();
-		total_time += elapsed;
+		// Extract public key and create signers
+		let public_key = dkg_outputs[0].public_key.clone();
+		let config = match ThresholdConfig::new(*threshold, *total_parties) {
+			Ok(c) => c,
+			Err(e) => {
+				println!("❌ {}-of-{}: Config error: {:?}", threshold, total_parties, e);
+				failed += 1;
+				continue;
+			},
+		};
 
-		if success {
-			println!(
-				"✅ {}-of-{}: PASSED (attempt {}, {:.2?})",
-				threshold, total_parties, final_attempt, elapsed
-			);
-			passed += 1;
-		} else {
-			println!(
-				"❌ {}-of-{}: FAILED after {} attempts ({:.2?})",
-				threshold, total_parties, max_attempts, elapsed
-			);
-			failed += 1;
+		// Create signers for threshold parties
+		let signers: Vec<ThresholdSigner> = match dkg_outputs
+			.into_iter()
+			.take(*threshold as usize)
+			.map(|output| ThresholdSigner::new(output.private_share, public_key.clone(), config))
+			.collect::<Result<Vec<_>, _>>()
+		{
+			Ok(s) => s,
+			Err(e) => {
+				println!("❌ {}-of-{}: Signer creation error: {:?}", threshold, total_parties, e);
+				failed += 1;
+				continue;
+			},
+		};
+
+		// Run the 4-round signing protocol with leader-based retry
+		match run_local_signing_with_stats(signers, message, context) {
+			Ok((signature, stats)) => {
+				// Verify the signature
+				if verify_signature(&public_key, message, context, &signature) {
+					let elapsed = start.elapsed();
+					total_time += elapsed;
+					total_retries += stats.retry_count;
+					if stats.retry_count > max_retries {
+						max_retries = stats.retry_count;
+					}
+					println!(
+						"{:<10} {:<10} {:<10} {:<10}",
+						format!("{}-of-{}", threshold, total_parties),
+						"✅ PASSED",
+						format!("{:.2?}", elapsed),
+						stats.retry_count
+					);
+					passed += 1;
+				} else {
+					println!(
+						"{:<10} {:<10} {:<10} {:<10}",
+						format!("{}-of-{}", threshold, total_parties),
+						"❌ VERIFY",
+						"-",
+						"-"
+					);
+					failed += 1;
+				}
+			},
+			Err(e) => {
+				let elapsed = start.elapsed();
+				total_time += elapsed;
+				println!(
+					"{:<10} {:<10} {:<10} {:<10}",
+					format!("{}-of-{}", threshold, total_parties),
+					"❌ ERROR",
+					format!("{:.2?}", elapsed),
+					format!("{:?}", e)
+				);
+				failed += 1;
+			},
 		}
 	}
 
-	println!("\n=== DKG MATRIX RESULTS ===");
+	println!("\n=== MATRIX RESULTS (DKG) ===");
 	println!("Passed: {}", passed);
 	println!("Failed: {}", failed);
 	println!("Total time: {:.2?}", total_time);
+	println!("Total retries: {}", total_retries);
+	println!("Max retries (single config): {}", max_retries);
+	if passed > 0 {
+		println!("Avg retries per config: {:.2}", total_retries as f64 / passed as f64);
+	}
 
-	assert_eq!(failed, 0, "Some threshold configurations failed with DKG");
+	assert_eq!(failed, 0, "Some DKG threshold configurations failed");
 }
 
 /// Test that configuration validation works for n up to 7
@@ -801,17 +771,17 @@ fn test_keygen_extended() {
 }
 
 // ============================================================================
-// Subset Signing Tests
+// Subset Signing Tests (4-Round Protocol)
 // ============================================================================
 
-/// Run threshold signing with a SUBSET of DKG participants.
+/// Run threshold signing with a SUBSET of DKG participants using the 4-round protocol.
 /// This tests the core subset signing feature needed for NEAR MPC integration.
 ///
 /// # Arguments
 /// * `dkg_threshold` - The threshold from DKG (t)
 /// * `dkg_total` - Total parties from DKG (n)
 /// * `signing_parties` - Which party IDs participate in signing (must be >= threshold)
-fn run_subset_signing(
+fn run_subset_signing_4_round(
 	dkg_threshold: u32,
 	dkg_total: u32,
 	signing_parties: &[u32],
@@ -839,52 +809,15 @@ fn run_subset_signing(
 		signing_parties.iter().map(|&id| all_shares[id as usize].clone()).collect();
 
 	// Create signers for the signing subset
-	let mut signers: Vec<ThresholdSigner> = signing_shares
+	let signers: Vec<ThresholdSigner> = signing_shares
 		.into_iter()
 		.map(|share| ThresholdSigner::new(share, public_key.clone(), signing_config))
 		.collect::<Result<_, _>>()
 		.map_err(|e| format!("Signer creation error: {:?}", e))?;
 
-	let mut rng = rand::thread_rng();
-
-	// Round 1: All signing parties generate commitments
-	let r1_broadcasts: Vec<_> = signers
-		.iter_mut()
-		.map(|s| s.round1_commit(&mut rng))
-		.collect::<Result<_, _>>()
-		.map_err(|e| format!("Round 1 error: {:?}", e))?;
-
-	// Round 2: All signing parties reveal their commitments
-	// Note: party_id in broadcasts is the ORIGINAL DKG party ID
-	let r2_broadcasts: Vec<_> = signers
-		.iter_mut()
-		.enumerate()
-		.map(|(i, s)| {
-			let my_party_id = signing_parties[i];
-			let others: Vec<_> =
-				r1_broadcasts.iter().filter(|r| r.party_id != my_party_id).cloned().collect();
-			s.round2_reveal(message, context, &others)
-		})
-		.collect::<Result<_, _>>()
-		.map_err(|e| format!("Round 2 error: {:?}", e))?;
-
-	// Round 3: All signing parties compute their responses
-	let r3_broadcasts: Vec<_> = signers
-		.iter_mut()
-		.enumerate()
-		.map(|(i, s)| {
-			let my_party_id = signing_parties[i];
-			let others: Vec<_> =
-				r2_broadcasts.iter().filter(|r| r.party_id != my_party_id).cloned().collect();
-			s.round3_respond(&others)
-		})
-		.collect::<Result<_, _>>()
-		.map_err(|e| format!("Round 3 error: {:?}", e))?;
-
-	// Combine: First signer combines
-	let signature = signers[0]
-		.combine(&r2_broadcasts, &r3_broadcasts)
-		.map_err(|e| format!("Combine error: {:?}", e))?;
+	// Run the 4-round signing protocol with leader-based retry
+	let signature = run_local_signing(signers, message, context)
+		.map_err(|e| format!("Signing error: {:?}", e))?;
 
 	// Verify the signature
 	if !verify_signature(&public_key, message, context, &signature) {
@@ -897,7 +830,7 @@ fn run_subset_signing(
 /// Test subset signing: 3 parties sign from 4-party DKG (parties 0, 1, 2)
 #[test]
 fn test_subset_signing_3_of_4_consecutive() {
-	println!("\n=== SUBSET SIGNING TEST: 3 from 4 (consecutive) ===\n");
+	println!("\n=== SUBSET SIGNING TEST: 3 from 4 (consecutive, 4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
@@ -911,30 +844,24 @@ fn test_subset_signing_3_of_4_consecutive() {
 	// Sign with parties 0, 1, 2 (skip party 3)
 	let signing_parties = [0u32, 1, 2];
 
-	let max_attempts = 200;
-	for attempt in 0..max_attempts {
-		match run_subset_signing(3, 4, &signing_parties, &seed, message, context) {
-			Ok(signature) => {
-				println!(
-					"✅ Subset signing (3 from 4, consecutive): Success on attempt {}!",
-					attempt + 1
-				);
-				println!("   Signature length: {} bytes", signature.len());
-				return;
-			},
-			Err(e) =>
-				if attempt < 5 || attempt % 50 == 0 {
-					println!("   Attempt {} failed: {}", attempt + 1, e);
-				},
-		}
+	let start = Instant::now();
+	match run_subset_signing_4_round(3, 4, &signing_parties, &seed, message, context) {
+		Ok(signature) => {
+			let elapsed = start.elapsed();
+			println!("✅ Subset signing (3 from 4, consecutive): Success!");
+			println!("   Time: {:?}", elapsed);
+			println!("   Signature length: {} bytes", signature.len());
+		},
+		Err(e) => {
+			panic!("❌ Subset signing (3 from 4, consecutive) failed: {}", e);
+		},
 	}
-	panic!("❌ Subset signing (3 from 4, consecutive) failed after {} attempts", max_attempts);
 }
 
 /// Test subset signing: 3 parties sign from 4-party DKG (parties 0, 1, 3 - skipping party 2)
 #[test]
 fn test_subset_signing_3_of_4_non_consecutive() {
-	println!("\n=== SUBSET SIGNING TEST: 3 from 4 (non-consecutive) ===\n");
+	println!("\n=== SUBSET SIGNING TEST: 3 from 4 (non-consecutive, 4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
@@ -948,30 +875,24 @@ fn test_subset_signing_3_of_4_non_consecutive() {
 	// Sign with parties 0, 1, 3 (skip party 2)
 	let signing_parties = [0u32, 1, 3];
 
-	let max_attempts = 200;
-	for attempt in 0..max_attempts {
-		match run_subset_signing(3, 4, &signing_parties, &seed, message, context) {
-			Ok(signature) => {
-				println!(
-					"✅ Subset signing (3 from 4, non-consecutive): Success on attempt {}!",
-					attempt + 1
-				);
-				println!("   Signature length: {} bytes", signature.len());
-				return;
-			},
-			Err(e) =>
-				if attempt < 5 || attempt % 50 == 0 {
-					println!("   Attempt {} failed: {}", attempt + 1, e);
-				},
-		}
+	let start = Instant::now();
+	match run_subset_signing_4_round(3, 4, &signing_parties, &seed, message, context) {
+		Ok(signature) => {
+			let elapsed = start.elapsed();
+			println!("✅ Subset signing (3 from 4, non-consecutive): Success!");
+			println!("   Time: {:?}", elapsed);
+			println!("   Signature length: {} bytes", signature.len());
+		},
+		Err(e) => {
+			panic!("❌ Subset signing (3 from 4, non-consecutive) failed: {}", e);
+		},
 	}
-	panic!("❌ Subset signing (3 from 4, non-consecutive) failed after {} attempts", max_attempts);
 }
 
 /// Test subset signing: 3 parties sign from 5-party DKG
 #[test]
 fn test_subset_signing_3_of_5() {
-	println!("\n=== SUBSET SIGNING TEST: 3 from 5 ===\n");
+	println!("\n=== SUBSET SIGNING TEST: 3 from 5 (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
 	for i in 0..32 {
@@ -985,21 +906,18 @@ fn test_subset_signing_3_of_5() {
 	// Sign with parties 0, 2, 4 (skipping parties 1 and 3)
 	let signing_parties = [0u32, 2, 4];
 
-	let max_attempts = 300;
-	for attempt in 0..max_attempts {
-		match run_subset_signing(3, 5, &signing_parties, &seed, message, context) {
-			Ok(signature) => {
-				println!("✅ Subset signing (3 from 5): Success on attempt {}!", attempt + 1);
-				println!("   Signature length: {} bytes", signature.len());
-				return;
-			},
-			Err(e) =>
-				if attempt < 5 || attempt % 50 == 0 {
-					println!("   Attempt {} failed: {}", attempt + 1, e);
-				},
-		}
+	let start = Instant::now();
+	match run_subset_signing_4_round(3, 5, &signing_parties, &seed, message, context) {
+		Ok(signature) => {
+			let elapsed = start.elapsed();
+			println!("✅ Subset signing (3 from 5): Success!");
+			println!("   Time: {:?}", elapsed);
+			println!("   Signature length: {} bytes", signature.len());
+		},
+		Err(e) => {
+			panic!("❌ Subset signing (3 from 5) failed: {}", e);
+		},
 	}
-	panic!("❌ Subset signing (3 from 5) failed after {} attempts", max_attempts);
 }
 
 /// Test that validation correctly rejects invalid subset configurations
