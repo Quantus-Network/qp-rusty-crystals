@@ -9,7 +9,6 @@ criterion = { version = "=0.5.1", features = ["html_reports"] }
 getrandom = { version = "=0.2.12", features = ["js"] }
 hex = { version = "=0.4.3", default-features = false, features = ["alloc"] }
 hex-literal = { version = "=0.4.1", default-features = false }
-nam-tiny-hderive = { version = "=0.3.1-nam.0", default-features = false }
 qp-poseidon-core = { version = "=1.0.1" }
 qp-rusty-crystals-dilithium = { path = "./dilithium", version = "2.0.0", default-features = false }
 qp-rusty-crystals-hdwallet = { path = "./hdwallet", version = "1.0.0", default-features = false }
