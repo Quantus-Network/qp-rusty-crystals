@@ -1074,7 +1074,7 @@ pub fn run_local_signing_with_stats(
 
 	// Run until any party completes
 	let mut iterations = 0;
-	const MAX_ITERATIONS: usize = 16; // Increased for retries
+	const MAX_ITERATIONS: usize = 32;
 
 	loop {
 		iterations += 1;
