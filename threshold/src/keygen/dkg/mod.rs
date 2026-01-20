@@ -127,7 +127,7 @@ pub fn run_local_dkg(
 	let threshold_config = ThresholdConfig::new(threshold, total_parties)
 		.map_err(|e| DkgProtocolError::InternalError(e.to_string()))?;
 
-	let participants: Vec<ParticipantId> = (0..total_parties as u32).collect();
+	let participants: Vec<ParticipantId> = (0..total_parties).collect();
 
 	// Create DKG instances for each party
 	let mut dkgs: Vec<DilithiumDkg> = participants
@@ -174,9 +174,9 @@ pub fn run_local_dkg(
 				Action::Wait => {},
 				Action::SendMany(data) => {
 					let from = party_id as ParticipantId;
-					for other in 0..total_parties as usize {
+					for (other, pending) in pending_messages.iter_mut().enumerate() {
 						if other != party_id {
-							pending_messages[other].push((from, data.clone()));
+							pending.push((from, data.clone()));
 						}
 					}
 				},

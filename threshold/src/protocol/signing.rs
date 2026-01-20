@@ -130,7 +130,7 @@ fn convert_shares(share: &PrivateKeyShare) -> HashMap<u16, SecretShare> {
 
 /// Unpack a commitment from 23-bit packed format.
 pub(crate) fn unpack_commitment_dilithium(commitment: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
-	let poly_q_size = (N * 23 + 7) / 8; // 736 bytes per poly
+	let poly_q_size = (N * 23).div_ceil(8); // 736 bytes per poly
 	let expected_len = K * poly_q_size;
 
 	if commitment.len() != expected_len {
@@ -148,23 +148,23 @@ pub(crate) fn aggregate_commitments_dilithium(
 	w_final: &mut polyvec::Polyveck,
 	w_temp: &polyvec::Polyveck,
 ) {
-	for i in 0..K {
-		poly::add_ip(&mut w_final.vec[i], &w_temp.vec[i]);
-		normalize_assuming_le2q(&mut w_final.vec[i]);
+	for (w_final_poly, w_temp_poly) in w_final.vec.iter_mut().zip(w_temp.vec.iter()).take(K) {
+		poly::add_ip(w_final_poly, w_temp_poly);
+		normalize_assuming_le2q(w_final_poly);
 	}
 }
 
 /// Aggregate response polynomials.
 pub(crate) fn aggregate_responses(zfinals: &mut [polyvec::Polyvecl], zs: &[polyvec::Polyvecl]) {
-	for i in 0..zs.len().min(zfinals.len()) {
-		for j in 0..L {
-			for k in 0..N {
-				zfinals[i].vec[j].coeffs[k] += zs[i].vec[j].coeffs[k];
+	for (zfinal, z) in zfinals.iter_mut().zip(zs.iter()) {
+		for (zfinal_poly, z_poly) in zfinal.vec.iter_mut().zip(z.vec.iter()).take(L) {
+			for (zfinal_coeff, z_coeff) in zfinal_poly.coeffs.iter_mut().zip(z_poly.coeffs.iter()) {
+				*zfinal_coeff += *z_coeff;
 			}
 		}
 		// Normalize
-		for j in 0..L {
-			for coeff in zfinals[i].vec[j].coeffs.iter_mut() {
+		for zfinal_poly in zfinal.vec.iter_mut().take(L) {
+			for coeff in zfinal_poly.coeffs.iter_mut() {
 				let c = *coeff;
 				let c_u32 = if c < 0 { (c + Q) as u32 } else { c as u32 };
 				*coeff = mod_q(c_u32) as i32;
@@ -234,12 +234,12 @@ pub(crate) fn generate_round1(
 		// Compute w_k = A·y_k using NTT
 		let mut w_k = polyvec::Polyveck::default();
 		let mut y_k_ntt = y_k.clone();
-		for i in 0..L {
-			crate::circl_ntt::ntt(&mut y_k_ntt.vec[i]);
+		for y_poly in y_k_ntt.vec.iter_mut().take(L) {
+			crate::circl_ntt::ntt(y_poly);
 		}
 
-		for i in 0..K {
-			compute_ntt_dot_product(&mut w_k.vec[i], &a_matrix[i], &y_k_ntt);
+		for (i, a_row) in a_matrix.iter().enumerate().take(K) {
+			compute_ntt_dot_product(&mut w_k.vec[i], a_row, &y_k_ntt);
 
 			// Apply ReduceLe2Q in NTT domain BEFORE InvNTT
 			for j in 0..N {
@@ -448,7 +448,7 @@ pub(crate) fn generate_round3_response(
 	let (r, _, nu) = get_threshold_params(config);
 
 	// For each commitment iteration
-	for i in 0..k {
+	for (i, z_out_slot) in zs.iter_mut().enumerate().take(k) {
 		if i >= round2.w_aggregated.len() || i >= round1.hyperball_samples.len() {
 			continue;
 		}
@@ -530,7 +530,7 @@ pub(crate) fn generate_round3_response(
 			}
 		}
 
-		zs[i] = z_out;
+		*z_out_slot = z_out;
 	}
 
 	Ok(zs)
@@ -644,17 +644,13 @@ pub(crate) fn combine_signature(
 		// Ensure ||z||_∞ < γ1 - β
 		let gamma1_minus_beta = (dilithium_params::GAMMA1 - dilithium_params::BETA) as i32;
 		let mut z_exceeds = false;
-		for j in 0..L {
-			for k in 0..N {
-				let coeff = z_aggregated[i].vec[j].coeffs[k];
-				let centered = if coeff > Q / 2 { coeff - Q } else { coeff };
+		'z_check: for z_poly in z_aggregated[i].vec.iter().take(L) {
+			for coeff in z_poly.coeffs.iter() {
+				let centered = if *coeff > Q / 2 { *coeff - Q } else { *coeff };
 				if centered.abs() >= gamma1_minus_beta {
 					z_exceeds = true;
-					break;
+					break 'z_check;
 				}
-			}
-			if z_exceeds {
-				break;
 			}
 		}
 		if z_exceeds {
@@ -663,18 +659,18 @@ pub(crate) fn combine_signature(
 
 		// Compute Az (z in NTT domain)
 		let mut zh = z_aggregated[i].clone();
-		for j in 0..L {
-			for k in 0..N {
-				if zh.vec[j].coeffs[k] > Q / 2 {
-					zh.vec[j].coeffs[k] -= Q;
+		for zh_poly in zh.vec.iter_mut().take(L) {
+			for coeff in zh_poly.coeffs.iter_mut() {
+				if *coeff > Q / 2 {
+					*coeff -= Q;
 				}
 			}
-			crate::circl_ntt::ntt(&mut zh.vec[j]);
+			crate::circl_ntt::ntt(zh_poly);
 		}
 
 		let mut az = polyvec::Polyveck::default();
-		for j in 0..K {
-			compute_ntt_dot_product(&mut az.vec[j], &a_matrix[j], &zh);
+		for (az_poly, a_row) in az.vec.iter_mut().zip(a_matrix.iter()).take(K) {
+			compute_ntt_dot_product(az_poly, a_row, &zh);
 		}
 
 		// Compute challenge: c~ = H(μ || w1)
@@ -699,56 +695,61 @@ pub(crate) fn combine_signature(
 
 		// Compute 2^d * c * t1 (scaled challenge times public key component)
 		let mut scaled_challenge_t1 = polyvec::Polyveck::default();
-		for j in 0..K {
-			for k in 0..N {
-				scaled_challenge_t1.vec[j].coeffs[k] =
-					(t1.vec[j].coeffs[k] << dilithium_params::D) as i32;
+		for (scaled_poly, t1_poly) in scaled_challenge_t1.vec.iter_mut().zip(t1.vec.iter()).take(K)
+		{
+			for (scaled_coeff, t1_coeff) in scaled_poly.coeffs.iter_mut().zip(t1_poly.coeffs.iter())
+			{
+				*scaled_coeff = *t1_coeff << dilithium_params::D;
 			}
-			crate::circl_ntt::ntt(&mut scaled_challenge_t1.vec[j]);
-			let tmp = scaled_challenge_t1.vec[j].clone();
-			crate::circl_ntt::mul_hat(&mut scaled_challenge_t1.vec[j], &tmp, &challenge_ntt);
+			crate::circl_ntt::ntt(scaled_poly);
+			let tmp = scaled_poly.clone();
+			crate::circl_ntt::mul_hat(scaled_poly, &tmp, &challenge_ntt);
 		}
 
 		// Compute Az - 2^d * c * t1
-		for j in 0..K {
-			for k in 0..N {
-				scaled_challenge_t1.vec[j].coeffs[k] =
-					az.vec[j].coeffs[k] - scaled_challenge_t1.vec[j].coeffs[k];
+		for (scaled_poly, az_poly) in scaled_challenge_t1.vec.iter_mut().zip(az.vec.iter()).take(K)
+		{
+			for (scaled_coeff, az_coeff) in scaled_poly.coeffs.iter_mut().zip(az_poly.coeffs.iter())
+			{
+				*scaled_coeff = *az_coeff - *scaled_coeff;
 			}
-			poly::reduce(&mut scaled_challenge_t1.vec[j]);
-			crate::circl_ntt::inv_ntt(&mut scaled_challenge_t1.vec[j]);
-			normalize_assuming_le2q(&mut scaled_challenge_t1.vec[j]);
+			poly::reduce(scaled_poly);
+			crate::circl_ntt::inv_ntt(scaled_poly);
+			normalize_assuming_le2q(scaled_poly);
 		}
 
 		// Compute difference: f = (Az - 2^d*c*t1) - w_aggregated
 		let mut difference = polyvec::Polyveck::default();
-		for j in 0..K {
-			for k in 0..N {
-				difference.vec[j].coeffs[k] =
-					scaled_challenge_t1.vec[j].coeffs[k] - w_aggregated[i].vec[j].coeffs[k];
+		for (diff_poly, (scaled_poly, w_poly)) in difference
+			.vec
+			.iter_mut()
+			.zip(scaled_challenge_t1.vec.iter().zip(w_aggregated[i].vec.iter()))
+			.take(K)
+		{
+			for (diff_coeff, (scaled_coeff, w_coeff)) in diff_poly
+				.coeffs
+				.iter_mut()
+				.zip(scaled_poly.coeffs.iter().zip(w_poly.coeffs.iter()))
+			{
+				*diff_coeff = *scaled_coeff - *w_coeff;
 			}
 			// Normalize coefficients to [0, Q)
-			for k in 0..N {
-				let coeff = difference.vec[j].coeffs[k];
-				let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
-				difference.vec[j].coeffs[k] = mod_q(coeff_u32) as i32;
+			for coeff in diff_poly.coeffs.iter_mut() {
+				let coeff_u32 = if *coeff < 0 { (*coeff + Q) as u32 } else { *coeff as u32 };
+				*coeff = mod_q(coeff_u32) as i32;
 			}
 		}
 
 		// Ensure ||difference||_∞ < γ2
 		let gamma2 = dilithium_params::GAMMA2 as i32;
 		let mut difference_exceeds = false;
-		for j in 0..K {
-			for k in 0..N {
-				let coeff = difference.vec[j].coeffs[k];
-				let centered = if coeff > Q / 2 { coeff - Q } else { coeff };
+		'diff_check: for diff_poly in difference.vec.iter().take(K) {
+			for coeff in diff_poly.coeffs.iter() {
+				let centered = if *coeff > Q / 2 { *coeff - Q } else { *coeff };
 				if centered.abs() >= gamma2 {
 					difference_exceeds = true;
-					break;
+					break 'diff_check;
 				}
-			}
-			if difference_exceeds {
-				break;
 			}
 		}
 		if difference_exceeds {
@@ -757,15 +758,23 @@ pub(crate) fn combine_signature(
 
 		// Compute w0 + difference for hint computation
 		let mut w0_plus_diff = polyvec::Polyveck::default();
-		for j in 0..K {
-			for k in 0..N {
-				w0_plus_diff.vec[j].coeffs[k] = w0.vec[j].coeffs[k] + difference.vec[j].coeffs[k];
+		for (w0pd_poly, (w0_poly, diff_poly)) in w0_plus_diff
+			.vec
+			.iter_mut()
+			.zip(w0.vec.iter().zip(difference.vec.iter()))
+			.take(K)
+		{
+			for (w0pd_coeff, (w0_coeff, diff_coeff)) in w0pd_poly
+				.coeffs
+				.iter_mut()
+				.zip(w0_poly.coeffs.iter().zip(diff_poly.coeffs.iter()))
+			{
+				*w0pd_coeff = *w0_coeff + *diff_coeff;
 			}
 			// Normalize coefficients to [0, Q)
-			for k in 0..N {
-				let coeff = w0_plus_diff.vec[j].coeffs[k];
-				let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
-				w0_plus_diff.vec[j].coeffs[k] = mod_q(coeff_u32) as i32;
+			for coeff in w0pd_poly.coeffs.iter_mut() {
+				let coeff_u32 = if *coeff < 0 { (*coeff + Q) as u32 } else { *coeff as u32 };
+				*coeff = mod_q(coeff_u32) as i32;
 			}
 		}
 
@@ -776,10 +785,10 @@ pub(crate) fn combine_signature(
 		if hint_pop <= dilithium_params::OMEGA {
 			// Convert z to centered form for packing
 			let mut z_centered = z_aggregated[i].clone();
-			for j in 0..L {
-				for k in 0..N {
-					if z_centered.vec[j].coeffs[k] > Q / 2 {
-						z_centered.vec[j].coeffs[k] -= Q;
+			for z_poly in z_centered.vec.iter_mut().take(L) {
+				for coeff in z_poly.coeffs.iter_mut() {
+					if *coeff > Q / 2 {
+						*coeff -= Q;
 					}
 				}
 			}

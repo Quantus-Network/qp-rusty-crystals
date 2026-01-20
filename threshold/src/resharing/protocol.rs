@@ -34,6 +34,10 @@ use super::types::{
 // Q is the prime modulus for ML-DSA-87
 const Q: i32 = 8380417;
 
+/// Type alias for secret coefficient pairs (s1 coefficients, s2 coefficients).
+/// Used to simplify complex return types in resharing operations.
+type SecretCoefficients = (Vec<[i32; N]>, Vec<[i32; N]>);
+
 // ============================================================================
 // Action Enum
 // ============================================================================
@@ -597,18 +601,18 @@ impl ResharingProtocol {
 		// Note: With single dealer, we only receive from one party, so no accumulation needed
 		// But we still reduce modulo Q for safety
 		for (subset_mask, share_data) in &msg.shares {
-			let entry = self.new_shares.entry(*subset_mask).or_insert_with(NewShareData::new);
+			let entry = self.new_shares.entry(*subset_mask).or_default();
 			// Add the share data and reduce modulo Q
-			for i in 0..L {
-				for j in 0..N {
-					entry.s1[i][j] = entry.s1[i][j].wrapping_add(share_data.s1[i][j]);
-					entry.s1[i][j] = reduce_coeff_mod_q(entry.s1[i][j]);
+			for (entry_poly, share_poly) in entry.s1.iter_mut().zip(share_data.s1.iter()) {
+				for (entry_coeff, share_coeff) in entry_poly.iter_mut().zip(share_poly.iter()) {
+					*entry_coeff = entry_coeff.wrapping_add(*share_coeff);
+					*entry_coeff = reduce_coeff_mod_q(*entry_coeff);
 				}
 			}
-			for i in 0..K {
-				for j in 0..N {
-					entry.s2[i][j] = entry.s2[i][j].wrapping_add(share_data.s2[i][j]);
-					entry.s2[i][j] = reduce_coeff_mod_q(entry.s2[i][j]);
+			for (entry_poly, share_poly) in entry.s2.iter_mut().zip(share_data.s2.iter()) {
+				for (entry_coeff, share_coeff) in entry_poly.iter_mut().zip(share_poly.iter()) {
+					*entry_coeff = entry_coeff.wrapping_add(*share_coeff);
+					*entry_coeff = reduce_coeff_mod_q(*entry_coeff);
 				}
 			}
 		}
@@ -786,7 +790,7 @@ impl ResharingProtocol {
 		&self,
 		blinding_s1: &[[i32; N]],
 		blinding_s2: &[[i32; N]],
-	) -> Result<(Vec<[i32; N]>, Vec<[i32; N]>), ResharingProtocolError> {
+	) -> Result<SecretCoefficients, ResharingProtocolError> {
 		// Get existing share
 		let existing_share = self.config.existing_share.as_ref().ok_or_else(|| {
 			ResharingProtocolError::InternalError("Missing existing share".to_string())
@@ -812,16 +816,26 @@ impl ResharingProtocol {
 
 			// Only contribute if we are the owner
 			if owner_index == Some(my_index) {
-				for i in 0..L.min(share_data.s1.len()) {
-					for j in 0..N {
-						contribution_s1[i][j] =
-							contribution_s1[i][j].wrapping_add(share_data.s1[i][j]);
+				for (contrib_poly, share_poly) in contribution_s1
+					.iter_mut()
+					.zip(share_data.s1.iter())
+					.take(L.min(share_data.s1.len()))
+				{
+					for (contrib_coeff, share_coeff) in
+						contrib_poly.iter_mut().zip(share_poly.iter())
+					{
+						*contrib_coeff = contrib_coeff.wrapping_add(*share_coeff);
 					}
 				}
-				for i in 0..K.min(share_data.s2.len()) {
-					for j in 0..N {
-						contribution_s2[i][j] =
-							contribution_s2[i][j].wrapping_add(share_data.s2[i][j]);
+				for (contrib_poly, share_poly) in contribution_s2
+					.iter_mut()
+					.zip(share_data.s2.iter())
+					.take(K.min(share_data.s2.len()))
+				{
+					for (contrib_coeff, share_coeff) in
+						contrib_poly.iter_mut().zip(share_poly.iter())
+					{
+						*contrib_coeff = contrib_coeff.wrapping_add(*share_coeff);
 					}
 				}
 			}
@@ -829,16 +843,16 @@ impl ResharingProtocol {
 
 		// Add blinding (all parties add their blinding, regardless of subset ownership)
 		// and reduce modulo Q to keep coefficients in valid range
-		for i in 0..L {
-			for j in 0..N {
-				contribution_s1[i][j] = contribution_s1[i][j].wrapping_add(blinding_s1[i][j]);
-				contribution_s1[i][j] = reduce_coeff_mod_q(contribution_s1[i][j]);
+		for (contrib_poly, blind_poly) in contribution_s1.iter_mut().zip(blinding_s1.iter()) {
+			for (contrib_coeff, blind_coeff) in contrib_poly.iter_mut().zip(blind_poly.iter()) {
+				*contrib_coeff = contrib_coeff.wrapping_add(*blind_coeff);
+				*contrib_coeff = reduce_coeff_mod_q(*contrib_coeff);
 			}
 		}
-		for i in 0..K {
-			for j in 0..N {
-				contribution_s2[i][j] = contribution_s2[i][j].wrapping_add(blinding_s2[i][j]);
-				contribution_s2[i][j] = reduce_coeff_mod_q(contribution_s2[i][j]);
+		for (contrib_poly, blind_poly) in contribution_s2.iter_mut().zip(blinding_s2.iter()) {
+			for (contrib_coeff, blind_coeff) in contrib_poly.iter_mut().zip(blind_poly.iter()) {
+				*contrib_coeff = contrib_coeff.wrapping_add(*blind_coeff);
+				*contrib_coeff = reduce_coeff_mod_q(*contrib_coeff);
 			}
 		}
 
@@ -932,36 +946,36 @@ impl ResharingProtocol {
 
 	/// Aggregate Round 1 contributions to get blinded total secret.
 	/// Coefficients are reduced modulo Q after aggregation to prevent overflow.
-	fn aggregate_round1_contributions(
-		&self,
-	) -> Result<(Vec<[i32; N]>, Vec<[i32; N]>), ResharingProtocolError> {
+	fn aggregate_round1_contributions(&self) -> Result<SecretCoefficients, ResharingProtocolError> {
 		let mut total_s1 = vec![[0i32; N]; L];
 		let mut total_s2 = vec![[0i32; N]; K];
 
 		for broadcast in self.round1_broadcasts.values() {
-			for i in 0..L {
-				for j in 0..N {
-					total_s1[i][j] = total_s1[i][j]
-						.wrapping_add(broadcast.blinded_s1_contribution.coefficients[i][j]);
+			for (total_poly, bcast_poly) in
+				total_s1.iter_mut().zip(broadcast.blinded_s1_contribution.coefficients.iter())
+			{
+				for (total_coeff, bcast_coeff) in total_poly.iter_mut().zip(bcast_poly.iter()) {
+					*total_coeff = total_coeff.wrapping_add(*bcast_coeff);
 				}
 			}
-			for i in 0..K {
-				for j in 0..N {
-					total_s2[i][j] = total_s2[i][j]
-						.wrapping_add(broadcast.blinded_s2_contribution.coefficients[i][j]);
+			for (total_poly, bcast_poly) in
+				total_s2.iter_mut().zip(broadcast.blinded_s2_contribution.coefficients.iter())
+			{
+				for (total_coeff, bcast_coeff) in total_poly.iter_mut().zip(bcast_poly.iter()) {
+					*total_coeff = total_coeff.wrapping_add(*bcast_coeff);
 				}
 			}
 		}
 
 		// Reduce coefficients modulo Q to keep them in valid range
-		for i in 0..L {
-			for j in 0..N {
-				total_s1[i][j] = reduce_coeff_mod_q(total_s1[i][j]);
+		for total_poly in total_s1.iter_mut() {
+			for total_coeff in total_poly.iter_mut() {
+				*total_coeff = reduce_coeff_mod_q(*total_coeff);
 			}
 		}
-		for i in 0..K {
-			for j in 0..N {
-				total_s2[i][j] = reduce_coeff_mod_q(total_s2[i][j]);
+		for total_poly in total_s2.iter_mut() {
+			for total_coeff in total_poly.iter_mut() {
+				*total_coeff = reduce_coeff_mod_q(*total_coeff);
 			}
 		}
 
@@ -980,30 +994,36 @@ impl ResharingProtocol {
 		// Sum blinding values from all Round 1 broadcasts
 		for broadcast in self.round1_broadcasts.values() {
 			// Add blinding_s1 from this participant
-			for i in 0..L.min(broadcast.blinding_s1.coefficients.len()) {
-				for j in 0..N {
-					total_s1[i][j] =
-						total_s1[i][j].wrapping_add(broadcast.blinding_s1.coefficients[i][j]);
+			for (total_poly, bcast_poly) in total_s1
+				.iter_mut()
+				.zip(broadcast.blinding_s1.coefficients.iter())
+				.take(L.min(broadcast.blinding_s1.coefficients.len()))
+			{
+				for (total_coeff, bcast_coeff) in total_poly.iter_mut().zip(bcast_poly.iter()) {
+					*total_coeff = total_coeff.wrapping_add(*bcast_coeff);
 				}
 			}
 			// Add blinding_s2 from this participant
-			for i in 0..K.min(broadcast.blinding_s2.coefficients.len()) {
-				for j in 0..N {
-					total_s2[i][j] =
-						total_s2[i][j].wrapping_add(broadcast.blinding_s2.coefficients[i][j]);
+			for (total_poly, bcast_poly) in total_s2
+				.iter_mut()
+				.zip(broadcast.blinding_s2.coefficients.iter())
+				.take(K.min(broadcast.blinding_s2.coefficients.len()))
+			{
+				for (total_coeff, bcast_coeff) in total_poly.iter_mut().zip(bcast_poly.iter()) {
+					*total_coeff = total_coeff.wrapping_add(*bcast_coeff);
 				}
 			}
 		}
 
 		// Reduce coefficients modulo Q
-		for i in 0..L {
-			for j in 0..N {
-				total_s1[i][j] = reduce_coeff_mod_q(total_s1[i][j]);
+		for total_poly in total_s1.iter_mut() {
+			for total_coeff in total_poly.iter_mut() {
+				*total_coeff = reduce_coeff_mod_q(*total_coeff);
 			}
 		}
-		for i in 0..K {
-			for j in 0..N {
-				total_s2[i][j] = reduce_coeff_mod_q(total_s2[i][j]);
+		for total_poly in total_s2.iter_mut() {
+			for total_coeff in total_poly.iter_mut() {
+				*total_coeff = reduce_coeff_mod_q(*total_coeff);
 			}
 		}
 
@@ -1028,16 +1048,24 @@ impl ResharingProtocol {
 		let mut secret_s1 = vec![[0i32; N]; L];
 		let mut secret_s2 = vec![[0i32; N]; K];
 
-		for i in 0..L {
-			for j in 0..N {
-				let diff = blinded_s1_total[i][j].wrapping_sub(total_blinding_s1[i][j]);
-				secret_s1[i][j] = reduce_coeff_mod_q(diff);
+		for (secret_poly, (blinded_poly, blind_poly)) in
+			secret_s1.iter_mut().zip(blinded_s1_total.iter().zip(total_blinding_s1.iter()))
+		{
+			for (secret_coeff, (blinded_coeff, blind_coeff)) in
+				secret_poly.iter_mut().zip(blinded_poly.iter().zip(blind_poly.iter()))
+			{
+				let diff = blinded_coeff.wrapping_sub(*blind_coeff);
+				*secret_coeff = reduce_coeff_mod_q(diff);
 			}
 		}
-		for i in 0..K {
-			for j in 0..N {
-				let diff = blinded_s2_total[i][j].wrapping_sub(total_blinding_s2[i][j]);
-				secret_s2[i][j] = reduce_coeff_mod_q(diff);
+		for (secret_poly, (blinded_poly, blind_poly)) in
+			secret_s2.iter_mut().zip(blinded_s2_total.iter().zip(total_blinding_s2.iter()))
+		{
+			for (secret_coeff, (blinded_coeff, blind_coeff)) in
+				secret_poly.iter_mut().zip(blinded_poly.iter().zip(blind_poly.iter()))
+			{
+				let diff = blinded_coeff.wrapping_sub(*blind_coeff);
+				*secret_coeff = reduce_coeff_mod_q(diff);
 			}
 		}
 
@@ -1070,14 +1098,22 @@ impl ResharingProtocol {
 				// Last subset: compute to make sum equal to secret
 				let mut s1 = vec![[0i32; N]; L];
 				let mut s2 = vec![[0i32; N]; K];
-				for i in 0..L {
-					for j in 0..N {
-						s1[i][j] = secret_s1[i][j].wrapping_sub(shares_sum_s1[i][j]);
+				for (s1_poly, (secret_poly, sum_poly)) in
+					s1.iter_mut().zip(secret_s1.iter().zip(shares_sum_s1.iter()))
+				{
+					for (s1_coeff, (secret_coeff, sum_coeff)) in
+						s1_poly.iter_mut().zip(secret_poly.iter().zip(sum_poly.iter()))
+					{
+						*s1_coeff = secret_coeff.wrapping_sub(*sum_coeff);
 					}
 				}
-				for i in 0..K {
-					for j in 0..N {
-						s2[i][j] = secret_s2[i][j].wrapping_sub(shares_sum_s2[i][j]);
+				for (s2_poly, (secret_poly, sum_poly)) in
+					s2.iter_mut().zip(secret_s2.iter().zip(shares_sum_s2.iter()))
+				{
+					for (s2_coeff, (secret_coeff, sum_coeff)) in
+						s2_poly.iter_mut().zip(secret_poly.iter().zip(sum_poly.iter()))
+					{
+						*s2_coeff = secret_coeff.wrapping_sub(*sum_coeff);
 					}
 				}
 				NewShareData { s1, s2 }
@@ -1116,14 +1152,14 @@ impl ResharingProtocol {
 				}
 
 				// Add to running sum
-				for i in 0..L {
-					for j in 0..N {
-						shares_sum_s1[i][j] = shares_sum_s1[i][j].wrapping_add(s1[i][j]);
+				for (sum_poly, s1_poly) in shares_sum_s1.iter_mut().zip(s1.iter()) {
+					for (sum_coeff, s1_coeff) in sum_poly.iter_mut().zip(s1_poly.iter()) {
+						*sum_coeff = sum_coeff.wrapping_add(*s1_coeff);
 					}
 				}
-				for i in 0..K {
-					for j in 0..N {
-						shares_sum_s2[i][j] = shares_sum_s2[i][j].wrapping_add(s2[i][j]);
+				for (sum_poly, s2_poly) in shares_sum_s2.iter_mut().zip(s2.iter()) {
+					for (sum_coeff, s2_coeff) in sum_poly.iter_mut().zip(s2_poly.iter()) {
+						*sum_coeff = sum_coeff.wrapping_add(*s2_coeff);
 					}
 				}
 
@@ -1444,11 +1480,11 @@ mod tests {
 		for offset in -10..10 {
 			let input = Q + offset;
 			let result = reduce_coeff_mod_q(input);
-			assert!(result >= 0 && result < Q);
+			assert!((0..Q).contains(&result));
 
 			let input2 = -Q + offset;
 			let result2 = reduce_coeff_mod_q(input2);
-			assert!(result2 >= 0 && result2 < Q);
+			assert!((0..Q).contains(&result2));
 		}
 	}
 

@@ -61,8 +61,8 @@ fn test_2_of_2_deterministic() {
 	println!("\n=== 2-of-2 DETERMINISTIC TEST (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = i as u8;
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = i as u8;
 	}
 
 	let message = b"test message";
@@ -88,8 +88,8 @@ fn test_2_of_3_deterministic() {
 	println!("\n=== 2-of-3 DETERMINISTIC TEST (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = i as u8;
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = i as u8;
 	}
 
 	let message = b"test message for 2-of-3";
@@ -114,8 +114,8 @@ fn test_3_of_5_deterministic() {
 	println!("\n=== 3-of-5 DETERMINISTIC TEST (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = i as u8;
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = i as u8;
 	}
 
 	let message = b"test message for 3-of-5";
@@ -226,8 +226,8 @@ fn test_with_context() {
 	println!("\n=== TEST WITH CONTEXT (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = i as u8;
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = i as u8;
 	}
 
 	let message = b"message with context";
@@ -253,8 +253,8 @@ fn test_empty_message() {
 	println!("\n=== TEST EMPTY MESSAGE (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = i as u8;
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = i as u8;
 	}
 
 	let message: &[u8] = b"";
@@ -279,8 +279,8 @@ fn test_long_message() {
 	println!("\n=== TEST LONG MESSAGE (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = i as u8;
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = i as u8;
 	}
 
 	// Create a 10KB message
@@ -311,8 +311,8 @@ fn test_signature_verification_with_wrong_message() {
 	println!("\n=== TEST WRONG MESSAGE VERIFICATION (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = i as u8;
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = i as u8;
 	}
 
 	let config = ThresholdConfig::new(2, 2).expect("Valid config");
@@ -343,8 +343,8 @@ fn test_signature_verification_with_wrong_context() {
 	println!("\n=== TEST WRONG CONTEXT VERIFICATION (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = i as u8;
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = i as u8;
 	}
 
 	let config = ThresholdConfig::new(2, 2).expect("Valid config");
@@ -379,8 +379,8 @@ fn test_threshold_matrix() {
 	println!("\n=== THRESHOLD MATRIX TEST (Dealer + 4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = i as u8;
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = i as u8;
 	}
 
 	let message = b"matrix test message";
@@ -529,8 +529,8 @@ fn test_threshold_matrix_dkg() {
 	println!("\n=== THRESHOLD MATRIX TEST (DKG + 4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = i as u8;
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = i as u8;
 	}
 
 	let message = b"DKG matrix test message";
@@ -796,8 +796,8 @@ fn test_subset_signing_3_of_4_consecutive() {
 	println!("\n=== SUBSET SIGNING TEST: 3 from 4 (consecutive, 4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = (i as u8).wrapping_add(50);
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = (i as u8).wrapping_add(50);
 	}
 
 	let message = b"subset signing test";
@@ -827,8 +827,8 @@ fn test_subset_signing_3_of_4_non_consecutive() {
 	println!("\n=== SUBSET SIGNING TEST: 3 from 4 (non-consecutive, 4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = (i as u8).wrapping_add(60);
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = (i as u8).wrapping_add(60);
 	}
 
 	let message = b"subset signing test non-consecutive";
@@ -858,8 +858,8 @@ fn test_subset_signing_3_of_5() {
 	println!("\n=== SUBSET SIGNING TEST: 3 from 5 (4-Round Protocol) ===\n");
 
 	let mut seed = [0u8; 32];
-	for i in 0..32 {
-		seed[i] = (i as u8).wrapping_add(70);
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = (i as u8).wrapping_add(70);
 	}
 
 	let message = b"subset signing test 3 of 5";

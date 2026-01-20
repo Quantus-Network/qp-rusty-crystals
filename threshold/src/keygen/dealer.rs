@@ -102,10 +102,10 @@ pub fn generate_with_dealer(
 	// 5. Compute t = A*s1 + s2
 	let mut t = polyvec::Polyveck::default();
 
-	for i in 0..K {
-		for j in 0..L {
+	for (i, a_row) in a_matrix.iter().enumerate().take(K) {
+		for (a_poly, s1h_poly) in a_row.vec.iter().zip(s1h_total.vec.iter()).take(L) {
 			let mut temp = poly::Poly::default();
-			poly::pointwise_montgomery(&mut temp, &a_matrix[i].vec[j], &s1h_total.vec[j]);
+			poly::pointwise_montgomery(&mut temp, a_poly, s1h_poly);
 			t.vec[i] = poly::add(&t.vec[i], &temp);
 		}
 		poly::reduce(&mut t.vec[i]);
@@ -113,17 +113,16 @@ pub fn generate_with_dealer(
 	}
 
 	// Add s2
-	for i in 0..K {
-		t.vec[i] = poly::add(&t.vec[i], &s2_total.vec[i]);
+	for (t_poly, s2_poly) in t.vec.iter_mut().zip(s2_total.vec.iter()).take(K) {
+		*t_poly = poly::add(t_poly, s2_poly);
 	}
 
 	// Normalize t
-	for i in 0..K {
-		poly::reduce(&mut t.vec[i]);
-		for j in 0..N {
-			let coeff = t.vec[i].coeffs[j];
-			let normalized = ((coeff % Q) + Q) % Q;
-			t.vec[i].coeffs[j] = normalized;
+	for t_poly in t.vec.iter_mut().take(K) {
+		poly::reduce(t_poly);
+		for coeff in t_poly.coeffs.iter_mut() {
+			let normalized = ((*coeff % Q) + Q) % Q;
+			*coeff = normalized;
 		}
 	}
 
@@ -201,17 +200,24 @@ struct SecretShare {
 	s2_share: polyvec::Polyveck,
 }
 
+/// Result type for threshold share generation containing:
+/// - s1_total: Polyvecl
+/// - s2_total: Polyveck
+/// - s1h_total: Polyvecl (NTT form)
+/// - party_shares: HashMap<u32, HashMap<u16, SecretShare>> (u16 subset masks)
+type ThresholdSharesResult = (
+	polyvec::Polyvecl,
+	polyvec::Polyveck,
+	polyvec::Polyvecl,
+	HashMap<u32, HashMap<u16, SecretShare>>,
+);
+
 /// Generate threshold shares for all subset combinations.
 fn generate_threshold_shares(
 	state: &mut fips202::KeccakState,
 	threshold: u32,
 	parties: u32,
-) -> ThresholdResult<(
-	polyvec::Polyvecl,                       // s1_total
-	polyvec::Polyveck,                       // s2_total
-	polyvec::Polyvecl,                       // s1h_total (NTT form)
-	HashMap<u32, HashMap<u16, SecretShare>>, // party_shares (u16 subset masks)
-)> {
+) -> ThresholdResult<ThresholdSharesResult> {
 	// Initialize party shares
 	let mut party_shares: HashMap<u32, HashMap<u16, SecretShare>> = HashMap::new();
 	for i in 0..parties {
@@ -235,20 +241,20 @@ fn generate_threshold_shares(
 
 		// Create η-bounded shares for s1
 		let mut s1_share = polyvec::Polyvecl::default();
-		for j in 0..L {
-			sample_poly_leq_eta(&mut s1_share.vec[j], &share_seed, j as u16, 2);
+		for (j, s1_poly) in s1_share.vec.iter_mut().enumerate().take(L) {
+			sample_poly_leq_eta(s1_poly, &share_seed, j as u16, 2);
 		}
 
 		// Create η-bounded shares for s2
 		let mut s2_share = polyvec::Polyveck::default();
-		for j in 0..K {
-			sample_poly_leq_eta(&mut s2_share.vec[j], &share_seed, (L + j) as u16, 2);
+		for (j, s2_poly) in s2_share.vec.iter_mut().enumerate().take(K) {
+			sample_poly_leq_eta(s2_poly, &share_seed, (L + j) as u16, 2);
 		}
 
 		// Compute NTT of s1 share
 		let mut s1h_share = s1_share.clone();
-		for j in 0..L {
-			crate::circl_ntt::ntt(&mut s1h_share.vec[j]);
+		for s1h_poly in s1h_share.vec.iter_mut().take(L) {
+			crate::circl_ntt::ntt(s1h_poly);
 		}
 
 		// Create share object
@@ -257,26 +263,36 @@ fn generate_threshold_shares(
 		// Distribute to all parties in this combination
 		for i in 0..parties {
 			if (honest_signers & (1 << i)) != 0 {
-				if let Some(party_map) = party_shares.get_mut(&(i as u32)) {
+				if let Some(party_map) = party_shares.get_mut(&i) {
 					party_map.insert(honest_signers, share.clone());
 				}
 			}
 		}
 
 		// Add to total
-		for i in 0..L {
-			for j in 0..N {
-				s1_total.vec[i].coeffs[j] =
-					s1_total.vec[i].coeffs[j].wrapping_add(s1_share.vec[i].coeffs[j]);
-				s1h_total.vec[i].coeffs[j] =
-					s1h_total.vec[i].coeffs[j].wrapping_add(s1h_share.vec[i].coeffs[j]);
+		for ((total_poly, share_poly), (totalh_poly, shareh_poly)) in s1_total
+			.vec
+			.iter_mut()
+			.zip(s1_share.vec.iter())
+			.zip(s1h_total.vec.iter_mut().zip(s1h_share.vec.iter()))
+			.take(L)
+		{
+			for ((total_coeff, share_coeff), (totalh_coeff, shareh_coeff)) in total_poly
+				.coeffs
+				.iter_mut()
+				.zip(share_poly.coeffs.iter())
+				.zip(totalh_poly.coeffs.iter_mut().zip(shareh_poly.coeffs.iter()))
+			{
+				*total_coeff = total_coeff.wrapping_add(*share_coeff);
+				*totalh_coeff = totalh_coeff.wrapping_add(*shareh_coeff);
 			}
 		}
 
-		for i in 0..K {
-			for j in 0..N {
-				s2_total.vec[i].coeffs[j] =
-					s2_total.vec[i].coeffs[j].wrapping_add(s2_share.vec[i].coeffs[j]);
+		for (total_poly, share_poly) in s2_total.vec.iter_mut().zip(s2_share.vec.iter()).take(K) {
+			for (total_coeff, share_coeff) in
+				total_poly.coeffs.iter_mut().zip(share_poly.coeffs.iter())
+			{
+				*total_coeff = total_coeff.wrapping_add(*share_coeff);
 			}
 		}
 
@@ -287,23 +303,25 @@ fn generate_threshold_shares(
 	}
 
 	// Normalize totals
-	for i in 0..L {
-		for j in 0..N {
-			let coeff = s1_total.vec[i].coeffs[j];
-			let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
-			s1_total.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
+	for (total_poly, totalh_poly) in s1_total.vec.iter_mut().zip(s1h_total.vec.iter_mut()).take(L) {
+		for (total_coeff, totalh_coeff) in
+			total_poly.coeffs.iter_mut().zip(totalh_poly.coeffs.iter_mut())
+		{
+			let coeff_u32 =
+				if *total_coeff < 0 { (*total_coeff + Q) as u32 } else { *total_coeff as u32 };
+			*total_coeff = mod_q(coeff_u32) as i32;
 
-			let coeff_h = s1h_total.vec[i].coeffs[j];
-			let coeff_h_u32 = if coeff_h < 0 { (coeff_h + Q) as u32 } else { coeff_h as u32 };
-			s1h_total.vec[i].coeffs[j] = mod_q(coeff_h_u32) as i32;
+			let coeff_h_u32 =
+				if *totalh_coeff < 0 { (*totalh_coeff + Q) as u32 } else { *totalh_coeff as u32 };
+			*totalh_coeff = mod_q(coeff_h_u32) as i32;
 		}
 	}
 
-	for i in 0..K {
-		for j in 0..N {
-			let coeff = s2_total.vec[i].coeffs[j];
-			let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
-			s2_total.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
+	for total_poly in s2_total.vec.iter_mut().take(K) {
+		for total_coeff in total_poly.coeffs.iter_mut() {
+			let coeff_u32 =
+				if *total_coeff < 0 { (*total_coeff + Q) as u32 } else { *total_coeff as u32 };
+			*total_coeff = mod_q(coeff_u32) as i32;
 		}
 	}
 

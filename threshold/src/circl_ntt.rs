@@ -87,17 +87,15 @@ pub fn mul_hat(p: &mut Poly, a: &Poly, b: &Poly) {
 	let mut a_u32 = [0u32; N];
 	let mut b_u32 = [0u32; N];
 
-	for i in 0..N {
-		a_u32[i] =
-			if a.coeffs[i] < 0 { (a.coeffs[i] + Q as i32) as u32 } else { a.coeffs[i] as u32 };
-		b_u32[i] =
-			if b.coeffs[i] < 0 { (b.coeffs[i] + Q as i32) as u32 } else { b.coeffs[i] as u32 };
+	for (i, (a_coeff, b_coeff)) in a.coeffs.iter().zip(b.coeffs.iter()).enumerate() {
+		a_u32[i] = if *a_coeff < 0 { (*a_coeff + Q as i32) as u32 } else { *a_coeff as u32 };
+		b_u32[i] = if *b_coeff < 0 { (*b_coeff + Q as i32) as u32 } else { *b_coeff as u32 };
 	}
 
 	// Pointwise Montgomery multiplication
-	for i in 0..N {
-		let result = mont_reduce_le2q(a_u32[i] as u64 * b_u32[i] as u64);
-		p.coeffs[i] = result as i32;
+	for (p_coeff, (a_val, b_val)) in p.coeffs.iter_mut().zip(a_u32.iter().zip(b_u32.iter())) {
+		let result = mont_reduce_le2q(*a_val as u64 * *b_val as u64);
+		*p_coeff = result as i32;
 	}
 }
 
@@ -107,16 +105,14 @@ pub fn poly_add(p: &mut Poly, a: &Poly, b: &Poly) {
 	let mut a_u32 = [0u32; N];
 	let mut b_u32 = [0u32; N];
 
-	for i in 0..N {
-		a_u32[i] =
-			if a.coeffs[i] < 0 { (a.coeffs[i] + Q as i32) as u32 } else { a.coeffs[i] as u32 };
-		b_u32[i] =
-			if b.coeffs[i] < 0 { (b.coeffs[i] + Q as i32) as u32 } else { b.coeffs[i] as u32 };
+	for (i, (a_coeff, b_coeff)) in a.coeffs.iter().zip(b.coeffs.iter()).enumerate() {
+		a_u32[i] = if *a_coeff < 0 { (*a_coeff + Q as i32) as u32 } else { *a_coeff as u32 };
+		b_u32[i] = if *b_coeff < 0 { (*b_coeff + Q as i32) as u32 } else { *b_coeff as u32 };
 	}
 
 	// Wrapping addition
-	for i in 0..N {
-		p.coeffs[i] = a_u32[i].wrapping_add(b_u32[i]) as i32;
+	for (p_coeff, (a_val, b_val)) in p.coeffs.iter_mut().zip(a_u32.iter().zip(b_u32.iter())) {
+		*p_coeff = a_val.wrapping_add(*b_val) as i32;
 	}
 }
 
@@ -142,10 +138,9 @@ pub fn ntt(p: &mut Poly) {
 
 	// Convert i32 coefficients to u32 for NTT computation
 	let mut coeffs_u32 = [0u32; N];
-	for i in 0..N {
+	for (dst, src) in coeffs_u32.iter_mut().zip(coeffs.iter()) {
 		// Handle negative values by adding Q
-		coeffs_u32[i] =
-			if coeffs[i] < 0 { (coeffs[i] + Q as i32) as u32 } else { coeffs[i] as u32 };
+		*dst = if *src < 0 { (*src + Q as i32) as u32 } else { *src as u32 };
 	}
 
 	let mut k = 0; // Index into Zetas
@@ -172,8 +167,8 @@ pub fn ntt(p: &mut Poly) {
 	}
 
 	// Convert back to i32
-	for i in 0..N {
-		coeffs[i] = coeffs_u32[i] as i32;
+	for (dst, src) in coeffs.iter_mut().zip(coeffs_u32.iter()) {
+		*dst = *src as i32;
 	}
 }
 
@@ -189,10 +184,9 @@ pub fn inv_ntt(p: &mut Poly) {
 
 	// Convert i32 coefficients to u32 for NTT computation
 	let mut coeffs_u32 = [0u32; N];
-	for i in 0..N {
+	for (dst, src) in coeffs_u32.iter_mut().zip(coeffs.iter()) {
 		// Handle negative values by adding Q
-		coeffs_u32[i] =
-			if coeffs[i] < 0 { (coeffs[i] + Q as i32) as u32 } else { coeffs[i] as u32 };
+		*dst = if *src < 0 { (*src + Q as i32) as u32 } else { *src as u32 };
 	}
 
 	let mut k = 0; // Index into InvZetas
@@ -221,13 +215,13 @@ pub fn inv_ntt(p: &mut Poly) {
 	}
 
 	// Final multiplication by R_OVER_256
-	for j in 0..N {
-		coeffs_u32[j] = mont_reduce_le2q(R_OVER_256 * coeffs_u32[j] as u64);
+	for coeff in coeffs_u32.iter_mut() {
+		*coeff = mont_reduce_le2q(R_OVER_256 * *coeff as u64);
 	}
 
 	// Convert back to i32
-	for i in 0..N {
-		coeffs[i] = coeffs_u32[i] as i32;
+	for (dst, src) in coeffs.iter_mut().zip(coeffs_u32.iter()) {
+		*dst = *src as i32;
 	}
 }
 
@@ -307,8 +301,8 @@ mod tests {
 			8380417, 8380417, 8380416, 8380415,
 		];
 
-		for i in 0..256 {
-			p.coeffs[i] = go_coeffs[i] as i32;
+		for (dst, src) in p.coeffs.iter_mut().zip(go_coeffs.iter()) {
+			*dst = *src;
 		}
 
 		ntt(&mut p);

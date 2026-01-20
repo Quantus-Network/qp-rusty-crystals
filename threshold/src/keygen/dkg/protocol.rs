@@ -638,18 +638,13 @@ impl DilithiumDkg {
 			}
 
 			// Verify commitment hash matches
-			let expected_hash = self
-				.state_data
-				.round2
-				.commitment_hashes
-				.get(&party_id)
-				.ok_or_else(|| {
+			let expected_hash =
+				*self.state_data.round2.commitment_hashes.get(&party_id).ok_or_else(|| {
 					DkgProtocolError::InternalError(format!(
 						"Missing commitment hash for party {}",
 						party_id
 					))
-				})?
-				.clone();
+				})?;
 
 			let actual_hash = self.compute_commitment_hash(&contributions);
 
@@ -659,7 +654,7 @@ impl DilithiumDkg {
 			}
 
 			// Verify coefficient bounds
-			for (_, subset_contrib) in &contributions.subset_contributions {
+			for subset_contrib in contributions.subset_contributions.values() {
 				if !subset_contrib.verify_bounds(eta) {
 					self.state_data.round3.set_verification_result(party_id, false);
 					return Err(DkgProtocolError::InvalidContributionBounds(party_id));
@@ -723,16 +718,22 @@ impl DilithiumDkg {
 					if let Some(subset_contrib) =
 						party_contrib.subset_contributions.get(subset_mask)
 					{
-						for i in 0..L {
-							for j in 0..N {
-								s1_combined[i][j] =
-									s1_combined[i][j].wrapping_add(subset_contrib.s1[i][j]);
+						for (s1_poly, contrib_poly) in
+							s1_combined.iter_mut().zip(subset_contrib.s1.iter())
+						{
+							for (s1_coeff, contrib_coeff) in
+								s1_poly.iter_mut().zip(contrib_poly.iter())
+							{
+								*s1_coeff = s1_coeff.wrapping_add(*contrib_coeff);
 							}
 						}
-						for i in 0..K {
-							for j in 0..N {
-								s2_combined[i][j] =
-									s2_combined[i][j].wrapping_add(subset_contrib.s2[i][j]);
+						for (s2_poly, contrib_poly) in
+							s2_combined.iter_mut().zip(subset_contrib.s2.iter())
+						{
+							for (s2_coeff, contrib_coeff) in
+								s2_poly.iter_mut().zip(contrib_poly.iter())
+							{
+								*s2_coeff = s2_coeff.wrapping_add(*contrib_coeff);
 							}
 						}
 					}
@@ -740,16 +741,14 @@ impl DilithiumDkg {
 			}
 
 			// Normalize coefficients mod q
-			for i in 0..L {
-				for j in 0..N {
-					let c = s1_combined[i][j];
-					s1_combined[i][j] = ((c % Q) + Q) % Q;
+			for s1_poly in s1_combined.iter_mut() {
+				for coeff in s1_poly.iter_mut() {
+					*coeff = ((*coeff % Q) + Q) % Q;
 				}
 			}
-			for i in 0..K {
-				for j in 0..N {
-					let c = s2_combined[i][j];
-					s2_combined[i][j] = ((c % Q) + Q) % Q;
+			for s2_poly in s2_combined.iter_mut() {
+				for coeff in s2_poly.iter_mut() {
+					*coeff = ((*coeff % Q) + Q) % Q;
 				}
 			}
 
@@ -762,41 +761,45 @@ impl DilithiumDkg {
 		let mut s2_total = polyvec::Polyveck::default();
 
 		// Sum all subset contributions (they partition the total)
-		for (_, contrib) in &self.state_data.round3.contributions {
-			for (_, subset_contrib) in &contrib.subset_contributions {
-				for i in 0..L {
-					for j in 0..N {
-						s1_total.vec[i].coeffs[j] =
-							s1_total.vec[i].coeffs[j].wrapping_add(subset_contrib.s1[i][j]);
+		for contrib in self.state_data.round3.contributions.values() {
+			for subset_contrib in contrib.subset_contributions.values() {
+				for (total_poly, contrib_poly) in
+					s1_total.vec.iter_mut().zip(subset_contrib.s1.iter())
+				{
+					for (total_coeff, contrib_coeff) in
+						total_poly.coeffs.iter_mut().zip(contrib_poly.iter())
+					{
+						*total_coeff = total_coeff.wrapping_add(*contrib_coeff);
 					}
 				}
-				for i in 0..K {
-					for j in 0..N {
-						s2_total.vec[i].coeffs[j] =
-							s2_total.vec[i].coeffs[j].wrapping_add(subset_contrib.s2[i][j]);
+				for (total_poly, contrib_poly) in
+					s2_total.vec.iter_mut().zip(subset_contrib.s2.iter())
+				{
+					for (total_coeff, contrib_coeff) in
+						total_poly.coeffs.iter_mut().zip(contrib_poly.iter())
+					{
+						*total_coeff = total_coeff.wrapping_add(*contrib_coeff);
 					}
 				}
 			}
 		}
 
 		// Normalize totals
-		for i in 0..L {
-			for j in 0..N {
-				let c = s1_total.vec[i].coeffs[j];
-				s1_total.vec[i].coeffs[j] = ((c % Q) + Q) % Q;
+		for total_poly in s1_total.vec.iter_mut() {
+			for coeff in total_poly.coeffs.iter_mut() {
+				*coeff = ((*coeff % Q) + Q) % Q;
 			}
 		}
-		for i in 0..K {
-			for j in 0..N {
-				let c = s2_total.vec[i].coeffs[j];
-				s2_total.vec[i].coeffs[j] = ((c % Q) + Q) % Q;
+		for total_poly in s2_total.vec.iter_mut() {
+			for coeff in total_poly.coeffs.iter_mut() {
+				*coeff = ((*coeff % Q) + Q) % Q;
 			}
 		}
 
 		// Convert s1 to NTT domain
 		let mut s1h_total = s1_total.clone();
-		for i in 0..L {
-			crate::circl_ntt::ntt(&mut s1h_total.vec[i]);
+		for s1h_poly in s1h_total.vec.iter_mut() {
+			crate::circl_ntt::ntt(s1h_poly);
 		}
 
 		// Expand matrix A from rho
@@ -806,10 +809,10 @@ impl DilithiumDkg {
 
 		// Compute t = A*s1 + s2
 		let mut t = polyvec::Polyveck::default();
-		for i in 0..K {
-			for j in 0..L {
+		for (i, a_row) in a_matrix.iter().enumerate().take(K) {
+			for (a_poly, s1h_poly) in a_row.vec.iter().zip(s1h_total.vec.iter()).take(L) {
 				let mut temp = poly::Poly::default();
-				poly::pointwise_montgomery(&mut temp, &a_matrix[i].vec[j], &s1h_total.vec[j]);
+				poly::pointwise_montgomery(&mut temp, a_poly, s1h_poly);
 				t.vec[i] = poly::add(&t.vec[i], &temp);
 			}
 			poly::reduce(&mut t.vec[i]);
@@ -817,16 +820,15 @@ impl DilithiumDkg {
 		}
 
 		// Add s2
-		for i in 0..K {
-			t.vec[i] = poly::add(&t.vec[i], &s2_total.vec[i]);
+		for (t_poly, s2_poly) in t.vec.iter_mut().zip(s2_total.vec.iter()).take(K) {
+			*t_poly = poly::add(t_poly, s2_poly);
 		}
 
 		// Normalize t
-		for i in 0..K {
-			poly::reduce(&mut t.vec[i]);
-			for j in 0..N {
-				let coeff = t.vec[i].coeffs[j];
-				t.vec[i].coeffs[j] = ((coeff % Q) + Q) % Q;
+		for t_poly in t.vec.iter_mut().take(K) {
+			poly::reduce(t_poly);
+			for coeff in t_poly.coeffs.iter_mut() {
+				*coeff = ((*coeff % Q) + Q) % Q;
 			}
 		}
 
@@ -870,8 +872,8 @@ impl DilithiumDkg {
 
 		let private_share = PrivateKeyShare::new(
 			my_id,
-			parties as u32,
-			threshold as u32,
+			parties,
+			threshold,
 			party_key,
 			rho,
 			tr,

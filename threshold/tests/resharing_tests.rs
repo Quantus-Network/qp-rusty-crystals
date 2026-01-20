@@ -89,7 +89,7 @@ fn run_resharing_protocol(
 
 			// Deliver queued messages first
 			let messages = message_queues.get_mut(&party_id).unwrap();
-			let messages_to_deliver: Vec<_> = messages.drain(..).collect();
+			let messages_to_deliver: Vec<_> = std::mem::take(messages);
 
 			for (from, data) in messages_to_deliver {
 				protocol.message(from, data);

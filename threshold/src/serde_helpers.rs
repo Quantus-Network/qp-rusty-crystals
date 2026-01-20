@@ -42,7 +42,7 @@ pub mod serde_byte_array {
 pub mod serde_poly_vec {
 	use super::*;
 
-	pub fn serialize<S>(polys: &Vec<[i32; 256]>, serializer: S) -> Result<S::Ok, S::Error>
+	pub fn serialize<S>(polys: &[[i32; 256]], serializer: S) -> Result<S::Ok, S::Error>
 	where
 		S: Serializer,
 	{

@@ -71,10 +71,10 @@ pub(crate) fn compute_sharing_patterns(
 
 	// Assign subsets to positions greedily:
 	// Position i gets all unassigned subsets that contain party i
-	for pos in 0..t {
+	for (pos, pattern) in patterns.iter_mut().enumerate().take(t) {
 		for &subset in &subsets {
 			if !used.contains(&subset) && (subset & (1 << pos)) != 0 {
-				patterns[pos].push(subset);
+				pattern.push(subset);
 				used.insert(subset);
 			}
 		}
@@ -164,11 +164,11 @@ pub fn recover_share(
 			let mut s1_ntt = share.s1_share.clone();
 			let mut s2_ntt = share.s2_share.clone();
 
-			for i in 0..dilithium_params::L {
-				crate::circl_ntt::ntt(&mut s1_ntt.vec[i]);
+			for s1_poly in s1_ntt.vec.iter_mut().take(dilithium_params::L) {
+				crate::circl_ntt::ntt(s1_poly);
 			}
-			for i in 0..dilithium_params::K {
-				crate::circl_ntt::ntt(&mut s2_ntt.vec[i]);
+			for s2_poly in s2_ntt.vec.iter_mut().take(dilithium_params::K) {
+				crate::circl_ntt::ntt(s2_poly);
 			}
 
 			return Ok((s1_ntt, s2_ntt));
@@ -234,9 +234,9 @@ pub fn recover_share(
 		// Translate the share index u to the share index u_ by applying the permutation
 		// The permutation maps positions to DKG indices
 		let mut u_translated = 0u16;
-		for i in 0..parties as usize {
+		for (i, &perm_val) in perm.iter().enumerate().take(parties as usize) {
 			if pattern_u & (1 << i) != 0 {
-				u_translated |= 1 << (perm[i] as u16);
+				u_translated |= 1 << (perm_val as u16);
 			}
 		}
 
@@ -246,47 +246,51 @@ pub fn recover_share(
 			let mut s1_ntt = share.s1_share.clone();
 			let mut s2_ntt = share.s2_share.clone();
 
-			for i in 0..dilithium_params::L {
-				crate::circl_ntt::ntt(&mut s1_ntt.vec[i]);
+			for s1_poly in s1_ntt.vec.iter_mut().take(dilithium_params::L) {
+				crate::circl_ntt::ntt(s1_poly);
 			}
-			for i in 0..dilithium_params::K {
-				crate::circl_ntt::ntt(&mut s2_ntt.vec[i]);
+			for s2_poly in s2_ntt.vec.iter_mut().take(dilithium_params::K) {
+				crate::circl_ntt::ntt(s2_poly);
 			}
 
 			// Add in NTT domain (pointwise addition)
 			// Use wrapping_add to handle overflow for large configurations
-			for i in 0..dilithium_params::L {
-				for j in 0..(dilithium_params::N as usize) {
-					s1_combined.vec[i].coeffs[j] =
-						s1_combined.vec[i].coeffs[j].wrapping_add(s1_ntt.vec[i].coeffs[j]);
+			for (combined_poly, ntt_poly) in
+				s1_combined.vec.iter_mut().zip(s1_ntt.vec.iter()).take(dilithium_params::L)
+			{
+				for (combined_coeff, ntt_coeff) in
+					combined_poly.coeffs.iter_mut().zip(ntt_poly.coeffs.iter())
+				{
+					*combined_coeff = combined_coeff.wrapping_add(*ntt_coeff);
 				}
 			}
 
-			for i in 0..dilithium_params::K {
-				for j in 0..(dilithium_params::N as usize) {
-					s2_combined.vec[i].coeffs[j] =
-						s2_combined.vec[i].coeffs[j].wrapping_add(s2_ntt.vec[i].coeffs[j]);
+			for (combined_poly, ntt_poly) in
+				s2_combined.vec.iter_mut().zip(s2_ntt.vec.iter()).take(dilithium_params::K)
+			{
+				for (combined_coeff, ntt_coeff) in
+					combined_poly.coeffs.iter_mut().zip(ntt_poly.coeffs.iter())
+				{
+					*combined_coeff = combined_coeff.wrapping_add(*ntt_coeff);
 				}
 			}
 		}
 	}
 
 	// Normalize accumulated NTT values (can exceed 2Q after addition)
-	for i in 0..dilithium_params::L {
-		for j in 0..(dilithium_params::N as usize) {
-			let coeff = s1_combined.vec[i].coeffs[j];
+	for combined_poly in s1_combined.vec.iter_mut().take(dilithium_params::L) {
+		for coeff in combined_poly.coeffs.iter_mut() {
 			let coeff_u32 =
-				if coeff < 0 { (coeff + dilithium_params::Q as i32) as u32 } else { coeff as u32 };
-			s1_combined.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
+				if *coeff < 0 { (*coeff + dilithium_params::Q) as u32 } else { *coeff as u32 };
+			*coeff = mod_q(coeff_u32) as i32;
 		}
 	}
 
-	for i in 0..dilithium_params::K {
-		for j in 0..(dilithium_params::N as usize) {
-			let coeff = s2_combined.vec[i].coeffs[j];
+	for combined_poly in s2_combined.vec.iter_mut().take(dilithium_params::K) {
+		for coeff in combined_poly.coeffs.iter_mut() {
 			let coeff_u32 =
-				if coeff < 0 { (coeff + dilithium_params::Q as i32) as u32 } else { coeff as u32 };
-			s2_combined.vec[i].coeffs[j] = mod_q(coeff_u32) as i32;
+				if *coeff < 0 { (*coeff + dilithium_params::Q) as u32 } else { *coeff as u32 };
+			*coeff = mod_q(coeff_u32) as i32;
 		}
 	}
 

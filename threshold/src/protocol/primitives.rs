@@ -215,8 +215,8 @@ impl HyperballSampleVector {
 		}
 
 		let factor = radius / sq.sqrt();
-		for i in 0..size {
-			self.data[i] = samples[i] * factor;
+		for (data_val, sample_val) in self.data.iter_mut().zip(samples.iter()).take(size) {
+			*data_val = *sample_val * factor;
 		}
 	}
 
@@ -321,7 +321,7 @@ impl HyperballSampleVector {
 				u += Q / 2;
 				let t = u - Q;
 				u = t + ((t >> 31) & Q);
-				u = u - Q / 2;
+				u -= Q / 2;
 
 				data[i * dilithium_params::N as usize + j] = u as f64;
 			}
@@ -335,7 +335,7 @@ impl HyperballSampleVector {
 				u += Q / 2;
 				let t = u - Q;
 				u = t + ((t >> 31) & Q);
-				u = u - Q / 2;
+				u -= Q / 2;
 
 				data[(dilithium_params::L + i) * dilithium_params::N as usize + j] = u as f64;
 			}
