@@ -6,7 +6,7 @@ authors = ["Quantum Resistant Ledger"]
 license = "GPL-3.0"
 description = "Threshold ML-DSA signature scheme implementation"
 repository = "https://github.com/quantum-resistant-ledger/qp-rusty-crystals"
-keywords = ["cryptography", "post-quantum", "threshold", "signatures", "ml-dsa"]
+keywords = ["cryptography", "ml-dsa", "post-quantum", "signatures", "threshold"]
 categories = ["cryptography"]
 
 [dependencies]
@@ -36,9 +36,9 @@ rand_chacha = { workspace = true }
 bincode = { workspace = true }
 
 [features]
-default = ["std", "serde"]
+default = ["serde", "std"]
 std = ["rand/std", "rand_core/std"]
-serde = ["dep:serde", "dep:bincode"]
+serde = ["dep:bincode", "dep:serde"]
 
 [[bench]]
 name = "threshold_benchmarks"
