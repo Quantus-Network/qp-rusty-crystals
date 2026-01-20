@@ -108,7 +108,8 @@ impl DkgState {
 	/// Check if messages for a given round can be accepted in this state.
 	pub fn can_accept_round(&self, msg_round: u8) -> bool {
 		let current_round = self.round_number();
-		// Can accept messages for current round or already-processed rounds (duplicates will be caught later)
+		// Can accept messages for current round or already-processed rounds (duplicates will be
+		// caught later)
 		msg_round <= current_round
 	}
 }

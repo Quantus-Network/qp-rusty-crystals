@@ -83,13 +83,12 @@ impl ThresholdConfig {
 			(5, 7) => 320,
 			(6, 7) => 270,
 			(7, 7) => 650,
-			_ => {
+			_ =>
 				return Err(ThresholdError::InvalidParameters {
 					threshold: t,
 					parties: n,
 					reason: "unsupported threshold configuration for ML-DSA-87",
-				})
-			},
+				}),
 		};
 
 		Ok(Self { t, n, k_iterations })

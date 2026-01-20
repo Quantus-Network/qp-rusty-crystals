@@ -7,8 +7,8 @@
 //! # Overview
 //!
 //! Resharing consists of four phases:
-//! 1. **Blinded Reconstruction**: Threshold of old committee members reconstruct
-//!    the secret in blinded form
+//! 1. **Blinded Reconstruction**: Threshold of old committee members reconstruct the secret in
+//!    blinded form
 //! 2. **Re-dealing**: Generate fresh RSS shares for the new committee structure
 //! 3. **Distribution**: Send new shares to new committee members
 //! 4. **Verification**: New committee verifies share consistency

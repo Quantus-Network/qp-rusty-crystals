@@ -165,11 +165,10 @@ impl ResharingConfig {
 			(true, true) => ResharingRole::Both,
 			(true, false) => ResharingRole::OldOnly,
 			(false, true) => ResharingRole::NewOnly,
-			(false, false) => {
+			(false, false) =>
 				return Err(ResharingConfigError::PartyNotInEitherCommittee {
 					party_id: my_party_id,
-				})
-			},
+				}),
 		};
 
 		// Validate existing share matches role
@@ -338,8 +337,8 @@ impl ResharingMessage {
 /// **Security note:** Broadcasting the blinding values is safe because:
 /// - The blinding alone doesn't reveal the secret
 /// - The blinded contribution hides the actual share values
-/// - Only the combination of all participants' shares (which requires
-///   threshold cooperation) can recover the secret
+/// - Only the combination of all participants' shares (which requires threshold cooperation) can
+///   recover the secret
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ResharingRound1Broadcast {

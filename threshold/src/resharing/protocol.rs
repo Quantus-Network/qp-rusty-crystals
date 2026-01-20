@@ -6,8 +6,8 @@
 //! # Protocol Overview
 //!
 //! The resharing protocol has 3 rounds:
-//! 1. **Round 1 (Blinded Reconstruction)**: Old committee members broadcast blinded
-//!    contributions to reconstruct the secret
+//! 1. **Round 1 (Blinded Reconstruction)**: Old committee members broadcast blinded contributions
+//!    to reconstruct the secret
 //! 2. **Round 2 (Re-dealing)**: Dealers generate and distribute new shares to new committee
 //! 3. **Round 3 (Verification)**: New committee members verify share consistency
 //!
@@ -23,8 +23,7 @@ use std::collections::HashMap;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::keys::PrivateKeyShare;
-use crate::participants::ParticipantId;
+use crate::{keys::PrivateKeyShare, participants::ParticipantId};
 
 use super::types::{
 	BlindedContribution, NewShareData, ResharingConfig, ResharingMessage, ResharingOutput,
@@ -335,12 +334,10 @@ impl ResharingProtocol {
 			ResharingState::Round3Generate => self.handle_round3_generate(),
 			ResharingState::Round3Waiting => self.handle_round3_waiting(),
 			ResharingState::Combining => self.handle_combining(),
-			ResharingState::Done => {
-				Err(ResharingProtocolError::InvalidState("Protocol already completed".to_string()))
-			},
-			ResharingState::Failed(reason) => {
-				Err(ResharingProtocolError::InvalidState(format!("Protocol failed: {}", reason)))
-			},
+			ResharingState::Done =>
+				Err(ResharingProtocolError::InvalidState("Protocol already completed".to_string())),
+			ResharingState::Failed(reason) =>
+				Err(ResharingProtocolError::InvalidState(format!("Protocol failed: {}", reason))),
 		}
 	}
 
@@ -567,10 +564,10 @@ impl ResharingProtocol {
 		// Only reject if we're already past Round2 or done/failed.
 		if matches!(
 			self.state,
-			ResharingState::Round3Generate
-				| ResharingState::Round3Waiting
-				| ResharingState::Combining
-				| ResharingState::Done
+			ResharingState::Round3Generate |
+				ResharingState::Round3Waiting |
+				ResharingState::Combining |
+				ResharingState::Done
 		) {
 			return;
 		}

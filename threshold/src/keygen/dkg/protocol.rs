@@ -258,7 +258,7 @@ impl DilithiumDkg {
 				Ok(Action::SendMany(self.serialize_message(&DkgMessage::Round2(msg))?))
 			},
 
-			DkgState::Round2Waiting => {
+			DkgState::Round2Waiting =>
 				if self.state_data.can_advance() {
 					let errors = self.state_data.transition_to(DkgState::Round3Revealing);
 					for e in errors {
@@ -268,8 +268,7 @@ impl DilithiumDkg {
 					self.poke()
 				} else {
 					Ok(Action::Wait)
-				}
-			},
+				},
 
 			DkgState::Round3Revealing => {
 				if self.sent_current_round {
@@ -378,9 +377,8 @@ impl DilithiumDkg {
 				Ok(Action::Return(output))
 			},
 
-			DkgState::Failed(reason) => {
-				Err(DkgProtocolError::InvalidState(format!("Protocol failed: {}", reason)))
-			},
+			DkgState::Failed(reason) =>
+				Err(DkgProtocolError::InvalidState(format!("Protocol failed: {}", reason))),
 		}
 	}
 
