@@ -30,16 +30,33 @@ impl Keypair {
 	///
 	/// Note: The entropy is moved here and zeroized after use, along with the derived secret key.
 	pub fn generate(entropy: SensitiveBytes32) -> Keypair {
-		let mut pk = [0u8; PUBLICKEYBYTES];
-		let mut sk = [0u8; SECRETKEYBYTES];
-		crate::sign::keypair(&mut pk, &mut sk, entropy);
-		let keypair = Keypair {
-			secret: SecretKey::from_bytes(&sk).expect("Should never fail"),
-			public: PublicKey::from_bytes(&pk).expect("Should never fail"),
-		};
-		sk.zeroize();
-		// entropy is automatically zeroized when it drops (ZeroizeOnDrop)
-		keypair
+		#[cfg(feature = "embedded")]
+		{
+			let mut pk = crate::boxed::zeroed_box::<[u8; PUBLICKEYBYTES]>();
+			let mut sk = crate::boxed::zeroed_box::<[u8; SECRETKEYBYTES]>();
+			crate::sign::keypair(pk.as_mut(), sk.as_mut(), entropy);
+			let keypair = Keypair {
+				secret: SecretKey::from_bytes(sk.as_ref()).expect("Should never fail"),
+				public: PublicKey::from_bytes(pk.as_ref()).expect("Should never fail"),
+			};
+			sk.as_mut().zeroize();
+			keypair
+		}
+
+		#[cfg(not(feature = "embedded"))]
+		{
+			panic!("embedded feature is OFF - crash for now.");
+			let mut pk = [0u8; PUBLICKEYBYTES];
+			let mut sk = [0u8; SECRETKEYBYTES];
+			crate::sign::keypair(&mut pk, &mut sk, entropy);
+			let keypair = Keypair {
+				secret: SecretKey::from_bytes(&sk).expect("Should never fail"),
+				public: PublicKey::from_bytes(&pk).expect("Should never fail"),
+			};
+			sk.zeroize();
+			// entropy is automatically zeroized when it drops (ZeroizeOnDrop)
+			keypair
+		}
 	}
 
 	/// Convert a Keypair to a bytes array.

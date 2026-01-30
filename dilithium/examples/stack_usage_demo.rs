@@ -5,7 +5,14 @@
 //! systems, blockchain VMs, and other constrained environments.
 
 use qp_rusty_crystals_dilithium::{ml_dsa_87, SensitiveBytes32};
-use std::{panic, sync::mpsc, thread, time::Duration};
+use std::{
+	env,
+	panic,
+	process::{self, Command},
+	sync::mpsc,
+	thread,
+	time::Duration,
+};
 
 use rand::Rng;
 
@@ -37,7 +44,7 @@ where
 		match handle {
 			Ok(thread_handle) => {
 				// Wait for result with timeout
-				match rx.recv_timeout(Duration::from_secs(1)) {
+				match rx.recv_timeout(Duration::from_secs(10)) {
 					Ok(success) => {
 						let _ = thread_handle.join();
 						success
@@ -134,25 +141,38 @@ where
 }
 
 fn main() {
+	if let (Ok(op), Ok(stack_kb)) = (env::var("STACK_DEMO_OP"), env::var("STACK_DEMO_STACK_KB")) {
+		let stack_kb: usize = stack_kb.parse().unwrap_or(0);
+		let ok = match op.as_str() {
+			"keygen" => test_keygen_with_stack_size(stack_kb, "ml-dsa-87", move || {
+				let _kp = ml_dsa_87::Keypair::generate((&mut [1u8; 32]).into());
+				true
+			}),
+			"sign" => {
+				let entropy = get_random_bytes();
+				let kp = Box::new(ml_dsa_87::Keypair::generate(entropy));
+				let msg = b"stack usage test message";
+				test_sign_with_stack_size(stack_kb, "ml-dsa-87", move || {
+					let _sig = kp.sign(msg, None, None);
+					true
+				})
+			},
+			"verify" => {
+				let entropy = get_random_bytes();
+				let kp = Box::new(ml_dsa_87::Keypair::generate(entropy));
+				let msg = b"stack usage test message";
+				let sig = Box::new(kp.sign(msg, None, None).unwrap());
+				test_verify_with_stack_size(stack_kb, "ml-dsa-87", move || kp.verify(msg, sig.as_ref(), None))
+			},
+			_ => false,
+		};
+		process::exit(if ok { 0 } else { 1 });
+	}
+
 	println!("=== ML-DSA Stack Usage Analysis ===\n");
 
-	// Pre-generate test data for all variants
-	let entropy = get_random_bytes();
-	let ml87_keypair = ml_dsa_87::Keypair::generate(entropy);
-
-	let test_msg = b"stack usage test message";
-
-	let ml87_sig = ml87_keypair.sign(test_msg, None, None).unwrap();
-
 	// Test with progressively smaller stack sizes
-	let stack_sizes = [
-		1024, 800, 700, 512, // 512KB
-		444, 333, 290, 256, // 256KB - typical small embedded system
-		200, 160, 150, 140, 128, // 128KB - typical small embedded system
-		100, 88, 64, // 64KB - large microcontroller
-		50, 40, 36, 34, 33, 32, // 32KB - medium microcontroller
-		16, // 16KB - small microcontroller
-	];
+	let stack_sizes = [256, 128, 64, 32, 24, 16, 12, 10, 8, 6, 4, 3, 2];
 
 	println!(
 		"{:>17} | {:>17} | {:>15} | {:>17}",
@@ -163,23 +183,19 @@ fn main() {
 	let mut min_sizes = [None; 3]; // [ml87_keygen, ml87_sign, ml87_verify]
 
 	for &size_kb in &stack_sizes {
-		// Test ML-DSA-87
-		let ml87_keygen = test_keygen_with_stack_size(size_kb, "ml-dsa-87", move || {
-			let _kp = ml_dsa_87::Keypair::generate((&mut [1u8; 32]).into());
-			true
-		});
+		let exe = env::current_exe().unwrap();
+		let run = |op: &str| {
+			Command::new(&exe)
+				.env("STACK_DEMO_OP", op)
+				.env("STACK_DEMO_STACK_KB", size_kb.to_string())
+				.status()
+				.map(|s| s.success())
+				.unwrap_or(false)
+		};
 
-		let ml87_keypair_clone = ml87_keypair.clone();
-		let ml87_sign = test_sign_with_stack_size(size_kb, "ml-dsa-87", move || {
-			let _sig = ml87_keypair_clone.sign(test_msg, None, None);
-			true
-		});
-
-		let ml87_keypair_clone2 = ml87_keypair.clone();
-		let ml87_sig_clone = ml87_sig;
-		let ml87_verify = test_verify_with_stack_size(size_kb, "ml-dsa-87", move || {
-			ml87_keypair_clone2.verify(test_msg, &ml87_sig_clone, None)
-		});
+		let ml87_keygen = run("keygen");
+		let ml87_sign = run("sign");
+		let ml87_verify = run("verify");
 
 		println!(
 			"{:>17} | {:>17} | {:>15} | {:>17}",

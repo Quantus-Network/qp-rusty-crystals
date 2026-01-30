@@ -436,7 +436,10 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
 	// Fixed number of rounds to reduce timing variations
 	const FIXED_ROUNDS: usize = 2;
 	let mut shake_output_buffer = [0u8; fips202::SHAKE256_RATE];
-	let mut temporary_coefficient_storage = [0i32; 1000]; // Temp storage for all extracted coeffs
+	#[cfg(feature = "embedded")]
+	let mut temporary_coefficient_storage = crate::boxed::zeroed_box::<[i32; 1000]>();
+	#[cfg(not(feature = "embedded"))]
+	let mut temporary_coefficient_storage = [0i32; 1000];
 	let mut total_coefficients_collected = 0usize;
 
 	// In the extremely rare case that 2 rounds isn't enough, we keep going.

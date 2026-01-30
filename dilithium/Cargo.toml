@@ -37,3 +37,4 @@ name = "ct_bench"
 
 [features]
 default = []
+embedded = []

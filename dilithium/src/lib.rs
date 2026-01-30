@@ -92,6 +92,8 @@ pub mod polyvec;
 pub mod reduce;
 pub mod rounding;
 pub mod sign;
+#[cfg(feature = "embedded")]
+mod boxed;
 
 #[cfg(test)]
 mod tests {

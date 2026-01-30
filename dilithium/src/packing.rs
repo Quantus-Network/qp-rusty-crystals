@@ -6,6 +6,13 @@ const K: usize = params::K;
 const L: usize = params::L;
 const N: usize = params::N as usize;
 
+pub const SK_RHO_OFF: usize = 0;
+pub const SK_KEY_OFF: usize = params::SEEDBYTES;
+pub const SK_TR_OFF: usize = params::SEEDBYTES * 2;
+pub const SK_S1_OFF: usize = params::SEEDBYTES * 2 + params::TR_BYTES;
+pub const SK_S2_OFF: usize = SK_S1_OFF + L * params::POLYETA_PACKEDBYTES;
+pub const SK_T0_OFF: usize = SK_S2_OFF + K * params::POLYETA_PACKEDBYTES;
+
 /// Bit-pack public key pk = (rho, t1).
 ///
 /// # Arguments
@@ -44,27 +51,27 @@ pub fn pack_sk(
 	s1: &Polyvecl,
 	s2: &Polyveck,
 ) {
-	sk[..params::SEEDBYTES].copy_from_slice(&rho[0..params::SEEDBYTES]);
-	let mut idx = params::SEEDBYTES;
-
-	sk[idx..idx + params::SEEDBYTES].copy_from_slice(&key[0..params::SEEDBYTES]);
-	idx += params::SEEDBYTES;
-
-	sk[idx..idx + params::TR_BYTES].copy_from_slice(&tr[0..params::TR_BYTES]);
-	idx += params::TR_BYTES;
+	sk[SK_RHO_OFF..SK_RHO_OFF + params::SEEDBYTES].copy_from_slice(&rho[..params::SEEDBYTES]);
+	sk[SK_KEY_OFF..SK_KEY_OFF + params::SEEDBYTES].copy_from_slice(&key[..params::SEEDBYTES]);
+	sk[SK_TR_OFF..SK_TR_OFF + params::TR_BYTES].copy_from_slice(&tr[..params::TR_BYTES]);
 
 	for i in 0..L {
-		poly::eta_pack(&mut sk[idx + i * params::POLYETA_PACKEDBYTES..], &s1.vec[i]);
+		poly::eta_pack(
+			&mut sk[SK_S1_OFF + i * params::POLYETA_PACKEDBYTES..],
+			&s1.vec[i],
+		);
 	}
-	idx += L * params::POLYETA_PACKEDBYTES;
-
 	for i in 0..K {
-		poly::eta_pack(&mut sk[idx + i * params::POLYETA_PACKEDBYTES..], &s2.vec[i]);
+		poly::eta_pack(
+			&mut sk[SK_S2_OFF + i * params::POLYETA_PACKEDBYTES..],
+			&s2.vec[i],
+		);
 	}
-	idx += K * params::POLYETA_PACKEDBYTES;
-
 	for i in 0..K {
-		poly::t0_pack(&mut sk[idx + i * params::POLYT0_PACKEDBYTES..], &t0.vec[i]);
+		poly::t0_pack(
+			&mut sk[SK_T0_OFF + i * params::POLYT0_PACKEDBYTES..],
+			&t0.vec[i],
+		);
 	}
 }
 
@@ -78,27 +85,27 @@ pub fn unpack_sk(
 	s2: &mut Polyveck,
 	sk: &[u8],
 ) {
-	rho[..params::SEEDBYTES].copy_from_slice(&sk[..params::SEEDBYTES]);
-	let mut idx = params::SEEDBYTES;
-
-	key[..params::SEEDBYTES].copy_from_slice(&sk[idx..idx + params::SEEDBYTES]);
-	idx += params::SEEDBYTES;
-
-	tr[..params::TR_BYTES].copy_from_slice(&sk[idx..idx + params::TR_BYTES]);
-	idx += params::TR_BYTES;
+	rho[..params::SEEDBYTES].copy_from_slice(&sk[SK_RHO_OFF..SK_RHO_OFF + params::SEEDBYTES]);
+	key[..params::SEEDBYTES].copy_from_slice(&sk[SK_KEY_OFF..SK_KEY_OFF + params::SEEDBYTES]);
+	tr[..params::TR_BYTES].copy_from_slice(&sk[SK_TR_OFF..SK_TR_OFF + params::TR_BYTES]);
 
 	for i in 0..L {
-		poly::eta_unpack(&mut s1.vec[i], &sk[idx + i * params::POLYETA_PACKEDBYTES..]);
+		poly::eta_unpack(
+			&mut s1.vec[i],
+			&sk[SK_S1_OFF + i * params::POLYETA_PACKEDBYTES..],
+		);
 	}
-	idx += L * params::POLYETA_PACKEDBYTES;
-
 	for i in 0..K {
-		poly::eta_unpack(&mut s2.vec[i], &sk[idx + i * params::POLYETA_PACKEDBYTES..]);
+		poly::eta_unpack(
+			&mut s2.vec[i],
+			&sk[SK_S2_OFF + i * params::POLYETA_PACKEDBYTES..],
+		);
 	}
-	idx += K * params::POLYETA_PACKEDBYTES;
-
 	for i in 0..K {
-		poly::t0_unpack(&mut t0.vec[i], &sk[idx + i * params::POLYT0_PACKEDBYTES..]);
+		poly::t0_unpack(
+			&mut t0.vec[i],
+			&sk[SK_T0_OFF + i * params::POLYT0_PACKEDBYTES..],
+		);
 	}
 }
 

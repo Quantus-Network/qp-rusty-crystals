@@ -5,11 +5,16 @@ use crate::{
 	polyvec::{Polyveck, Polyvecl},
 	SensitiveBytes32,
 };
+#[cfg(not(feature = "embedded"))]
 use core::array;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::Zeroize;
+#[cfg(not(feature = "embedded"))]
+use zeroize::ZeroizeOnDrop;
 
 const K: usize = params::K;
 const L: usize = params::L;
+#[cfg(feature = "embedded")]
+const N: usize = params::N as usize;
 
 /// Generate public and private key.
 ///
@@ -39,35 +44,88 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: SensitiveBytes32) {
 	let mut key = [0u8; params::SEEDBYTES];
 	key.copy_from_slice(&seedbuf[params::SEEDBYTES + params::CRHBYTES..]);
 
-	// Allocate polynomial structures
-	let mut mat: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
-	polyvec::matrix_expand(&mut mat, &rho);
+	#[cfg(feature = "embedded")]
+	{
+		sk[packing::SK_RHO_OFF..packing::SK_RHO_OFF + params::SEEDBYTES]
+			.copy_from_slice(&rho[..params::SEEDBYTES]);
+		sk[packing::SK_KEY_OFF..packing::SK_KEY_OFF + params::SEEDBYTES]
+			.copy_from_slice(&key[..params::SEEDBYTES]);
 
-	let mut s1 = Polyvecl::default();
-	polyvec::l_uniform_eta(&mut s1, &rhoprime, 0);
+		let mut t1 = crate::boxed::zeroed_box::<Polyveck>();
+		let mut s1_ntt = crate::boxed::zeroed_box::<Polyvecl>();
+		let mut nonce: u16 = 0;
+		for i in 0..L {
+			let mut p = Poly::default();
+			poly::uniform_eta(&mut p, &rhoprime, nonce);
+			poly::eta_pack(
+				&mut sk[packing::SK_S1_OFF + i * params::POLYETA_PACKEDBYTES..],
+				&p,
+			);
+			poly::ntt(&mut p);
+			s1_ntt.vec[i] = p;
+			nonce += 1;
+		}
+		polyvec::matrix_pointwise_montgomery_streaming(&mut t1, &rho, &s1_ntt);
+		polyvec::k_reduce(&mut t1);
+		polyvec::k_invntt_tomont(&mut t1);
 
-	let mut s2 = Polyveck::default();
-	polyvec::k_uniform_eta(&mut s2, &rhoprime, L as u16);
+		for i in 0..K {
+			let mut p = Poly::default();
+			poly::uniform_eta(&mut p, &rhoprime, nonce);
+			poly::eta_pack(
+				&mut sk[packing::SK_S2_OFF + i * params::POLYETA_PACKEDBYTES..],
+				&p,
+			);
+			poly::add_ip(&mut t1.vec[i], &p);
+			nonce += 1;
+		}
+		polyvec::k_caddq(&mut t1);
 
-	let mut s1hat = s1.clone();
-	polyvec::l_ntt(&mut s1hat);
+		for i in 0..K {
+			let mut t0 = Poly::default();
+			poly::power2round(&mut t1.vec[i], &mut t0);
+			poly::t0_pack(
+				&mut sk[packing::SK_T0_OFF + i * params::POLYT0_PACKEDBYTES..],
+				&t0,
+			);
+		}
 
-	let mut t1 = Polyveck::default();
-	polyvec::matrix_pointwise_montgomery(&mut t1, &mat, &s1hat);
-	polyvec::k_reduce(&mut t1);
-	polyvec::k_invntt_tomont(&mut t1);
-	polyvec::k_add(&mut t1, &s2);
-	polyvec::k_caddq(&mut t1);
+		packing::pack_pk(pk, &rho, &t1);
 
-	let mut t0 = Polyveck::default();
-	polyvec::k_power2round(&mut t1, &mut t0);
+		let mut tr = [0u8; params::TR_BYTES];
+		fips202::shake256(&mut tr, params::TR_BYTES, pk, params::PUBLICKEYBYTES);
+		sk[packing::SK_TR_OFF..packing::SK_TR_OFF + params::TR_BYTES]
+			.copy_from_slice(&tr[..params::TR_BYTES]);
+	}
 
-	packing::pack_pk(pk, &rho, &t1);
+	#[cfg(not(feature = "embedded"))]
+	{
+		let mut s1 = Polyvecl::default();
+		polyvec::l_uniform_eta(&mut s1, &rhoprime, 0);
 
-	let mut tr = [0u8; params::TR_BYTES];
-	fips202::shake256(&mut tr, params::TR_BYTES, pk, params::PUBLICKEYBYTES);
+		let mut s2 = Polyveck::default();
+		polyvec::k_uniform_eta(&mut s2, &rhoprime, L as u16);
 
-	packing::pack_sk(sk, &rho, &tr, &key, &t0, &s1, &s2);
+		let mut s1hat = s1.clone();
+		polyvec::l_ntt(&mut s1hat);
+
+		let mut t1 = Polyveck::default();
+		polyvec::matrix_pointwise_montgomery_streaming(&mut t1, &rho, &s1hat);
+		polyvec::k_reduce(&mut t1);
+		polyvec::k_invntt_tomont(&mut t1);
+		polyvec::k_add(&mut t1, &s2);
+		polyvec::k_caddq(&mut t1);
+
+		let mut t0 = Polyveck::default();
+		polyvec::k_power2round(&mut t1, &mut t0);
+
+		packing::pack_pk(pk, &rho, &t1);
+
+		let mut tr = [0u8; params::TR_BYTES];
+		fips202::shake256(&mut tr, params::TR_BYTES, pk, params::PUBLICKEYBYTES);
+
+		packing::pack_sk(sk, &rho, &tr, &key, &t0, &s1, &s2);
+	}
 
 	// Zeroize sensitive intermediate seed material
 	seedbuf.zeroize();
@@ -88,6 +146,7 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: SensitiveBytes32) {
 ///
 /// Note signature depends on std because k_decompose depends on swap which depends on std
 /// Unpacked secret key components
+#[cfg(not(feature = "embedded"))]
 #[derive(ZeroizeOnDrop)]
 struct UnpackedSecretKey {
 	public_seed_rho: [u8; params::SEEDBYTES],
@@ -99,12 +158,17 @@ struct UnpackedSecretKey {
 }
 
 /// Signing context containing precomputed values
+#[cfg(not(feature = "embedded"))]
 struct SigningContext {
+	#[cfg(not(feature = "embedded"))]
 	expanded_matrix_a: [Polyvecl; K],
+	#[cfg(feature = "embedded")]
+	public_seed_rho: [u8; params::SEEDBYTES],
 	message_hash_mu: [u8; params::CRHBYTES],
 	signing_entropy_rho_prime: [u8; params::CRHBYTES],
 }
 
+#[cfg(not(feature = "embedded"))]
 impl Drop for SigningContext {
 	fn drop(&mut self) {
 		// Only zeroize the sensitive entropy, not the polynomial matrix or message hash
@@ -113,6 +177,7 @@ impl Drop for SigningContext {
 }
 
 /// Unpack secret key and prepare for signing
+#[cfg(not(feature = "embedded"))]
 fn unpack_secret_key_for_signing(secret_key_bytes: &[u8]) -> UnpackedSecretKey {
 	let mut public_seed_rho = [0u8; params::SEEDBYTES];
 	let mut public_key_hash_tr = [0u8; params::TR_BYTES];
@@ -147,6 +212,7 @@ fn unpack_secret_key_for_signing(secret_key_bytes: &[u8]) -> UnpackedSecretKey {
 }
 
 /// Compute message hash and signing randomness
+#[cfg(not(feature = "embedded"))]
 fn prepare_signing_context(
 	unpacked_sk: &UnpackedSecretKey,
 	message: &[u8],
@@ -173,14 +239,25 @@ fn prepare_signing_context(
 	// Zeroize sensitive hedge bytes after use
 	hedge_bytes.zeroize();
 
-	// Expand matrix A from public seed
-	let mut expanded_matrix_a: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
-	polyvec::matrix_expand(&mut expanded_matrix_a, &unpacked_sk.public_seed_rho);
+	#[cfg(feature = "embedded")]
+	{
+		SigningContext {
+			public_seed_rho: unpacked_sk.public_seed_rho,
+			message_hash_mu,
+			signing_entropy_rho_prime,
+		}
+	}
 
-	SigningContext { expanded_matrix_a, message_hash_mu, signing_entropy_rho_prime }
+	#[cfg(not(feature = "embedded"))]
+	{
+		let mut expanded_matrix_a: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
+		polyvec::matrix_expand(&mut expanded_matrix_a, &unpacked_sk.public_seed_rho);
+		SigningContext { expanded_matrix_a, message_hash_mu, signing_entropy_rho_prime }
+	}
 }
 
 /// Compute z = y + cs1 and check if ||z||∞ < γ₁ - β
+#[cfg(not(feature = "embedded"))]
 fn compute_and_check_signature_z(
 	signature_z: &mut Polyvecl,
 	masking_vector_y: &Polyvecl,
@@ -198,6 +275,7 @@ fn compute_and_check_signature_z(
 }
 
 /// Compute w0 - cs2 and check if ||w0 - cs2||∞ < γ₂ - β
+#[cfg(not(feature = "embedded"))]
 fn compute_and_check_commitment_w0(
 	commitment_w0: &mut Polyveck,
 	challenge_poly_c: &Poly,
@@ -218,6 +296,7 @@ fn compute_and_check_commitment_w0(
 }
 
 /// Compute challenge_t0 and check if ||challenge_t0||∞ < γ₂
+#[cfg(not(feature = "embedded"))]
 fn compute_and_check_challenge_t0(
 	challenge_t0: &mut Polyveck,
 	challenge_poly_c: &Poly,
@@ -233,6 +312,7 @@ fn compute_and_check_challenge_t0(
 }
 
 /// Compute hint vector and check if weight ≤ ω
+#[cfg(not(feature = "embedded"))]
 fn compute_and_check_hint_vector(
 	hint_vector_h: &mut Polyveck,
 	commitment_w0: &Polyveck,
@@ -250,7 +330,7 @@ fn compute_and_check_hint_vector(
 	hint_weight <= params::OMEGA as i32
 }
 
-/// Generate masking vector and compute commitment w = Ay, then decompose w = w1*2^d + w0
+#[cfg(not(feature = "embedded"))]
 fn generate_masking_vector_and_commitment(
 	masking_vector_y: &mut Polyvecl,
 	commitment_w1: &mut Polyveck,
@@ -260,22 +340,19 @@ fn generate_masking_vector_and_commitment(
 	signing_entropy: &[u8],
 	attempt_nonce: u16,
 ) {
-	// Generate random masking vector y
 	polyvec::l_uniform_gamma1(masking_vector_y, signing_entropy, attempt_nonce);
 
-	// Compute commitment w = Ay
 	*signature_z_temp = masking_vector_y.clone();
 	polyvec::l_ntt(signature_z_temp);
 	polyvec::matrix_pointwise_montgomery(commitment_w1, expanded_matrix_a, signature_z_temp);
 	polyvec::k_reduce(commitment_w1);
 	polyvec::k_invntt_tomont(commitment_w1);
 	polyvec::k_caddq(commitment_w1);
-
-	// Decompose w = w1*2^d + w0
 	polyvec::k_decompose(commitment_w1, commitment_w0);
 }
 
 /// Generate challenge polynomial from commitment and message hash
+#[cfg(not(feature = "embedded"))]
 fn generate_challenge_polynomial(
 	signature_buffer: &mut [u8],
 	commitment_w1: &Polyveck,
@@ -297,6 +374,7 @@ fn generate_challenge_polynomial(
 }
 
 /// Main signature generation function
+#[cfg(not(feature = "embedded"))]
 pub(crate) fn signature(
 	signature_output: &mut [u8],
 	message: &[u8],
@@ -330,6 +408,17 @@ pub(crate) fn signature(
 		for _ in 0..MIN_SIGNING_ATTEMPTS {
 			// Generate masking vector and compute commitment
 			let mut signature_z = Polyvecl::default();
+			#[cfg(feature = "embedded")]
+			generate_masking_vector_and_commitment(
+				&mut masking_vector_y,
+				&mut commitment_w1,
+				&mut commitment_w0,
+				&mut signature_z,
+				&signing_ctx.public_seed_rho,
+				&signing_ctx.signing_entropy_rho_prime,
+				attempt_nonce,
+			);
+			#[cfg(not(feature = "embedded"))]
 			generate_masking_vector_and_commitment(
 				&mut masking_vector_y,
 				&mut commitment_w1,
@@ -412,6 +501,162 @@ pub(crate) fn signature(
 	}
 }
 
+#[cfg(feature = "embedded")]
+fn decompose_w0_pack_w1(w0: &mut Polyveck, w1_packed: &mut [u8; K * params::POLYW1_PACKEDBYTES]) {
+	for i in 0..K {
+		let base = i * params::POLYW1_PACKEDBYTES;
+		for j in 0..(N / 2) {
+			let (a0_0, a1_0) = crate::rounding::decompose(w0.vec[i].coeffs[2 * j]);
+			let (a0_1, a1_1) = crate::rounding::decompose(w0.vec[i].coeffs[2 * j + 1]);
+			w0.vec[i].coeffs[2 * j] = a0_0;
+			w0.vec[i].coeffs[2 * j + 1] = a0_1;
+			w1_packed[base + j] = (a1_0 as u8) | ((a1_1 as u8) << 4);
+		}
+	}
+}
+
+#[cfg(feature = "embedded")]
+fn w1_coeff(w1_packed: &[u8; K * params::POLYW1_PACKEDBYTES], i: usize, j: usize) -> i32 {
+	let b = w1_packed[i * params::POLYW1_PACKEDBYTES + (j >> 1)];
+	if (j & 1) == 0 { (b & 0x0F) as i32 } else { (b >> 4) as i32 }
+}
+
+#[cfg(feature = "embedded")]
+pub(crate) fn signature(
+	signature_output: &mut [u8],
+	message: &[u8],
+	secret_key_bytes: &[u8],
+	hedge: Option<[u8; params::SEEDBYTES]>,
+) {
+	let public_seed_rho: &[u8] = &secret_key_bytes[packing::SK_RHO_OFF..packing::SK_RHO_OFF + params::SEEDBYTES];
+	let private_key_seed: &[u8] = &secret_key_bytes[packing::SK_KEY_OFF..packing::SK_KEY_OFF + params::SEEDBYTES];
+	let public_key_hash_tr: &[u8] = &secret_key_bytes[packing::SK_TR_OFF..packing::SK_TR_OFF + params::TR_BYTES];
+
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, public_key_hash_tr, params::TR_BYTES);
+	fips202::shake256_absorb(&mut state, message, message.len());
+	fips202::shake256_finalize(&mut state);
+	let mut mu = [0u8; params::CRHBYTES];
+	fips202::shake256_squeeze(&mut mu, params::CRHBYTES, &mut state);
+
+	let mut hedge_bytes = hedge.unwrap_or([0u8; params::SEEDBYTES]);
+	state.init();
+	fips202::shake256_absorb(&mut state, private_key_seed, params::SEEDBYTES);
+	fips202::shake256_absorb(&mut state, &hedge_bytes, params::SEEDBYTES);
+	fips202::shake256_absorb(&mut state, &mu, params::CRHBYTES);
+	fips202::shake256_finalize(&mut state);
+	let mut rhoprime = [0u8; params::CRHBYTES];
+	fips202::shake256_squeeze(&mut rhoprime, params::CRHBYTES, &mut state);
+	hedge_bytes.zeroize();
+
+	const MIN_SIGNING_ATTEMPTS: u16 = 16;
+	let mut signature_found = false;
+	let mut attempt_nonce: u16 = 0;
+
+	let mut vl = crate::boxed::zeroed_box::<Polyvecl>();
+	let mut vk = crate::boxed::zeroed_box::<Polyveck>();
+	let mut candidate_sig = crate::boxed::zeroed_box::<[u8; params::SIGNBYTES]>();
+	let mut w1_packed = [0u8; K * params::POLYW1_PACKEDBYTES];
+	let mut c = [0u8; params::C_DASH_BYTES];
+	let mut cp = Poly::default();
+	let mut tmp = Poly::default();
+	let mut tmp2 = Poly::default();
+
+	loop {
+		for _ in 0..MIN_SIGNING_ATTEMPTS {
+			polyvec::l_uniform_gamma1(&mut vl, &rhoprime, attempt_nonce);
+			polyvec::l_ntt(&mut vl);
+			polyvec::matrix_pointwise_montgomery_streaming(&mut vk, public_seed_rho, &vl);
+			polyvec::k_reduce(&mut vk);
+			polyvec::k_invntt_tomont(&mut vk);
+			polyvec::k_caddq(&mut vk);
+			decompose_w0_pack_w1(&mut vk, &mut w1_packed);
+
+			state.init();
+			fips202::shake256_absorb(&mut state, &mu, params::CRHBYTES);
+			fips202::shake256_absorb(&mut state, &w1_packed, K * params::POLYW1_PACKEDBYTES);
+			fips202::shake256_finalize(&mut state);
+			fips202::shake256_squeeze(&mut c, params::C_DASH_BYTES, &mut state);
+
+			candidate_sig[..params::C_DASH_BYTES].copy_from_slice(&c);
+			poly::challenge(&mut cp, &c);
+			poly::ntt(&mut cp);
+
+			polyvec::l_uniform_gamma1(&mut vl, &rhoprime, attempt_nonce);
+
+			let mut all_ok = true;
+
+			for i in 0..L {
+				let off = packing::SK_S1_OFF + i * params::POLYETA_PACKEDBYTES;
+				poly::eta_unpack(&mut tmp, &secret_key_bytes[off..off + params::POLYETA_PACKEDBYTES]);
+				poly::ntt(&mut tmp);
+				poly::pointwise_montgomery(&mut tmp2, &cp, &tmp);
+				poly::invntt_tomont(&mut tmp2);
+				poly::reduce(&mut tmp2);
+				poly::add_ip(&mut vl.vec[i], &tmp2);
+				poly::reduce(&mut vl.vec[i]);
+				all_ok &= !poly::check_norm(&vl.vec[i], (params::GAMMA1 - params::BETA) as i32);
+			}
+
+			for i in 0..K {
+				let off = packing::SK_S2_OFF + i * params::POLYETA_PACKEDBYTES;
+				poly::eta_unpack(&mut tmp, &secret_key_bytes[off..off + params::POLYETA_PACKEDBYTES]);
+				poly::ntt(&mut tmp);
+				poly::pointwise_montgomery(&mut tmp2, &cp, &tmp);
+				poly::invntt_tomont(&mut tmp2);
+				poly::reduce(&mut tmp2);
+				poly::sub_ip(&mut vk.vec[i], &tmp2);
+				poly::reduce(&mut vk.vec[i]);
+				all_ok &= !poly::check_norm(&vk.vec[i], (params::GAMMA2 - params::BETA) as i32);
+			}
+
+			for i in 0..K {
+				let off = packing::SK_T0_OFF + i * params::POLYT0_PACKEDBYTES;
+				poly::t0_unpack(&mut tmp, &secret_key_bytes[off..off + params::POLYT0_PACKEDBYTES]);
+				poly::ntt(&mut tmp);
+				poly::pointwise_montgomery(&mut tmp2, &cp, &tmp);
+				poly::invntt_tomont(&mut tmp2);
+				poly::reduce(&mut tmp2);
+				all_ok &= !poly::check_norm(&tmp2, params::GAMMA2 as i32);
+				poly::add_ip(&mut vk.vec[i], &tmp2);
+			}
+
+			for i in 0..L {
+				let off = params::C_DASH_BYTES + i * params::POLYZ_PACKEDBYTES;
+				poly::z_pack(&mut candidate_sig[off..off + params::POLYZ_PACKEDBYTES], &vl.vec[i]);
+			}
+
+			let hint_off = params::C_DASH_BYTES + L * params::POLYZ_PACKEDBYTES;
+			candidate_sig[hint_off..hint_off + params::OMEGA + K].fill(0);
+			let mut k_total: usize = 0;
+			for i in 0..K {
+				for j in 0..N {
+					let hint = crate::rounding::make_hint(vk.vec[i].coeffs[j], w1_coeff(&w1_packed, i, j));
+					if hint != 0 {
+						if k_total >= params::OMEGA {
+							all_ok = false;
+						} else {
+							candidate_sig[hint_off + k_total] = j as u8;
+							k_total += 1;
+						}
+					}
+				}
+				candidate_sig[hint_off + params::OMEGA + i] = k_total as u8;
+			}
+
+			if all_ok && !signature_found {
+				signature_output.copy_from_slice(&candidate_sig[..params::SIGNBYTES]);
+				signature_found = true;
+			}
+			attempt_nonce = attempt_nonce.wrapping_add(1);
+		}
+
+		if signature_found {
+			return;
+		}
+	}
+}
+
 /// Verify a signature for a given message with a public key.
 ///
 /// # Arguments
@@ -421,6 +666,7 @@ pub(crate) fn signature(
 /// * 'pk' - public key
 ///
 /// Returns 'true' if the verification process was successful, 'false' otherwise
+#[cfg(not(feature = "embedded"))]
 pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	let mut buf = [0u8; K * crate::params::POLYW1_PACKEDBYTES];
 	let mut rho = [0u8; params::SEEDBYTES];
@@ -429,7 +675,6 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	let mut c2 = [0u8; params::C_DASH_BYTES];
 	// Allocate polynomial structures
 	let mut cp = Poly::default();
-	let mut mat: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
 	let mut z = Polyvecl::default();
 	let mut t1 = Polyveck::default();
 	let mut w1 = Polyveck::default();
@@ -460,10 +705,9 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 
 	// Matrix-vector multiplication; compute Az - c2^dt1
 	poly::challenge(&mut cp, &c);
-	polyvec::matrix_expand(&mut mat, &rho);
 
 	polyvec::l_ntt(&mut z);
-	polyvec::matrix_pointwise_montgomery(&mut w1, &mat, &z);
+	polyvec::matrix_pointwise_montgomery_streaming(&mut w1, &rho, &z);
 
 	poly::ntt(&mut cp);
 	polyvec::k_shiftl(&mut t1);
@@ -481,6 +725,70 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	polyvec::k_pack_w1(&mut buf, &w1);
 
 	// Call random oracle and verify challenge
+	state.init();
+	fips202::shake256_absorb(&mut state, &mu, params::CRHBYTES);
+	fips202::shake256_absorb(&mut state, &buf, K * crate::params::POLYW1_PACKEDBYTES);
+	fips202::shake256_finalize(&mut state);
+	fips202::shake256_squeeze(&mut c2, params::C_DASH_BYTES, &mut state);
+	c == c2
+}
+
+#[cfg(feature = "embedded")]
+pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
+	let mut buf = [0u8; K * crate::params::POLYW1_PACKEDBYTES];
+	let mut rho = [0u8; params::SEEDBYTES];
+	let mut mu = [0u8; params::CRHBYTES];
+	let mut c = [0u8; params::C_DASH_BYTES];
+	let mut c2 = [0u8; params::C_DASH_BYTES];
+	let mut cp = Poly::default();
+	let mut t = Poly::default();
+	let mut ct = Poly::default();
+	let mut z = crate::boxed::zeroed_box::<Polyvecl>();
+	let mut w1 = crate::boxed::zeroed_box::<Polyveck>();
+	let mut h = crate::boxed::zeroed_box::<Polyveck>();
+	let mut state = fips202::KeccakState::default();
+
+	if sig.len() != crate::params::SIGNBYTES {
+		return false;
+	}
+	if pk.len() != crate::params::PUBLICKEYBYTES {
+		return false;
+	}
+
+	rho.copy_from_slice(&pk[..params::SEEDBYTES]);
+	if !packing::unpack_sig(&mut c, &mut z, &mut h, sig) {
+		return false;
+	}
+	if !polyvec::polyvecl_is_norm_within_bound(&z, (params::GAMMA1 - params::BETA) as i32) {
+		return false;
+	}
+
+	fips202::shake256(&mut mu, params::CRHBYTES, pk, crate::params::PUBLICKEYBYTES);
+	fips202::shake256_absorb(&mut state, &mu, params::CRHBYTES);
+	fips202::shake256_absorb(&mut state, m, m.len());
+	fips202::shake256_finalize(&mut state);
+	fips202::shake256_squeeze(&mut mu, params::CRHBYTES, &mut state);
+
+	poly::challenge(&mut cp, &c);
+	polyvec::l_ntt(&mut z);
+	polyvec::matrix_pointwise_montgomery_streaming(&mut w1, &rho, &z);
+	poly::ntt(&mut cp);
+
+	for i in 0..K {
+		let off = params::SEEDBYTES + i * params::POLYT1_PACKEDBYTES;
+		poly::t1_unpack(&mut t, &pk[off..off + params::POLYT1_PACKEDBYTES]);
+		poly::shiftl(&mut t);
+		poly::ntt(&mut t);
+		poly::pointwise_montgomery(&mut ct, &cp, &t);
+		poly::sub_ip(&mut w1.vec[i], &ct);
+	}
+
+	polyvec::k_reduce(&mut w1);
+	polyvec::k_invntt_tomont(&mut w1);
+	polyvec::k_caddq(&mut w1);
+	polyvec::k_use_hint(&mut w1, &h);
+	polyvec::k_pack_w1(&mut buf, &w1);
+
 	state.init();
 	fips202::shake256_absorb(&mut state, &mu, params::CRHBYTES);
 	fips202::shake256_absorb(&mut state, &buf, K * crate::params::POLYW1_PACKEDBYTES);
