@@ -522,6 +522,17 @@ fn w1_coeff(w1_packed: &[u8; K * params::POLYW1_PACKEDBYTES], i: usize, j: usize
 }
 
 #[cfg(feature = "embedded")]
+struct SigningWorkspace {
+	vl: Polyvecl,
+	vk: Polyveck,
+	candidate_sig: [u8; params::SIGNBYTES],
+	w1_packed: [u8; K * params::POLYW1_PACKEDBYTES],
+	cp: Poly,
+	tmp: Poly,
+	tmp2: Poly,
+}
+
+#[cfg(feature = "embedded")]
 pub(crate) fn signature(
 	signature_output: &mut [u8],
 	message: &[u8],
@@ -553,99 +564,93 @@ pub(crate) fn signature(
 	let mut signature_found = false;
 	let mut attempt_nonce: u16 = 0;
 
-	let mut vl = crate::boxed::zeroed_box::<Polyvecl>();
-	let mut vk = crate::boxed::zeroed_box::<Polyveck>();
-	let mut candidate_sig = crate::boxed::zeroed_box::<[u8; params::SIGNBYTES]>();
-	let mut w1_packed = [0u8; K * params::POLYW1_PACKEDBYTES];
+	let mut ws = crate::boxed::zeroed_box::<SigningWorkspace>();
 	let mut c = [0u8; params::C_DASH_BYTES];
-	let mut cp = Poly::default();
-	let mut tmp = Poly::default();
-	let mut tmp2 = Poly::default();
 
 	loop {
 		for _ in 0..MIN_SIGNING_ATTEMPTS {
-			polyvec::l_uniform_gamma1(&mut vl, &rhoprime, attempt_nonce);
-			polyvec::l_ntt(&mut vl);
-			polyvec::matrix_pointwise_montgomery_streaming(&mut vk, public_seed_rho, &vl);
-			polyvec::k_reduce(&mut vk);
-			polyvec::k_invntt_tomont(&mut vk);
-			polyvec::k_caddq(&mut vk);
-			decompose_w0_pack_w1(&mut vk, &mut w1_packed);
+			polyvec::l_uniform_gamma1(&mut ws.vl, &rhoprime, attempt_nonce);
+			polyvec::l_ntt(&mut ws.vl);
+			polyvec::matrix_pointwise_montgomery_streaming(&mut ws.vk, public_seed_rho, &ws.vl);
+			polyvec::k_reduce(&mut ws.vk);
+			polyvec::k_invntt_tomont(&mut ws.vk);
+			polyvec::k_caddq(&mut ws.vk);
+			decompose_w0_pack_w1(&mut ws.vk, &mut ws.w1_packed);
 
 			state.init();
 			fips202::shake256_absorb(&mut state, &mu, params::CRHBYTES);
-			fips202::shake256_absorb(&mut state, &w1_packed, K * params::POLYW1_PACKEDBYTES);
+			fips202::shake256_absorb(&mut state, &ws.w1_packed, K * params::POLYW1_PACKEDBYTES);
 			fips202::shake256_finalize(&mut state);
 			fips202::shake256_squeeze(&mut c, params::C_DASH_BYTES, &mut state);
 
-			candidate_sig[..params::C_DASH_BYTES].copy_from_slice(&c);
-			poly::challenge(&mut cp, &c);
-			poly::ntt(&mut cp);
+			ws.candidate_sig[..params::C_DASH_BYTES].copy_from_slice(&c);
+			poly::challenge(&mut ws.cp, &c);
+			poly::ntt(&mut ws.cp);
 
-			polyvec::l_uniform_gamma1(&mut vl, &rhoprime, attempt_nonce);
+			polyvec::l_uniform_gamma1(&mut ws.vl, &rhoprime, attempt_nonce);
 
 			let mut all_ok = true;
 
 			for i in 0..L {
 				let off = packing::SK_S1_OFF + i * params::POLYETA_PACKEDBYTES;
-				poly::eta_unpack(&mut tmp, &secret_key_bytes[off..off + params::POLYETA_PACKEDBYTES]);
-				poly::ntt(&mut tmp);
-				poly::pointwise_montgomery(&mut tmp2, &cp, &tmp);
-				poly::invntt_tomont(&mut tmp2);
-				poly::reduce(&mut tmp2);
-				poly::add_ip(&mut vl.vec[i], &tmp2);
-				poly::reduce(&mut vl.vec[i]);
-				all_ok &= !poly::check_norm(&vl.vec[i], (params::GAMMA1 - params::BETA) as i32);
+				poly::eta_unpack(&mut ws.tmp, &secret_key_bytes[off..off + params::POLYETA_PACKEDBYTES]);
+				poly::ntt(&mut ws.tmp);
+				poly::pointwise_montgomery(&mut ws.tmp2, &ws.cp, &ws.tmp);
+				poly::invntt_tomont(&mut ws.tmp2);
+				poly::reduce(&mut ws.tmp2);
+				poly::add_ip(&mut ws.vl.vec[i], &ws.tmp2);
+				poly::reduce(&mut ws.vl.vec[i]);
+				all_ok &= !poly::check_norm(&ws.vl.vec[i], (params::GAMMA1 - params::BETA) as i32);
 			}
 
 			for i in 0..K {
 				let off = packing::SK_S2_OFF + i * params::POLYETA_PACKEDBYTES;
-				poly::eta_unpack(&mut tmp, &secret_key_bytes[off..off + params::POLYETA_PACKEDBYTES]);
-				poly::ntt(&mut tmp);
-				poly::pointwise_montgomery(&mut tmp2, &cp, &tmp);
-				poly::invntt_tomont(&mut tmp2);
-				poly::reduce(&mut tmp2);
-				poly::sub_ip(&mut vk.vec[i], &tmp2);
-				poly::reduce(&mut vk.vec[i]);
-				all_ok &= !poly::check_norm(&vk.vec[i], (params::GAMMA2 - params::BETA) as i32);
+				poly::eta_unpack(&mut ws.tmp, &secret_key_bytes[off..off + params::POLYETA_PACKEDBYTES]);
+				poly::ntt(&mut ws.tmp);
+				poly::pointwise_montgomery(&mut ws.tmp2, &ws.cp, &ws.tmp);
+				poly::invntt_tomont(&mut ws.tmp2);
+				poly::reduce(&mut ws.tmp2);
+				poly::sub_ip(&mut ws.vk.vec[i], &ws.tmp2);
+				poly::reduce(&mut ws.vk.vec[i]);
+				all_ok &= !poly::check_norm(&ws.vk.vec[i], (params::GAMMA2 - params::BETA) as i32);
 			}
 
 			for i in 0..K {
 				let off = packing::SK_T0_OFF + i * params::POLYT0_PACKEDBYTES;
-				poly::t0_unpack(&mut tmp, &secret_key_bytes[off..off + params::POLYT0_PACKEDBYTES]);
-				poly::ntt(&mut tmp);
-				poly::pointwise_montgomery(&mut tmp2, &cp, &tmp);
-				poly::invntt_tomont(&mut tmp2);
-				poly::reduce(&mut tmp2);
-				all_ok &= !poly::check_norm(&tmp2, params::GAMMA2 as i32);
-				poly::add_ip(&mut vk.vec[i], &tmp2);
+				poly::t0_unpack(&mut ws.tmp, &secret_key_bytes[off..off + params::POLYT0_PACKEDBYTES]);
+				poly::ntt(&mut ws.tmp);
+				poly::pointwise_montgomery(&mut ws.tmp2, &ws.cp, &ws.tmp);
+				poly::invntt_tomont(&mut ws.tmp2);
+				poly::reduce(&mut ws.tmp2);
+				all_ok &= !poly::check_norm(&ws.tmp2, params::GAMMA2 as i32);
+				poly::add_ip(&mut ws.vk.vec[i], &ws.tmp2);
 			}
 
 			for i in 0..L {
 				let off = params::C_DASH_BYTES + i * params::POLYZ_PACKEDBYTES;
-				poly::z_pack(&mut candidate_sig[off..off + params::POLYZ_PACKEDBYTES], &vl.vec[i]);
+				poly::z_pack(&mut ws.candidate_sig[off..off + params::POLYZ_PACKEDBYTES], &ws.vl.vec[i]);
 			}
 
 			let hint_off = params::C_DASH_BYTES + L * params::POLYZ_PACKEDBYTES;
-			candidate_sig[hint_off..hint_off + params::OMEGA + K].fill(0);
+			ws.candidate_sig[hint_off..hint_off + params::OMEGA + K].fill(0);
 			let mut k_total: usize = 0;
 			for i in 0..K {
 				for j in 0..N {
-					let hint = crate::rounding::make_hint(vk.vec[i].coeffs[j], w1_coeff(&w1_packed, i, j));
+					let hint = crate::rounding::make_hint(ws.vk.vec[i].coeffs[j], w1_coeff(&ws.w1_packed, i, j));
 					if hint != 0 {
 						if k_total >= params::OMEGA {
 							all_ok = false;
 						} else {
-							candidate_sig[hint_off + k_total] = j as u8;
+							ws.candidate_sig[hint_off + k_total] = j as u8;
 							k_total += 1;
 						}
 					}
 				}
-				candidate_sig[hint_off + params::OMEGA + i] = k_total as u8;
+				ws.candidate_sig[hint_off + params::OMEGA + i] = k_total as u8;
 			}
 
 			if all_ok && !signature_found {
-				signature_output.copy_from_slice(&candidate_sig[..params::SIGNBYTES]);
+				signature_output.copy_from_slice(&ws.candidate_sig[..params::SIGNBYTES]);
 				signature_found = true;
 			}
 			attempt_nonce = attempt_nonce.wrapping_add(1);

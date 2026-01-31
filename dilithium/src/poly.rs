@@ -199,13 +199,41 @@ pub fn rej_uniform(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usi
 	ctr
 }
 
-/// Sample polynomial with uniformly random coefficients in [0, Q-1] by performing rejection
-/// sampling using the output stream of SHAKE128(seed|nonce).
+const UNIFORM_BUF_SIZE: usize = UNIFORM_NBLOCKS * fips202::SHAKE128_RATE + 2;
+
+#[cfg(feature = "embedded")]
+struct UniformWorkspace {
+	buf: [u8; UNIFORM_BUF_SIZE],
+}
+
+#[cfg(feature = "embedded")]
 pub fn uniform(a: &mut Poly, seed: &[u8], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake128_stream_init(&mut state, seed, nonce);
 
-	let mut buf = [0u8; UNIFORM_NBLOCKS * fips202::SHAKE128_RATE + 2];
+	let mut ws = crate::boxed::zeroed_box::<UniformWorkspace>();
+	fips202::shake128_squeezeblocks(&mut ws.buf, UNIFORM_NBLOCKS, &mut state);
+
+	let mut buflen: usize = UNIFORM_NBLOCKS * fips202::SHAKE128_RATE;
+	let mut ctr = rej_uniform(&mut a.coeffs, N, &ws.buf, buflen);
+
+	while ctr < N {
+		let off = buflen % 3;
+		for i in 0..off {
+			ws.buf[i] = ws.buf[buflen - off + i];
+		}
+		buflen = fips202::SHAKE128_RATE + off;
+		fips202::shake128_squeezeblocks(&mut ws.buf[off..], 1, &mut state);
+		ctr += rej_uniform(&mut a.coeffs[ctr..], N - ctr, &ws.buf, buflen);
+	}
+}
+
+#[cfg(not(feature = "embedded"))]
+pub fn uniform(a: &mut Poly, seed: &[u8], nonce: u16) {
+	let mut state = fips202::KeccakState::default();
+	fips202::shake128_stream_init(&mut state, seed, nonce);
+
+	let mut buf = [0u8; UNIFORM_BUF_SIZE];
 	fips202::shake128_squeezeblocks(&mut buf, UNIFORM_NBLOCKS, &mut state);
 
 	let mut buflen: usize = UNIFORM_NBLOCKS * fips202::SHAKE128_RATE;
@@ -467,13 +495,24 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
 	output_polynomial.coeffs[..N].copy_from_slice(&temporary_coefficient_storage[..N]);
 }
 
-/// Sample polynomial with uniformly random coefficients in [-(GAMMA1 - 1), GAMMA1] by
-/// performing rejection sampling on output stream of SHAKE256(seed|nonce).
+const UNIFORM_GAMMA1_BUF_SIZE: usize = UNIFORM_GAMMA1_NBLOCKS * fips202::SHAKE256_RATE;
+
+#[cfg(feature = "embedded")]
 pub fn uniform_gamma1(a: &mut Poly, seed: &[u8], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
-	let mut buf = [0u8; UNIFORM_GAMMA1_NBLOCKS * fips202::SHAKE256_RATE];
+	let mut buf = crate::boxed::zeroed_box::<[u8; UNIFORM_GAMMA1_BUF_SIZE]>();
+	fips202::shake256_squeezeblocks(buf.as_mut(), UNIFORM_GAMMA1_NBLOCKS, &mut state);
+	z_unpack(a, buf.as_ref());
+}
+
+#[cfg(not(feature = "embedded"))]
+pub fn uniform_gamma1(a: &mut Poly, seed: &[u8], nonce: u16) {
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_stream_init(&mut state, seed, nonce);
+
+	let mut buf = [0u8; UNIFORM_GAMMA1_BUF_SIZE];
 	fips202::shake256_squeezeblocks(&mut buf, UNIFORM_GAMMA1_NBLOCKS, &mut state);
 	z_unpack(a, &buf);
 }

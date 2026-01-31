@@ -1,9 +1,14 @@
+#[cfg(feature = "embedded")]
+use zeroize::Zeroize;
+#[cfg(not(feature = "embedded"))]
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	errors::{KeyParsingError, KeyParsingError::BadSecretKey, SignatureError},
 	params, SensitiveBytes32,
 };
+#[cfg(feature = "embedded")]
+use alloc::boxed::Box;
 use alloc::vec;
 use core::fmt;
 
@@ -104,6 +109,18 @@ impl Keypair {
 		self.secret.sign(msg, ctx, hedge)
 	}
 
+	/// Compute a signature directly into a pre-allocated buffer.
+	/// Preferred for embedded systems to avoid large stack allocations.
+	pub fn sign_into(
+		&self,
+		sig: &mut Signature,
+		msg: &[u8],
+		ctx: Option<&[u8]>,
+		hedge: Option<[u8; params::SEEDBYTES]>,
+	) -> Result<(), SignatureError> {
+		self.secret.sign_into(sig, msg, ctx, hedge)
+	}
+
 	/// Verify a signature for a given message with a public key.
 	///
 	/// # Arguments
@@ -124,6 +141,20 @@ impl fmt::Debug for Keypair {
 }
 
 /// Private key.
+#[cfg(feature = "embedded")]
+#[derive(Clone)]
+pub struct SecretKey {
+	pub bytes: Box<[u8; SECRETKEYBYTES]>,
+}
+
+#[cfg(feature = "embedded")]
+impl Drop for SecretKey {
+	fn drop(&mut self) {
+		self.bytes.zeroize();
+	}
+}
+
+#[cfg(not(feature = "embedded"))]
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct SecretKey {
 	pub bytes: [u8; SECRETKEYBYTES],
@@ -132,16 +163,26 @@ pub struct SecretKey {
 impl SecretKey {
 	/// Returns a copy of underlying bytes.
 	pub fn to_bytes(&self) -> [u8; SECRETKEYBYTES] {
-		self.bytes
+		*self.bytes
+	}
+
+	/// Returns a reference to underlying bytes.
+	pub fn as_bytes(&self) -> &[u8; SECRETKEYBYTES] {
+		&self.bytes
 	}
 
 	/// Create a SecretKey from bytes.
-	///
-	/// # Arguments
-	///
-	/// * 'bytes' - private key bytes
-	///
-	/// Returns a SecretKey
+	#[cfg(feature = "embedded")]
+	pub fn from_bytes(bytes: &[u8]) -> Result<SecretKey, KeyParsingError> {
+		if bytes.len() != SECRETKEYBYTES {
+			return Err(BadSecretKey);
+		}
+		let mut boxed = crate::boxed::zeroed_box::<[u8; SECRETKEYBYTES]>();
+		boxed.copy_from_slice(bytes);
+		Ok(SecretKey { bytes: boxed })
+	}
+
+	#[cfg(not(feature = "embedded"))]
 	pub fn from_bytes(bytes: &[u8]) -> Result<SecretKey, KeyParsingError> {
 		let result = bytes.try_into();
 		match result {
@@ -151,20 +192,26 @@ impl SecretKey {
 	}
 
 	/// Compute a signature for a given message.
-	///
-	/// # Arguments
-	///
-	/// * 'msg' - message to sign
-	/// * 'ctx' - context string
-	/// * 'hedged' - wether to use RNG or not
-	///
-	/// Returns Option<Signature>
 	pub fn sign(
 		&self,
 		msg: &[u8],
 		ctx: Option<&[u8]>,
 		hedge: Option<[u8; params::SEEDBYTES]>,
 	) -> Result<Signature, SignatureError> {
+		let mut sig: Signature = [0u8; SIGNBYTES];
+		self.sign_into(&mut sig, msg, ctx, hedge)?;
+		Ok(sig)
+	}
+
+	/// Compute a signature directly into a pre-allocated buffer.
+	/// Preferred for embedded systems to avoid large stack allocations.
+	pub fn sign_into(
+		&self,
+		sig: &mut Signature,
+		msg: &[u8],
+		ctx: Option<&[u8]>,
+		hedge: Option<[u8; params::SEEDBYTES]>,
+	) -> Result<(), SignatureError> {
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
@@ -176,22 +223,50 @@ impl SecretKey {
 				m[1] = x_len as u8;
 				m[2..2 + x_len].copy_from_slice(x);
 				m[2 + x_len..].copy_from_slice(msg);
-				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
-				Ok(sig)
+				crate::sign::signature(sig, m.as_slice(), self.as_bytes(), hedge);
+				Ok(())
 			},
 			None => {
-				let mut sig: Signature = [0u8; SIGNBYTES];
-				// Prefix 2 zero bytes (domain_sep=0, context_len=0) for pure signatures
 				let mut m = vec![0u8; msg.len() + 2];
 				m[2..2 + msg.len()].copy_from_slice(msg);
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
-				Ok(sig)
+				crate::sign::signature(sig, m.as_slice(), self.as_bytes(), hedge);
+				Ok(())
 			},
 		}
 	}
 }
 
+#[cfg(feature = "embedded")]
+#[derive(Clone)]
+pub struct PublicKey {
+	pub bytes: Box<[u8; PUBLICKEYBYTES]>,
+}
+
+#[cfg(feature = "embedded")]
+impl PartialEq for PublicKey {
+	fn eq(&self, other: &Self) -> bool {
+		self.bytes.as_ref() == other.bytes.as_ref()
+	}
+}
+
+#[cfg(feature = "embedded")]
+impl Eq for PublicKey {}
+
+#[cfg(feature = "embedded")]
+impl core::hash::Hash for PublicKey {
+	fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+		self.bytes.as_ref().hash(state);
+	}
+}
+
+#[cfg(feature = "embedded")]
+impl fmt::Debug for PublicKey {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("PublicKey").finish()
+	}
+}
+
+#[cfg(not(feature = "embedded"))]
 #[derive(Eq, Clone, PartialEq, Debug, Hash, PartialOrd, Ord)]
 pub struct PublicKey {
 	pub bytes: [u8; PUBLICKEYBYTES],
@@ -200,16 +275,26 @@ pub struct PublicKey {
 impl PublicKey {
 	/// Returns a copy of underlying bytes.
 	pub fn to_bytes(&self) -> [u8; PUBLICKEYBYTES] {
-		self.bytes
+		*self.bytes
+	}
+
+	/// Returns a reference to underlying bytes.
+	pub fn as_bytes(&self) -> &[u8; PUBLICKEYBYTES] {
+		&self.bytes
 	}
 
 	/// Create a PublicKey from bytes.
-	///
-	/// # Arguments
-	///
-	/// * 'bytes' - public key bytes
-	///
-	/// Returns a PublicKey
+	#[cfg(feature = "embedded")]
+	pub fn from_bytes(bytes: &[u8]) -> Result<PublicKey, KeyParsingError> {
+		if bytes.len() != PUBLICKEYBYTES {
+			return Err(KeyParsingError::BadPublicKey);
+		}
+		let mut boxed = crate::boxed::zeroed_box::<[u8; PUBLICKEYBYTES]>();
+		boxed.copy_from_slice(bytes);
+		Ok(PublicKey { bytes: boxed })
+	}
+
+	#[cfg(not(feature = "embedded"))]
 	pub fn from_bytes(bytes: &[u8]) -> Result<PublicKey, KeyParsingError> {
 		let result = bytes.try_into();
 		match result {
@@ -219,14 +304,6 @@ impl PublicKey {
 	}
 
 	/// Verify a signature for a given message with a public key.
-	///
-	/// # Arguments
-	///
-	/// * 'msg' - message that is claimed to be signed
-	/// * 'sig' - signature to verify
-	/// * 'ctx' - context string
-	///
-	/// Returns 'true' if the verification process was successful, 'false' otherwise
 	pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool {
 		if sig.len() != SIGNBYTES {
 			return false;
@@ -242,12 +319,12 @@ impl PublicKey {
 				m[1] = x_len as u8;
 				m[2..2 + x_len].copy_from_slice(x);
 				m[2 + x_len..].copy_from_slice(msg);
-				crate::sign::verify(sig, m.as_slice(), &self.bytes)
+				crate::sign::verify(sig, m.as_slice(), self.as_bytes())
 			},
 			None => {
 				let mut m = vec![0; msg.len() + 2];
 				m[2..2 + msg.len()].copy_from_slice(msg);
-				crate::sign::verify(sig, m.as_slice(), &self.bytes)
+				crate::sign::verify(sig, m.as_slice(), self.as_bytes())
 			},
 		}
 	}

@@ -157,6 +157,16 @@ fn main() {
 					true
 				})
 			},
+			"sign_into" => {
+				let entropy = get_random_bytes();
+				let kp = Box::new(ml_dsa_87::Keypair::generate(entropy));
+				let msg = b"stack usage test message";
+				let mut sig = Box::new([0u8; ml_dsa_87::SIGNBYTES]);
+				test_sign_with_stack_size(stack_kb, "ml-dsa-87", move || {
+					let _ = kp.sign_into(sig.as_mut(), msg, None, None);
+					true
+				})
+			},
 			"verify" => {
 				let entropy = get_random_bytes();
 				let kp = Box::new(ml_dsa_87::Keypair::generate(entropy));

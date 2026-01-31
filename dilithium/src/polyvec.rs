@@ -55,6 +55,27 @@ pub fn matrix_pointwise_montgomery(t: &mut Polyveck, mat: &[Polyvecl], v: &Polyv
 	}
 }
 
+#[cfg(feature = "embedded")]
+struct MatrixStreamingWorkspace {
+	a_ij: Poly,
+	tmp: Poly,
+}
+
+#[cfg(feature = "embedded")]
+pub fn matrix_pointwise_montgomery_streaming(t: &mut Polyveck, rho: &[u8], v: &Polyvecl) {
+	let mut ws = crate::boxed::zeroed_box::<MatrixStreamingWorkspace>();
+	for (i, t_i) in t.vec.iter_mut().enumerate().take(K) {
+		poly::uniform(&mut ws.a_ij, rho, ((i << 8) + 0) as u16);
+		poly::pointwise_montgomery(t_i, &ws.a_ij, &v.vec[0]);
+		for j in 1..L {
+			poly::uniform(&mut ws.a_ij, rho, ((i << 8) + j) as u16);
+			poly::pointwise_montgomery(&mut ws.tmp, &ws.a_ij, &v.vec[j]);
+			poly::add_ip(t_i, &ws.tmp);
+		}
+	}
+}
+
+#[cfg(not(feature = "embedded"))]
 pub fn matrix_pointwise_montgomery_streaming(t: &mut Polyveck, rho: &[u8], v: &Polyvecl) {
 	let mut a_ij = Poly::default();
 	let mut tmp = Poly::default();
