@@ -69,6 +69,24 @@ pub fn matrix_pointwise_montgomery_streaming(t: &mut Polyveck, rho: &[u8], v: &P
 	}
 }
 
+#[cfg(feature = "embedded")]
+pub fn matrix_accum_column(t: &mut Polyveck, rho: &[u8], v_j_ntt: &Poly, j: usize) {
+	let mut a_ij = Poly::default();
+	let mut tmp = Poly::default();
+	for (i, t_i) in t.vec.iter_mut().enumerate().take(K) {
+		poly::uniform(&mut a_ij, rho, ((i << 8) + j) as u16);
+		poly::pointwise_montgomery(&mut tmp, &a_ij, v_j_ntt);
+		poly::add_ip(t_i, &tmp);
+	}
+}
+
+#[cfg(feature = "embedded")]
+pub fn k_zero(v: &mut Polyveck) {
+	for p in v.vec.iter_mut() {
+		p.coeffs.fill(0);
+	}
+}
+
 pub fn l_uniform_eta(v: &mut Polyvecl, seed: &[u8], mut nonce: u16) {
 	for i in 0..L {
 		poly::uniform_eta(&mut v.vec[i], seed, nonce);

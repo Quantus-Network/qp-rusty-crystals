@@ -2,9 +2,11 @@ use crate::{
 	fips202, packing, params, poly,
 	poly::Poly,
 	polyvec,
-	polyvec::{Polyveck, Polyvecl},
+	polyvec::Polyveck,
 	SensitiveBytes32,
 };
+#[cfg(not(feature = "embedded"))]
+use crate::polyvec::Polyvecl;
 #[cfg(not(feature = "embedded"))]
 use core::array;
 use zeroize::Zeroize;
@@ -52,20 +54,18 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: SensitiveBytes32) {
 			.copy_from_slice(&key[..params::SEEDBYTES]);
 
 		let mut t1 = crate::boxed::zeroed_box::<Polyveck>();
-		let mut s1_ntt = crate::boxed::zeroed_box::<Polyvecl>();
 		let mut nonce: u16 = 0;
-		for i in 0..L {
+		for j in 0..L {
 			let mut p = Poly::default();
 			poly::uniform_eta(&mut p, &rhoprime, nonce);
 			poly::eta_pack(
-				&mut sk[packing::SK_S1_OFF + i * params::POLYETA_PACKEDBYTES..],
+				&mut sk[packing::SK_S1_OFF + j * params::POLYETA_PACKEDBYTES..],
 				&p,
 			);
 			poly::ntt(&mut p);
-			s1_ntt.vec[i] = p;
+			polyvec::matrix_accum_column(&mut t1, &rho, &p, j);
 			nonce += 1;
 		}
-		polyvec::matrix_pointwise_montgomery_streaming(&mut t1, &rho, &s1_ntt);
 		polyvec::k_reduce(&mut t1);
 		polyvec::k_invntt_tomont(&mut t1);
 
@@ -553,7 +553,6 @@ pub(crate) fn signature(
 	let mut signature_found = false;
 	let mut attempt_nonce: u16 = 0;
 
-	let mut vl = crate::boxed::zeroed_box::<Polyvecl>();
 	let mut vk = crate::boxed::zeroed_box::<Polyveck>();
 	let mut candidate_sig = crate::boxed::zeroed_box::<[u8; params::SIGNBYTES]>();
 	let mut w1_packed = [0u8; K * params::POLYW1_PACKEDBYTES];
@@ -561,12 +560,16 @@ pub(crate) fn signature(
 	let mut cp = Poly::default();
 	let mut tmp = Poly::default();
 	let mut tmp2 = Poly::default();
+	let mut y_i = Poly::default();
 
 	loop {
 		for _ in 0..MIN_SIGNING_ATTEMPTS {
-			polyvec::l_uniform_gamma1(&mut vl, &rhoprime, attempt_nonce);
-			polyvec::l_ntt(&mut vl);
-			polyvec::matrix_pointwise_montgomery_streaming(&mut vk, public_seed_rho, &vl);
+			polyvec::k_zero(&mut vk);
+			for j in 0..L {
+				poly::uniform_gamma1(&mut tmp, &rhoprime, L as u16 * attempt_nonce + j as u16);
+				poly::ntt(&mut tmp);
+				polyvec::matrix_accum_column(&mut vk, public_seed_rho, &tmp, j);
+			}
 			polyvec::k_reduce(&mut vk);
 			polyvec::k_invntt_tomont(&mut vk);
 			polyvec::k_caddq(&mut vk);
@@ -582,20 +585,21 @@ pub(crate) fn signature(
 			poly::challenge(&mut cp, &c);
 			poly::ntt(&mut cp);
 
-			polyvec::l_uniform_gamma1(&mut vl, &rhoprime, attempt_nonce);
-
 			let mut all_ok = true;
 
 			for i in 0..L {
+				poly::uniform_gamma1(&mut y_i, &rhoprime, L as u16 * attempt_nonce + i as u16);
 				let off = packing::SK_S1_OFF + i * params::POLYETA_PACKEDBYTES;
 				poly::eta_unpack(&mut tmp, &secret_key_bytes[off..off + params::POLYETA_PACKEDBYTES]);
 				poly::ntt(&mut tmp);
 				poly::pointwise_montgomery(&mut tmp2, &cp, &tmp);
 				poly::invntt_tomont(&mut tmp2);
 				poly::reduce(&mut tmp2);
-				poly::add_ip(&mut vl.vec[i], &tmp2);
-				poly::reduce(&mut vl.vec[i]);
-				all_ok &= !poly::check_norm(&vl.vec[i], (params::GAMMA1 - params::BETA) as i32);
+				poly::add_ip(&mut y_i, &tmp2);
+				poly::reduce(&mut y_i);
+				all_ok &= !poly::check_norm(&y_i, (params::GAMMA1 - params::BETA) as i32);
+				let sig_off = params::C_DASH_BYTES + i * params::POLYZ_PACKEDBYTES;
+				poly::z_pack(&mut candidate_sig[sig_off..sig_off + params::POLYZ_PACKEDBYTES], &y_i);
 			}
 
 			for i in 0..K {
@@ -619,11 +623,6 @@ pub(crate) fn signature(
 				poly::reduce(&mut tmp2);
 				all_ok &= !poly::check_norm(&tmp2, params::GAMMA2 as i32);
 				poly::add_ip(&mut vk.vec[i], &tmp2);
-			}
-
-			for i in 0..L {
-				let off = params::C_DASH_BYTES + i * params::POLYZ_PACKEDBYTES;
-				poly::z_pack(&mut candidate_sig[off..off + params::POLYZ_PACKEDBYTES], &vl.vec[i]);
 			}
 
 			let hint_off = params::C_DASH_BYTES + L * params::POLYZ_PACKEDBYTES;
@@ -742,10 +741,8 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	let mut c2 = [0u8; params::C_DASH_BYTES];
 	let mut cp = Poly::default();
 	let mut t = Poly::default();
-	let mut ct = Poly::default();
-	let mut z = crate::boxed::zeroed_box::<Polyvecl>();
+	let mut tmp = Poly::default();
 	let mut w1 = crate::boxed::zeroed_box::<Polyveck>();
-	let mut h = crate::boxed::zeroed_box::<Polyveck>();
 	let mut state = fips202::KeccakState::default();
 
 	if sig.len() != crate::params::SIGNBYTES {
@@ -756,11 +753,16 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	}
 
 	rho.copy_from_slice(&pk[..params::SEEDBYTES]);
-	if !packing::unpack_sig(&mut c, &mut z, &mut h, sig) {
-		return false;
-	}
-	if !polyvec::polyvecl_is_norm_within_bound(&z, (params::GAMMA1 - params::BETA) as i32) {
-		return false;
+	c.copy_from_slice(&sig[..params::C_DASH_BYTES]);
+
+	let z_off = params::C_DASH_BYTES;
+	for j in 0..L {
+		poly::z_unpack(&mut tmp, &sig[z_off + j * params::POLYZ_PACKEDBYTES..]);
+		if poly::check_norm(&tmp, (params::GAMMA1 - params::BETA) as i32) {
+			return false;
+		}
+		poly::ntt(&mut tmp);
+		polyvec::matrix_accum_column(&mut w1, &rho, &tmp, j);
 	}
 
 	fips202::shake256(&mut mu, params::CRHBYTES, pk, crate::params::PUBLICKEYBYTES);
@@ -770,8 +772,6 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 	fips202::shake256_squeeze(&mut mu, params::CRHBYTES, &mut state);
 
 	poly::challenge(&mut cp, &c);
-	polyvec::l_ntt(&mut z);
-	polyvec::matrix_pointwise_montgomery_streaming(&mut w1, &rho, &z);
 	poly::ntt(&mut cp);
 
 	for i in 0..K {
@@ -779,14 +779,37 @@ pub(crate) fn verify(sig: &[u8], m: &[u8], pk: &[u8]) -> bool {
 		poly::t1_unpack(&mut t, &pk[off..off + params::POLYT1_PACKEDBYTES]);
 		poly::shiftl(&mut t);
 		poly::ntt(&mut t);
-		poly::pointwise_montgomery(&mut ct, &cp, &t);
-		poly::sub_ip(&mut w1.vec[i], &ct);
+		poly::pointwise_montgomery(&mut tmp, &cp, &t);
+		poly::sub_ip(&mut w1.vec[i], &tmp);
 	}
 
 	polyvec::k_reduce(&mut w1);
 	polyvec::k_invntt_tomont(&mut w1);
 	polyvec::k_caddq(&mut w1);
-	polyvec::k_use_hint(&mut w1, &h);
+
+	let h_off = params::C_DASH_BYTES + L * params::POLYZ_PACKEDBYTES;
+	let mut prev_k: usize = 0;
+	for i in 0..K {
+		let cur_k = sig[h_off + params::OMEGA + i] as usize;
+		if cur_k < prev_k || cur_k > params::OMEGA {
+			return false;
+		}
+		let mut h_i = Poly::default();
+		for j in prev_k..cur_k {
+			if j > prev_k && sig[h_off + j] <= sig[h_off + j - 1] {
+				return false;
+			}
+			h_i.coeffs[sig[h_off + j] as usize] = 1;
+		}
+		poly::use_hint(&mut w1.vec[i], &h_i);
+		prev_k = cur_k;
+	}
+	for j in prev_k..params::OMEGA {
+		if sig[h_off + j] > 0 {
+			return false;
+		}
+	}
+
 	polyvec::k_pack_w1(&mut buf, &w1);
 
 	state.init();
