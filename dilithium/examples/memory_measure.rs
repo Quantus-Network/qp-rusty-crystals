@@ -1,5 +1,7 @@
+use qp_rusty_crystals_dilithium::ml_dsa_87;
+#[cfg(debug_assertions)]
 use qp_rusty_crystals_dilithium::{
-	ml_dsa_87, params,
+	params,
 	poly::Poly,
 	polyvec::{Polyveck, Polyvecl},
 };
@@ -122,13 +124,16 @@ fn main() {
 	#[cfg(not(debug_assertions))]
 	println!("Build:   RELEASE");
 
-	println!("\nData structure sizes:");
-	println!("  Poly:       {:>6} bytes", std::mem::size_of::<Poly>());
-	println!("  Polyvecl:   {:>6} bytes (L={})", std::mem::size_of::<Polyvecl>(), params::L);
-	println!("  Polyveck:   {:>6} bytes (K={})", std::mem::size_of::<Polyveck>(), params::K);
-	println!("  PublicKey:  {:>6} bytes", params::PUBLICKEYBYTES);
-	println!("  SecretKey:  {:>6} bytes", params::SECRETKEYBYTES);
-	println!("  Signature:  {:>6} bytes", params::SIGNBYTES);
+	#[cfg(debug_assertions)]
+	{
+		println!("\nData structure sizes:");
+		println!("  Poly:       {:>6} bytes", std::mem::size_of::<Poly>());
+		println!("  Polyvecl:   {:>6} bytes (L={})", std::mem::size_of::<Polyvecl>(), params::L);
+		println!("  Polyveck:   {:>6} bytes (K={})", std::mem::size_of::<Polyveck>(), params::K);
+		println!("  PublicKey:  {:>6} bytes", params::PUBLICKEYBYTES);
+		println!("  SecretKey:  {:>6} bytes", params::SECRETKEYBYTES);
+		println!("  Signature:  {:>6} bytes", params::SIGNBYTES);
+	}
 
 	let kp = ml_dsa_87::Keypair::generate((&mut [1u8; 32]).into());
 	let sig = kp.sign(MSG, None, None).unwrap();
