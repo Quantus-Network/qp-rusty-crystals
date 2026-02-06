@@ -1,5 +1,3 @@
-#![cfg(feature = "embedded")]
-
 use alloc::{
 	alloc::{alloc_zeroed, handle_alloc_error, Layout},
 	boxed::Box,
