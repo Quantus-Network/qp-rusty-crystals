@@ -45,7 +45,6 @@ impl Keypair {
 
 		#[cfg(not(feature = "embedded"))]
 		{
-			panic!("embedded feature is OFF - crash for now.");
 			let mut pk = [0u8; PUBLICKEYBYTES];
 			let mut sk = [0u8; SECRETKEYBYTES];
 			crate::sign::keypair(&mut pk, &mut sk, entropy);
