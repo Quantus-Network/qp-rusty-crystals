@@ -554,7 +554,6 @@ pub(crate) fn signature(
 	let mut cp = Poly::default();
 	let mut tmp = Poly::default();
 	let mut tmp2 = Poly::default();
-	let mut y_i = Poly::default();
 
 	loop {
 		for _ in 0..MIN_SIGNING_ATTEMPTS {
@@ -582,7 +581,6 @@ pub(crate) fn signature(
 			let mut all_ok = true;
 
 			for i in 0..L {
-				poly::uniform_gamma1(&mut y_i, &rhoprime, L as u16 * attempt_nonce + i as u16);
 				let off = packing::SK_S1_OFF + i * params::POLYETA_PACKEDBYTES;
 				poly::eta_unpack(
 					&mut tmp,
@@ -592,13 +590,14 @@ pub(crate) fn signature(
 				poly::pointwise_montgomery(&mut tmp2, &cp, &tmp);
 				poly::invntt_tomont(&mut tmp2);
 				poly::reduce(&mut tmp2);
-				poly::add_ip(&mut y_i, &tmp2);
-				poly::reduce(&mut y_i);
-				all_ok &= !poly::check_norm(&y_i, (params::GAMMA1 - params::BETA) as i32);
+				poly::uniform_gamma1(&mut tmp, &rhoprime, L as u16 * attempt_nonce + i as u16);
+				poly::add_ip(&mut tmp, &tmp2);
+				poly::reduce(&mut tmp);
+				all_ok &= !poly::check_norm(&tmp, (params::GAMMA1 - params::BETA) as i32);
 				let sig_off = params::C_DASH_BYTES + i * params::POLYZ_PACKEDBYTES;
 				poly::z_pack(
 					&mut candidate_sig[sig_off..sig_off + params::POLYZ_PACKEDBYTES],
-					&y_i,
+					&tmp,
 				);
 			}
 
