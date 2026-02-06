@@ -56,22 +56,13 @@ pub fn pack_sk(
 	sk[SK_TR_OFF..SK_TR_OFF + params::TR_BYTES].copy_from_slice(&tr[..params::TR_BYTES]);
 
 	for i in 0..L {
-		poly::eta_pack(
-			&mut sk[SK_S1_OFF + i * params::POLYETA_PACKEDBYTES..],
-			&s1.vec[i],
-		);
+		poly::eta_pack(&mut sk[SK_S1_OFF + i * params::POLYETA_PACKEDBYTES..], &s1.vec[i]);
 	}
 	for i in 0..K {
-		poly::eta_pack(
-			&mut sk[SK_S2_OFF + i * params::POLYETA_PACKEDBYTES..],
-			&s2.vec[i],
-		);
+		poly::eta_pack(&mut sk[SK_S2_OFF + i * params::POLYETA_PACKEDBYTES..], &s2.vec[i]);
 	}
 	for i in 0..K {
-		poly::t0_pack(
-			&mut sk[SK_T0_OFF + i * params::POLYT0_PACKEDBYTES..],
-			&t0.vec[i],
-		);
+		poly::t0_pack(&mut sk[SK_T0_OFF + i * params::POLYT0_PACKEDBYTES..], &t0.vec[i]);
 	}
 }
 
@@ -90,22 +81,13 @@ pub fn unpack_sk(
 	tr[..params::TR_BYTES].copy_from_slice(&sk[SK_TR_OFF..SK_TR_OFF + params::TR_BYTES]);
 
 	for i in 0..L {
-		poly::eta_unpack(
-			&mut s1.vec[i],
-			&sk[SK_S1_OFF + i * params::POLYETA_PACKEDBYTES..],
-		);
+		poly::eta_unpack(&mut s1.vec[i], &sk[SK_S1_OFF + i * params::POLYETA_PACKEDBYTES..]);
 	}
 	for i in 0..K {
-		poly::eta_unpack(
-			&mut s2.vec[i],
-			&sk[SK_S2_OFF + i * params::POLYETA_PACKEDBYTES..],
-		);
+		poly::eta_unpack(&mut s2.vec[i], &sk[SK_S2_OFF + i * params::POLYETA_PACKEDBYTES..]);
 	}
 	for i in 0..K {
-		poly::t0_unpack(
-			&mut t0.vec[i],
-			&sk[SK_T0_OFF + i * params::POLYT0_PACKEDBYTES..],
-		);
+		poly::t0_unpack(&mut t0.vec[i], &sk[SK_T0_OFF + i * params::POLYT0_PACKEDBYTES..]);
 	}
 }
 

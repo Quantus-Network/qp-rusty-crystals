@@ -81,6 +81,8 @@ impl From<&mut [u8; 64]> for SensitiveBytes64 {
 	}
 }
 
+#[cfg(feature = "embedded")]
+mod boxed;
 mod errors;
 pub mod fips202;
 pub mod ml_dsa_87;
@@ -92,8 +94,6 @@ pub mod polyvec;
 pub mod reduce;
 pub mod rounding;
 pub mod sign;
-#[cfg(feature = "embedded")]
-mod boxed;
 
 #[cfg(test)]
 mod tests {

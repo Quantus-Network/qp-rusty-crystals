@@ -1,12 +1,8 @@
-use crate::{
-	fips202, packing, params, poly,
-	poly::Poly,
-	polyvec,
-	polyvec::Polyveck,
-	SensitiveBytes32,
-};
 #[cfg(not(feature = "embedded"))]
 use crate::polyvec::Polyvecl;
+use crate::{
+	fips202, packing, params, poly, poly::Poly, polyvec, polyvec::Polyveck, SensitiveBytes32,
+};
 #[cfg(not(feature = "embedded"))]
 use core::array;
 use zeroize::Zeroize;
@@ -58,10 +54,7 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: SensitiveBytes32) {
 		for j in 0..L {
 			let mut p = Poly::default();
 			poly::uniform_eta(&mut p, &rhoprime, nonce);
-			poly::eta_pack(
-				&mut sk[packing::SK_S1_OFF + j * params::POLYETA_PACKEDBYTES..],
-				&p,
-			);
+			poly::eta_pack(&mut sk[packing::SK_S1_OFF + j * params::POLYETA_PACKEDBYTES..], &p);
 			poly::ntt(&mut p);
 			polyvec::matrix_accum_column(&mut t1, &rho, &p, j);
 			nonce += 1;
@@ -72,10 +65,7 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: SensitiveBytes32) {
 		for i in 0..K {
 			let mut p = Poly::default();
 			poly::uniform_eta(&mut p, &rhoprime, nonce);
-			poly::eta_pack(
-				&mut sk[packing::SK_S2_OFF + i * params::POLYETA_PACKEDBYTES..],
-				&p,
-			);
+			poly::eta_pack(&mut sk[packing::SK_S2_OFF + i * params::POLYETA_PACKEDBYTES..], &p);
 			poly::add_ip(&mut t1.vec[i], &p);
 			nonce += 1;
 		}
@@ -84,10 +74,7 @@ pub fn keypair(pk: &mut [u8], sk: &mut [u8], seed: SensitiveBytes32) {
 		for i in 0..K {
 			let mut t0 = Poly::default();
 			poly::power2round(&mut t1.vec[i], &mut t0);
-			poly::t0_pack(
-				&mut sk[packing::SK_T0_OFF + i * params::POLYT0_PACKEDBYTES..],
-				&t0,
-			);
+			poly::t0_pack(&mut sk[packing::SK_T0_OFF + i * params::POLYT0_PACKEDBYTES..], &t0);
 		}
 
 		packing::pack_pk(pk, &rho, &t1);
@@ -518,7 +505,11 @@ fn decompose_w0_pack_w1(w0: &mut Polyveck, w1_packed: &mut [u8; K * params::POLY
 #[cfg(feature = "embedded")]
 fn w1_coeff(w1_packed: &[u8; K * params::POLYW1_PACKEDBYTES], i: usize, j: usize) -> i32 {
 	let b = w1_packed[i * params::POLYW1_PACKEDBYTES + (j >> 1)];
-	if (j & 1) == 0 { (b & 0x0F) as i32 } else { (b >> 4) as i32 }
+	if (j & 1) == 0 {
+		(b & 0x0F) as i32
+	} else {
+		(b >> 4) as i32
+	}
 }
 
 #[cfg(feature = "embedded")]
@@ -528,9 +519,12 @@ pub(crate) fn signature(
 	secret_key_bytes: &[u8],
 	hedge: Option<[u8; params::SEEDBYTES]>,
 ) {
-	let public_seed_rho: &[u8] = &secret_key_bytes[packing::SK_RHO_OFF..packing::SK_RHO_OFF + params::SEEDBYTES];
-	let private_key_seed: &[u8] = &secret_key_bytes[packing::SK_KEY_OFF..packing::SK_KEY_OFF + params::SEEDBYTES];
-	let public_key_hash_tr: &[u8] = &secret_key_bytes[packing::SK_TR_OFF..packing::SK_TR_OFF + params::TR_BYTES];
+	let public_seed_rho: &[u8] =
+		&secret_key_bytes[packing::SK_RHO_OFF..packing::SK_RHO_OFF + params::SEEDBYTES];
+	let private_key_seed: &[u8] =
+		&secret_key_bytes[packing::SK_KEY_OFF..packing::SK_KEY_OFF + params::SEEDBYTES];
+	let public_key_hash_tr: &[u8] =
+		&secret_key_bytes[packing::SK_TR_OFF..packing::SK_TR_OFF + params::TR_BYTES];
 
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, public_key_hash_tr, params::TR_BYTES);
@@ -590,7 +584,10 @@ pub(crate) fn signature(
 			for i in 0..L {
 				poly::uniform_gamma1(&mut y_i, &rhoprime, L as u16 * attempt_nonce + i as u16);
 				let off = packing::SK_S1_OFF + i * params::POLYETA_PACKEDBYTES;
-				poly::eta_unpack(&mut tmp, &secret_key_bytes[off..off + params::POLYETA_PACKEDBYTES]);
+				poly::eta_unpack(
+					&mut tmp,
+					&secret_key_bytes[off..off + params::POLYETA_PACKEDBYTES],
+				);
 				poly::ntt(&mut tmp);
 				poly::pointwise_montgomery(&mut tmp2, &cp, &tmp);
 				poly::invntt_tomont(&mut tmp2);
@@ -599,12 +596,18 @@ pub(crate) fn signature(
 				poly::reduce(&mut y_i);
 				all_ok &= !poly::check_norm(&y_i, (params::GAMMA1 - params::BETA) as i32);
 				let sig_off = params::C_DASH_BYTES + i * params::POLYZ_PACKEDBYTES;
-				poly::z_pack(&mut candidate_sig[sig_off..sig_off + params::POLYZ_PACKEDBYTES], &y_i);
+				poly::z_pack(
+					&mut candidate_sig[sig_off..sig_off + params::POLYZ_PACKEDBYTES],
+					&y_i,
+				);
 			}
 
 			for i in 0..K {
 				let off = packing::SK_S2_OFF + i * params::POLYETA_PACKEDBYTES;
-				poly::eta_unpack(&mut tmp, &secret_key_bytes[off..off + params::POLYETA_PACKEDBYTES]);
+				poly::eta_unpack(
+					&mut tmp,
+					&secret_key_bytes[off..off + params::POLYETA_PACKEDBYTES],
+				);
 				poly::ntt(&mut tmp);
 				poly::pointwise_montgomery(&mut tmp2, &cp, &tmp);
 				poly::invntt_tomont(&mut tmp2);
@@ -630,7 +633,8 @@ pub(crate) fn signature(
 			let mut k_total: usize = 0;
 			for i in 0..K {
 				for j in 0..N {
-					let hint = crate::rounding::make_hint(vk.vec[i].coeffs[j], w1_coeff(&w1_packed, i, j));
+					let hint =
+						crate::rounding::make_hint(vk.vec[i].coeffs[j], w1_coeff(&w1_packed, i, j));
 					if hint != 0 {
 						if k_total >= params::OMEGA {
 							all_ok = false;

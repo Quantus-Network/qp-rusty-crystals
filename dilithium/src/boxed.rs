@@ -17,4 +17,3 @@ pub(crate) fn zeroed_box<T>() -> Box<T> {
 	}
 	unsafe { Box::from_raw(ptr) }
 }
-

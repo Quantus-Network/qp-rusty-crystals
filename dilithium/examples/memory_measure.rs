@@ -1,4 +1,8 @@
-use qp_rusty_crystals_dilithium::{ml_dsa_87, params, poly::Poly, polyvec::{Polyveck, Polyvecl}};
+use qp_rusty_crystals_dilithium::{
+	ml_dsa_87, params,
+	poly::Poly,
+	polyvec::{Polyveck, Polyvecl},
+};
 use std::{
 	alloc::{GlobalAlloc, Layout, System},
 	sync::atomic::{AtomicUsize, Ordering},
