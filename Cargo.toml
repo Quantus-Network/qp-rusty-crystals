@@ -3,18 +3,18 @@ members = ["dilithium", "hdwallet", "tests"]
 resolver = "2"
 
 [workspace.dependencies]
-bip39 = { version = "=2.0.0", default-features = false }
+bip39 = { version = "=2.2.2", default-features = false }
 criterion = { version = "=0.5.1", features = ["html_reports"] }
-getrandom = { version = "=0.2", features = ["js"] }
+getrandom = { version = "=0.2.17", features = ["js"] }
 hex = { version = "=0.4.3", default-features = false, features = ["alloc"] }
 hex-literal = { version = "=0.4.1", default-features = false }
-qp-poseidon-core = { version = "=1.0.1" }
+qp-poseidon-core = { version = "=1.0.7", default-features = false, features = ["p2", "p3"] }
 qp-rusty-crystals-dilithium = { path = "./dilithium", version = "2.0.0", default-features = false }
 qp-rusty-crystals-hdwallet = { path = "./hdwallet", version = "1.0.0", default-features = false }
-rand = { version = "=0.8", default-features = false, features = ["std_rng"] }
-rand_core = { version = "=0.9.3", default-features = false }
+rand = { version = "=0.8.5", default-features = false, features = ["std_rng"] }
+rand_core = { version = "=0.6.4", default-features = false }
 rusty-crystals-integration-tests = { path = "./tests" }
-serde = { version = "=1.0", default-features = false, features = ["alloc", "derive"] }
-serde_json = { version = "=1.0.140", default-features = false, features = ["alloc"] }
-thiserror = { version = "=2.0.12", default-features = false }
+serde = { version = "=1.0.228", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "=1.0.149", default-features = false, features = ["alloc"] }
+thiserror = { version = "=2.0.18", default-features = false }
 zeroize = { version = "=1.8.2", default-features = false, features = ["derive"] }

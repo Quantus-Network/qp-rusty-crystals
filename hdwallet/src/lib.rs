@@ -203,7 +203,7 @@ pub fn generate_mnemonic(entropy: SensitiveBytes32) -> Result<String, HDLatticeE
 	let mnemonic = Mnemonic::from_entropy(entropy.as_bytes())
 		.map_err(|e| HDLatticeError::MnemonicDerivationFailed(e.to_string()))?;
 
-	let result = mnemonic.word_iter().collect::<Vec<&str>>().join(" ");
+	let result = mnemonic.words().collect::<Vec<&str>>().join(" ");
 
 	// entropy is automatically zeroized when it drops
 
