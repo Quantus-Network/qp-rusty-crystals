@@ -1112,9 +1112,9 @@ dependencies = [
 
 [[package]]
 name = "qp-poseidon-core"
-version = "1.0.7"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f65766d6de64eff741c7f402002a3322f5e563d53e0e9040aeab4921ff24f2b"
+checksum = "4dcdc2b94d265b986711f5f44eea860c96c9e7b25aaa999f7aa024437c0dcd5f"
 dependencies = [
  "p3-field",
  "p3-goldilocks",
