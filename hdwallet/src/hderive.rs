@@ -206,5 +206,4 @@ mod tests {
 		assert_eq!("m/44'/60'/0".parse::<DerivationPath>().unwrap_err(), Error::NotHardened);
 		assert_eq!("0".parse::<ChildNumber>().unwrap_err(), Error::NotHardened);
 	}
-
 }

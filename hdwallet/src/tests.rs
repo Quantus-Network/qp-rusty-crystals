@@ -507,7 +507,9 @@ mod hdwallet_tests {
 			let bytes = key.to_bytes();
 			for chunk in bytes.chunks(14) {
 				out.push_str("\t\t\t\t");
-				out.push_str(&chunk.iter().map(|b| format!("0x{b:02x}")).collect::<Vec<_>>().join(", "));
+				out.push_str(
+					&chunk.iter().map(|b| format!("0x{b:02x}")).collect::<Vec<_>>().join(", "),
+				);
 				out.push_str(",\n");
 			}
 			out.push_str("\t\t\t])\n\t\t\t.expect(\"Should not fail\"),\n");
@@ -520,5 +522,4 @@ mod hdwallet_tests {
 		f.write_all(out.as_bytes()).unwrap();
 		println!("Wrote updated Rust test vectors");
 	}
-
 }
