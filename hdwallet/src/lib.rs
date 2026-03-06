@@ -176,7 +176,7 @@ pub fn generate_wormhole_from_seed(
 fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 	let p = crate::hderive::DerivationPath::from_str(path).map_err(HDLatticeError::GenericError)?;
 
-	for (_, element) in p.iter().enumerate() {
+	for element in p.iter() {
 		if !element.is_hardened() {
 			return Err(HDLatticeError::HardenedPathsOnly());
 		}
