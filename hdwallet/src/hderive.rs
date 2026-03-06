@@ -1,8 +1,7 @@
 use alloc::vec::Vec;
-use core::{fmt, ops::Deref, str::FromStr};
+use core::{ops::Deref, str::FromStr};
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::SensitiveBytes32;
 
@@ -158,8 +157,8 @@ impl ExtendedPrivKey {
 	}
 
 	pub fn child(&self, child: ChildNumber) -> Result<ExtendedPrivKey, Error> {
-		let mut hmac: Hmac<Sha512> =
-			Hmac::new_from_slice(self.chain_code.as_bytes()).map_err(|_| Error::InvalidChildNumber)?;
+		let mut hmac: Hmac<Sha512> = Hmac::new_from_slice(self.chain_code.as_bytes())
+			.map_err(|_| Error::InvalidChildNumber)?;
 
 		hmac.update(&[0]);
 		hmac.update(&self.secret());
