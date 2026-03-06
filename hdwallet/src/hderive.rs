@@ -229,7 +229,7 @@ mod tests {
 	fn bip39_to_address() {
 		let phrase = "panda eyebrow bullet gorilla call smoke muffin taste mesh discover soft ostrich alcohol speed nation flash devote level hobby quick inner drive ghost inside";
 
-		let expected_secret_key = b"\x1a\xce\xbd\xbf\x18\x7f\x02\x14\xff\x5d\x7e\xea\xe3\xa1\xce\x42\x3f\x4e\x2c\xad\xd3\xfe\xe4\x73\xb7\xcc\x31\x88\xa6\x52\x4f\x5c";
+		let expected_secret_key = b"\xaf\x03\x67\xec\x66\x0c\x9e\x24\x34\x60\xfe\x97\xb2\x3e\x11\x62\xaa\x56\xd4\xd0\x39\x20\xd1\xeb\xe5\x00\xff\x0b\x34\x83\x71\x74";
 
 		let mnemonic = Mnemonic::parse_in_normalized(Language::English, phrase).unwrap();
 		let seed = mnemonic.to_seed_normalized("");

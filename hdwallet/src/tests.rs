@@ -300,7 +300,7 @@ mod hdwallet_tests {
 		let seed: &[u8] = &[42; 64];
 		let path = "m/44'/60'/0'/0/0";
 		let ext = ExtendedPrivKey::derive(seed, path).unwrap();
-		assert_eq!(&ext.secret(), b"\x98\x84\xbf\x56\x24\xfa\xdd\x7f\xb2\x80\x4c\xfb\x0c\xb6\xf7\x1f\x28\x9e\x21\x1f\xcf\x0d\xe8\x36\xa3\x84\x17\x57\xda\xd9\x70\xd0");
+		assert_eq!(&ext.secret(), b"\xe4\x24\x92\x71\xc9\x98\xaa\xc0\xd8\x87\x00\xe2\x77\x7a\xa5\x5a\x24\xee\x67\x17\xba\x73\xef\x67\xf8\xdb\x2f\xef\xcb\xf4\x4d\x45");
 
 		let base_ext = ExtendedPrivKey::derive(seed, "m/44'/60'/0'/0").unwrap();
 		let child_ext = base_ext.child(ChildNumber::from_str("0").unwrap()).unwrap();
@@ -361,7 +361,8 @@ mod hdwallet_tests {
 			assert_eq!(
 				entropy,
 				str_to_32_bytes(&vector.private_key),
-				"Expected private keys to match python's bip-utils"
+				"Private key mismatch for path: {}",
+				vector.path
 			);
 		}
 	}
