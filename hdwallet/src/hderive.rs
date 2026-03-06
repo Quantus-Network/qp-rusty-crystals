@@ -165,11 +165,10 @@ impl ExtendedPrivKey {
 		hmac.update(seed);
 
 		let result = hmac.finalize().into_bytes();
-		let (sk_slice, chain_code) = result.split_at(32);
-		let mut sk_buf: [u8; 32] = sk_slice.try_into().unwrap();
+		let (secret_key, chain_code) = result.split_at(32);
 
 		let mut sk = ExtendedPrivKey {
-			secret_key: SensitiveBytes32::from(&mut sk_buf),
+			secret_key: SensitiveBytes32::from(&mut secret_key.try_into().unwrap()),
 			chain_code: Protected::from(chain_code),
 		};
 
