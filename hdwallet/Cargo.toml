@@ -47,4 +47,3 @@ std = [
 	"serde_json/std",
 	"thiserror/std",
 ]
-quantus_v1 = []
