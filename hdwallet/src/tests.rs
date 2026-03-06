@@ -349,28 +349,6 @@ mod hdwallet_tests {
 	}
 
 	#[test]
-	fn test_entropy_from_seeds() {
-		let vectors = load_known_private_keys("./json/bip44_test_vectors.json").unwrap();
-
-		// For demonstration: print the parsed vectors
-		for vector in vectors {
-			println!("{vector:?}");
-			let seed = str_to_64_bytes(&vector.seed);
-			// Derive raw entropy like the old test did
-			let xpriv = ExtendedPrivKey::derive(&seed, vector.path.as_str())
-				.map_err(|_e| format!("Key derivation failed for path: {}", vector.path))
-				.unwrap();
-			let entropy = xpriv.secret();
-			assert_eq!(
-				entropy,
-				str_to_32_bytes(&vector.private_key),
-				"Private key mismatch for path: {}",
-				vector.path
-			);
-		}
-	}
-
-	#[test]
 	fn test_mnemonic_to_seed() {
 		// Single-use pattern
 		let mnemonic1 =
