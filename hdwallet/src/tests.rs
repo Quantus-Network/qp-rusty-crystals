@@ -12,7 +12,7 @@ pub struct TestVector {
 mod hdwallet_tests {
 	use crate::{
 		derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed,
-		hderive::{ChildNumber, ExtendedPrivKey},
+		hderive::{ChildNumber, DerivationPath, ExtendedPrivKey},
 		mnemonic_to_seed,
 		test_vectors::{
 			get_test_vectors, load_known_private_keys, str_to_32_bytes, str_to_64_bytes,
@@ -148,11 +148,13 @@ mod hdwallet_tests {
 	fn test_derive_seed() {
 		for (expected_keys, mnemonic_str, derivation_path) in get_test_vectors() {
 			let mut seed = mnemonic_to_seed(mnemonic_str.to_string(), None).unwrap();
-			// println!("Deriving seed for path: {}", derivation_path);
-			// Generate keys based on the derivation path
+			if !derivation_path.is_empty() && derivation_path != "m" {
+				let dp: DerivationPath = derivation_path.parse().unwrap();
+				assert!(dp.iter().all(|c| c.is_hardened()), "Path must be fully hardened: {derivation_path}");
+			}
 			let generated_keys = if derivation_path.is_empty() || derivation_path == "m" {
 				// Use a default path for empty or "m" path
-				derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0/0").unwrap()
+				derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0'/0'").unwrap()
 			} else {
 				derive_key_from_seed((&mut seed).into(), derivation_path).unwrap()
 			};

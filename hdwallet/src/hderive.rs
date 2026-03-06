@@ -25,9 +25,9 @@ impl ChildNumber {
 		self.0 & HARDENED_BIT == HARDENED_BIT
 	}
 
-	pub fn is_normal(&self) -> bool {
-		self.0 & HARDENED_BIT == 0
-	}
+	// pub fn is_normal(&self) -> bool {
+	// 	self.0 & HARDENED_BIT == 0
+	// }
 
 	pub fn to_bytes(&self) -> [u8; 4] {
 		self.0.to_be_bytes()
@@ -188,12 +188,8 @@ impl ExtendedPrivKey {
 		let mut hmac: Hmac<Sha512> =
 			Hmac::new_from_slice(&self.chain_code).map_err(|_| Error::InvalidChildNumber)?;
 
-		if child.is_normal() {
-			hmac.update(&self.secret());
-		} else {
-			hmac.update(&[0]);
-			hmac.update(&self.secret());
-		}
+		hmac.update(&[0]);
+		hmac.update(&self.secret());
 
 		hmac.update(&child.to_bytes());
 
@@ -239,7 +235,7 @@ mod tests {
 		let mnemonic = Mnemonic::parse_in_normalized(Language::English, phrase).unwrap();
 		let seed = mnemonic.to_seed_normalized("");
 
-		let account = ExtendedPrivKey::derive(&seed, "m/44'/60'/0'/0/0").unwrap();
+		let account = ExtendedPrivKey::derive(&seed, "m/44'/60'/0'/0'/0'").unwrap();
 
 		assert_eq!(expected_secret_key, &account.secret(), "Secret key is invalid");
 	}
