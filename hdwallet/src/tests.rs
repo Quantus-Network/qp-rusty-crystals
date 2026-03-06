@@ -302,7 +302,7 @@ mod hdwallet_tests {
 
 		let base_ext = ExtendedPrivKey::derive(seed, "m/44'/60'/0'/0").unwrap();
 		let child_ext = base_ext.child(ChildNumber::from_str("0").unwrap()).unwrap();
-		assert_eq!(ext, child_ext);
+		assert_eq!(ext.secret(), child_ext.secret());
 	}
 
 	#[test]

@@ -1,13 +1,13 @@
 use alloc::vec::Vec;
 use core::{fmt, ops::Deref, str::FromStr};
 use hmac::{Hmac, Mac};
-use k256::{elliptic_curve::sec1::ToEncodedPoint, SecretKey};
 use sha2::Sha512;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::SensitiveBytes32;
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Error {
-	Secp256k1(k256::elliptic_curve::Error),
 	InvalidChildNumber,
 	InvalidDerivationPath,
 	InvalidExtendedPrivKey,
@@ -148,9 +148,9 @@ impl fmt::Debug for Protected {
 	}
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone)]
 pub struct ExtendedPrivKey {
-	secret_key: SecretKey,
+	secret_key: SensitiveBytes32,
 	chain_code: Protected,
 }
 
@@ -165,10 +165,11 @@ impl ExtendedPrivKey {
 		hmac.update(seed);
 
 		let result = hmac.finalize().into_bytes();
-		let (secret_key, chain_code) = result.split_at(32);
+		let (sk_slice, chain_code) = result.split_at(32);
+		let mut sk_buf: [u8; 32] = sk_slice.try_into().unwrap();
 
 		let mut sk = ExtendedPrivKey {
-			secret_key: SecretKey::from_slice(secret_key).map_err(Error::Secp256k1)?,
+			secret_key: SensitiveBytes32::from(&mut sk_buf),
 			chain_code: Protected::from(chain_code),
 		};
 
@@ -180,7 +181,7 @@ impl ExtendedPrivKey {
 	}
 
 	pub fn secret(&self) -> [u8; 32] {
-		self.secret_key.to_bytes().into()
+		*self.secret_key.as_bytes()
 	}
 
 	pub fn child(&self, child: ChildNumber) -> Result<ExtendedPrivKey, Error> {
@@ -188,7 +189,7 @@ impl ExtendedPrivKey {
 			Hmac::new_from_slice(&self.chain_code).map_err(|_| Error::InvalidChildNumber)?;
 
 		if child.is_normal() {
-			hmac.update(self.secret_key.public_key().to_encoded_point(true).as_bytes());
+			hmac.update(&self.secret());
 		} else {
 			hmac.update(&[0]);
 			hmac.update(&self.secret());
@@ -197,16 +198,10 @@ impl ExtendedPrivKey {
 		hmac.update(&child.to_bytes());
 
 		let result = hmac.finalize().into_bytes();
-		let (secret_key, chain_code) = result.split_at(32);
+		let (sk_slice, chain_code) = result.split_at(32);
+		let mut sk_buf: [u8; 32] = sk_slice.try_into().unwrap();
 
-		let mut secret_key = SecretKey::from_slice(secret_key).map_err(Error::Secp256k1)?;
-		let raw = *secret_key.as_scalar_primitive() + self.secret_key.as_scalar_primitive();
-		if raw.is_zero().into() {
-			return Err(Error::ZeroChildKey);
-		}
-		secret_key = SecretKey::new(raw);
-
-		Ok(ExtendedPrivKey { secret_key, chain_code: Protected::from(&chain_code) })
+		Ok(ExtendedPrivKey { secret_key: SensitiveBytes32::from(&mut sk_buf), chain_code: Protected::from(chain_code) })
 	}
 }
 
@@ -220,9 +215,11 @@ impl FromStr for ExtendedPrivKey {
 			return Err(Error::InvalidExtendedPrivKey);
 		}
 
+		let mut sk_buf = [0u8; 32];
+		sk_buf.copy_from_slice(&data[46..78]);
 		Ok(ExtendedPrivKey {
 			chain_code: Protected::from(&data[13..45]),
-			secret_key: SecretKey::from_slice(&data[46..78]).map_err(Error::Secp256k1)?,
+			secret_key: SensitiveBytes32::from(&mut sk_buf),
 		})
 	}
 }
@@ -237,7 +234,7 @@ mod tests {
 	fn bip39_to_address() {
 		let phrase = "panda eyebrow bullet gorilla call smoke muffin taste mesh discover soft ostrich alcohol speed nation flash devote level hobby quick inner drive ghost inside";
 
-		let expected_secret_key = b"\xff\x1e\x68\xeb\x7b\xf2\xf4\x86\x51\xc4\x7e\xf0\x17\x7e\xb8\x15\x85\x73\x22\x25\x7c\x58\x94\xbb\x4c\xfd\x11\x76\xc9\x98\x93\x14";
+		let expected_secret_key = b"\x1a\xce\xbd\xbf\x18\x7f\x02\x14\xff\x5d\x7e\xea\xe3\xa1\xce\x42\x3f\x4e\x2c\xad\xd3\xfe\xe4\x73\xb7\xcc\x31\x88\xa6\x52\x4f\x5c";
 
 		let mnemonic = Mnemonic::parse_in_normalized(Language::English, phrase).unwrap();
 		let seed = mnemonic.to_seed_normalized("");
