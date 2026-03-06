@@ -1,17 +1,15 @@
 use alloc::vec::Vec;
-use core::{fmt, ops::Deref, str::FromStr};
+use core::{ops::Deref, str::FromStr};
 use hmac::{Hmac, Mac};
-use k256::{elliptic_curve::sec1::ToEncodedPoint, SecretKey};
 use sha2::Sha512;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+
+use crate::SensitiveBytes32;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Error {
-	Secp256k1(k256::elliptic_curve::Error),
 	InvalidChildNumber,
 	InvalidDerivationPath,
-	InvalidExtendedPrivKey,
-	ZeroChildKey,
+	NotHardened,
 }
 
 const HARDENED_BIT: u32 = 1 << 31;
@@ -21,14 +19,6 @@ const HARDENED_BIT: u32 = 1 << 31;
 pub struct ChildNumber(u32);
 
 impl ChildNumber {
-	pub fn is_hardened(&self) -> bool {
-		self.0 & HARDENED_BIT == HARDENED_BIT
-	}
-
-	pub fn is_normal(&self) -> bool {
-		self.0 & HARDENED_BIT == 0
-	}
-
 	pub fn to_bytes(&self) -> [u8; 4] {
 		self.0.to_be_bytes()
 	}
@@ -36,29 +26,18 @@ impl ChildNumber {
 	pub fn hardened_from_u32(index: u32) -> Self {
 		ChildNumber(index | HARDENED_BIT)
 	}
-
-	pub fn non_hardened_from_u32(index: u32) -> Self {
-		ChildNumber(index)
-	}
 }
 
 impl FromStr for ChildNumber {
 	type Err = Error;
 
 	fn from_str(child: &str) -> Result<ChildNumber, Error> {
-		let (child, mask) = if let Some(child) = child.strip_suffix('\'') {
-			(child, HARDENED_BIT)
-		} else {
-			(child, 0)
-		};
-
+		let child = child.strip_suffix('\'').ok_or(Error::NotHardened)?;
 		let index: u32 = child.parse().map_err(|_| Error::InvalidChildNumber)?;
-
-		if index & HARDENED_BIT == 0 {
-			Ok(ChildNumber(index | mask))
-		} else {
-			Err(Error::InvalidChildNumber)
+		if index & HARDENED_BIT != 0 {
+			return Err(Error::InvalidChildNumber);
 		}
+		Ok(ChildNumber(index | HARDENED_BIT))
 	}
 }
 
@@ -122,36 +101,11 @@ impl IntoDerivationPath for &str {
 		self.parse()
 	}
 }
-
-#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
-pub struct Protected([u8; 32]);
-
-impl<Data: AsRef<[u8]>> From<Data> for Protected {
-	fn from(data: Data) -> Protected {
-		let mut buf = [0u8; 32];
-		buf.copy_from_slice(data.as_ref());
-		Protected(buf)
-	}
-}
-
-impl Deref for Protected {
-	type Target = [u8];
-
-	fn deref(&self) -> &[u8] {
-		&self.0
-	}
-}
-
-impl fmt::Debug for Protected {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "Protected")
-	}
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone)]
 pub struct ExtendedPrivKey {
-	secret_key: SecretKey,
-	chain_code: Protected,
+	// Debug intentionally omitted to avoid leaking key material
+	secret_key: SensitiveBytes32,
+	chain_code: SensitiveBytes32,
 }
 
 impl ExtendedPrivKey {
@@ -161,15 +115,15 @@ impl ExtendedPrivKey {
 		Path: IntoDerivationPath,
 	{
 		let mut hmac: Hmac<Sha512> =
-			Hmac::new_from_slice(b"Bitcoin seed").expect("seed is always correct; qed");
+			Hmac::new_from_slice(b"Dilithium seed").expect("seed is always correct; qed");
 		hmac.update(seed);
 
 		let result = hmac.finalize().into_bytes();
 		let (secret_key, chain_code) = result.split_at(32);
 
 		let mut sk = ExtendedPrivKey {
-			secret_key: SecretKey::from_slice(secret_key).map_err(Error::Secp256k1)?,
-			chain_code: Protected::from(chain_code),
+			secret_key: SensitiveBytes32::from(&mut secret_key.try_into().unwrap()),
+			chain_code: SensitiveBytes32::from(&mut chain_code.try_into().unwrap()),
 		};
 
 		for child in path.into()?.as_ref() {
@@ -180,50 +134,31 @@ impl ExtendedPrivKey {
 	}
 
 	pub fn secret(&self) -> [u8; 32] {
-		self.secret_key.to_bytes().into()
+		*self.secret_key.as_bytes()
 	}
 
 	pub fn child(&self, child: ChildNumber) -> Result<ExtendedPrivKey, Error> {
-		let mut hmac: Hmac<Sha512> =
-			Hmac::new_from_slice(&self.chain_code).map_err(|_| Error::InvalidChildNumber)?;
+		let mut hmac: Hmac<Sha512> = Hmac::new_from_slice(self.chain_code.as_bytes())
+			.map_err(|_| Error::InvalidChildNumber)?;
 
-		if child.is_normal() {
-			hmac.update(self.secret_key.public_key().to_encoded_point(true).as_bytes());
-		} else {
-			hmac.update(&[0]);
-			hmac.update(&self.secret());
-		}
+		hmac.update(&[0]);
+		hmac.update(&self.secret());
 
 		hmac.update(&child.to_bytes());
 
 		let result = hmac.finalize().into_bytes();
 		let (secret_key, chain_code) = result.split_at(32);
 
-		let mut secret_key = SecretKey::from_slice(secret_key).map_err(Error::Secp256k1)?;
-		let raw = *secret_key.as_scalar_primitive() + self.secret_key.as_scalar_primitive();
-		if raw.is_zero().into() {
-			return Err(Error::ZeroChildKey);
-		}
-		secret_key = SecretKey::new(raw);
-
-		Ok(ExtendedPrivKey { secret_key, chain_code: Protected::from(&chain_code) })
+		Ok(ExtendedPrivKey {
+			secret_key: SensitiveBytes32::from(&mut secret_key.try_into().unwrap()),
+			chain_code: SensitiveBytes32::from(&mut chain_code.try_into().unwrap()),
+		})
 	}
 }
 
-impl FromStr for ExtendedPrivKey {
-	type Err = Error;
-
-	fn from_str(xprv: &str) -> Result<ExtendedPrivKey, Error> {
-		let data = bs58::decode(xprv).into_vec().map_err(|_| Error::InvalidExtendedPrivKey)?;
-
-		if data.len() != 82 {
-			return Err(Error::InvalidExtendedPrivKey);
-		}
-
-		Ok(ExtendedPrivKey {
-			chain_code: Protected::from(&data[13..45]),
-			secret_key: SecretKey::from_slice(&data[46..78]).map_err(Error::Secp256k1)?,
-		})
+impl core::fmt::Debug for ExtendedPrivKey {
+	fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+		f.debug_struct("ExtendedPrivKey").finish_non_exhaustive()
 	}
 }
 
@@ -237,20 +172,19 @@ mod tests {
 	fn bip39_to_address() {
 		let phrase = "panda eyebrow bullet gorilla call smoke muffin taste mesh discover soft ostrich alcohol speed nation flash devote level hobby quick inner drive ghost inside";
 
-		let expected_secret_key = b"\xff\x1e\x68\xeb\x7b\xf2\xf4\x86\x51\xc4\x7e\xf0\x17\x7e\xb8\x15\x85\x73\x22\x25\x7c\x58\x94\xbb\x4c\xfd\x11\x76\xc9\x98\x93\x14";
+		let expected_secret_key = b"\x2f\xbd\x41\x6a\x34\xc0\xac\x40\x98\xea\xad\xd0\x8c\x07\xc7\x09\xad\xf4\xd8\x7e\x7a\xa8\x12\x44\xa4\xbf\x2b\xf9\xfb\xfb\xbf\x76";
 
 		let mnemonic = Mnemonic::parse_in_normalized(Language::English, phrase).unwrap();
 		let seed = mnemonic.to_seed_normalized("");
 
-		let account = ExtendedPrivKey::derive(&seed, "m/44'/60'/0'/0/0").unwrap();
+		let account = ExtendedPrivKey::derive(&seed, "m/44'/60'/0'/0'/0'").unwrap();
 
 		assert_eq!(expected_secret_key, &account.secret(), "Secret key is invalid");
 	}
 
 	#[test]
 	fn derive_path() {
-		let path: DerivationPath = "m/44'/60'/0'/0".parse().unwrap();
-
+		let path: DerivationPath = "m/44'/60'/0'".parse().unwrap();
 		assert_eq!(
 			path,
 			DerivationPath {
@@ -258,9 +192,14 @@ mod tests {
 					ChildNumber(44 | HARDENED_BIT),
 					ChildNumber(60 | HARDENED_BIT),
 					ChildNumber(HARDENED_BIT),
-					ChildNumber(0),
 				],
 			}
 		);
+	}
+
+	#[test]
+	fn non_hardened_path_rejected() {
+		assert_eq!("m/44'/60'/0".parse::<DerivationPath>().unwrap_err(), Error::NotHardened);
+		assert_eq!("0".parse::<ChildNumber>().unwrap_err(), Error::NotHardened);
 	}
 }

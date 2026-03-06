@@ -35,8 +35,6 @@ pub enum HDLatticeError {
 	Bip39Error(String),
 	#[error("Key derivation failed: {0}")]
 	KeyDerivationFailed(String),
-	#[error("Non-hardened keys not supported because lattice")]
-	HardenedPathsOnly(),
 	#[error("Bad entropy bit count: {0}")]
 	BadEntropyBitCount(usize),
 	#[error("Mnemonic derivation failed: {0}")]
@@ -169,24 +167,9 @@ pub fn generate_wormhole_from_seed(
 	Ok(wormhole_pair)
 }
 
-/// Validate a BIP44 derivation path
-///
-/// Enforces hardened derivation for all indices
-/// In quantus_v1 feature, enforces hardened keys for the first 3 levels, allows subsequent levels
-/// to be non-hardened.
+/// Validate a derivation path — parsing itself enforces hardened-only.
 fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
-	let p = crate::hderive::DerivationPath::from_str(path).map_err(HDLatticeError::GenericError)?;
-
-	#[cfg(feature = "quantus_v1")]
-	let hardened_check_count = core::cmp::min(p.iter().count(), 3);
-	#[cfg(not(feature = "quantus_v1"))]
-	let hardened_check_count = p.iter().count();
-
-	for (index, element) in p.iter().enumerate() {
-		if index < hardened_check_count && !element.is_hardened() {
-			return Err(HDLatticeError::HardenedPathsOnly());
-		}
-	}
+	crate::hderive::DerivationPath::from_str(path).map_err(HDLatticeError::GenericError)?;
 	Ok(())
 }
 

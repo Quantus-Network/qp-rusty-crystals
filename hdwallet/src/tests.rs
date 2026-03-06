@@ -1,22 +1,10 @@
-use alloc::string::String;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct TestVector {
-	pub(crate) seed: String,
-	pub(crate) path: String,
-	pub(crate) private_key: String,
-}
-
 #[cfg(test)]
 mod hdwallet_tests {
 	use crate::{
 		derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed,
 		hderive::{ChildNumber, ExtendedPrivKey},
 		mnemonic_to_seed,
-		test_vectors::{
-			get_test_vectors, load_known_private_keys, str_to_32_bytes, str_to_64_bytes,
-		},
+		test_vectors::get_test_vectors,
 		HDLatticeError,
 	};
 	use alloc::{
@@ -78,7 +66,6 @@ mod hdwallet_tests {
 		// Different passphrase should produce different seed
 		assert_ne!(seed1, seed3, "password should affect seed");
 
-		// Derive master keys (path "m/44'/0'/0'/0/0")
 		let master_key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0'/0'").unwrap();
 		let master_key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
 		let master_key3 = derive_key_from_seed((&mut seed3).into(), "m/44'/0'/0'/0'/0'").unwrap();
@@ -148,11 +135,9 @@ mod hdwallet_tests {
 	fn test_derive_seed() {
 		for (expected_keys, mnemonic_str, derivation_path) in get_test_vectors() {
 			let mut seed = mnemonic_to_seed(mnemonic_str.to_string(), None).unwrap();
-			// println!("Deriving seed for path: {}", derivation_path);
-			// Generate keys based on the derivation path
 			let generated_keys = if derivation_path.is_empty() || derivation_path == "m" {
 				// Use a default path for empty or "m" path
-				derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0/0").unwrap()
+				derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0'/0'").unwrap()
 			} else {
 				derive_key_from_seed((&mut seed).into(), derivation_path).unwrap()
 			};
@@ -296,13 +281,13 @@ mod hdwallet_tests {
 	fn test_tiny_hderive_api() {
 		// Test that nam-tiny-hderive works with our seed format
 		let seed: &[u8] = &[42; 64];
-		let path = "m/44'/60'/0'/0/0";
+		let path = "m/44'/60'/0'/0'/0'";
 		let ext = ExtendedPrivKey::derive(seed, path).unwrap();
-		assert_eq!(&ext.secret(), b"\x98\x84\xbf\x56\x24\xfa\xdd\x7f\xb2\x80\x4c\xfb\x0c\xb6\xf7\x1f\x28\x9e\x21\x1f\xcf\x0d\xe8\x36\xa3\x84\x17\x57\xda\xd9\x70\xd0");
+		assert_eq!(&ext.secret(), b"\xfc\x29\xd9\xfc\x63\x5b\x32\x72\x63\x1b\x43\x02\xf7\x9b\xe4\x07\xa7\xf6\x77\xef\x73\x4a\xf2\xc4\x52\x7c\x90\x88\x97\xcd\xaa\x86");
 
-		let base_ext = ExtendedPrivKey::derive(seed, "m/44'/60'/0'/0").unwrap();
-		let child_ext = base_ext.child(ChildNumber::from_str("0").unwrap()).unwrap();
-		assert_eq!(ext, child_ext);
+		let base_ext = ExtendedPrivKey::derive(seed, "m/44'/60'/0'/0'").unwrap();
+		let child_ext = base_ext.child(ChildNumber::from_str("0'").unwrap()).unwrap();
+		assert_eq!(ext.secret(), child_ext.secret());
 	}
 
 	#[test]
@@ -341,27 +326,6 @@ mod hdwallet_tests {
 			key1.secret.bytes, key2.secret.bytes,
 			"Master key derivation should be deterministic"
 		);
-	}
-
-	#[test]
-	fn test_entropy_from_seeds() {
-		let vectors = load_known_private_keys("./json/bip44_test_vectors.json").unwrap();
-
-		// For demonstration: print the parsed vectors
-		for vector in vectors {
-			println!("{vector:?}");
-			let seed = str_to_64_bytes(&vector.seed);
-			// Derive raw entropy like the old test did
-			let xpriv = ExtendedPrivKey::derive(&seed, vector.path.as_str())
-				.map_err(|_e| format!("Key derivation failed for path: {}", vector.path))
-				.unwrap();
-			let entropy = xpriv.secret();
-			assert_eq!(
-				entropy,
-				str_to_32_bytes(&vector.private_key),
-				"Expected private keys to match python's bip-utils"
-			);
-		}
 	}
 
 	#[test]
@@ -465,10 +429,12 @@ mod hdwallet_tests {
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
 		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
 
-		// Should fail with non-hardened early indices
 		let result = derive_key_from_seed((&mut seed).into(), "m/44/60/0");
 		assert!(result.is_err());
-		assert_eq!(result.err().unwrap(), HDLatticeError::HardenedPathsOnly());
+		assert_eq!(
+			result.err().unwrap(),
+			HDLatticeError::GenericError(crate::hderive::Error::NotHardened)
+		);
 	}
 
 	#[test]
@@ -518,5 +484,34 @@ mod hdwallet_tests {
 		// raw_seed was zeroized by the conversion
 
 		assert_eq!(seed_from_mnemonic.len(), 64);
+	}
+
+	// For reference and in case test vectors need to be regenerated
+	// ignored during normal test runs
+	#[test]
+	#[ignore]
+	fn regenerate_rust_vectors() {
+		use std::io::Write;
+		let vecs = generate_test_vectors(10);
+		let mut out = String::from("use crate::Keypair;\n#[cfg(test)]\nuse alloc::{vec, vec::Vec};\n\n#[cfg(test)]\npub fn get_test_vectors() -> Vec<(Keypair, &'static str, &'static str)> {\n\tvec![\n");
+		for (key, mnemonic, path) in vecs.iter() {
+			out.push_str("\t\t(\n\t\t\tKeypair::from_bytes(&vec![\n");
+			let bytes = key.to_bytes();
+			for chunk in bytes.chunks(14) {
+				out.push_str("\t\t\t\t");
+				out.push_str(
+					&chunk.iter().map(|b| format!("0x{b:02x}")).collect::<Vec<_>>().join(", "),
+				);
+				out.push_str(",\n");
+			}
+			out.push_str("\t\t\t])\n\t\t\t.expect(\"Should not fail\"),\n");
+			out.push_str(&format!("\t\t\t\"{mnemonic}\",\n"));
+			out.push_str(&format!("\t\t\t\"{path}\",\n"));
+			out.push_str("\t\t),\n");
+		}
+		out.push_str("\t]\n}\n");
+		let mut f = std::fs::File::create("./src/test_vectors.rs").unwrap();
+		f.write_all(out.as_bytes()).unwrap();
+		println!("Wrote updated Rust test vectors");
 	}
 }
