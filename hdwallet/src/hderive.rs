@@ -36,19 +36,12 @@ impl FromStr for ChildNumber {
 	type Err = Error;
 
 	fn from_str(child: &str) -> Result<ChildNumber, Error> {
-		let (child, mask) = if let Some(child) = child.strip_suffix('\'') {
-			(child, HARDENED_BIT)
-		} else {
-			(child, 0)
-		};
-
+		let child = child.strip_suffix('\'').ok_or(Error::NotHardened)?;
 		let index: u32 = child.parse().map_err(|_| Error::InvalidChildNumber)?;
-
-		if index & HARDENED_BIT == 0 {
-			Ok(ChildNumber(index | mask))
-		} else {
-			Err(Error::InvalidChildNumber)
+		if index & HARDENED_BIT != 0 {
+			return Err(Error::InvalidChildNumber);
 		}
+		Ok(ChildNumber(index | HARDENED_BIT))
 	}
 }
 
@@ -126,7 +119,7 @@ impl ExtendedPrivKey {
 		Path: IntoDerivationPath,
 	{
 		let mut hmac: Hmac<Sha512> =
-			Hmac::new_from_slice(b"Bitcoin seed").expect("seed is always correct; qed");
+			Hmac::new_from_slice(b"Dilithium seed").expect("seed is always correct; qed");
 		hmac.update(seed);
 
 		let result = hmac.finalize().into_bytes();
@@ -149,9 +142,6 @@ impl ExtendedPrivKey {
 	}
 
 	pub fn child(&self, child: ChildNumber) -> Result<ExtendedPrivKey, Error> {
-		if !child.is_hardened() {
-			return Err(Error::NotHardened);
-		}
 		let mut hmac: Hmac<Sha512> = Hmac::new_from_slice(self.chain_code.as_bytes())
 			.map_err(|_| Error::InvalidChildNumber)?;
 
@@ -186,7 +176,7 @@ mod tests {
 	fn bip39_to_address() {
 		let phrase = "panda eyebrow bullet gorilla call smoke muffin taste mesh discover soft ostrich alcohol speed nation flash devote level hobby quick inner drive ghost inside";
 
-		let expected_secret_key = b"\xaf\x03\x67\xec\x66\x0c\x9e\x24\x34\x60\xfe\x97\xb2\x3e\x11\x62\xaa\x56\xd4\xd0\x39\x20\xd1\xeb\xe5\x00\xff\x0b\x34\x83\x71\x74";
+		let expected_secret_key = b"\x2f\xbd\x41\x6a\x34\xc0\xac\x40\x98\xea\xad\xd0\x8c\x07\xc7\x09\xad\xf4\xd8\x7e\x7a\xa8\x12\x44\xa4\xbf\x2b\xf9\xfb\xfb\xbf\x76";
 
 		let mnemonic = Mnemonic::parse_in_normalized(Language::English, phrase).unwrap();
 		let seed = mnemonic.to_seed_normalized("");
@@ -198,8 +188,7 @@ mod tests {
 
 	#[test]
 	fn derive_path() {
-		let path: DerivationPath = "m/44'/60'/0'/0".parse().unwrap();
-
+		let path: DerivationPath = "m/44'/60'/0'".parse().unwrap();
 		assert_eq!(
 			path,
 			DerivationPath {
@@ -207,9 +196,15 @@ mod tests {
 					ChildNumber(44 | HARDENED_BIT),
 					ChildNumber(60 | HARDENED_BIT),
 					ChildNumber(HARDENED_BIT),
-					ChildNumber(0),
 				],
 			}
 		);
 	}
+
+	#[test]
+	fn non_hardened_path_rejected() {
+		assert_eq!("m/44'/60'/0".parse::<DerivationPath>().unwrap_err(), Error::NotHardened);
+		assert_eq!("0".parse::<ChildNumber>().unwrap_err(), Error::NotHardened);
+	}
+
 }

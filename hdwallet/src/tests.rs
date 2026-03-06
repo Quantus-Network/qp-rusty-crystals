@@ -291,7 +291,7 @@ mod hdwallet_tests {
 		let seed: &[u8] = &[42; 64];
 		let path = "m/44'/60'/0'/0'/0'";
 		let ext = ExtendedPrivKey::derive(seed, path).unwrap();
-		assert_eq!(&ext.secret(), b"\x33\xee\xff\xe6\x3e\x4e\xc8\x6a\x93\xb9\x26\xc2\xfc\x8a\xf4\x44\x36\x8e\x3d\xad\xe0\x9d\x22\x8e\x70\xbe\x6a\xf4\xcf\x4f\xa2\x06");
+		assert_eq!(&ext.secret(), b"\xfc\x29\xd9\xfc\x63\x5b\x32\x72\x63\x1b\x43\x02\xf7\x9b\xe4\x07\xa7\xf6\x77\xef\x73\x4a\xf2\xc4\x52\x7c\x90\x88\x97\xcd\xaa\x86");
 
 		let base_ext = ExtendedPrivKey::derive(seed, "m/44'/60'/0'/0'").unwrap();
 		let child_ext = base_ext.child(ChildNumber::from_str("0'").unwrap()).unwrap();
@@ -437,10 +437,12 @@ mod hdwallet_tests {
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
 		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
 
-		// Should fail with non-hardened early indices
 		let result = derive_key_from_seed((&mut seed).into(), "m/44/60/0");
 		assert!(result.is_err());
-		assert_eq!(result.err().unwrap(), HDLatticeError::HardenedPathsOnly());
+		assert_eq!(
+			result.err().unwrap(),
+			HDLatticeError::GenericError(crate::hderive::Error::NotHardened)
+		);
 	}
 
 	#[test]
@@ -491,4 +493,32 @@ mod hdwallet_tests {
 
 		assert_eq!(seed_from_mnemonic.len(), 64);
 	}
+
+	// For reference and in case test vectors need to be regenerated
+	// ignored during normal test runs
+	#[test]
+	#[ignore]
+	fn regenerate_rust_vectors() {
+		use std::io::Write;
+		let vecs = generate_test_vectors(10);
+		let mut out = String::from("use crate::Keypair;\n#[cfg(test)]\nuse alloc::{vec, vec::Vec};\n\n#[cfg(test)]\npub fn get_test_vectors() -> Vec<(Keypair, &'static str, &'static str)> {\n\tvec![\n");
+		for (key, mnemonic, path) in vecs.iter() {
+			out.push_str("\t\t(\n\t\t\tKeypair::from_bytes(&vec![\n");
+			let bytes = key.to_bytes();
+			for chunk in bytes.chunks(14) {
+				out.push_str("\t\t\t\t");
+				out.push_str(&chunk.iter().map(|b| format!("0x{b:02x}")).collect::<Vec<_>>().join(", "));
+				out.push_str(",\n");
+			}
+			out.push_str("\t\t\t])\n\t\t\t.expect(\"Should not fail\"),\n");
+			out.push_str(&format!("\t\t\t\"{mnemonic}\",\n"));
+			out.push_str(&format!("\t\t\t\"{path}\",\n"));
+			out.push_str("\t\t),\n");
+		}
+		out.push_str("\t]\n}\n");
+		let mut f = std::fs::File::create("./src/test_vectors.rs").unwrap();
+		f.write_all(out.as_bytes()).unwrap();
+		println!("Wrote updated Rust test vectors");
+	}
+
 }

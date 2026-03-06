@@ -35,8 +35,6 @@ pub enum HDLatticeError {
 	Bip39Error(String),
 	#[error("Key derivation failed: {0}")]
 	KeyDerivationFailed(String),
-	#[error("Non-hardened keys not supported because lattice")]
-	HardenedPathsOnly(),
 	#[error("Bad entropy bit count: {0}")]
 	BadEntropyBitCount(usize),
 	#[error("Mnemonic derivation failed: {0}")]
@@ -169,15 +167,9 @@ pub fn generate_wormhole_from_seed(
 	Ok(wormhole_pair)
 }
 
-/// Validate a BIP44 derivation path — enforces hardened derivation for all indices.
+/// Validate a derivation path — parsing itself enforces hardened-only.
 fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
-	let p = crate::hderive::DerivationPath::from_str(path).map_err(HDLatticeError::GenericError)?;
-
-	for element in p.iter() {
-		if !element.is_hardened() {
-			return Err(HDLatticeError::HardenedPathsOnly());
-		}
-	}
+	crate::hderive::DerivationPath::from_str(path).map_err(HDLatticeError::GenericError)?;
 	Ok(())
 }
 
