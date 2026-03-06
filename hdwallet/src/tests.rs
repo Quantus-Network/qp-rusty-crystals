@@ -1,12 +1,3 @@
-use alloc::string::String;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct TestVector {
-	pub(crate) seed: String,
-	pub(crate) path: String,
-	pub(crate) private_key: String,
-}
 
 #[cfg(test)]
 mod hdwallet_tests {
@@ -15,7 +6,7 @@ mod hdwallet_tests {
 		hderive::{ChildNumber, DerivationPath, ExtendedPrivKey},
 		mnemonic_to_seed,
 		test_vectors::{
-			get_test_vectors, load_known_private_keys, str_to_32_bytes, str_to_64_bytes,
+			get_test_vectors,
 		},
 		HDLatticeError,
 	};
