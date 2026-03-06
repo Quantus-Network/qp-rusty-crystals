@@ -122,36 +122,10 @@ impl IntoDerivationPath for &str {
 		self.parse()
 	}
 }
-
-#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
-pub struct Protected([u8; 32]);
-
-impl<Data: AsRef<[u8]>> From<Data> for Protected {
-	fn from(data: Data) -> Protected {
-		let mut buf = [0u8; 32];
-		buf.copy_from_slice(data.as_ref());
-		Protected(buf)
-	}
-}
-
-impl Deref for Protected {
-	type Target = [u8];
-
-	fn deref(&self) -> &[u8] {
-		&self.0
-	}
-}
-
-impl fmt::Debug for Protected {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "Protected")
-	}
-}
-
 #[derive(Clone)]
 pub struct ExtendedPrivKey {
 	secret_key: SensitiveBytes32,
-	chain_code: Protected,
+	chain_code: SensitiveBytes32,
 }
 
 impl ExtendedPrivKey {
@@ -169,7 +143,7 @@ impl ExtendedPrivKey {
 
 		let mut sk = ExtendedPrivKey {
 			secret_key: SensitiveBytes32::from(&mut secret_key.try_into().unwrap()),
-			chain_code: Protected::from(chain_code),
+			chain_code: SensitiveBytes32::from(&mut chain_code.try_into().unwrap()),
 		};
 
 		for child in path.into()?.as_ref() {
@@ -185,7 +159,7 @@ impl ExtendedPrivKey {
 
 	pub fn child(&self, child: ChildNumber) -> Result<ExtendedPrivKey, Error> {
 		let mut hmac: Hmac<Sha512> =
-			Hmac::new_from_slice(&self.chain_code).map_err(|_| Error::InvalidChildNumber)?;
+			Hmac::new_from_slice(self.chain_code.as_bytes()).map_err(|_| Error::InvalidChildNumber)?;
 
 		hmac.update(&[0]);
 		hmac.update(&self.secret());
@@ -193,12 +167,11 @@ impl ExtendedPrivKey {
 		hmac.update(&child.to_bytes());
 
 		let result = hmac.finalize().into_bytes();
-		let (sk_slice, chain_code) = result.split_at(32);
-		let mut sk_buf: [u8; 32] = sk_slice.try_into().unwrap();
+		let (secret_key, chain_code) = result.split_at(32);
 
 		Ok(ExtendedPrivKey {
-			secret_key: SensitiveBytes32::from(&mut sk_buf),
-			chain_code: Protected::from(chain_code),
+			secret_key: SensitiveBytes32::from(&mut secret_key.try_into().unwrap()),
+			chain_code: SensitiveBytes32::from(&mut chain_code.try_into().unwrap()),
 		})
 	}
 }
@@ -213,11 +186,9 @@ impl FromStr for ExtendedPrivKey {
 			return Err(Error::InvalidExtendedPrivKey);
 		}
 
-		let mut sk_buf = [0u8; 32];
-		sk_buf.copy_from_slice(&data[46..78]);
 		Ok(ExtendedPrivKey {
-			chain_code: Protected::from(&data[13..45]),
-			secret_key: SensitiveBytes32::from(&mut sk_buf),
+			chain_code: SensitiveBytes32::from(&mut data[13..45].try_into().unwrap()),
+			secret_key: SensitiveBytes32::from(&mut data[46..78].try_into().unwrap()),
 		})
 	}
 }

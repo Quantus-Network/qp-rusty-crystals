@@ -301,7 +301,7 @@ mod hdwallet_tests {
 	fn test_tiny_hderive_api() {
 		// Test that nam-tiny-hderive works with our seed format
 		let seed: &[u8] = &[42; 64];
-		let path = "m/44'/60'/0'/0/0";
+		let path = "m/44'/60'/0'/0'/0'";
 		let ext = ExtendedPrivKey::derive(seed, path).unwrap();
 		assert_eq!(&ext.secret(), b"\xe4\x24\x92\x71\xc9\x98\xaa\xc0\xd8\x87\x00\xe2\x77\x7a\xa5\x5a\x24\xee\x67\x17\xba\x73\xef\x67\xf8\xdb\x2f\xef\xcb\xf4\x4d\x45");
 
