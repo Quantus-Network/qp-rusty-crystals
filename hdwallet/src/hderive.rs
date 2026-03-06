@@ -19,9 +19,6 @@ const HARDENED_BIT: u32 = 1 << 31;
 pub struct ChildNumber(u32);
 
 impl ChildNumber {
-	pub fn is_hardened(&self) -> bool {
-		self.0 & HARDENED_BIT == HARDENED_BIT
-	}
 
 	pub fn to_bytes(&self) -> [u8; 4] {
 		self.0.to_be_bytes()
