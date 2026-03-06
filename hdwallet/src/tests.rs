@@ -66,7 +66,6 @@ mod hdwallet_tests {
 		// Different passphrase should produce different seed
 		assert_ne!(seed1, seed3, "password should affect seed");
 
-		// Derive master keys (path "m/44'/0'/0'/0/0")
 		let master_key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0'/0'").unwrap();
 		let master_key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
 		let master_key3 = derive_key_from_seed((&mut seed3).into(), "m/44'/0'/0'/0'/0'").unwrap();
