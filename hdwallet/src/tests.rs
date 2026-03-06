@@ -1,13 +1,10 @@
-
 #[cfg(test)]
 mod hdwallet_tests {
 	use crate::{
 		derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed,
 		hderive::{ChildNumber, DerivationPath, ExtendedPrivKey},
 		mnemonic_to_seed,
-		test_vectors::{
-			get_test_vectors,
-		},
+		test_vectors::get_test_vectors,
 		HDLatticeError,
 	};
 	use alloc::{
