@@ -9,8 +9,7 @@ use crate::SensitiveBytes32;
 pub enum Error {
 	InvalidChildNumber,
 	InvalidDerivationPath,
-	InvalidExtendedPrivKey,
-	ZeroChildKey,
+	NotHardened,
 }
 
 const HARDENED_BIT: u32 = 1 << 31;
@@ -24,20 +23,12 @@ impl ChildNumber {
 		self.0 & HARDENED_BIT == HARDENED_BIT
 	}
 
-	// pub fn is_normal(&self) -> bool {
-	// 	self.0 & HARDENED_BIT == 0
-	// }
-
 	pub fn to_bytes(&self) -> [u8; 4] {
 		self.0.to_be_bytes()
 	}
 
 	pub fn hardened_from_u32(index: u32) -> Self {
 		ChildNumber(index | HARDENED_BIT)
-	}
-
-	pub fn non_hardened_from_u32(index: u32) -> Self {
-		ChildNumber(index)
 	}
 }
 
@@ -123,6 +114,7 @@ impl IntoDerivationPath for &str {
 }
 #[derive(Clone)]
 pub struct ExtendedPrivKey {
+	// Debug intentionally omitted to avoid leaking key material
 	secret_key: SensitiveBytes32,
 	chain_code: SensitiveBytes32,
 }
@@ -157,6 +149,9 @@ impl ExtendedPrivKey {
 	}
 
 	pub fn child(&self, child: ChildNumber) -> Result<ExtendedPrivKey, Error> {
+		if !child.is_hardened() {
+			return Err(Error::NotHardened);
+		}
 		let mut hmac: Hmac<Sha512> = Hmac::new_from_slice(self.chain_code.as_bytes())
 			.map_err(|_| Error::InvalidChildNumber)?;
 
@@ -175,20 +170,9 @@ impl ExtendedPrivKey {
 	}
 }
 
-impl FromStr for ExtendedPrivKey {
-	type Err = Error;
-
-	fn from_str(xprv: &str) -> Result<ExtendedPrivKey, Error> {
-		let data = bs58::decode(xprv).into_vec().map_err(|_| Error::InvalidExtendedPrivKey)?;
-
-		if data.len() != 82 {
-			return Err(Error::InvalidExtendedPrivKey);
-		}
-
-		Ok(ExtendedPrivKey {
-			chain_code: SensitiveBytes32::from(&mut data[13..45].try_into().unwrap()),
-			secret_key: SensitiveBytes32::from(&mut data[46..78].try_into().unwrap()),
-		})
+impl core::fmt::Debug for ExtendedPrivKey {
+	fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+		f.debug_struct("ExtendedPrivKey").finish_non_exhaustive()
 	}
 }
 

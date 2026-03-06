@@ -169,10 +169,7 @@ pub fn generate_wormhole_from_seed(
 	Ok(wormhole_pair)
 }
 
-/// Validate a BIP44 derivation path
-///
-/// Enforces hardened derivation for all indices
-/// to be non-hardened.
+/// Validate a BIP44 derivation path — enforces hardened derivation for all indices.
 fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 	let p = crate::hderive::DerivationPath::from_str(path).map_err(HDLatticeError::GenericError)?;
 
