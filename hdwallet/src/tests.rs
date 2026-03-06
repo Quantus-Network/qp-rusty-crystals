@@ -303,10 +303,10 @@ mod hdwallet_tests {
 		let seed: &[u8] = &[42; 64];
 		let path = "m/44'/60'/0'/0'/0'";
 		let ext = ExtendedPrivKey::derive(seed, path).unwrap();
-		assert_eq!(&ext.secret(), b"\xe4\x24\x92\x71\xc9\x98\xaa\xc0\xd8\x87\x00\xe2\x77\x7a\xa5\x5a\x24\xee\x67\x17\xba\x73\xef\x67\xf8\xdb\x2f\xef\xcb\xf4\x4d\x45");
+		assert_eq!(&ext.secret(), b"\x33\xee\xff\xe6\x3e\x4e\xc8\x6a\x93\xb9\x26\xc2\xfc\x8a\xf4\x44\x36\x8e\x3d\xad\xe0\x9d\x22\x8e\x70\xbe\x6a\xf4\xcf\x4f\xa2\x06");
 
-		let base_ext = ExtendedPrivKey::derive(seed, "m/44'/60'/0'/0").unwrap();
-		let child_ext = base_ext.child(ChildNumber::from_str("0").unwrap()).unwrap();
+		let base_ext = ExtendedPrivKey::derive(seed, "m/44'/60'/0'/0'").unwrap();
+		let child_ext = base_ext.child(ChildNumber::from_str("0'").unwrap()).unwrap();
 		assert_eq!(ext.secret(), child_ext.secret());
 	}
 
