@@ -150,7 +150,10 @@ mod hdwallet_tests {
 			let mut seed = mnemonic_to_seed(mnemonic_str.to_string(), None).unwrap();
 			if !derivation_path.is_empty() && derivation_path != "m" {
 				let dp: DerivationPath = derivation_path.parse().unwrap();
-				assert!(dp.iter().all(|c| c.is_hardened()), "Path must be fully hardened: {derivation_path}");
+				assert!(
+					dp.iter().all(|c| c.is_hardened()),
+					"Path must be fully hardened: {derivation_path}"
+				);
 			}
 			let generated_keys = if derivation_path.is_empty() || derivation_path == "m" {
 				// Use a default path for empty or "m" path

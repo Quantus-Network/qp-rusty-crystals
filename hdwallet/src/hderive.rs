@@ -196,7 +196,10 @@ impl ExtendedPrivKey {
 		let (sk_slice, chain_code) = result.split_at(32);
 		let mut sk_buf: [u8; 32] = sk_slice.try_into().unwrap();
 
-		Ok(ExtendedPrivKey { secret_key: SensitiveBytes32::from(&mut sk_buf), chain_code: Protected::from(chain_code) })
+		Ok(ExtendedPrivKey {
+			secret_key: SensitiveBytes32::from(&mut sk_buf),
+			chain_code: Protected::from(chain_code),
+		})
 	}
 }
 
