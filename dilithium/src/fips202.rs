@@ -489,3 +489,113 @@ pub fn shake256_stream_init(state: &mut KeccakState, seed: &[u8], nonce: u16) {
 	shake256_absorb(state, &t, 2);
 	shake256_finalize(state);
 }
+
+#[cfg(test)]
+mod tests {
+	use alloc::vec::Vec;
+	use super::*;
+
+	fn decode_hex(s: &str) -> Vec<u8> {
+		assert_eq!(s.len() % 2, 0, "hex length must be even");
+
+		(0..s.len())
+			.step_by(2)
+			.map(|i| {
+				u8::from_str_radix(&s[i..i + 2], 16)
+					.expect("invalid hex encoding")
+			})
+			.collect()
+	}
+
+	struct KeccakTest<const OUTPUT_LENGTH: usize> {
+		input: Vec<u8>,
+		output: [u8; OUTPUT_LENGTH],
+	}
+
+	struct TestSuite<const OUTPUT_LENGTH: usize> {
+		tests: Vec<KeccakTest<OUTPUT_LENGTH>>
+	}
+
+	impl<const OUTPUT_LENGTH: usize> TestSuite<OUTPUT_LENGTH> {
+		fn from_file(content: &str) -> Self {
+			let mut current_msg = None;
+
+			let mut vectors = Vec::new();
+
+			for line in content.lines() {
+				let line = line.trim();
+
+				if line.is_empty() || line.starts_with('#') {
+					continue;
+				}
+
+				if line.starts_with('[') {
+					continue;
+				}
+
+				if line.starts_with("Len =") {
+					continue;
+				}
+
+				if line.starts_with("Msg =") {
+					let hex = line.split('=').nth(1).unwrap().trim();
+					current_msg = Some(decode_hex(hex));
+					continue;
+				}
+
+				if line.starts_with("Output =") {
+					let hex = line.split('=').nth(1).unwrap().trim();
+					let expected = decode_hex(hex);
+					assert_eq!(expected.len(), OUTPUT_LENGTH);
+
+					let mut output = [0; OUTPUT_LENGTH];
+					for i in 0..OUTPUT_LENGTH {
+						output[i] = expected[i];
+					}
+
+					let vec = KeccakTest{
+						input: current_msg.take().expect("the message is missing"),
+						output,
+					};
+
+					vectors.push(vec);
+					continue;
+				}
+			}
+
+			Self { tests: vectors }
+		}
+	}
+
+	#[test]
+	fn nist_test_shake256_short_messages() {
+		const OUTPUT_LENGTH: usize = 32;
+		let content = include_str!("../../test_vectors/SHAKE256ShortMsg.rsp");
+		let test_suite: TestSuite<OUTPUT_LENGTH> = TestSuite::from_file(content);
+		for test in test_suite.tests {
+			let mut output = [0; OUTPUT_LENGTH];
+
+			let mut state = KeccakState::default();
+			shake256_absorb(&mut state, &test.input, test.input.len());
+			shake256_finalize(&mut state);
+			shake256_squeeze(&mut output, OUTPUT_LENGTH, &mut state);
+			assert_eq!(output, test.output, "Input failed with {:?}", test.input);
+		}
+	}
+
+	#[test]
+	fn nist_test_shake256_long_messages() {
+		const OUTPUT_LENGTH: usize = 32;
+		let content = include_str!("../../test_vectors/SHAKE256LongMsg.rsp");
+		let test_suite: TestSuite<OUTPUT_LENGTH> = TestSuite::from_file(content);
+		for test in test_suite.tests {
+			let mut output = [0; OUTPUT_LENGTH];
+
+			let mut state = KeccakState::default();
+			shake256_absorb(&mut state, &test.input, test.input.len());
+			shake256_finalize(&mut state);
+			shake256_squeeze(&mut output, OUTPUT_LENGTH, &mut state);
+			assert_eq!(output, test.output);
+		}
+	}
+}
