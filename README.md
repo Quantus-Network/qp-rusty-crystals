@@ -12,7 +12,7 @@ This implementation provides enterprise-grade memory security through `Sensitive
 - **Automatic memory zeroization** - Both source arrays and wrapper contents are automatically cleared when dropped
 - **Explicit sensitive data handling** - API requires `(&mut entropy).into()` syntax, making sensitive operations obvious
 - **Move-only semantics** - Functions take `SensitiveBytes32`/`SensitiveBytes64` directly, preventing silent reference copying
-
+dddd
 ```rust
 // Secure by design - entropy is zeroized after conversion
 let mut entropy = [0u8; 32];
