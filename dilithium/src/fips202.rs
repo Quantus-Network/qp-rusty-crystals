@@ -492,18 +492,15 @@ pub fn shake256_stream_init(state: &mut KeccakState, seed: &[u8], nonce: u16) {
 
 #[cfg(test)]
 mod tests {
-	use alloc::vec::Vec;
 	use super::*;
+	use alloc::vec::Vec;
 
 	fn decode_hex(s: &str) -> Vec<u8> {
 		assert_eq!(s.len() % 2, 0, "hex length must be even");
 
 		(0..s.len())
 			.step_by(2)
-			.map(|i| {
-				u8::from_str_radix(&s[i..i + 2], 16)
-					.expect("invalid hex encoding")
-			})
+			.map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("invalid hex encoding"))
 			.collect()
 	}
 
@@ -513,7 +510,7 @@ mod tests {
 	}
 
 	struct TestSuite<const OUTPUT_LENGTH: usize> {
-		tests: Vec<KeccakTest<OUTPUT_LENGTH>>
+		tests: Vec<KeccakTest<OUTPUT_LENGTH>>,
 	}
 
 	impl<const OUTPUT_LENGTH: usize> TestSuite<OUTPUT_LENGTH> {
@@ -553,7 +550,7 @@ mod tests {
 						output[i] = expected[i];
 					}
 
-					let vec = KeccakTest{
+					let vec = KeccakTest {
 						input: current_msg.take().expect("the message is missing"),
 						output,
 					};
