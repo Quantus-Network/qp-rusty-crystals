@@ -28,7 +28,7 @@
 
 use qp_poseidon_core::{
 	double_hash_variable_length, hash_variable_length, hash_variable_length_bytes,
-	serialization::{injective_string_to_felts, safe_digest_bytes_to_felts},
+	serialization::{injective_string_to_felts, unsafe_digest_bytes_to_felts},
 };
 extern crate alloc;
 use alloc::vec::Vec;
@@ -97,8 +97,7 @@ impl WormholePair {
 		let mut secret_bytes = secret.into_bytes();
 		let mut preimage_felts = Vec::new();
 		let salt_felt = injective_string_to_felts(ADDRESS_SALT);
-		// Use safe encoding (4 bytes/felt) for collision resistance and indistinguishability
-		let mut secret_felt = safe_digest_bytes_to_felts(&secret_bytes);
+		let mut secret_felt = unsafe_digest_bytes_to_felts(&secret_bytes);
 		preimage_felts.extend_from_slice(&salt_felt);
 		preimage_felts.extend_from_slice(&secret_felt);
 		let inner_hash = hash_variable_length(preimage_felts.clone());
@@ -125,7 +124,7 @@ impl WormholePair {
 mod tests {
 	use super::*;
 	use hex_literal::hex;
-	use qp_poseidon_core::serialization::safe_digest_bytes_to_felts;
+	use qp_poseidon_core::serialization::{injective_bytes_to_felts, unsafe_digest_bytes_to_felts};
 
 	#[test]
 	fn test_generate_pair_from_secret() {
@@ -182,7 +181,7 @@ mod tests {
 	fn test_address_derivation_properties() {
 		// Arrange
 		let secret = hex!("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
-		let secret_felts = safe_digest_bytes_to_felts(&secret);
+		let secret_felts = unsafe_digest_bytes_to_felts(&secret);
 
 		// Act - Generate the pair
 		let mut secret_copy = secret;
@@ -260,7 +259,7 @@ mod tests {
 		// Arrange
 		let secret = [7u8; 32];
 
-		let secret_felts = safe_digest_bytes_to_felts(&secret);
+		let secret_felts = unsafe_digest_bytes_to_felts(&secret);
 
 		// Generate a pair normally (with salt)
 		let mut secret_copy = secret;
@@ -268,8 +267,7 @@ mod tests {
 
 		// Simulate address generation without salt or with different salt
 		let different_salt = b"diffrent";
-		let different_salt_felts =
-			injective_string_to_felts(core::str::from_utf8(different_salt).unwrap());
+		let different_salt_felts = injective_bytes_to_felts(different_salt);
 
 		let mut combined_felts =
 			Vec::with_capacity(different_salt_felts.len() + secret_felts.len());
