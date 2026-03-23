@@ -18,6 +18,3 @@ serde = { version = "=1.0.228", default-features = false, features = ["alloc", "
 serde_json = { version = "=1.0.149", default-features = false, features = ["alloc"] }
 thiserror = { version = "=2.0.18", default-features = false }
 zeroize = { version = "=1.8.2", default-features = false, features = ["derive"] }
-
-[patch.crates-io]
-qp-poseidon-core = { git = "https://github.com/Quantus-Network/qp-poseidon.git", tag = "v1.2.0" }
