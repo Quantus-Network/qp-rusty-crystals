@@ -767,8 +767,7 @@ dependencies = [
 [[package]]
 name = "qp-poseidon-core"
 version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab0fc06dee65a2bb9782517bf58162f97e41b25f971f692de42eee750622018e"
+source = "git+https://github.com/Quantus-Network/qp-poseidon.git?branch=illuzen%2Finjective-to-felts#2d1c5431d7797deb482841e5fce295fa0849103d"
 dependencies = [
  "p3-field",
  "p3-goldilocks",
