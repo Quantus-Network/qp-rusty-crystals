@@ -24,7 +24,7 @@ mod tests;
 pub mod hderive;
 pub mod wormhole;
 
-pub use wormhole::{WormholeError, WormholePair};
+pub use wormhole::WormholePair;
 
 // Import and re-export SensitiveBytes types from dilithium
 pub use qp_rusty_crystals_dilithium::{SensitiveBytes32, SensitiveBytes64};
@@ -160,7 +160,7 @@ pub fn generate_wormhole_from_seed(
 	let derived_entropy = SensitiveBytes32::from(&mut secret);
 
 	// Generate wormhole pair
-	let wormhole_pair = WormholePair::generate_pair_from_secret(derived_entropy);
+	let wormhole_pair = WormholePair::generate_new(derived_entropy);
 
 	// seed and derived_entropy are automatically zeroized when they drop
 

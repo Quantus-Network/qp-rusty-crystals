@@ -27,8 +27,8 @@
 //! Poseidon hashing, which is particularly well-suited for zero-knowledge proof systems.
 
 use qp_poseidon_core::{
-	double_hash_variable_length, hash_variable_length, hash_variable_length_bytes,
-	serialization::{injective_string_to_felts, unsafe_digest_bytes_to_felts},
+	hash_bytes, hash_to_bytes, hash_twice,
+	serialization::{bytes_to_digest, string_to_felts},
 };
 extern crate alloc;
 use alloc::vec::Vec;
@@ -37,13 +37,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Salt used when deriving wormhole addresses.
 pub const ADDRESS_SALT: &str = "wormhole";
-
-/// Error types returned from wormhole identity operations.
-#[derive(Debug, Eq, PartialEq)]
-pub enum WormholeError {
-	/// Returned when the input random source fails or is malformed.
-	InvalidSecretFormat,
-}
 
 /// A struct representing a wormhole identity pair: address + secret.
 #[derive(Clone, Eq, PartialEq, ZeroizeOnDrop)]
@@ -58,17 +51,12 @@ pub struct WormholePair {
 
 impl WormholePair {
 	/// Generates a new `WormholePair` from user-supplied entropy.
-	///
-	/// # Errors
-	/// Returns `WormholeError::InvalidSecretFormat` if entropy collection fails.
-	pub fn generate_new(seed: SensitiveBytes32) -> Result<WormholePair, WormholeError> {
-		let mut hashed_seed = hash_variable_length_bytes(seed.as_bytes());
+	pub fn generate_new(seed: SensitiveBytes32) -> WormholePair {
+		let mut hashed_seed = hash_bytes(seed.as_bytes());
 		let secret = SensitiveBytes32::new(&mut hashed_seed);
-		let result = Self::generate_pair_from_secret(secret);
 
 		// seed and secret are automatically zeroized when it drops
-
-		Ok(result)
+		WormholePair::generate_pair_from_secret(secret)
 	}
 
 	/// Verifies whether the given raw secret generates the specified wormhole address.
@@ -93,15 +81,16 @@ impl WormholePair {
 	/// # Security Note
 	/// This function takes ownership of the secret for security (move semantics).
 	/// The secret parameter is zeroized before returning.
-	pub fn generate_pair_from_secret(secret: SensitiveBytes32) -> WormholePair {
+	fn generate_pair_from_secret(secret: SensitiveBytes32) -> WormholePair {
 		let mut secret_bytes = secret.into_bytes();
 		let mut preimage_felts = Vec::new();
-		let salt_felt = injective_string_to_felts(ADDRESS_SALT);
-		let mut secret_felt = unsafe_digest_bytes_to_felts(&secret_bytes);
+		let salt_felt = string_to_felts(ADDRESS_SALT);
+		// Use bytes_to_digest for safe 4-bytes/felt encoding (8 felts total)
+		let mut secret_felt = bytes_to_digest(&secret_bytes);
 		preimage_felts.extend_from_slice(&salt_felt);
 		preimage_felts.extend_from_slice(&secret_felt);
-		let inner_hash = hash_variable_length(preimage_felts.clone());
-		let second_hash = double_hash_variable_length(preimage_felts.clone());
+		let inner_hash = hash_to_bytes(&preimage_felts);
+		let second_hash = hash_twice(&preimage_felts);
 
 		// Create result with copy of secret before zeroizing
 		let result =
@@ -124,7 +113,7 @@ impl WormholePair {
 mod tests {
 	use super::*;
 	use hex_literal::hex;
-	use qp_poseidon_core::serialization::{injective_bytes_to_felts, unsafe_digest_bytes_to_felts};
+	use qp_poseidon_core::serialization::{bytes_to_digest, bytes_to_felts};
 
 	#[test]
 	fn test_generate_pair_from_secret() {
@@ -181,7 +170,7 @@ mod tests {
 	fn test_address_derivation_properties() {
 		// Arrange
 		let secret = hex!("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
-		let secret_felts = unsafe_digest_bytes_to_felts(&secret);
+		let secret_felts = bytes_to_digest(&secret);
 
 		// Act - Generate the pair
 		let mut secret_copy = secret;
@@ -203,16 +192,16 @@ mod tests {
 
 		// 4. Verify that the process uses the salt
 		// (Create a direct hash without salt and ensure it's different)
-		let double_hash = double_hash_variable_length(secret_felts.to_vec());
+		let double_hash = hash_twice(&secret_felts);
 		assert_ne!(pair.address, double_hash);
 
 		// 5. Verify that each stage of the hash process changes the result
 		// (Create a hash with salt but without the second hashing step)
-		let address_salt_felts = injective_string_to_felts(ADDRESS_SALT);
+		let address_salt_felts = string_to_felts(ADDRESS_SALT);
 		let mut combined_felts = Vec::with_capacity(address_salt_felts.len() + secret_felts.len());
 		combined_felts.extend_from_slice(address_salt_felts.as_ref());
 		combined_felts.extend_from_slice(&secret_felts);
-		let first_hash = hash_variable_length(combined_felts.to_vec());
+		let first_hash = hash_to_bytes(&combined_felts);
 		assert_ne!(pair.address, first_hash);
 	}
 
@@ -234,11 +223,7 @@ mod tests {
 	fn test_generate_new_produces_valid_pair() {
 		let mut seed = [55u8; 32];
 		// Act
-		let result = WormholePair::generate_new((&mut seed).into());
-
-		// Assert
-		assert!(result.is_ok());
-		let pair = result.unwrap();
+		let pair = WormholePair::generate_new((&mut seed).into());
 
 		// The secret should not be all zeros
 		assert_ne!(pair.secret, [0u8; 32]);
@@ -259,7 +244,7 @@ mod tests {
 		// Arrange
 		let secret = [7u8; 32];
 
-		let secret_felts = unsafe_digest_bytes_to_felts(&secret);
+		let secret_felts = bytes_to_digest(&secret);
 
 		// Generate a pair normally (with salt)
 		let mut secret_copy = secret;
@@ -267,14 +252,14 @@ mod tests {
 
 		// Simulate address generation without salt or with different salt
 		let different_salt = b"diffrent";
-		let different_salt_felts = injective_bytes_to_felts(different_salt);
+		let different_salt_felts = bytes_to_felts(different_salt);
 
 		let mut combined_felts =
 			Vec::with_capacity(different_salt_felts.len() + secret_felts.len());
 		combined_felts.extend_from_slice(&different_salt_felts);
 		combined_felts.extend_from_slice(&secret_felts);
 
-		let address_with_different_salt = double_hash_variable_length(combined_felts);
+		let address_with_different_salt = hash_twice(&combined_felts);
 
 		// Assert
 		assert_ne!(pair_with_salt.address, address_with_different_salt);
