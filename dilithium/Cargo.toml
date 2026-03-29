@@ -16,10 +16,6 @@ keywords = [
 ]
 categories = ["cryptography"]
 
-[[example]]
-name = "stack_usage_demo"
-path = "examples/stack_usage_demo.rs"
-
 [dependencies]
 zeroize = { workspace = true }
 
@@ -35,5 +31,10 @@ harness = false
 [[example]]
 name = "ct_bench"
 
+[[example]]
+name = "memory_measure"
+path = "examples/memory_measure.rs"
+
 [features]
 default = []
+embedded = []
