@@ -110,6 +110,15 @@ pub enum SignProtocolError {
 	InvalidMessage(String),
 	/// Missing required data.
 	MissingData(String),
+	/// Dropped below threshold after removing unresponsive parties (HQ7).
+	BelowThreshold {
+		/// Number of remaining responsive parties.
+		remaining: usize,
+		/// Required threshold.
+		threshold: usize,
+	},
+	/// Party not found when trying to drop.
+	PartyNotFound(u32),
 }
 
 impl std::fmt::Display for SignProtocolError {
@@ -121,6 +130,12 @@ impl std::fmt::Display for SignProtocolError {
 			SignProtocolError::ProtocolFailed(s) => write!(f, "Protocol failed: {}", s),
 			SignProtocolError::InvalidMessage(s) => write!(f, "Invalid message: {}", s),
 			SignProtocolError::MissingData(s) => write!(f, "Missing data: {}", s),
+			SignProtocolError::BelowThreshold { remaining, threshold } => write!(
+				f,
+				"Dropped below threshold: {} parties remaining, {} required",
+				remaining, threshold
+			),
+			SignProtocolError::PartyNotFound(id) => write!(f, "Party not found: {}", id),
 		}
 	}
 }
@@ -334,6 +349,9 @@ pub struct DilithiumSignProtocol {
 	retry_count: u32,
 	/// Signature received from leader (for followers).
 	received_signature: Option<Signature>,
+
+	/// Parties that have been dropped due to unresponsiveness (HQ7).
+	dropped_parties: std::collections::HashSet<ParticipantId>,
 }
 
 impl DilithiumSignProtocol {
@@ -399,6 +417,7 @@ impl DilithiumSignProtocol {
 			message_buffer: SignMessageBuffer::new(),
 			retry_count: 0,
 			received_signature: None,
+			dropped_parties: std::collections::HashSet::new(),
 		}
 	}
 
@@ -450,6 +469,140 @@ impl DilithiumSignProtocol {
 	/// Check if we have enough Round 3 broadcasts to proceed.
 	fn have_enough_r3(&self) -> bool {
 		self.r3_broadcasts.len() >= self.threshold()
+	}
+
+	// ========================================================================
+	// HQ7: Party management for timeout handling
+	// ========================================================================
+
+	/// Get the number of currently active (non-dropped) parties.
+	pub fn active_party_count(&self) -> usize {
+		self.participants
+			.iter()
+			.filter(|&id| !self.dropped_parties.contains(&id))
+			.count()
+	}
+
+	/// Get the list of dropped parties.
+	pub fn dropped_parties(&self) -> Vec<ParticipantId> {
+		self.dropped_parties.iter().copied().collect()
+	}
+
+	/// Get the list of parties we are currently waiting for (HQ7).
+	///
+	/// Returns the party IDs that have not yet sent their message for the
+	/// current round (excluding dropped parties). Applications can use this
+	/// to implement timeout logic:
+	///
+	/// ```ignore
+	/// // Application timeout logic
+	/// if elapsed > timeout {
+	///     for party in protocol.waiting_for() {
+	///         protocol.drop_party(party)?;
+	///     }
+	/// }
+	/// ```
+	pub fn waiting_for(&self) -> Vec<ParticipantId> {
+		let all_others: Vec<ParticipantId> = self
+			.participants
+			.iter()
+			.filter(|&id| id != self.my_participant_id && !self.dropped_parties.contains(&id))
+			.collect();
+
+		match &self.state {
+			SignProtocolState::Round1Waiting => all_others
+				.into_iter()
+				.filter(|id| !self.r1_broadcasts.contains_key(id))
+				.collect(),
+			SignProtocolState::Round2Waiting => all_others
+				.into_iter()
+				.filter(|id| !self.r2_broadcasts.contains_key(id))
+				.collect(),
+			SignProtocolState::Round3Waiting => all_others
+				.into_iter()
+				.filter(|id| !self.r3_broadcasts.contains_key(id))
+				.collect(),
+			SignProtocolState::WaitingForLeaderDecision => {
+				// Waiting for leader only (unless leader was dropped)
+				if self.received_signature.is_none()
+					&& !self.dropped_parties.contains(&self.leader_id)
+				{
+					vec![self.leader_id]
+				} else {
+					vec![]
+				}
+			},
+			_ => vec![], // Not in a waiting state
+		}
+	}
+
+	/// Drop an unresponsive party from the protocol (HQ7).
+	///
+	/// If enough parties remain (≥ threshold), the protocol continues.
+	/// Otherwise, returns `BelowThreshold` error.
+	///
+	/// # Arguments
+	///
+	/// * `party_id` - The ID of the unresponsive party to drop
+	///
+	/// # Errors
+	///
+	/// * `PartyNotFound` - The party is not a participant or is this party
+	/// * `BelowThreshold` - Dropping this party would leave fewer than threshold parties
+	///
+	/// # Example
+	///
+	/// ```ignore
+	/// // Application detects party 2 is unresponsive
+	/// match protocol.drop_party(2) {
+	///     Ok(()) => println!("Dropped party 2, continuing with remaining parties"),
+	///     Err(SignProtocolError::BelowThreshold { .. }) => {
+	///         println!("Cannot continue - not enough parties");
+	///         return Err(...);
+	///     }
+	///     Err(e) => return Err(e),
+	/// }
+	/// ```
+	pub fn drop_party(&mut self, party_id: ParticipantId) -> Result<(), SignProtocolError> {
+		// Can't drop ourselves
+		if party_id == self.my_participant_id {
+			return Err(SignProtocolError::PartyNotFound(party_id));
+		}
+
+		// Check party is a participant and not already dropped
+		if !self.participants.contains(party_id) || self.dropped_parties.contains(&party_id) {
+			return Err(SignProtocolError::PartyNotFound(party_id));
+		}
+
+		// Calculate remaining active parties after drop
+		// Active = all participants - dropped - the one being dropped now
+		let remaining_count = self
+			.participants
+			.iter()
+			.filter(|&id| id != party_id && !self.dropped_parties.contains(&id))
+			.count();
+
+		// Check if we'd drop below threshold
+		if remaining_count < self.threshold() {
+			return Err(SignProtocolError::BelowThreshold {
+				remaining: remaining_count,
+				threshold: self.threshold(),
+			});
+		}
+
+		// Mark party as dropped
+		self.dropped_parties.insert(party_id);
+
+		// Remove the party's data from all rounds
+		self.r1_broadcasts.remove(&party_id);
+		self.r2_broadcasts.remove(&party_id);
+		self.r3_broadcasts.remove(&party_id);
+
+		// Remove from buffered messages
+		self.message_buffer.round2.retain(|r| r.party_id != party_id);
+		self.message_buffer.round3.retain(|r| r.party_id != party_id);
+
+		Ok(())
 	}
 
 	/// Serialize a message for network transmission.
@@ -572,8 +725,9 @@ impl DilithiumSignProtocol {
 				// Round 4 Retry: no additional data
 				Ok(SigningMessage::Round4Retry)
 			},
-			_ =>
-				Err(SignProtocolError::SerializationError(format!("Unknown message tag: {}", tag))),
+			_ => {
+				Err(SignProtocolError::SerializationError(format!("Unknown message tag: {}", tag)))
+			},
 		}
 	}
 
@@ -838,10 +992,10 @@ impl DilithiumSignProtocol {
 				// Accept Round 1 messages during Round 1 waiting or earlier Round 2 states
 				if matches!(
 					self.state,
-					SignProtocolState::Round1Generate |
-						SignProtocolState::Round1Waiting |
-						SignProtocolState::Round2Generate |
-						SignProtocolState::Round2Waiting
+					SignProtocolState::Round1Generate
+						| SignProtocolState::Round1Waiting
+						| SignProtocolState::Round2Generate
+						| SignProtocolState::Round2Waiting
 				) {
 					self.r1_broadcasts.entry(r1.party_id).or_insert(r1);
 				}
@@ -851,10 +1005,10 @@ impl DilithiumSignProtocol {
 				// Accept Round 2 messages during Round 2 or Round 3 states
 				if matches!(
 					self.state,
-					SignProtocolState::Round2Generate |
-						SignProtocolState::Round2Waiting |
-						SignProtocolState::Round3Generate |
-						SignProtocolState::Round3Waiting
+					SignProtocolState::Round2Generate
+						| SignProtocolState::Round2Waiting
+						| SignProtocolState::Round3Generate
+						| SignProtocolState::Round3Waiting
 				) {
 					self.r2_broadcasts.entry(r2.party_id).or_insert(r2);
 				} else if matches!(
@@ -874,18 +1028,18 @@ impl DilithiumSignProtocol {
 				// Accept Round 3 messages during Round 3 waiting or later
 				if matches!(
 					self.state,
-					SignProtocolState::Round3Generate |
-						SignProtocolState::Round3Waiting |
-						SignProtocolState::Round4Deciding |
-						SignProtocolState::WaitingForLeaderDecision
+					SignProtocolState::Round3Generate
+						| SignProtocolState::Round3Waiting
+						| SignProtocolState::Round4Deciding
+						| SignProtocolState::WaitingForLeaderDecision
 				) {
 					self.r3_broadcasts.entry(r3.party_id).or_insert(r3);
 				} else if matches!(
 					self.state,
-					SignProtocolState::Round1Generate |
-						SignProtocolState::Round1Waiting |
-						SignProtocolState::Round2Generate |
-						SignProtocolState::Round2Waiting
+					SignProtocolState::Round1Generate
+						| SignProtocolState::Round1Waiting
+						| SignProtocolState::Round2Generate
+						| SignProtocolState::Round2Waiting
 				) {
 					// Buffer Round 3 messages that arrive while we're still in earlier rounds
 					#[cfg(debug_assertions)]
@@ -898,8 +1052,8 @@ impl DilithiumSignProtocol {
 			},
 			SigningMessage::Round4Complete(sig_bytes) => {
 				// Only followers process Round4Complete
-				if !self.is_leader() &&
-					matches!(self.state, SignProtocolState::WaitingForLeaderDecision)
+				if !self.is_leader()
+					&& matches!(self.state, SignProtocolState::WaitingForLeaderDecision)
 				{
 					if let Some(signature) = Signature::from_bytes(&sig_bytes) {
 						self.received_signature = Some(signature);
