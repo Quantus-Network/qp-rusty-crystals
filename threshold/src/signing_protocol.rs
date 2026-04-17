@@ -350,8 +350,12 @@ impl DilithiumSignProtocol {
 	///
 	/// # Panics
 	///
-	/// Panics if `my_participant_id` is not in `participants`, if `leader_id` is not in
-	/// `participants`, or if there are duplicate IDs.
+	/// Panics if:
+	/// - `participants` contains duplicates
+	/// - `my_participant_id` is not in `participants`
+	/// - `leader_id` is not in `participants`
+	/// - Any participant is not in the original DKG participant set (HQ3: act ⊆ [N])
+	/// - `my_participant_id` is not in the original DKG participant set (HQ3: i ∈ act)
 	pub fn new(
 		signer: ThresholdSigner,
 		message: Vec<u8>,
@@ -367,6 +371,16 @@ impl DilithiumSignProtocol {
 			"my_participant_id must be in participants"
 		);
 		assert!(participant_list.contains(leader_id), "leader_id must be in participants");
+
+		// HQ3: Validate that all signing participants are valid DKG participants (act ⊆ [N])
+		let dkg_participants = signer.dkg_participants();
+		for &participant in &participants {
+			assert!(
+				dkg_participants.contains(participant),
+				"signing participant {} is not in the DKG participant set (act ⊆ [N] violated)",
+				participant
+			);
+		}
 
 		Self {
 			signer,

@@ -185,6 +185,14 @@ impl ThresholdSigner {
 		&self.public_key
 	}
 
+	/// Get the DKG participants list.
+	///
+	/// This returns the original participant set from DKG, which is used to validate
+	/// that signing participants are a valid subset (HQ3: act ⊆ [N]).
+	pub fn dkg_participants(&self) -> &crate::participants::ParticipantList {
+		self.private_key.dkg_participants()
+	}
+
 	/// Round 1: Generate commitment and return broadcast message.
 	///
 	/// This is the first step in the signing protocol. The returned
