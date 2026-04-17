@@ -343,4 +343,212 @@ mod tests {
 
 		assert!(success, "Signing with DKG keys should succeed within 100 attempts");
 	}
+
+	/// Test that verifies the HQ1 security fix: threshold property is preserved.
+	///
+	/// HQ1 vulnerability: In the original implementation, all parties broadcast their
+	/// raw secret contributions, allowing any single party to reconstruct the full
+	/// secret key by summing all contributions.
+	///
+	/// The fix ensures:
+	/// 1. Broadcast messages contain only partial PUBLIC keys (t_I = A·s_I), not raw secrets
+	/// 2. Raw secrets are shared via P2P only with parties in the same subset
+	/// 3. A single party cannot reconstruct secrets for subsets they don't belong to
+	#[test]
+	fn test_hq1_fix_threshold_property_preserved() {
+		use crate::config::ThresholdConfig;
+
+		let threshold = 2u32;
+		let total_parties = 3u32;
+		let seed = [
+			0x48u8, 0x51, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, // "HQ1" + padding
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+		];
+
+		let threshold_config = ThresholdConfig::new(threshold, total_parties).unwrap();
+		let participants: Vec<ParticipantId> = (0..total_parties).collect();
+
+		// Create DKG instances
+		let mut dkgs: Vec<DilithiumDkg> = participants
+			.iter()
+			.enumerate()
+			.map(|(i, &party_id)| {
+				let config =
+					DkgConfig::new(threshold_config, party_id, participants.clone()).unwrap();
+				let mut party_seed = seed;
+				party_seed[0] = party_seed[0].wrapping_add(i as u8);
+				DilithiumDkg::new(config, party_seed)
+			})
+			.collect();
+
+		// Track all broadcast messages to verify they don't contain raw secrets
+		let mut broadcast_messages: Vec<Vec<u8>> = Vec::new();
+
+		// Track P2P messages per recipient to verify threshold property
+		let mut p2p_messages_received: Vec<Vec<(ParticipantId, Vec<u8>)>> =
+			vec![Vec::new(); total_parties as usize];
+
+		let mut outputs: Vec<Option<DkgOutput>> = vec![None; total_parties as usize];
+		let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> =
+			vec![Vec::new(); total_parties as usize];
+
+		// Run DKG and collect all messages
+		let mut iterations = 0;
+		while outputs.iter().any(|o| o.is_none()) {
+			iterations += 1;
+			assert!(iterations < 1000, "DKG should complete");
+
+			for party_id in 0..total_parties as usize {
+				let messages = std::mem::take(&mut pending_messages[party_id]);
+				for (from, data) in messages {
+					dkgs[party_id].message(from, data);
+				}
+			}
+
+			for party_id in 0..total_parties as usize {
+				if outputs[party_id].is_some() {
+					continue;
+				}
+
+				match dkgs[party_id].poke().unwrap() {
+					Action::Wait => {},
+					Action::SendMany(data) => {
+						// Track broadcast message
+						broadcast_messages.push(data.clone());
+
+						let from = party_id as ParticipantId;
+						for (other, pending) in pending_messages.iter_mut().enumerate() {
+							if other != party_id {
+								pending.push((from, data.clone()));
+							}
+						}
+					},
+					Action::SendPrivate(to, data) => {
+						// Track P2P message
+						p2p_messages_received[to as usize]
+							.push((party_id as ParticipantId, data.clone()));
+
+						let from = party_id as ParticipantId;
+						pending_messages[to as usize].push((from, data));
+					},
+					Action::Return(output) => {
+						outputs[party_id] = Some(output);
+					},
+				}
+			}
+		}
+
+		// =========================================================================
+		// VERIFICATION 1: Broadcast messages don't contain raw secrets
+		// =========================================================================
+		// Parse all broadcast messages and verify Round 3 broadcasts contain
+		// PartyPublicContributions (partial public keys), not PartyContributions (secrets)
+		for msg_bytes in &broadcast_messages {
+			let msg: DkgMessage = bincode::deserialize(msg_bytes).unwrap();
+			if let DkgMessage::Round3(round3) = msg {
+				// Round 3 broadcast should contain PartyPublicContributions
+				// which has partial_public_keys, NOT subset_contributions (raw secrets)
+				let public_contrib = &round3.public_contributions;
+
+				// Verify it has partial public keys
+				assert!(
+					!public_contrib.partial_public_keys.is_empty(),
+					"Round 3 broadcast should contain partial public keys"
+				);
+
+				// The PartyPublicContributions type doesn't have subset_contributions field
+				// (that's only in PartyContributions which is never broadcast)
+				// This is verified by the type system, but we can check the data doesn't
+				// contain the secret polynomial structure
+			}
+		}
+
+		// =========================================================================
+		// VERIFICATION 2: Each party only receives P2P secrets for their subsets
+		// =========================================================================
+		// For a 2-of-3 scheme, subset size is 3-2+1=2
+		// Party 0 is in subsets: {0,1} (mask 0b011) and {0,2} (mask 0b101)
+		// Party 1 is in subsets: {0,1} (mask 0b011) and {1,2} (mask 0b110)
+		// Party 2 is in subsets: {0,2} (mask 0b101) and {1,2} (mask 0b110)
+
+		for party_id in 0..total_parties as usize {
+			let received = &p2p_messages_received[party_id];
+
+			// Parse each P2P message and verify the subset
+			for (from, msg_bytes) in received {
+				let msg: DkgMessage = bincode::deserialize(msg_bytes).unwrap();
+				if let DkgMessage::Round4(round4_private) = msg {
+					let subset_mask = round4_private.subset_mask;
+
+					// Verify this party (recipient) is in the subset
+					assert!(
+						(subset_mask & (1 << party_id)) != 0,
+						"Party {} received P2P secret for subset {:b} but is not in that subset",
+						party_id,
+						subset_mask
+					);
+
+					// Verify the sender is also in the subset
+					assert!(
+						(subset_mask & (1 << from)) != 0,
+						"Party {} sent P2P secret for subset {:b} but is not in that subset",
+						from,
+						subset_mask
+					);
+				}
+			}
+		}
+
+		// =========================================================================
+		// VERIFICATION 3: A single party cannot compute secrets for other subsets
+		// =========================================================================
+		// Party 0 belongs to subsets {0,1} and {0,2}
+		// Party 0 should NOT be able to reconstruct the secret for subset {1,2}
+
+		let party0_output = outputs[0].as_ref().unwrap();
+		let party0_shares = party0_output.private_share.shares();
+
+		// Party 0 should have shares for subsets it belongs to
+		assert!(party0_shares.contains_key(&0b011), "Party 0 should have share for subset {{0,1}}");
+		assert!(party0_shares.contains_key(&0b101), "Party 0 should have share for subset {{0,2}}");
+
+		// Party 0 should NOT have shares for subset {1,2} (which it doesn't belong to)
+		assert!(
+			!party0_shares.contains_key(&0b110),
+			"Party 0 should NOT have share for subset {{1,2}} - this would violate threshold!"
+		);
+
+		// Similarly verify for other parties
+		let party1_shares = outputs[1].as_ref().unwrap().private_share.shares();
+		assert!(!party1_shares.contains_key(&0b101), "Party 1 should NOT have share for {{0,2}}");
+
+		let party2_shares = outputs[2].as_ref().unwrap().private_share.shares();
+		assert!(!party2_shares.contains_key(&0b011), "Party 2 should NOT have share for {{0,1}}");
+
+		// =========================================================================
+		// VERIFICATION 4: Subsets that share members have the SAME combined secret
+		// =========================================================================
+		// This verifies the RSS scheme works correctly: all parties in a subset
+		// should compute the same s_I = Σ_j s_I^(j)
+
+		// Party 0 and Party 1 both belong to subset {0,1}
+		let share_01_from_p0 = party0_shares.get(&0b011).unwrap();
+		let share_01_from_p1 = party1_shares.get(&0b011).unwrap();
+
+		assert_eq!(
+			share_01_from_p0.s1, share_01_from_p1.s1,
+			"Parties in same subset should have identical s1 shares"
+		);
+		assert_eq!(
+			share_01_from_p0.s2, share_01_from_p1.s2,
+			"Parties in same subset should have identical s2 shares"
+		);
+
+		println!("HQ1 security fix verified:");
+		println!("  ✓ Broadcast messages contain only partial public keys, not raw secrets");
+		println!("  ✓ P2P secrets are only sent to parties in the same subset");
+		println!("  ✓ Parties only have shares for subsets they belong to");
+		println!("  ✓ Parties in the same subset compute identical combined shares");
+	}
 }
