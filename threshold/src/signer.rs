@@ -220,7 +220,13 @@ impl ThresholdSigner {
 		rng.fill_bytes(&mut seed);
 
 		// Generate Round 1 data
-		let round1_data = generate_round1(&self.private_key, &self.config, &seed)?;
+		let round1_data = generate_round1(&self.private_key, &self.config, &seed);
+
+		// Zeroize the seed immediately after use to prevent leakage (HQ5)
+		seed.zeroize();
+
+		// Propagate any error after zeroizing
+		let round1_data = round1_data?;
 
 		let broadcast =
 			Round1Broadcast::new(self.private_key.party_id(), round1_data.commitment_hash);
