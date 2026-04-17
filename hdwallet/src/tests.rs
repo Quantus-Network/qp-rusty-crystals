@@ -56,7 +56,7 @@ mod hdwallet_tests {
 		// Should be able to derive same keys from same seed
 		let key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0'/0'").unwrap();
 		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
-		assert_eq!(key1.secret.bytes, key2.secret.bytes);
+		assert_eq!(key1.secret.to_bytes(), key2.secret.to_bytes());
 	}
 
 	#[test]
@@ -85,18 +85,27 @@ mod hdwallet_tests {
 
 		// Keys from same seed should be identical
 		assert_eq!(
-			master_key1.secret.bytes, master_key2.secret.bytes,
+			master_key1.secret.to_bytes(),
+			master_key2.secret.to_bytes(),
 			"keys are not deterministic"
 		);
 
 		// Keys from different seeds should be different
-		assert_ne!(master_key1.secret.bytes, master_key3.secret.bytes, "password has no effect");
+		assert_ne!(
+			master_key1.secret.to_bytes(),
+			master_key3.secret.to_bytes(),
+			"password has no effect"
+		);
 
 		// Derive a different path - need a fresh seed since seed1 was already consumed
 		let mut seed_for_derive = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
 		let derived_key =
 			derive_key_from_seed((&mut seed_for_derive).into(), "m/0'/2147483647'/1'").unwrap();
-		assert_ne!(master_key1.secret.bytes, derived_key.secret.bytes, "derived key not derived");
+		assert_ne!(
+			master_key1.secret.to_bytes(),
+			derived_key.secret.to_bytes(),
+			"derived key not derived"
+		);
 
 		// UNCOMMENT THIS AND RUN WITH `cargo test -- --nocapture` TO GENERATE TEST VECTORS
 		// let vecs = generate_test_vectors(10);
@@ -123,7 +132,7 @@ mod hdwallet_tests {
 			let k1 = derive_key_from_seed((&mut seed1).into(), p).unwrap();
 			let k2 = derive_key_from_seed((&mut seed2).into(), p).unwrap();
 
-			assert_eq!(k1.secret.bytes, k2.secret.bytes);
+			assert_eq!(k1.secret.to_bytes(), k2.secret.to_bytes());
 			assert_eq!(k1.public.bytes, k2.public.bytes);
 		}
 	}
@@ -159,7 +168,8 @@ mod hdwallet_tests {
 
 			// Compare secret keys
 			assert_eq!(
-				generated_keys.secret.bytes, expected_keys.secret.bytes,
+				generated_keys.secret.to_bytes(),
+				expected_keys.secret.to_bytes(),
 				"Secret key mismatch for path: {derivation_path}"
 			);
 
@@ -178,8 +188,8 @@ mod hdwallet_tests {
 		// Generate length between 5 and 15 using RngCore
 		let length = (rng.next_u32() % 10) + 5;
 
-		"m/".to_owned() +
-			&(0..length)
+		"m/".to_owned()
+			+ &(0..length)
 				.map(|_| (rng.next_u32() % 99) + 1) // Generate number between 1 and 99
 				.map(|num| num.to_string() + "\'")
 				.collect::<Vec<_>>()
@@ -287,7 +297,8 @@ mod hdwallet_tests {
 
 		// Keys derived from same path should be identical
 		assert_eq!(
-			key1.secret.bytes, key2.secret.bytes,
+			key1.secret.to_bytes(),
+			key2.secret.to_bytes(),
 			"Keys derived from same path should be identical"
 		);
 	}
@@ -338,7 +349,8 @@ mod hdwallet_tests {
 		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
 
 		assert_eq!(
-			key1.secret.bytes, key2.secret.bytes,
+			key1.secret.to_bytes(),
+			key2.secret.to_bytes(),
 			"Master key derivation should be deterministic"
 		);
 	}
@@ -403,7 +415,7 @@ mod hdwallet_tests {
 		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/1'").unwrap();
 
 		// Keys should be different
-		assert_ne!(key1.secret.bytes, key2.secret.bytes);
+		assert_ne!(key1.secret.to_bytes(), key2.secret.to_bytes());
 		assert_ne!(key1.public.bytes, key2.public.bytes);
 	}
 
@@ -423,7 +435,7 @@ mod hdwallet_tests {
 		let key2 = derive_key_from_seed((&mut seed2).into(), path).unwrap();
 
 		// Same seed and path should produce same keys
-		assert_eq!(key1.secret.bytes, key2.secret.bytes);
+		assert_eq!(key1.secret.to_bytes(), key2.secret.to_bytes());
 		assert_eq!(key1.public.bytes, key2.public.bytes);
 	}
 
@@ -486,7 +498,7 @@ mod hdwallet_tests {
 		let key2 = derive_key_from_seed((&mut seed2).into(), path).unwrap();
 
 		// Should produce identical results
-		assert_eq!(key1.secret.bytes, key2.secret.bytes);
+		assert_eq!(key1.secret.to_bytes(), key2.secret.to_bytes());
 		assert_eq!(key1.public.bytes, key2.public.bytes);
 	}
 
