@@ -1,6 +1,6 @@
 //! Types for Distributed Key Generation (DKG) protocol.
 //!
-//! This module defines the message types exchanged during the 4-round DKG protocol,
+//! This module defines the message types exchanged during the 5-round DKG protocol,
 //! as well as configuration and output types.
 
 use std::collections::HashMap;
@@ -148,7 +148,77 @@ impl Default for SubsetContribution {
 	}
 }
 
-/// All contributions from one party for all subsets they belong to.
+/// Partial public key for a single subset.
+///
+/// This is the public component t_I = A·s_I (mod q) computed from secret
+/// contributions. Only partial public keys are broadcast, never raw secrets.
+///
+/// SECURITY: This is the fix for HQ1 - we broadcast partial public keys
+/// instead of raw secret polynomials.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct PartialPublicKey {
+	/// The subset this partial public key corresponds to.
+	pub subset_mask: SubsetMask,
+	/// The partial public key t_I = A·s1_I + s2_I (K polynomials, each with N coefficients).
+	/// This is computed as: for each row i of A, t_I[i] = Σ_j A[i][j]·s1_I[j] + s2_I[i]
+	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
+	pub t: Vec<[i32; N]>,
+}
+
+impl PartialPublicKey {
+	/// Create a new partial public key with zero coefficients.
+	pub fn new(subset_mask: SubsetMask) -> Self {
+		Self { subset_mask, t: vec![[0i32; N]; K] }
+	}
+
+	/// Verify that all coefficients are within valid range [0, Q).
+	pub fn verify_range(&self, q: i32) -> bool {
+		for poly in &self.t {
+			for &coeff in poly {
+				if coeff < 0 || coeff >= q {
+					return false;
+				}
+			}
+		}
+		true
+	}
+}
+
+/// Public contributions from one party for all subsets they belong to.
+///
+/// SECURITY: This contains only PUBLIC information (partial public keys and rho).
+/// The secret contributions (s1, s2) are stored locally and never broadcast.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct PartyPublicContributions {
+	/// The party that generated these contributions.
+	pub party_id: ParticipantId,
+	/// Random bytes contributed to the final rho seed.
+	pub rho_contribution: [u8; RHO_CONTRIBUTION_SIZE],
+	/// Partial public keys for each subset this party belongs to.
+	/// Key is the subset mask (bitmask of party IDs in the subset).
+	pub partial_public_keys: HashMap<SubsetMask, PartialPublicKey>,
+}
+
+impl PartyPublicContributions {
+	/// Create a new empty party public contributions structure.
+	pub fn new(party_id: ParticipantId) -> Self {
+		Self {
+			party_id,
+			rho_contribution: [0u8; RHO_CONTRIBUTION_SIZE],
+			partial_public_keys: HashMap::new(),
+		}
+	}
+}
+
+/// Secret contributions from one party for all subsets they belong to.
+///
+/// This type is used internally to store secret contributions. It is:
+/// - Stored locally and NEVER broadcast
+/// - Shared via P2P only with other parties in the same subsets
+///
+/// For Round 3 broadcast (public data), use PartyPublicContributions instead.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PartyContributions {
@@ -202,26 +272,50 @@ pub struct DkgRound2Broadcast {
 	pub commitment_hash: [u8; COMMITMENT_HASH_SIZE],
 }
 
-/// Round 3 message: Revealed contributions.
+/// Round 3 message: Revealed public contributions.
 ///
-/// Each party reveals their actual contributions. Other parties verify
-/// that the hash matches what was committed in Round 2.
+/// SECURITY FIX (HQ1): Each party reveals their partial public keys and rho
+/// contribution. The raw secret polynomials (s1, s2) are NEVER broadcast.
+///
+/// Other parties verify:
+/// 1. The hash matches what was committed in Round 2
+/// 2. Partial public keys are well-formed (coefficients in valid range)
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct DkgRound3Broadcast {
 	/// The party sending this message.
 	pub party_id: ParticipantId,
-	/// The actual contributions (must hash to the Round 2 commitment).
-	pub contributions: PartyContributions,
+	/// The public contributions (partial public keys + rho, must hash to Round 2 commitment).
+	pub public_contributions: PartyPublicContributions,
 }
 
-/// Round 4 message: Confirmation.
+/// Round 4 P2P message: Secret contribution for a specific subset.
+///
+/// SECURITY FIX (HQ1): Secret contributions are sent via P2P only to
+/// parties who are members of the same subset. This ensures:
+/// 1. Each party only learns secrets for subsets they belong to
+/// 2. The threshold property is preserved (t-1 parties cannot reconstruct s)
+///
+/// Recipients verify that A·s_I matches the partial public key t_I
+/// that was broadcast in the Round 3 broadcast message.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct DkgRound4Private {
+	/// The party sending this message.
+	pub from_party_id: ParticipantId,
+	/// The subset this contribution is for.
+	pub subset_mask: SubsetMask,
+	/// The secret contribution for this subset.
+	pub contribution: SubsetContribution,
+}
+
+/// Round 5 message: Confirmation.
 ///
 /// Each party confirms they successfully computed their shares and
 /// the public key. All parties must agree on the public key hash.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct DkgRound4Broadcast {
+pub struct DkgRound5Broadcast {
 	/// The party sending this message.
 	pub party_id: ParticipantId,
 	/// Whether this party succeeded in computing their share.
@@ -245,10 +339,12 @@ pub enum DkgMessage {
 	Round1(DkgRound1Broadcast),
 	/// Round 2: Commitment hash.
 	Round2(DkgRound2Broadcast),
-	/// Round 3: Revealed contributions.
+	/// Round 3: Revealed public contributions (partial public keys).
 	Round3(DkgRound3Broadcast),
-	/// Round 4: Confirmation.
-	Round4(DkgRound4Broadcast),
+	/// Round 4: P2P secret contribution for a subset (sent only to subset members).
+	Round4(DkgRound4Private),
+	/// Round 5: Confirmation.
+	Round5(DkgRound5Broadcast),
 }
 
 impl DkgMessage {
@@ -258,17 +354,19 @@ impl DkgMessage {
 			DkgMessage::Round1(msg) => msg.party_id,
 			DkgMessage::Round2(msg) => msg.party_id,
 			DkgMessage::Round3(msg) => msg.party_id,
-			DkgMessage::Round4(msg) => msg.party_id,
+			DkgMessage::Round4(msg) => msg.from_party_id,
+			DkgMessage::Round5(msg) => msg.party_id,
 		}
 	}
 
-	/// Get the round number (1-4).
+	/// Get the round number (1-5).
 	pub fn round(&self) -> u8 {
 		match self {
 			DkgMessage::Round1(_) => 1,
 			DkgMessage::Round2(_) => 2,
 			DkgMessage::Round3(_) => 3,
 			DkgMessage::Round4(_) => 4,
+			DkgMessage::Round5(_) => 5,
 		}
 	}
 }

@@ -1,6 +1,6 @@
 //! DKG Protocol State Machine.
 //!
-//! This module defines the state machine for the 4-round DKG protocol.
+//! This module defines the state machine for the 5-round DKG protocol.
 //! The state machine tracks which round we're in, what data we've collected
 //! from other parties, and manages transitions between rounds.
 //!
@@ -17,7 +17,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::types::{
 	DkgConfig, DkgMessage, DkgOutput, DkgRound1Broadcast, DkgRound2Broadcast, DkgRound3Broadcast,
-	DkgRound4Broadcast, ParticipantId, PartyContributions, COMMITMENT_HASH_SIZE, SESSION_ID_SIZE,
+	DkgRound4Private, DkgRound5Broadcast, ParticipantId, PartyContributions,
+	PartyPublicContributions, SubsetContribution, SubsetMask, COMMITMENT_HASH_SIZE,
+	SESSION_ID_SIZE,
 };
 
 use crate::participants::ParticipantList;
@@ -40,17 +42,23 @@ pub enum DkgState {
 	/// Round 2: Waiting for commitment hashes from other parties.
 	Round2Waiting,
 
-	/// Round 3: Revealing contributions.
+	/// Round 3: Revealing public contributions (partial public keys).
 	Round3Revealing,
 
-	/// Round 3: Waiting for revealed contributions from other parties.
+	/// Round 3: Waiting for revealed public contributions from other parties.
 	Round3Waiting,
 
-	/// Round 4: Sending confirmation.
-	Round4Confirming,
+	/// Round 4: Sending P2P secret contributions to subset members.
+	Round4Sending,
 
-	/// Round 4: Waiting for confirmations from other parties.
+	/// Round 4: Waiting for P2P secret contributions from subset members.
 	Round4Waiting,
+
+	/// Round 5: Sending confirmation.
+	Round5Confirming,
+
+	/// Round 5: Waiting for confirmations from other parties.
+	Round5Waiting,
 
 	/// Protocol completed successfully.
 	Complete,
@@ -70,8 +78,10 @@ impl DkgState {
 			DkgState::Round2Waiting => "Round2Waiting",
 			DkgState::Round3Revealing => "Round3Revealing",
 			DkgState::Round3Waiting => "Round3Waiting",
-			DkgState::Round4Confirming => "Round4Confirming",
+			DkgState::Round4Sending => "Round4Sending",
 			DkgState::Round4Waiting => "Round4Waiting",
+			DkgState::Round5Confirming => "Round5Confirming",
+			DkgState::Round5Waiting => "Round5Waiting",
 			DkgState::Complete => "Complete",
 			DkgState::Failed(_) => "Failed",
 		}
@@ -92,15 +102,16 @@ impl DkgState {
 		matches!(self, DkgState::Failed(_))
 	}
 
-	/// Get the current round number (0 = not started, 1-4 = in progress, 5 = complete).
+	/// Get the current round number (0 = not started, 1-5 = in progress, 6 = complete).
 	pub fn round_number(&self) -> u8 {
 		match self {
 			DkgState::Initialized => 0,
 			DkgState::Round1Generating | DkgState::Round1Waiting => 1,
 			DkgState::Round2Generating | DkgState::Round2Waiting => 2,
 			DkgState::Round3Revealing | DkgState::Round3Waiting => 3,
-			DkgState::Round4Confirming | DkgState::Round4Waiting => 4,
-			DkgState::Complete => 5,
+			DkgState::Round4Sending | DkgState::Round4Waiting => 4,
+			DkgState::Round5Confirming | DkgState::Round5Waiting => 5,
+			DkgState::Complete => 6,
 			DkgState::Failed(_) => 0,
 		}
 	}
@@ -127,16 +138,18 @@ impl DkgState {
 pub struct MessageBuffer {
 	/// Buffered Round 2 messages (from parties that are ahead of us).
 	pub round2: Vec<DkgRound2Broadcast>,
-	/// Buffered Round 3 messages.
+	/// Buffered Round 3 broadcast messages.
 	pub round3: Vec<DkgRound3Broadcast>,
-	/// Buffered Round 4 messages.
-	pub round4: Vec<DkgRound4Broadcast>,
+	/// Buffered Round 4 P2P messages (secret contributions).
+	pub round4: Vec<DkgRound4Private>,
+	/// Buffered Round 5 messages.
+	pub round5: Vec<DkgRound5Broadcast>,
 }
 
 impl MessageBuffer {
 	/// Create a new empty message buffer.
 	pub fn new() -> Self {
-		Self { round2: Vec::new(), round3: Vec::new(), round4: Vec::new() }
+		Self { round2: Vec::new(), round3: Vec::new(), round4: Vec::new(), round5: Vec::new() }
 	}
 
 	/// Buffer a message for later processing.
@@ -149,6 +162,7 @@ impl MessageBuffer {
 			DkgMessage::Round2(m) => self.round2.push(m),
 			DkgMessage::Round3(m) => self.round3.push(m),
 			DkgMessage::Round4(m) => self.round4.push(m),
+			DkgMessage::Round5(m) => self.round5.push(m),
 		}
 	}
 
@@ -157,19 +171,27 @@ impl MessageBuffer {
 		std::mem::take(&mut self.round2)
 	}
 
-	/// Take all buffered Round 3 messages.
+	/// Take all buffered Round 3 broadcast messages.
 	pub fn take_round3(&mut self) -> Vec<DkgRound3Broadcast> {
 		std::mem::take(&mut self.round3)
 	}
 
-	/// Take all buffered Round 4 messages.
-	pub fn take_round4(&mut self) -> Vec<DkgRound4Broadcast> {
+	/// Take all buffered Round 4 P2P messages.
+	pub fn take_round4(&mut self) -> Vec<DkgRound4Private> {
 		std::mem::take(&mut self.round4)
+	}
+
+	/// Take all buffered Round 5 messages.
+	pub fn take_round5(&mut self) -> Vec<DkgRound5Broadcast> {
+		std::mem::take(&mut self.round5)
 	}
 
 	/// Check if there are any buffered messages.
 	pub fn is_empty(&self) -> bool {
-		self.round2.is_empty() && self.round3.is_empty() && self.round4.is_empty()
+		self.round2.is_empty() &&
+			self.round3.is_empty() &&
+			self.round4.is_empty() &&
+			self.round5.is_empty()
 	}
 }
 
@@ -258,32 +280,96 @@ impl Default for Round2Data {
 }
 
 /// Accumulated data from Round 3.
+///
+/// SECURITY FIX (HQ1): This now stores PUBLIC contributions (partial public keys)
+/// instead of raw secret contributions. Raw secrets are NEVER broadcast.
+/// Secret contributions are received via P2P only from subset members.
 #[derive(Debug, Clone)]
 pub struct Round3Data {
-	/// Revealed contributions from all parties (including self).
-	pub contributions: HashMap<ParticipantId, PartyContributions>,
+	/// Public contributions from all parties (including self).
+	/// Contains partial public keys and rho, NOT raw secrets.
+	pub public_contributions: HashMap<ParticipantId, PartyPublicContributions>,
 	/// Verification results for each party.
 	pub verification_results: HashMap<ParticipantId, bool>,
+	/// Local secret contributions (only for this party's own contributions).
+	/// SECURITY: This is kept locally, NEVER shared via broadcast.
+	pub my_secret_contributions: Option<PartyContributions>,
+	/// Received secret contributions from other parties via P2P.
+	/// Key is (from_party_id, subset_mask), value is the secret contribution.
+	/// SECURITY: Only received from parties in the same subset.
+	pub received_secret_contributions: HashMap<(ParticipantId, SubsetMask), SubsetContribution>,
+	/// Track which parties have sent us their P2P secrets for each subset.
+	/// Key is subset_mask, value is set of parties who have sent their contribution.
+	pub received_secrets_by_subset: HashMap<SubsetMask, Vec<ParticipantId>>,
 }
 
 impl Round3Data {
 	/// Create new Round 3 data storage.
 	pub fn new() -> Self {
-		Self { contributions: HashMap::new(), verification_results: HashMap::new() }
+		Self {
+			public_contributions: HashMap::new(),
+			verification_results: HashMap::new(),
+			my_secret_contributions: None,
+			received_secret_contributions: HashMap::new(),
+			received_secrets_by_subset: HashMap::new(),
+		}
 	}
 
-	/// Check if we've received all contributions.
+	/// Check if we've received all public contributions (broadcasts).
+	pub fn is_broadcast_complete(&self, expected_count: usize) -> bool {
+		self.public_contributions.len() == expected_count
+	}
+
+	/// Check if we've received all public contributions.
+	/// DEPRECATED: Use is_broadcast_complete and is_p2p_complete instead.
 	pub fn is_complete(&self, expected_count: usize) -> bool {
-		self.contributions.len() == expected_count
+		self.public_contributions.len() == expected_count
 	}
 
-	/// Add revealed contributions from a party.
-	pub fn add_contributions(
+	/// Check if we've received all P2P secret contributions for our subsets.
+	/// Each subset should have contributions from all its members.
+	pub fn is_p2p_complete(&self, my_subsets: &[SubsetMask], _total_parties: u32) -> bool {
+		for subset_mask in my_subsets {
+			// Count how many parties are in this subset
+			let subset_size = subset_mask.count_ones() as usize;
+			// We need contributions from all parties in the subset (including ourselves)
+			let received = self.received_secrets_by_subset.get(subset_mask);
+			// We count ourselves as having contributed via my_secret_contributions
+			let received_count = received.map(|v| v.len()).unwrap_or(0) + 1; // +1 for self
+			if received_count < subset_size {
+				return false;
+			}
+		}
+		true
+	}
+
+	/// Add public contributions from a party.
+	pub fn add_public_contributions(
 		&mut self,
 		party_id: ParticipantId,
-		contributions: PartyContributions,
+		contributions: PartyPublicContributions,
 	) {
-		self.contributions.insert(party_id, contributions);
+		self.public_contributions.insert(party_id, contributions);
+	}
+
+	/// Store this party's own secret contributions (kept locally, never broadcast).
+	pub fn set_my_secret_contributions(&mut self, contributions: PartyContributions) {
+		self.my_secret_contributions = Some(contributions);
+	}
+
+	/// Add a secret contribution received via P2P from another party.
+	pub fn add_received_secret(
+		&mut self,
+		from_party_id: ParticipantId,
+		subset_mask: SubsetMask,
+		contribution: SubsetContribution,
+	) {
+		self.received_secret_contributions
+			.insert((from_party_id, subset_mask), contribution);
+		self.received_secrets_by_subset
+			.entry(subset_mask)
+			.or_insert_with(Vec::new)
+			.push(from_party_id);
 	}
 
 	/// Record verification result for a party.
@@ -303,19 +389,19 @@ impl Default for Round3Data {
 	}
 }
 
-/// Accumulated data from Round 4.
+/// Accumulated data from Round 5.
 #[derive(Debug, Clone)]
-pub struct Round4Data {
+pub struct Round5Data {
 	/// My confirmation message.
-	pub my_confirmation: Option<DkgRound4Broadcast>,
+	pub my_confirmation: Option<DkgRound5Broadcast>,
 	/// Confirmations from all parties (including self).
-	pub confirmations: HashMap<ParticipantId, DkgRound4Broadcast>,
+	pub confirmations: HashMap<ParticipantId, DkgRound5Broadcast>,
 	/// The computed public key hash (for consensus).
 	pub my_public_key_hash: [u8; COMMITMENT_HASH_SIZE],
 }
 
-impl Round4Data {
-	/// Create new Round 4 data storage.
+impl Round5Data {
+	/// Create new Round 5 data storage.
 	pub fn new() -> Self {
 		Self {
 			my_confirmation: None,
@@ -330,7 +416,7 @@ impl Round4Data {
 	}
 
 	/// Add a confirmation from a party.
-	pub fn add_confirmation(&mut self, party_id: ParticipantId, confirmation: DkgRound4Broadcast) {
+	pub fn add_confirmation(&mut self, party_id: ParticipantId, confirmation: DkgRound5Broadcast) {
 		self.confirmations.insert(party_id, confirmation);
 	}
 
@@ -370,7 +456,7 @@ impl Round4Data {
 	}
 }
 
-impl Default for Round4Data {
+impl Default for Round5Data {
 	fn default() -> Self {
 		Self::new()
 	}
@@ -396,7 +482,7 @@ pub struct DkgStateData {
 	/// Data from Round 3.
 	pub round3: Round3Data,
 	/// Data from Round 4.
-	pub round4: Round4Data,
+	pub round5: Round5Data,
 	/// The final output (set when protocol completes).
 	pub output: Option<DkgOutput>,
 	/// Buffer for messages that arrive before we're ready to process them.
@@ -418,7 +504,7 @@ impl DkgStateData {
 			round1: Round1Data::new(),
 			round2: Round2Data::new(),
 			round3: Round3Data::new(),
-			round4: Round4Data::new(),
+			round5: Round5Data::new(),
 			output: None,
 			message_buffer: MessageBuffer::new(),
 		}
@@ -471,17 +557,27 @@ impl DkgStateData {
 				}
 			},
 			DkgState::Round3Revealing | DkgState::Round3Waiting => {
-				let buffered = self.message_buffer.take_round3();
-				for msg in buffered {
+				// Process Round 3 broadcast messages (partial public keys)
+				let buffered_broadcast = self.message_buffer.take_round3();
+				for msg in buffered_broadcast {
 					if let Err(e) = self.process_round3(msg) {
 						errors.push(e);
 					}
 				}
 			},
-			DkgState::Round4Confirming | DkgState::Round4Waiting => {
-				let buffered = self.message_buffer.take_round4();
+			DkgState::Round4Sending | DkgState::Round4Waiting => {
+				// Process Round 4 P2P messages (secret contributions)
+				let buffered_private = self.message_buffer.take_round4();
+				for msg in buffered_private {
+					if let Err(e) = self.process_round4_private(msg) {
+						errors.push(e);
+					}
+				}
+			},
+			DkgState::Round5Confirming | DkgState::Round5Waiting => {
+				let buffered = self.message_buffer.take_round5();
 				for msg in buffered {
-					if let Err(e) = self.process_round4(msg) {
+					if let Err(e) = self.process_round5(msg) {
 						errors.push(e);
 					}
 				}
@@ -510,7 +606,7 @@ impl DkgStateData {
 			DkgState::Round1Waiting => self.round1.is_complete(expected),
 			DkgState::Round2Waiting => self.round2.is_complete(expected),
 			DkgState::Round3Waiting => self.round3.is_complete(expected),
-			DkgState::Round4Waiting => self.round4.is_complete(expected),
+			DkgState::Round5Waiting => self.round5.is_complete(expected),
 			_ => false,
 		}
 	}
@@ -551,7 +647,10 @@ impl DkgStateData {
 		Ok(())
 	}
 
-	/// Process a Round 3 message.
+	/// Process a Round 3 broadcast message.
+	///
+	/// SECURITY FIX (HQ1): This now processes PUBLIC contributions (partial public keys)
+	/// instead of raw secret contributions.
 	pub fn process_round3(&mut self, msg: DkgRound3Broadcast) -> Result<(), String> {
 		if !matches!(self.state, DkgState::Round3Revealing | DkgState::Round3Waiting) {
 			return Err(format!("Cannot process Round 3 message in state {}", self.state.name()));
@@ -561,29 +660,92 @@ impl DkgStateData {
 			return Err(format!("Unknown party ID: {}", msg.party_id));
 		}
 
-		if self.round3.contributions.contains_key(&msg.party_id) {
+		if self.round3.public_contributions.contains_key(&msg.party_id) {
 			return Err(format!("Duplicate Round 3 message from party {}", msg.party_id));
 		}
 
-		self.round3.add_contributions(msg.party_id, msg.contributions);
+		self.round3.add_public_contributions(msg.party_id, msg.public_contributions);
 		Ok(())
 	}
 
-	/// Process a Round 4 message.
-	pub fn process_round4(&mut self, msg: DkgRound4Broadcast) -> Result<(), String> {
-		if !matches!(self.state, DkgState::Round4Confirming | DkgState::Round4Waiting) {
-			return Err(format!("Cannot process Round 4 message in state {}", self.state.name()));
+	/// Process a Round 4 P2P message (secret contribution).
+	///
+	/// SECURITY FIX (HQ1): Secret contributions are only received via P2P from
+	/// parties who share the same subset. This preserves the threshold property.
+	pub fn process_round4_private(&mut self, msg: DkgRound4Private) -> Result<(), String> {
+		if !matches!(
+			self.state,
+			DkgState::Round3Revealing |
+				DkgState::Round3Waiting |
+				DkgState::Round4Sending |
+				DkgState::Round4Waiting
+		) {
+			return Err(format!(
+				"Cannot process Round 4 P2P message in state {}",
+				self.state.name()
+			));
+		}
+
+		if !self.config.all_participants.contains(&msg.from_party_id) {
+			return Err(format!("Unknown party ID: {}", msg.from_party_id));
+		}
+
+		// Verify this party is in the subset they claim to be sharing for
+		let from_index = self
+			.participants
+			.index_of(msg.from_party_id)
+			.ok_or_else(|| format!("Party {} not in participant list", msg.from_party_id))?;
+		if (msg.subset_mask & (1 << from_index)) == 0 {
+			return Err(format!(
+				"Party {} claims contribution for subset {:b} but is not in that subset",
+				msg.from_party_id, msg.subset_mask
+			));
+		}
+
+		// Verify we are in this subset (we should only receive secrets for subsets we belong to)
+		let my_index = self
+			.participants
+			.index_of(self.config.my_party_id)
+			.ok_or_else(|| "My party ID not in participant list".to_string())?;
+		if (msg.subset_mask & (1 << my_index)) == 0 {
+			return Err(format!(
+				"Received secret for subset {:b} but I (index {}) am not in that subset",
+				msg.subset_mask, my_index
+			));
+		}
+
+		// Check for duplicate
+		if self
+			.round3
+			.received_secret_contributions
+			.contains_key(&(msg.from_party_id, msg.subset_mask))
+		{
+			return Err(format!(
+				"Duplicate Round 4 P2P message from party {} for subset {:b}",
+				msg.from_party_id, msg.subset_mask
+			));
+		}
+
+		self.round3
+			.add_received_secret(msg.from_party_id, msg.subset_mask, msg.contribution);
+		Ok(())
+	}
+
+	/// Process a Round 5 message.
+	pub fn process_round5(&mut self, msg: DkgRound5Broadcast) -> Result<(), String> {
+		if !matches!(self.state, DkgState::Round5Confirming | DkgState::Round5Waiting) {
+			return Err(format!("Cannot process Round 5 message in state {}", self.state.name()));
 		}
 
 		if !self.config.all_participants.contains(&msg.party_id) {
 			return Err(format!("Unknown party ID: {}", msg.party_id));
 		}
 
-		if self.round4.confirmations.contains_key(&msg.party_id) {
-			return Err(format!("Duplicate Round 4 message from party {}", msg.party_id));
+		if self.round5.confirmations.contains_key(&msg.party_id) {
+			return Err(format!("Duplicate Round 5 message from party {}", msg.party_id));
 		}
 
-		self.round4.add_confirmation(msg.party_id, msg);
+		self.round5.add_confirmation(msg.party_id, msg);
 		Ok(())
 	}
 }
@@ -608,7 +770,7 @@ impl Zeroize for DkgStateData {
 				}
 			}
 		}
-		self.round4.my_public_key_hash.zeroize();
+		self.round5.my_public_key_hash.zeroize();
 	}
 }
 
@@ -622,7 +784,7 @@ impl std::fmt::Debug for DkgStateData {
 			.field("round1_complete", &self.round1.is_complete(self.expected_count()))
 			.field("round2_complete", &self.round2.is_complete(self.expected_count()))
 			.field("round3_complete", &self.round3.is_complete(self.expected_count()))
-			.field("round4_complete", &self.round4.is_complete(self.expected_count()))
+			.field("round5_complete", &self.round5.is_complete(self.expected_count()))
 			.field("has_output", &self.output.is_some())
 			.finish()
 	}
@@ -652,8 +814,9 @@ mod tests {
 		assert_eq!(DkgState::Round1Generating.round_number(), 1);
 		assert_eq!(DkgState::Round2Waiting.round_number(), 2);
 		assert_eq!(DkgState::Round3Revealing.round_number(), 3);
-		assert_eq!(DkgState::Round4Confirming.round_number(), 4);
-		assert_eq!(DkgState::Complete.round_number(), 5);
+		assert_eq!(DkgState::Round4Sending.round_number(), 4);
+		assert_eq!(DkgState::Round5Confirming.round_number(), 5);
+		assert_eq!(DkgState::Complete.round_number(), 6);
 	}
 
 	#[test]
@@ -683,8 +846,8 @@ mod tests {
 	}
 
 	#[test]
-	fn test_round4_consensus() {
-		let mut data = Round4Data::new();
+	fn test_round5_consensus() {
+		let mut data = Round5Data::new();
 		data.my_public_key_hash = [42u8; 32];
 
 		// Empty - no consensus
@@ -693,18 +856,18 @@ mod tests {
 		// Add matching confirmations
 		data.add_confirmation(
 			0,
-			DkgRound4Broadcast { party_id: 0, success: true, public_key_hash: [42u8; 32] },
+			DkgRound5Broadcast { party_id: 0, success: true, public_key_hash: [42u8; 32] },
 		);
 		data.add_confirmation(
 			1,
-			DkgRound4Broadcast { party_id: 1, success: true, public_key_hash: [42u8; 32] },
+			DkgRound5Broadcast { party_id: 1, success: true, public_key_hash: [42u8; 32] },
 		);
 		assert!(data.consensus_reached());
 
 		// Add mismatched confirmation
 		data.add_confirmation(
 			2,
-			DkgRound4Broadcast { party_id: 2, success: true, public_key_hash: [99u8; 32] },
+			DkgRound5Broadcast { party_id: 2, success: true, public_key_hash: [99u8; 32] },
 		);
 		assert!(!data.consensus_reached());
 		assert_eq!(data.mismatched_parties(), vec![2]);
@@ -794,7 +957,7 @@ mod tests {
 		assert!(buffer.is_empty());
 		assert!(buffer.round2.is_empty());
 		assert!(buffer.round3.is_empty());
-		assert!(buffer.round4.is_empty());
+		assert!(buffer.round5.is_empty());
 	}
 
 	#[test]
@@ -820,8 +983,8 @@ mod tests {
 	fn test_message_buffer_round3() {
 		let mut buffer = MessageBuffer::new();
 
-		let contributions = PartyContributions::new(2);
-		let msg = DkgMessage::Round3(DkgRound3Broadcast { party_id: 2, contributions });
+		let public_contributions = PartyPublicContributions::new(2);
+		let msg = DkgMessage::Round3(DkgRound3Broadcast { party_id: 2, public_contributions });
 		buffer.buffer(msg);
 
 		assert!(!buffer.is_empty());
@@ -834,10 +997,10 @@ mod tests {
 	}
 
 	#[test]
-	fn test_message_buffer_round4() {
+	fn test_message_buffer_round5() {
 		let mut buffer = MessageBuffer::new();
 
-		let msg = DkgMessage::Round4(DkgRound4Broadcast {
+		let msg = DkgMessage::Round5(DkgRound5Broadcast {
 			party_id: 1,
 			success: true,
 			public_key_hash: [99u8; 32],
@@ -845,9 +1008,9 @@ mod tests {
 		buffer.buffer(msg);
 
 		assert!(!buffer.is_empty());
-		assert_eq!(buffer.round4.len(), 1);
+		assert_eq!(buffer.round5.len(), 1);
 
-		let taken = buffer.take_round4();
+		let taken = buffer.take_round5();
 		assert_eq!(taken.len(), 1);
 		assert_eq!(taken[0].party_id, 1);
 		assert!(taken[0].success);

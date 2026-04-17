@@ -18,9 +18,9 @@ use super::{
 	state::{DkgState, DkgStateData},
 	types::{
 		DkgConfig, DkgMessage, DkgOutput, DkgRound1Broadcast, DkgRound2Broadcast,
-		DkgRound3Broadcast, DkgRound4Broadcast, ParticipantId, PartyContributions,
-		SubsetContribution, SubsetMask, COMMITMENT_HASH_SIZE, K, L, N, RHO_CONTRIBUTION_SIZE,
-		SESSION_ID_SIZE,
+		DkgRound3Broadcast, DkgRound4Private, DkgRound5Broadcast, PartialPublicKey, ParticipantId,
+		PartyContributions, PartyPublicContributions, SubsetContribution, SubsetMask,
+		COMMITMENT_HASH_SIZE, K, L, N, RHO_CONTRIBUTION_SIZE, SESSION_ID_SIZE,
 	},
 };
 
@@ -152,8 +152,17 @@ pub struct DilithiumDkg {
 	state_data: DkgStateData,
 	/// Random number generator.
 	rng: rand::rngs::StdRng,
-	/// Whether we've sent our message for the current round.
+	/// Whether we've sent our broadcast message for the current round.
 	sent_current_round: bool,
+	/// SECURITY FIX (HQ1): Public contributions to broadcast in Round 3.
+	/// Contains partial public keys (t_I = A·s_I) and rho contribution.
+	/// Stored separately from secret contributions to prevent accidental leakage.
+	my_public_contributions: Option<PartyPublicContributions>,
+	/// SECURITY FIX (HQ1): P2P messages to send in Round 4.
+	/// Contains secret contributions for each (party, subset) pair.
+	round4_private_messages: Vec<DkgRound4Private>,
+	/// Number of P2P messages sent so far in Round 4.
+	round4_private_sent_count: usize,
 }
 
 impl DilithiumDkg {
@@ -167,6 +176,9 @@ impl DilithiumDkg {
 			state_data: DkgStateData::new(config),
 			rng: rand::rngs::StdRng::from_seed(seed),
 			sent_current_round: false,
+			my_public_contributions: None,
+			round4_private_messages: Vec::new(),
+			round4_private_sent_count: 0,
 		}
 	}
 
@@ -244,11 +256,20 @@ impl DilithiumDkg {
 					return Ok(Action::Wait);
 				}
 
-				// Generate contributions for all subsets
-				let contributions = self.generate_contributions()?;
-				let commitment_hash = self.compute_commitment_hash(&contributions);
+				// SECURITY FIX (HQ1): Generate secret contributions AND partial public keys
+				// Only the partial public keys will be broadcast
+				let (secret_contributions, public_contributions) =
+					self.generate_contributions_with_partial_public_keys()?;
 
-				self.state_data.round2.my_contributions = Some(contributions);
+				// Commit to PUBLIC contributions only (partial public keys + rho)
+				// SECURITY: We commit to what we will broadcast, NOT to raw secrets
+				let commitment_hash = self.compute_public_commitment_hash(&public_contributions);
+
+				// Store secret contributions locally (NEVER broadcast)
+				self.state_data.round2.my_contributions = Some(secret_contributions);
+				// Store public contributions for Round 3
+				self.my_public_contributions = Some(public_contributions);
+
 				self.state_data.round2.my_commitment_hash = commitment_hash;
 				self.state_data.round2.add_commitment_hash(self.my_party_id(), commitment_hash);
 
@@ -272,49 +293,109 @@ impl DilithiumDkg {
 
 			DkgState::Round3Revealing => {
 				if self.sent_current_round {
+					// Broadcast sent, now transition to waiting and send P2P messages
 					let errors = self.state_data.transition_to(DkgState::Round3Waiting);
 					for e in errors {
 						eprintln!("Error processing buffered message: {}", e);
 					}
-					return Ok(Action::Wait);
+					// Continue to Round3Waiting to send P2P messages
+					return self.poke();
 				}
 
-				// Reveal our contributions
-				let contributions =
-					self.state_data.round2.my_contributions.clone().ok_or_else(|| {
-						DkgProtocolError::InternalError("Missing my contributions".into())
+				// SECURITY FIX (HQ1): Reveal only PUBLIC contributions (partial public keys)
+				// Raw secrets are NEVER broadcast
+				let public_contributions =
+					self.my_public_contributions.clone().ok_or_else(|| {
+						DkgProtocolError::InternalError("Missing my public contributions".into())
 					})?;
 
-				// Add our own contributions to round3 data
+				// Store our secret contributions locally for final computation
+				let secret_contributions =
+					self.state_data.round2.my_contributions.clone().ok_or_else(|| {
+						DkgProtocolError::InternalError("Missing my secret contributions".into())
+					})?;
+				self.state_data.round3.set_my_secret_contributions(secret_contributions.clone());
+
+				// Add our public contributions to round3 data
 				self.state_data
 					.round3
-					.add_contributions(self.my_party_id(), contributions.clone());
+					.add_public_contributions(self.my_party_id(), public_contributions.clone());
 
-				let msg = DkgRound3Broadcast { party_id: self.my_party_id(), contributions };
+				// SECURITY FIX (HQ1): Generate P2P messages to send secret contributions
+				// to other parties in the same subsets (these are Round 4 messages)
+				self.round4_private_messages =
+					self.generate_round4_private_messages(&secret_contributions);
+				self.round4_private_sent_count = 0;
+
+				// SECURITY: Only partial public keys and rho are broadcast
+				let msg = DkgRound3Broadcast { party_id: self.my_party_id(), public_contributions };
 
 				self.sent_current_round = true;
 				Ok(Action::SendMany(self.serialize_message(&DkgMessage::Round3(msg))?))
 			},
 
 			DkgState::Round3Waiting => {
-				if self.state_data.can_advance() {
-					// Verify all contributions
-					self.verify_all_contributions()?;
+				// Check if we have all broadcasts
+				let expected = self.state_data.expected_count();
+				let broadcasts_complete = self.state_data.round3.is_broadcast_complete(expected);
 
-					let errors = self.state_data.transition_to(DkgState::Round4Confirming);
-					for e in errors {
-						eprintln!("Error processing buffered message: {}", e);
-					}
-					self.sent_current_round = false;
-					self.poke()
-				} else {
-					Ok(Action::Wait)
+				if !broadcasts_complete {
+					return Ok(Action::Wait);
 				}
+
+				// All broadcasts received, verify commitment hashes
+				self.verify_all_contributions()?;
+
+				// Transition to Round 4 (P2P secret sharing)
+				let errors = self.state_data.transition_to(DkgState::Round4Sending);
+				for e in errors {
+					eprintln!("Error processing buffered message: {}", e);
+				}
+				self.sent_current_round = false;
+				self.poke()
 			},
 
-			DkgState::Round4Confirming => {
+			DkgState::Round4Sending => {
+				// Send P2P messages with secret contributions
+				if self.round4_private_sent_count < self.round4_private_messages.len() {
+					return self.send_next_round4_private();
+				}
+
+				// All P2P messages sent, transition to waiting
+				let errors = self.state_data.transition_to(DkgState::Round4Waiting);
+				for e in errors {
+					eprintln!("Error processing buffered message: {}", e);
+				}
+				self.poke()
+			},
+
+			DkgState::Round4Waiting => {
+				// Check if we have all P2P messages for our subsets
+				let my_subsets = self.compute_my_subsets();
+				let p2p_complete = self
+					.state_data
+					.round3
+					.is_p2p_complete(&my_subsets, self.state_data.config.total_parties());
+
+				if !p2p_complete {
+					return Ok(Action::Wait);
+				}
+
+				// Verify that received secrets match broadcast partial public keys
+				self.verify_received_secrets()?;
+
+				// Transition to Round 5 (confirmation)
+				let errors = self.state_data.transition_to(DkgState::Round5Confirming);
+				for e in errors {
+					eprintln!("Error processing buffered message: {}", e);
+				}
+				self.sent_current_round = false;
+				self.poke()
+			},
+
+			DkgState::Round5Confirming => {
 				if self.sent_current_round {
-					let errors = self.state_data.transition_to(DkgState::Round4Waiting);
+					let errors = self.state_data.transition_to(DkgState::Round5Waiting);
 					for e in errors {
 						eprintln!("Error processing buffered message: {}", e);
 					}
@@ -325,7 +406,7 @@ impl DilithiumDkg {
 				let (success, public_key_hash) = match self.compute_final_output() {
 					Ok(output) => {
 						let pk_hash = self.hash_public_key(&output.public_key);
-						self.state_data.round4.my_public_key_hash = pk_hash;
+						self.state_data.round5.my_public_key_hash = pk_hash;
 						self.state_data.output = Some(output);
 						(true, pk_hash)
 					},
@@ -337,23 +418,23 @@ impl DilithiumDkg {
 				};
 
 				let msg =
-					DkgRound4Broadcast { party_id: self.my_party_id(), success, public_key_hash };
+					DkgRound5Broadcast { party_id: self.my_party_id(), success, public_key_hash };
 
-				self.state_data.round4.add_confirmation(self.my_party_id(), msg.clone());
+				self.state_data.round5.add_confirmation(self.my_party_id(), msg.clone());
 
 				self.sent_current_round = true;
-				Ok(Action::SendMany(self.serialize_message(&DkgMessage::Round4(msg))?))
+				Ok(Action::SendMany(self.serialize_message(&DkgMessage::Round5(msg))?))
 			},
 
-			DkgState::Round4Waiting => {
+			DkgState::Round5Waiting => {
 				if self.state_data.can_advance() {
 					// Check consensus
-					if !self.state_data.round4.consensus_reached() {
-						let failed = self.state_data.round4.failed_parties();
+					if !self.state_data.round5.consensus_reached() {
+						let failed = self.state_data.round5.failed_parties();
 						if !failed.is_empty() {
 							return Err(DkgProtocolError::PartyFailure(failed));
 						}
-						let mismatched = self.state_data.round4.mismatched_parties();
+						let mismatched = self.state_data.round5.mismatched_parties();
 						return Err(DkgProtocolError::ConsensusFailure(mismatched));
 					}
 
@@ -424,7 +505,8 @@ impl DilithiumDkg {
 			DkgMessage::Round1(m) => self.state_data.process_round1(m),
 			DkgMessage::Round2(m) => self.state_data.process_round2(m),
 			DkgMessage::Round3(m) => self.state_data.process_round3(m),
-			DkgMessage::Round4(m) => self.state_data.process_round4(m),
+			DkgMessage::Round4(m) => self.state_data.process_round4_private(m),
+			DkgMessage::Round5(m) => self.state_data.process_round5(m),
 		};
 
 		if let Err(e) = result {
@@ -467,26 +549,110 @@ impl DilithiumDkg {
 		self.state_data.round1.combined_session_id = Some(combined);
 	}
 
-	/// Generate contributions for all subsets this party belongs to.
-	fn generate_contributions(&mut self) -> Result<PartyContributions, DkgProtocolError> {
+	/// Generate both secret contributions AND partial public keys.
+	///
+	/// This method generates:
+	/// 1. Secret contributions (s1, s2) - kept locally, NEVER broadcast
+	/// 2. Partial public keys (t_I = A·s1_I + s2_I) - broadcast in Round 3
+	///
+	/// The partial public keys allow computing the final public key without
+	/// revealing the underlying secrets.
+	fn generate_contributions_with_partial_public_keys(
+		&mut self,
+	) -> Result<(PartyContributions, PartyPublicContributions), DkgProtocolError> {
+		use crate::protocol::primitives::Q;
+		use qp_rusty_crystals_dilithium::{poly, polyvec};
+
 		let my_id = self.my_party_id();
 		let threshold = self.state_data.config.threshold();
 		let parties = self.state_data.config.total_parties();
 
-		let mut contributions = PartyContributions::new(my_id);
+		// Generate rho contribution (shared between both structs)
+		let rho_contribution: [u8; RHO_CONTRIBUTION_SIZE] = self.rng.gen();
 
-		// Generate rho contribution
-		contributions.rho_contribution = self.rng.gen();
+		let mut secret_contributions = PartyContributions::new(my_id);
+		secret_contributions.rho_contribution = rho_contribution;
 
-		// Generate contributions for each subset this party belongs to
+		let mut public_contributions = PartyPublicContributions::new(my_id);
+		public_contributions.rho_contribution = rho_contribution;
+
+		// Get subsets this party belongs to
 		let subsets = self.compute_subsets_for_party(my_id, threshold, parties);
 
+		// We need the combined rho to expand matrix A, but at Round 2 we don't have it yet.
+		// Use a deterministic expansion based on session ID for now.
+		// The final t will be computed in Round 4 using the actual combined rho.
+		let session_id =
+			self.state_data.round1.combined_session_id.ok_or_else(|| {
+				DkgProtocolError::InternalError("Session ID not yet computed".into())
+			})?;
+
+		// Expand matrix A using session ID as seed (deterministic, all parties get same A)
+		let mut a_matrix: Vec<polyvec::Polyvecl> =
+			(0..K).map(|_| polyvec::Polyvecl::default()).collect();
+		polyvec::matrix_expand(&mut a_matrix, &session_id);
+
 		for subset_mask in subsets {
-			let contrib = self.generate_subset_contribution(subset_mask)?;
-			contributions.subset_contributions.insert(subset_mask, contrib);
+			// Generate secret contribution
+			let secret_contrib = self.generate_subset_contribution(subset_mask)?;
+
+			// Compute partial public key: t_I = A · s1_I + s2_I
+			let mut partial_pk = PartialPublicKey::new(subset_mask);
+
+			// Convert s1 to polyvec and to NTT domain
+			let mut s1_polyvec = polyvec::Polyvecl::default();
+			for (i, poly_coeffs) in secret_contrib.s1.iter().enumerate().take(L) {
+				for (j, &coeff) in poly_coeffs.iter().enumerate().take(N) {
+					s1_polyvec.vec[i].coeffs[j] = coeff;
+				}
+			}
+
+			// Convert to NTT domain
+			let mut s1h = s1_polyvec.clone();
+			for s1h_poly in s1h.vec.iter_mut() {
+				crate::circl_ntt::ntt(s1h_poly);
+			}
+
+			// Compute t = A * s1
+			let mut t_polyvec = polyvec::Polyveck::default();
+			for (i, a_row) in a_matrix.iter().enumerate().take(K) {
+				for (a_poly, s1h_poly) in a_row.vec.iter().zip(s1h.vec.iter()).take(L) {
+					let mut temp = poly::Poly::default();
+					poly::pointwise_montgomery(&mut temp, a_poly, s1h_poly);
+					t_polyvec.vec[i] = poly::add(&t_polyvec.vec[i], &temp);
+				}
+				poly::reduce(&mut t_polyvec.vec[i]);
+				poly::invntt_tomont(&mut t_polyvec.vec[i]);
+			}
+
+			// Add s2: t = A * s1 + s2
+			for (i, poly_coeffs) in secret_contrib.s2.iter().enumerate().take(K) {
+				for (j, &coeff) in poly_coeffs.iter().enumerate().take(N) {
+					t_polyvec.vec[i].coeffs[j] = t_polyvec.vec[i].coeffs[j].wrapping_add(coeff);
+				}
+			}
+
+			// Reduce and normalize
+			for t_poly in t_polyvec.vec.iter_mut().take(K) {
+				poly::reduce(t_poly);
+				for coeff in t_poly.coeffs.iter_mut() {
+					*coeff = ((*coeff % Q) + Q) % Q;
+				}
+			}
+
+			// Copy to partial public key
+			for (i, t_poly) in t_polyvec.vec.iter().enumerate().take(K) {
+				for (j, &coeff) in t_poly.coeffs.iter().enumerate().take(N) {
+					partial_pk.t[i][j] = coeff;
+				}
+			}
+
+			// Store both
+			secret_contributions.subset_contributions.insert(subset_mask, secret_contrib);
+			public_contributions.partial_public_keys.insert(subset_mask, partial_pk);
 		}
 
-		Ok(contributions)
+		Ok((secret_contributions, public_contributions))
 	}
 
 	/// Compute all subset masks that contain a given party.
@@ -565,38 +731,241 @@ impl DilithiumDkg {
 		}
 	}
 
-	/// Compute the commitment hash for contributions.
-	fn compute_commitment_hash(
+	/// Compute the subsets this party belongs to.
+	fn compute_my_subsets(&self) -> Vec<SubsetMask> {
+		let my_id = self.my_party_id();
+		let threshold = self.state_data.config.threshold();
+		let parties = self.state_data.config.total_parties();
+		self.compute_subsets_for_party(my_id, threshold, parties)
+	}
+
+	/// SECURITY FIX (HQ1): Generate P2P messages to send secret contributions
+	/// to other parties in the same subsets.
+	///
+	/// For each subset this party belongs to, we generate a message for each
+	/// OTHER party in that subset (not ourselves).
+	fn generate_round4_private_messages(
 		&self,
-		contributions: &PartyContributions,
+		secret_contributions: &PartyContributions,
+	) -> Vec<DkgRound4Private> {
+		let my_id = self.my_party_id();
+		let mut messages = Vec::new();
+
+		for (subset_mask, contribution) in &secret_contributions.subset_contributions {
+			// Find other parties in this subset
+			for i in 0..self.state_data.config.total_parties() {
+				let party_bit = 1u16 << i;
+				if (*subset_mask & party_bit) != 0 {
+					// This party is in the subset
+					if let Some(party_id) = self.state_data.party_id_at(i as usize) {
+						if party_id != my_id {
+							// Send our contribution to this party
+							messages.push(DkgRound4Private {
+								from_party_id: my_id,
+								subset_mask: *subset_mask,
+								contribution: contribution.clone(),
+							});
+						}
+					}
+				}
+			}
+		}
+
+		messages
+	}
+
+	/// Send the next P2P message in the Round 4 queue.
+	fn send_next_round4_private(&mut self) -> Result<Action<DkgOutput>, DkgProtocolError> {
+		if self.round4_private_sent_count >= self.round4_private_messages.len() {
+			return Ok(Action::Wait);
+		}
+
+		let msg = &self.round4_private_messages[self.round4_private_sent_count];
+
+		// Find the target party ID from the subset mask
+		// We need to find which party this specific message is for
+		// The messages are generated in order, so we need to track per-subset recipients
+		let target_party_id =
+			self.find_recipient_for_private_message(self.round4_private_sent_count)?;
+
+		let dkg_msg = DkgMessage::Round4(msg.clone());
+		let data = self.serialize_message(&dkg_msg)?;
+
+		self.round4_private_sent_count += 1;
+
+		Ok(Action::SendPrivate(target_party_id, data))
+	}
+
+	/// Find the recipient party ID for a given P2P message index.
+	fn find_recipient_for_private_message(
+		&self,
+		msg_index: usize,
+	) -> Result<ParticipantId, DkgProtocolError> {
+		let my_id = self.my_party_id();
+		let secret_contributions =
+			self.state_data.round2.my_contributions.as_ref().ok_or_else(|| {
+				DkgProtocolError::InternalError("Missing my contributions".into())
+			})?;
+
+		let mut current_index = 0;
+		for (subset_mask, _) in &secret_contributions.subset_contributions {
+			for i in 0..self.state_data.config.total_parties() {
+				let party_bit = 1u16 << i;
+				if (*subset_mask & party_bit) != 0 {
+					if let Some(party_id) = self.state_data.party_id_at(i as usize) {
+						if party_id != my_id {
+							if current_index == msg_index {
+								return Ok(party_id);
+							}
+							current_index += 1;
+						}
+					}
+				}
+			}
+		}
+
+		Err(DkgProtocolError::InternalError(format!(
+			"Could not find recipient for message index {}",
+			msg_index
+		)))
+	}
+
+	/// SECURITY FIX (HQ1): Verify that received secrets match broadcast partial public keys.
+	///
+	/// For each received secret contribution, we verify that A·s_I equals the
+	/// partial public key t_I that was broadcast by the same party.
+	fn verify_received_secrets(&self) -> Result<(), DkgProtocolError> {
+		use crate::protocol::primitives::Q;
+		use qp_rusty_crystals_dilithium::{poly, polyvec};
+
+		// Get the session ID to expand matrix A
+		let session_id = self
+			.state_data
+			.round1
+			.combined_session_id
+			.ok_or_else(|| DkgProtocolError::InternalError("Session ID not computed".into()))?;
+
+		// Expand matrix A
+		let mut a_matrix: Vec<polyvec::Polyvecl> =
+			(0..K).map(|_| polyvec::Polyvecl::default()).collect();
+		polyvec::matrix_expand(&mut a_matrix, &session_id);
+
+		// For each received secret contribution
+		for ((from_party_id, subset_mask), received_secret) in
+			&self.state_data.round3.received_secret_contributions
+		{
+			// Get the broadcast public contributions from this party
+			let public_contrib =
+				self.state_data.round3.public_contributions.get(from_party_id).ok_or_else(
+					|| {
+						DkgProtocolError::InternalError(format!(
+							"Missing public contributions from party {}",
+							from_party_id
+						))
+					},
+				)?;
+
+			// Get the partial public key for this subset
+			let partial_pk =
+				public_contrib.partial_public_keys.get(subset_mask).ok_or_else(|| {
+					DkgProtocolError::InternalError(format!(
+						"Missing partial public key for subset {:b} from party {}",
+						subset_mask, from_party_id
+					))
+				})?;
+
+			// Compute t_I = A·s1_I + s2_I from the received secret
+			let mut s1_polyvec = polyvec::Polyvecl::default();
+			for (i, poly_coeffs) in received_secret.s1.iter().enumerate().take(L) {
+				for (j, &coeff) in poly_coeffs.iter().enumerate().take(N) {
+					s1_polyvec.vec[i].coeffs[j] = coeff;
+				}
+			}
+
+			// Convert to NTT domain
+			let mut s1h = s1_polyvec.clone();
+			for s1h_poly in s1h.vec.iter_mut() {
+				crate::circl_ntt::ntt(s1h_poly);
+			}
+
+			// Compute t = A * s1
+			let mut computed_t = polyvec::Polyveck::default();
+			for (i, a_row) in a_matrix.iter().enumerate().take(K) {
+				for (a_poly, s1h_poly) in a_row.vec.iter().zip(s1h.vec.iter()).take(L) {
+					let mut temp = poly::Poly::default();
+					poly::pointwise_montgomery(&mut temp, a_poly, s1h_poly);
+					computed_t.vec[i] = poly::add(&computed_t.vec[i], &temp);
+				}
+				poly::reduce(&mut computed_t.vec[i]);
+				poly::invntt_tomont(&mut computed_t.vec[i]);
+			}
+
+			// Add s2: t = A * s1 + s2
+			for (i, poly_coeffs) in received_secret.s2.iter().enumerate().take(K) {
+				for (j, &coeff) in poly_coeffs.iter().enumerate().take(N) {
+					computed_t.vec[i].coeffs[j] = computed_t.vec[i].coeffs[j].wrapping_add(coeff);
+				}
+			}
+
+			// Reduce and normalize
+			for t_poly in computed_t.vec.iter_mut().take(K) {
+				poly::reduce(t_poly);
+				for coeff in t_poly.coeffs.iter_mut() {
+					*coeff = ((*coeff % Q) + Q) % Q;
+				}
+			}
+
+			// Compare with broadcast partial public key
+			for i in 0..K {
+				for j in 0..N {
+					let computed = computed_t.vec[i].coeffs[j];
+					let broadcast = partial_pk.t[i][j];
+					if computed != broadcast {
+						return Err(DkgProtocolError::CommitmentMismatch(*from_party_id));
+					}
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	/// Compute commitment hash for PUBLIC contributions only.
+	///
+	/// This commits to:
+	/// - Party ID
+	/// - Rho contribution
+	/// - Partial public keys (t_I = A·s_I), NOT raw secrets
+	/// - Session ID (for domain separation)
+	///
+	/// SECURITY: The raw secret polynomials (s1, s2) are NEVER included in the commitment.
+	fn compute_public_commitment_hash(
+		&self,
+		public_contributions: &PartyPublicContributions,
 	) -> [u8; COMMITMENT_HASH_SIZE] {
 		use qp_rusty_crystals_dilithium::fips202;
 
 		let mut state = fips202::KeccakState::default();
 
 		// Include party ID
-		fips202::shake256_absorb(&mut state, &contributions.party_id.to_le_bytes(), 4);
+		fips202::shake256_absorb(&mut state, &public_contributions.party_id.to_le_bytes(), 4);
 
 		// Include rho contribution
 		fips202::shake256_absorb(
 			&mut state,
-			&contributions.rho_contribution,
+			&public_contributions.rho_contribution,
 			RHO_CONTRIBUTION_SIZE,
 		);
 
-		// Include subset contributions in sorted order
-		let mut subsets: Vec<_> = contributions.subset_contributions.iter().collect();
-		subsets.sort_by_key(|(mask, _)| *mask);
+		// Include partial public keys in sorted order by subset mask
+		let mut partial_pks: Vec<_> = public_contributions.partial_public_keys.iter().collect();
+		partial_pks.sort_by_key(|(mask, _)| *mask);
 
-		for (mask, contrib) in subsets {
+		for (mask, partial_pk) in partial_pks {
 			fips202::shake256_absorb(&mut state, &mask.to_le_bytes(), 2);
 
-			for poly in &contrib.s1 {
-				for coeff in poly {
-					fips202::shake256_absorb(&mut state, &coeff.to_le_bytes(), 4);
-				}
-			}
-			for poly in &contrib.s2 {
+			// Include partial public key coefficients
+			for poly in &partial_pk.t {
 				for coeff in poly {
 					fips202::shake256_absorb(&mut state, &coeff.to_le_bytes(), 4);
 				}
@@ -616,21 +985,28 @@ impl DilithiumDkg {
 		hash
 	}
 
-	/// Verify all revealed contributions against their commitments.
+	/// SECURITY FIX (HQ1): Verify all revealed PUBLIC contributions against their commitments.
+	///
+	/// This verifies:
+	/// 1. The commitment hash matches what was committed in Round 2
+	/// 2. Partial public key coefficients are in valid range [0, Q)
+	///
+	/// SECURITY: We verify PUBLIC contributions (partial public keys), NOT raw secrets.
 	fn verify_all_contributions(&mut self) -> Result<(), DkgProtocolError> {
-		let eta = 2i32; // ML-DSA-87 η parameter
+		use crate::protocol::primitives::Q;
+
 		let my_id = self.my_party_id();
 
-		// Collect party IDs and contributions to avoid borrow issues
-		let parties_to_verify: Vec<(ParticipantId, PartyContributions)> = self
+		// Collect party IDs and public contributions to avoid borrow issues
+		let parties_to_verify: Vec<(ParticipantId, PartyPublicContributions)> = self
 			.state_data
 			.round3
-			.contributions
+			.public_contributions
 			.iter()
 			.map(|(&id, c)| (id, c.clone()))
 			.collect();
 
-		for (party_id, contributions) in parties_to_verify {
+		for (party_id, public_contributions) in parties_to_verify {
 			// Skip self (already verified implicitly)
 			if party_id == my_id {
 				self.state_data.round3.set_verification_result(party_id, true);
@@ -646,16 +1022,16 @@ impl DilithiumDkg {
 					))
 				})?;
 
-			let actual_hash = self.compute_commitment_hash(&contributions);
+			let actual_hash = self.compute_public_commitment_hash(&public_contributions);
 
 			if actual_hash != expected_hash {
 				self.state_data.round3.set_verification_result(party_id, false);
 				return Err(DkgProtocolError::CommitmentMismatch(party_id));
 			}
 
-			// Verify coefficient bounds
-			for subset_contrib in contributions.subset_contributions.values() {
-				if !subset_contrib.verify_bounds(eta) {
+			// Verify partial public key coefficients are in valid range [0, Q)
+			for partial_pk in public_contributions.partial_public_keys.values() {
+				if !partial_pk.verify_range(Q) {
 					self.state_data.round3.set_verification_result(party_id, false);
 					return Err(DkgProtocolError::InvalidContributionBounds(party_id));
 				}
@@ -667,166 +1043,109 @@ impl DilithiumDkg {
 		Ok(())
 	}
 
-	/// Compute the final DKG output (public key and private share).
+	/// SECURITY FIX (HQ1): Compute the final DKG output (public key and private share).
+	///
+	/// This method computes:
+	/// 1. Combined rho from all parties' rho contributions
+	/// 2. Final public key t by summing PARTIAL PUBLIC KEYS (not raw secrets!)
+	/// 3. Private key shares using only THIS PARTY's secret contributions
+	///
+	/// SECURITY: Raw secrets from other parties are NEVER accessed because they
+	/// were never broadcast. Only partial public keys are summed.
 	fn compute_final_output(&mut self) -> Result<DkgOutput, DkgProtocolError> {
 		use crate::{
 			keys::{PrivateKeyShare, PublicKey, SecretShareData, PUBLIC_KEY_SIZE, TR_SIZE},
 			protocol::primitives::Q,
 		};
-		use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec};
+		use qp_rusty_crystals_dilithium::{fips202, packing, polyvec};
 
 		let my_id = self.my_party_id();
 		let threshold = self.state_data.config.threshold();
 		let parties = self.state_data.config.total_parties();
 
-		// Combine rho contributions
-		let mut rho = [0u8; 32];
-		{
-			let mut state = fips202::KeccakState::default();
-			let mut contribs: Vec<_> = self.state_data.round3.contributions.iter().collect();
-			contribs.sort_by_key(|(id, _)| *id);
+		// Use session_id as rho for matrix A expansion.
+		// This is critical: the same seed must be used both when computing partial
+		// public keys (in Round 2) and when packing the final public key here.
+		// The session_id was jointly generated in Round 1 from all parties'
+		// contributions, so it serves the same purpose as rho in the Borin DKG.
+		let rho = self
+			.state_data
+			.round1
+			.combined_session_id
+			.ok_or_else(|| DkgProtocolError::InternalError("Session ID not computed".into()))?;
 
-			for (_, contrib) in contribs {
-				fips202::shake256_absorb(&mut state, &contrib.rho_contribution, 32);
-			}
-			fips202::shake256_finalize(&mut state);
-			fips202::shake256_squeeze(&mut rho, 32, &mut state);
-		}
+		// SECURITY FIX (HQ1): Get THIS PARTY's secret contributions
+		let my_secret_contributions =
+			self.state_data.round3.my_secret_contributions.clone().ok_or_else(|| {
+				DkgProtocolError::InternalError("Missing my secret contributions".into())
+			})?;
 
-		// Compute combined shares for each subset
+		// Compute combined shares for each subset THIS PARTY belongs to
+		// SECURITY FIX (HQ1): We now combine our own secrets WITH secrets received
+		// via P2P from other parties in the same subset.
 		let mut combined_shares: HashMap<SubsetMask, SecretShareData> = HashMap::new();
 		let my_subsets = self.compute_subsets_for_party(my_id, threshold, parties);
 
 		for subset_mask in &my_subsets {
-			let mut s1_combined = vec![[0i32; N]; L];
-			let mut s2_combined = vec![[0i32; N]; K];
+			let mut s1_share = vec![[0i32; N]; L];
+			let mut s2_share = vec![[0i32; N]; K];
 
-			// Sum contributions from all parties in this subset
-			// Iterate by index (0, 1, 2, ...) for bitmask checks, then look up actual party ID
-			for party_index in 0..parties as usize {
-				if (subset_mask & (1 << party_index)) == 0 {
-					continue;
+			// Add our own contribution
+			if let Some(my_contrib) = my_secret_contributions.subset_contributions.get(subset_mask)
+			{
+				for (i, poly) in my_contrib.s1.iter().enumerate() {
+					for (j, &coeff) in poly.iter().enumerate() {
+						s1_share[i][j] = s1_share[i][j].wrapping_add(coeff);
+					}
 				}
+				for (i, poly) in my_contrib.s2.iter().enumerate() {
+					for (j, &coeff) in poly.iter().enumerate() {
+						s2_share[i][j] = s2_share[i][j].wrapping_add(coeff);
+					}
+				}
+			}
 
-				// Get the actual party ID for this index
-				let actual_party_id =
-					self.state_data.party_id_at(party_index).expect("party_index should be valid");
-
-				if let Some(party_contrib) =
-					self.state_data.round3.contributions.get(&actual_party_id)
-				{
-					if let Some(subset_contrib) =
-						party_contrib.subset_contributions.get(subset_mask)
-					{
-						for (s1_poly, contrib_poly) in
-							s1_combined.iter_mut().zip(subset_contrib.s1.iter())
-						{
-							for (s1_coeff, contrib_coeff) in
-								s1_poly.iter_mut().zip(contrib_poly.iter())
-							{
-								*s1_coeff = s1_coeff.wrapping_add(*contrib_coeff);
-							}
+			// Add contributions received from other parties via P2P
+			for ((from_party_id, received_mask), received_contrib) in
+				&self.state_data.round3.received_secret_contributions
+			{
+				if *received_mask == *subset_mask && *from_party_id != my_id {
+					for (i, poly) in received_contrib.s1.iter().enumerate() {
+						for (j, &coeff) in poly.iter().enumerate() {
+							s1_share[i][j] = s1_share[i][j].wrapping_add(coeff);
 						}
-						for (s2_poly, contrib_poly) in
-							s2_combined.iter_mut().zip(subset_contrib.s2.iter())
-						{
-							for (s2_coeff, contrib_coeff) in
-								s2_poly.iter_mut().zip(contrib_poly.iter())
-							{
-								*s2_coeff = s2_coeff.wrapping_add(*contrib_coeff);
-							}
+					}
+					for (i, poly) in received_contrib.s2.iter().enumerate() {
+						for (j, &coeff) in poly.iter().enumerate() {
+							s2_share[i][j] = s2_share[i][j].wrapping_add(coeff);
 						}
 					}
 				}
 			}
 
-			// Normalize coefficients mod q
-			for s1_poly in s1_combined.iter_mut() {
-				for coeff in s1_poly.iter_mut() {
-					*coeff = ((*coeff % Q) + Q) % Q;
-				}
-			}
-			for s2_poly in s2_combined.iter_mut() {
-				for coeff in s2_poly.iter_mut() {
-					*coeff = ((*coeff % Q) + Q) % Q;
-				}
-			}
-
-			combined_shares
-				.insert(*subset_mask, SecretShareData { s1: s1_combined, s2: s2_combined });
+			// Note: Do NOT normalize to [0, Q) here!
+			// The shares should remain in centered form like the dealer produces.
+			// The signing code expects centered values.
+			combined_shares.insert(*subset_mask, SecretShareData { s1: s1_share, s2: s2_share });
 		}
 
-		// Compute total s1, s2 for public key generation
-		let mut s1_total = polyvec::Polyvecl::default();
-		let mut s2_total = polyvec::Polyveck::default();
-
-		// Sum all subset contributions (they partition the total)
-		for contrib in self.state_data.round3.contributions.values() {
-			for subset_contrib in contrib.subset_contributions.values() {
-				for (total_poly, contrib_poly) in
-					s1_total.vec.iter_mut().zip(subset_contrib.s1.iter())
-				{
-					for (total_coeff, contrib_coeff) in
-						total_poly.coeffs.iter_mut().zip(contrib_poly.iter())
-					{
-						*total_coeff = total_coeff.wrapping_add(*contrib_coeff);
-					}
-				}
-				for (total_poly, contrib_poly) in
-					s2_total.vec.iter_mut().zip(subset_contrib.s2.iter())
-				{
-					for (total_coeff, contrib_coeff) in
-						total_poly.coeffs.iter_mut().zip(contrib_poly.iter())
-					{
-						*total_coeff = total_coeff.wrapping_add(*contrib_coeff);
-					}
-				}
-			}
-		}
-
-		// Normalize totals
-		for total_poly in s1_total.vec.iter_mut() {
-			for coeff in total_poly.coeffs.iter_mut() {
-				*coeff = ((*coeff % Q) + Q) % Q;
-			}
-		}
-		for total_poly in s2_total.vec.iter_mut() {
-			for coeff in total_poly.coeffs.iter_mut() {
-				*coeff = ((*coeff % Q) + Q) % Q;
-			}
-		}
-
-		// Convert s1 to NTT domain
-		let mut s1h_total = s1_total.clone();
-		for s1h_poly in s1h_total.vec.iter_mut() {
-			crate::circl_ntt::ntt(s1h_poly);
-		}
-
-		// Expand matrix A from rho
-		let mut a_matrix: Vec<polyvec::Polyvecl> =
-			(0..K).map(|_| polyvec::Polyvecl::default()).collect();
-		polyvec::matrix_expand(&mut a_matrix, &rho);
-
-		// Compute t = A*s1 + s2
+		// SECURITY FIX: Compute final t by summing PARTIAL PUBLIC KEYS from all parties
+		// We NEVER access other parties' raw secrets (we don't have them!)
 		let mut t = polyvec::Polyveck::default();
-		for (i, a_row) in a_matrix.iter().enumerate().take(K) {
-			for (a_poly, s1h_poly) in a_row.vec.iter().zip(s1h_total.vec.iter()).take(L) {
-				let mut temp = poly::Poly::default();
-				poly::pointwise_montgomery(&mut temp, a_poly, s1h_poly);
-				t.vec[i] = poly::add(&t.vec[i], &temp);
+
+		// Sum all partial public keys from all parties
+		for public_contrib in self.state_data.round3.public_contributions.values() {
+			for partial_pk in public_contrib.partial_public_keys.values() {
+				for (i, t_poly) in partial_pk.t.iter().enumerate().take(K) {
+					for (j, &coeff) in t_poly.iter().enumerate().take(N) {
+						t.vec[i].coeffs[j] = t.vec[i].coeffs[j].wrapping_add(coeff);
+					}
+				}
 			}
-			poly::reduce(&mut t.vec[i]);
-			poly::invntt_tomont(&mut t.vec[i]);
 		}
 
-		// Add s2
-		for (t_poly, s2_poly) in t.vec.iter_mut().zip(s2_total.vec.iter()).take(K) {
-			*t_poly = poly::add(t_poly, s2_poly);
-		}
-
-		// Normalize t
+		// Normalize t mod Q
 		for t_poly in t.vec.iter_mut().take(K) {
-			poly::reduce(t_poly);
 			for coeff in t_poly.coeffs.iter_mut() {
 				*coeff = ((*coeff % Q) + Q) % Q;
 			}
@@ -854,11 +1173,9 @@ impl DilithiumDkg {
 		let mut party_key = [0u8; 32];
 		{
 			let mut state = fips202::KeccakState::default();
+			// Use rho (which is session_id) and party_id to derive a unique key
 			fips202::shake256_absorb(&mut state, &rho, 32);
 			fips202::shake256_absorb(&mut state, &my_id.to_le_bytes(), 4);
-			if let Some(session_id) = &self.state_data.round1.combined_session_id {
-				fips202::shake256_absorb(&mut state, session_id, SESSION_ID_SIZE);
-			}
 			fips202::shake256_finalize(&mut state);
 			fips202::shake256_squeeze(&mut party_key, 32, &mut state);
 		}

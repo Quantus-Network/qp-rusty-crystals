@@ -1,22 +1,26 @@
 //! Distributed Key Generation (DKG) for threshold ML-DSA-87.
 //!
-//! This module implements a 4-round DKG protocol that allows parties to
+//! This module implements a 5-round DKG protocol that allows parties to
 //! collaboratively generate threshold key shares without a trusted dealer.
 //!
 //! # Protocol Overview
 //!
-//! The DKG protocol consists of 4 rounds:
+//! The DKG protocol consists of 5 rounds:
 //!
 //! 1. **Round 1 - Session ID**: Each party contributes random bytes to form a unique session ID,
 //!    preventing replay attacks.
 //!
 //! 2. **Round 2 - Commitment**: Each party generates random contributions for each subset they
-//!    belong to and broadcasts a hash commitment.
+//!    belong to and broadcasts a hash commitment to their PUBLIC contributions.
 //!
-//! 3. **Round 3 - Reveal**: Each party reveals their contributions. Others verify that the revealed
-//!    data matches the committed hash.
+//! 3. **Round 3 - Reveal**: Each party reveals their PARTIAL PUBLIC KEYS (t_I = A·s_I). Others
+//!    verify that the revealed data matches the committed hash. SECURITY: Raw secrets are NEVER
+//!    broadcast.
 //!
-//! 4. **Round 4 - Confirmation**: Each party computes their final shares and the public key, then
+//! 4. **Round 4 - P2P Secret Sharing**: Each party sends their SECRET contributions via P2P ONLY to
+//!    parties in the same subsets. Recipients verify A·s matches the broadcast t.
+//!
+//! 5. **Round 5 - Confirmation**: Each party computes their final shares and the public key, then
 //!    broadcasts a confirmation with the public key hash to ensure consensus.
 //!
 //! # Usage
@@ -92,7 +96,8 @@ pub use protocol::{Action, DilithiumDkg, DkgProtocolError};
 pub use state::{DkgState, DkgStateData};
 pub use types::{
 	DkgConfig, DkgMessage, DkgOutput, DkgRound1Broadcast, DkgRound2Broadcast, DkgRound3Broadcast,
-	DkgRound4Broadcast, ParticipantId, PartyContributions, SubsetContribution, SubsetMask,
+	DkgRound4Private, DkgRound5Broadcast, ParticipantId, PartyContributions, SubsetContribution,
+	SubsetMask,
 };
 
 /// Convenience function to run a complete local DKG for testing.
@@ -263,6 +268,16 @@ mod tests {
 		let public_key = dkg_outputs[0].public_key.clone();
 		for output in &dkg_outputs[1..] {
 			assert_eq!(public_key.as_bytes(), output.public_key.as_bytes());
+		}
+
+		// Verify that parties in the same subset have the same combined share
+		// Party 0 and Party 1 both belong to subset 0b11
+		let party0_share_11 = dkg_outputs[0].private_share.shares().get(&0b11);
+		let party1_share_11 = dkg_outputs[1].private_share.shares().get(&0b11);
+		if let (Some(s0), Some(s1)) = (party0_share_11, party1_share_11) {
+			let all_same = s0.s1.iter().zip(s1.s1.iter()).all(|(p0, p1)| p0 == p1) &&
+				s0.s2.iter().zip(s1.s2.iter()).all(|(p0, p1)| p0 == p1);
+			assert!(all_same, "Parties in the same subset should have identical shares");
 		}
 
 		let config = ThresholdConfig::new(2, 3).unwrap();

@@ -524,8 +524,8 @@ impl DilithiumSignProtocol {
 				.collect(),
 			SignProtocolState::WaitingForLeaderDecision => {
 				// Waiting for leader only (unless leader was dropped)
-				if self.received_signature.is_none()
-					&& !self.dropped_parties.contains(&self.leader_id)
+				if self.received_signature.is_none() &&
+					!self.dropped_parties.contains(&self.leader_id)
 				{
 					vec![self.leader_id]
 				} else {
@@ -725,9 +725,8 @@ impl DilithiumSignProtocol {
 				// Round 4 Retry: no additional data
 				Ok(SigningMessage::Round4Retry)
 			},
-			_ => {
-				Err(SignProtocolError::SerializationError(format!("Unknown message tag: {}", tag)))
-			},
+			_ =>
+				Err(SignProtocolError::SerializationError(format!("Unknown message tag: {}", tag))),
 		}
 	}
 
@@ -992,10 +991,10 @@ impl DilithiumSignProtocol {
 				// Accept Round 1 messages during Round 1 waiting or earlier Round 2 states
 				if matches!(
 					self.state,
-					SignProtocolState::Round1Generate
-						| SignProtocolState::Round1Waiting
-						| SignProtocolState::Round2Generate
-						| SignProtocolState::Round2Waiting
+					SignProtocolState::Round1Generate |
+						SignProtocolState::Round1Waiting |
+						SignProtocolState::Round2Generate |
+						SignProtocolState::Round2Waiting
 				) {
 					self.r1_broadcasts.entry(r1.party_id).or_insert(r1);
 				}
@@ -1005,10 +1004,10 @@ impl DilithiumSignProtocol {
 				// Accept Round 2 messages during Round 2 or Round 3 states
 				if matches!(
 					self.state,
-					SignProtocolState::Round2Generate
-						| SignProtocolState::Round2Waiting
-						| SignProtocolState::Round3Generate
-						| SignProtocolState::Round3Waiting
+					SignProtocolState::Round2Generate |
+						SignProtocolState::Round2Waiting |
+						SignProtocolState::Round3Generate |
+						SignProtocolState::Round3Waiting
 				) {
 					self.r2_broadcasts.entry(r2.party_id).or_insert(r2);
 				} else if matches!(
@@ -1028,18 +1027,18 @@ impl DilithiumSignProtocol {
 				// Accept Round 3 messages during Round 3 waiting or later
 				if matches!(
 					self.state,
-					SignProtocolState::Round3Generate
-						| SignProtocolState::Round3Waiting
-						| SignProtocolState::Round4Deciding
-						| SignProtocolState::WaitingForLeaderDecision
+					SignProtocolState::Round3Generate |
+						SignProtocolState::Round3Waiting |
+						SignProtocolState::Round4Deciding |
+						SignProtocolState::WaitingForLeaderDecision
 				) {
 					self.r3_broadcasts.entry(r3.party_id).or_insert(r3);
 				} else if matches!(
 					self.state,
-					SignProtocolState::Round1Generate
-						| SignProtocolState::Round1Waiting
-						| SignProtocolState::Round2Generate
-						| SignProtocolState::Round2Waiting
+					SignProtocolState::Round1Generate |
+						SignProtocolState::Round1Waiting |
+						SignProtocolState::Round2Generate |
+						SignProtocolState::Round2Waiting
 				) {
 					// Buffer Round 3 messages that arrive while we're still in earlier rounds
 					#[cfg(debug_assertions)]
@@ -1052,8 +1051,8 @@ impl DilithiumSignProtocol {
 			},
 			SigningMessage::Round4Complete(sig_bytes) => {
 				// Only followers process Round4Complete
-				if !self.is_leader()
-					&& matches!(self.state, SignProtocolState::WaitingForLeaderDecision)
+				if !self.is_leader() &&
+					matches!(self.state, SignProtocolState::WaitingForLeaderDecision)
 				{
 					if let Some(signature) = Signature::from_bytes(&sig_bytes) {
 						self.received_signature = Some(signature);
