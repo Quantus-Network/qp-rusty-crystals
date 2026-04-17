@@ -225,9 +225,11 @@ fn test_derived_key_generation_and_signing() {
 			.iter_mut()
 			.enumerate()
 			.map(|(i, s)| {
-				let others: Vec<_> =
+				let others_r1: Vec<_> =
+					r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+				let others_r2: Vec<_> =
 					r2_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-				s.round3_respond(&others).unwrap()
+				s.round3_respond(&others_r1, &others_r2).unwrap()
 			})
 			.collect();
 

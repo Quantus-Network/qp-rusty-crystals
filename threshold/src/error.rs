@@ -109,6 +109,16 @@ pub enum ThresholdError {
 		/// Party ID that sent duplicate.
 		party_id: u32,
 	},
+	/// Commitment data does not match commitment hash (HQ2).
+	///
+	/// This indicates a potential rushing adversary attack where a party
+	/// tried to change their commitment after seeing other parties' values.
+	CommitmentMismatch {
+		/// Party ID with mismatched commitment.
+		party_id: u32,
+		/// Additional context about the mismatch.
+		message: String,
+	},
 	// ========================================================================
 	// DKG-specific errors
 	// ========================================================================
@@ -206,6 +216,9 @@ impl fmt::Display for ThresholdError {
 			},
 			ThresholdError::DuplicateBroadcast { party_id } => {
 				write!(f, "Duplicate broadcast from party {}", party_id)
+			},
+			ThresholdError::CommitmentMismatch { party_id, message } => {
+				write!(f, "Commitment mismatch for party {}: {}", party_id, message)
 			},
 			ThresholdError::DkgError(msg) => {
 				write!(f, "DKG error: {}", msg)

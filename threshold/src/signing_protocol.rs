@@ -669,18 +669,26 @@ impl DilithiumSignProtocol {
 			},
 
 			SignProtocolState::Round3Generate => {
+				// Collect other parties' Round 1 broadcasts (for commitment verification)
+				let others_r1: Vec<Round1Broadcast> = self
+					.r1_broadcasts
+					.values()
+					.filter(|r| r.party_id != self.signer.party_id())
+					.cloned()
+					.collect();
+
 				// Collect other parties' Round 2 broadcasts
-				let others: Vec<Round2Broadcast> = self
+				let others_r2: Vec<Round2Broadcast> = self
 					.r2_broadcasts
 					.values()
 					.filter(|r| r.party_id != self.signer.party_id())
 					.cloned()
 					.collect();
 
-				// Generate Round 3 response
+				// Generate Round 3 response (HQ2: verification happens inside round3_respond)
 				let r3 = self
 					.signer
-					.round3_respond(&others)
+					.round3_respond(&others_r1, &others_r2)
 					.map_err(|e| SignProtocolError::SigningError(e.to_string()))?;
 
 				// Store our broadcast

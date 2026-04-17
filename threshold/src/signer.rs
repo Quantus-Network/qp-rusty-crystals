@@ -27,8 +27,8 @@
 //! let r2 = signer.round2_reveal(message, context, &other_r1_broadcasts)?;
 //! // ... broadcast r2 to other parties, receive their broadcasts ...
 //!
-//! // Round 3: Compute response
-//! let r3 = signer.round3_respond(&other_r2_broadcasts)?;
+//! // Round 3: Compute response (verifies commitments before aggregating)
+//! let r3 = signer.round3_respond(&other_r1_broadcasts, &other_r2_broadcasts)?;
 //! // ... broadcast r3 to other parties, receive their broadcasts ...
 //!
 //! // Combine into final signature
@@ -48,7 +48,8 @@ use crate::{
 	protocol::signing::{
 		aggregate_commitments_dilithium, combine_signature, generate_round1,
 		generate_round3_response, pack_responses, pack_round1_commitment, process_round2,
-		unpack_commitment_dilithium, unpack_responses, Round1Data, Round2Data,
+		unpack_commitment_dilithium, unpack_responses, verify_commitment_hash, Round1Data,
+		Round2Data,
 	},
 };
 
@@ -245,16 +246,23 @@ impl ThresholdSigner {
 		Ok(broadcast)
 	}
 
-	/// Round 2: Process others' commitments and reveal our commitment.
+	/// Round 2: Generate our commitment reveal.
 	///
 	/// After receiving all Round 1 broadcasts from other parties, call this
-	/// method to produce the Round 2 broadcast.
+	/// method to produce our Round 2 broadcast.
 	///
 	/// # Arguments
 	///
 	/// * `message` - The message to sign
 	/// * `context` - Optional context string (max 255 bytes)
 	/// * `other_round1` - Round 1 broadcasts from other participating parties
+	///
+	/// # Security Note (HQ2)
+	///
+	/// This function generates our Round 2 broadcast. Verification of OTHER parties'
+	/// Round 2 commitments against their Round 1 hashes must be done separately before
+	/// using their data. When using `DilithiumSignProtocol`, this verification is
+	/// performed automatically in `Round3Generate` via `verify_round2_commitments()`.
 	///
 	/// # Errors
 	///
@@ -299,7 +307,8 @@ impl ThresholdSigner {
 		// Collect other parties' IDs
 		let other_party_ids: Vec<u32> = other_round1.iter().map(|r1| r1.party_id).collect();
 
-		// Process Round 2 (without other commitment data yet - we'll get it in round3)
+		// Process Round 2 - sets up our own commitments
+		// Verification and aggregation of others' commitments happens in round3_respond() (HQ2)
 		let round2_data = process_round2(
 			&self.private_key,
 			&self.public_key,
@@ -308,81 +317,6 @@ impl ThresholdSigner {
 			message,
 			context,
 			&other_party_ids,
-			&[], // No commitment data yet
-		)?;
-
-		let broadcast = Round2Broadcast::new(self.private_key.party_id(), commitment_data);
-
-		// Update state
-		self.state = SignerState::AfterRound2 {
-			round1_data,
-			round2_data,
-			message: message.to_vec(),
-			context: context.to_vec(),
-		};
-
-		Ok(broadcast)
-	}
-
-	/// Round 2 with explicit commitment data from other parties.
-	///
-	/// This is the full version of Round 2 that processes both the commitment
-	/// hashes (for verification) and the actual commitment data (for aggregation).
-	///
-	/// # Arguments
-	///
-	/// * `message` - The message to sign
-	/// * `context` - Optional context string (max 255 bytes)
-	/// * `other_broadcasts` - Round 2 broadcasts from other participating parties
-	///
-	/// # State Transition
-	///
-	/// `AfterRound1` → `AfterRound2`
-	pub fn round2_reveal_with_data(
-		&mut self,
-		message: &[u8],
-		context: &[u8],
-		other_broadcasts: &[Round2Broadcast],
-	) -> ThresholdResult<Round2Broadcast> {
-		// Check state and extract round1_data
-		let round1_data = match std::mem::take(&mut self.state) {
-			SignerState::AfterRound1 { round1_data } => round1_data,
-			other => {
-				self.state = other;
-				return Err(ThresholdError::InvalidState {
-					current: self.state_name(),
-					expected: "AfterRound1",
-				});
-			},
-		};
-
-		// Check we have enough parties
-		let total_parties = other_broadcasts.len() + 1;
-		if total_parties < self.config.threshold() as usize {
-			return Err(ThresholdError::InsufficientParties {
-				provided: total_parties,
-				required: self.config.threshold(),
-			});
-		}
-
-		// Pack our commitment data
-		let commitment_data = pack_round1_commitment(&round1_data, &self.config);
-
-		// Collect other parties' data
-		let other_party_ids: Vec<u32> = other_broadcasts.iter().map(|r2| r2.party_id).collect();
-		let other_commitment_data: Vec<Vec<u8>> =
-			other_broadcasts.iter().map(|r2| r2.commitment_data.clone()).collect();
-
-		// Process Round 2
-		let round2_data = process_round2(
-			&self.private_key,
-			&self.public_key,
-			&self.config,
-			&round1_data,
-			message,
-			context,
-			&other_party_ids,
-			&other_commitment_data,
 		)?;
 
 		let broadcast = Round2Broadcast::new(self.private_key.party_id(), commitment_data);
@@ -400,24 +334,32 @@ impl ThresholdSigner {
 
 	/// Round 3: Compute signature response.
 	///
-	/// After receiving all Round 2 broadcasts from other parties, call this
-	/// method to compute and broadcast the signature response.
+	/// After receiving all Round 1 and Round 2 broadcasts from other parties, call this
+	/// method to verify commitments and compute the signature response.
 	///
 	/// # Arguments
 	///
+	/// * `other_round1` - Round 1 broadcasts from other parties (for commitment verification)
 	/// * `other_round2` - Round 2 broadcasts from other participating parties
+	///
+	/// # Security (HQ2)
+	///
+	/// This function verifies that each party's Round 2 commitment data matches their
+	/// Round 1 commitment hash BEFORE aggregating. This prevents rushing adversary attacks.
 	///
 	/// # Errors
 	///
 	/// Returns an error if:
 	/// - The signer is not in the `AfterRound2` state
 	/// - Response computation fails
+	/// - Any party's commitment verification fails (HQ2)
 	///
 	/// # State Transition
 	///
 	/// `AfterRound2` → `AfterRound3`
 	pub fn round3_respond(
 		&mut self,
+		other_round1: &[Round1Broadcast],
 		other_round2: &[Round2Broadcast],
 	) -> ThresholdResult<Round3Broadcast> {
 		// Check state and extract data
@@ -434,12 +376,33 @@ impl ThresholdSigner {
 			},
 		};
 
-		// Re-aggregate commitments with full data from Round 2 broadcasts
+		// HQ2: Verify and aggregate commitments from Round 2 broadcasts
 		let k = self.config.k_iterations() as usize;
 		let single_commitment_size = 8 * 736; // K * POLY_Q_SIZE
+		let tr = self.public_key.tr();
 
 		for r2 in other_round2 {
 			if !r2.commitment_data.is_empty() {
+				// HQ2: Find matching Round 1 broadcast and verify commitment hash
+				let r1 = other_round1
+					.iter()
+					.find(|r1| r1.party_id == r2.party_id)
+					.ok_or_else(|| ThresholdError::MissingBroadcast { party_id: r2.party_id })?;
+
+				if !verify_commitment_hash(
+					tr,
+					r2.party_id,
+					&r2.commitment_data,
+					&r1.commitment_hash,
+				) {
+					return Err(ThresholdError::CommitmentMismatch {
+						party_id: r2.party_id,
+						message: "Round 2 commitment data does not match Round 1 commitment hash"
+							.to_string(),
+					});
+				}
+
+				// Commitment verified, now aggregate
 				for k_idx in 0..k {
 					let start = k_idx * single_commitment_size;
 					let end = start + single_commitment_size;
@@ -455,8 +418,6 @@ impl ThresholdSigner {
 						}
 					}
 				}
-				// Note: active_participants is already complete from process_round2
-				// No need to update it here - all participants were known from Round 1
 			}
 		}
 

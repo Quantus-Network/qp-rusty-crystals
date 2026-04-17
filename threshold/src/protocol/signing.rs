@@ -101,6 +101,42 @@ pub(crate) fn compute_mu(tr: &[u8; 64], message: &[u8], context: &[u8]) -> [u8; 
 	mu
 }
 
+/// Compute the commitment hash for Round 1.
+///
+/// The hash is computed as: SHAKE256(tr || party_id || commitment_data)
+/// where commitment_data is the packed w polynomials.
+///
+/// This function is used both when generating the commitment (Round 1) and
+/// when verifying it (before Round 3) to ensure consistency.
+pub(crate) fn compute_commitment_hash(
+	tr: &[u8; 64],
+	party_id: ParticipantId,
+	commitment_data: &[u8],
+) -> [u8; 32] {
+	let mut hash = [0u8; 32];
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, tr, 64);
+	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, commitment_data, commitment_data.len());
+	fips202::shake256_finalize(&mut state);
+	fips202::shake256_squeeze(&mut hash, 32, &mut state);
+	hash
+}
+
+/// Verify that commitment data matches the commitment hash from Round 1 (HQ2).
+///
+/// This prevents rushing adversary attacks where a malicious party could
+/// adaptively choose their w_i values after seeing other parties' commitments.
+pub(crate) fn verify_commitment_hash(
+	tr: &[u8; 64],
+	party_id: ParticipantId,
+	commitment_data: &[u8],
+	expected_hash: &[u8; 32],
+) -> bool {
+	let computed_hash = compute_commitment_hash(tr, party_id, commitment_data);
+	computed_hash == *expected_hash
+}
+
 /// Convert PrivateKeyShare to the internal share format.
 /// Uses u16 subset masks to support up to 16 parties.
 fn convert_shares(share: &PrivateKeyShare) -> HashMap<u16, SecretShare> {
@@ -286,14 +322,9 @@ pub(crate) fn generate_round1(
 		}
 	}
 
-	// Generate commitment hash
-	let mut commitment_hash = [0u8; 32];
-	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, private_key.tr(), 64);
-	fips202::shake256_absorb(&mut state, &private_key.party_id().to_le_bytes(), 4);
-	fips202::shake256_absorb(&mut state, &w_packed, w_packed.len());
-	fips202::shake256_finalize(&mut state);
-	fips202::shake256_squeeze(&mut commitment_hash, 32, &mut state);
+	// Generate commitment hash using the shared function to ensure consistency with verification
+	let commitment_hash =
+		compute_commitment_hash(private_key.tr(), private_key.party_id(), &w_packed);
 
 	Ok(Round1Data { w_commitments, hyperball_samples, commitment_hash, rho_prime })
 }
@@ -364,7 +395,20 @@ pub(crate) fn pack_round1_commitment(round1: &Round1Data, config: &ThresholdConf
 // Round 2: Process Commitments
 // ============================================================================
 
-/// Process Round 2: aggregate commitments and compute message hash.
+/// Process Round 2: initialize aggregation state and compute message hash.
+///
+/// This function sets up the Round 2 state with our own commitments. Aggregation
+/// of other parties' commitments and verification happens in `round3_respond()`.
+///
+/// # Arguments
+///
+/// * `other_party_ids` - IDs of other parties in this signing session
+///
+/// # Security Note (HQ2)
+///
+/// Verification and aggregation of other parties' commitment data happens in
+/// `round3_respond()`, which verifies each party's Round 2 data against their
+/// Round 1 hash before aggregating.
 pub(crate) fn process_round2(
 	private_key: &PrivateKeyShare,
 	public_key: &PublicKey,
@@ -373,7 +417,6 @@ pub(crate) fn process_round2(
 	message: &[u8],
 	context: &[u8],
 	other_party_ids: &[ParticipantId],
-	other_commitments: &[Vec<u8>],
 ) -> ThresholdResult<Round2Data> {
 	crate::error::validate_context(context)?;
 
@@ -394,23 +437,6 @@ pub(crate) fn process_round2(
 	let active_participants = ParticipantList::new(&all_party_ids).ok_or_else(|| {
 		ThresholdError::InvalidConfiguration("Duplicate party IDs in signing session".to_string())
 	})?;
-
-	// Aggregate commitments from other parties
-	let single_commitment_size = K * 736; // K * POLY_Q_SIZE
-	for commitment_data in other_commitments {
-		if !commitment_data.is_empty() {
-			for k_idx in 0..k {
-				let start = k_idx * single_commitment_size;
-				let end = start + single_commitment_size;
-
-				if end <= commitment_data.len() && k_idx < w_aggregated.len() {
-					if let Ok(w_other) = unpack_commitment_dilithium(&commitment_data[start..end]) {
-						aggregate_commitments_dilithium(&mut w_aggregated[k_idx], &w_other);
-					}
-				}
-			}
-		}
-	}
 
 	// Compute message hash μ
 	let mut tr = [0u8; 64];

@@ -58,11 +58,15 @@
 //!     .take(2)
 //!     .enumerate()
 //!     .map(|(i, s)| {
-//!         let others: Vec<_> = r2_broadcasts.iter()
+//!         let others_r1: Vec<_> = r1_broadcasts.iter()
 //!             .filter(|r| r.party_id != i as u8)
 //!             .cloned()
 //!             .collect();
-//!         s.round3_respond(&others)
+//!         let others_r2: Vec<_> = r2_broadcasts.iter()
+//!             .filter(|r| r.party_id != i as u8)
+//!             .cloned()
+//!             .collect();
+//!         s.round3_respond(&others_r1, &others_r2)
 //!     })
 //!     .collect::<Result<_, _>>()?;
 //!

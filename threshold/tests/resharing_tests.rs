@@ -225,13 +225,19 @@ fn run_signing_and_verify_with_retries(
 			.iter_mut()
 			.enumerate()
 			.map(|(i, s)| {
-				let others: Vec<_> = r2_broadcasts
+				let others_r1: Vec<_> = r1_broadcasts
 					.iter()
 					.enumerate()
 					.filter(|(j, _)| *j != i)
 					.map(|(_, r)| r.clone())
 					.collect();
-				s.round3_respond(&others)
+				let others_r2: Vec<_> = r2_broadcasts
+					.iter()
+					.enumerate()
+					.filter(|(j, _)| *j != i)
+					.map(|(_, r)| r.clone())
+					.collect();
+				s.round3_respond(&others_r1, &others_r2)
 			})
 			.collect();
 

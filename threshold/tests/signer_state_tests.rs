@@ -68,7 +68,7 @@ fn test_state_machine_round3_before_round2() {
 
 	let _r1 = signer.round1_commit(&mut rng).expect("round1");
 
-	let result = signer.round3_respond(&[]);
+	let result = signer.round3_respond(&[], &[]);
 	assert!(result.is_err(), "round3 should fail without prior round2");
 }
 
