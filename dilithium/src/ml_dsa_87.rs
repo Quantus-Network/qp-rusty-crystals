@@ -107,9 +107,12 @@ impl fmt::Debug for Keypair {
 }
 
 /// Private key.
+///
+/// The internal bytes are private to ensure ZeroizeOnDrop works correctly
+/// and to prevent accidental exposure of secret material (HQ4).
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct SecretKey {
-	pub bytes: [u8; SECRETKEYBYTES],
+	bytes: [u8; SECRETKEYBYTES],
 }
 
 impl SecretKey {
