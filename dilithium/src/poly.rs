@@ -1,7 +1,9 @@
 use crate::{fips202, ntt, params, reduce, rounding};
 use zeroize::ZeroizeOnDrop;
 const N: usize = params::N as usize;
-const UNIFORM_NBLOCKS: usize = (767 + fips202::SHAKE128_RATE) / fips202::SHAKE128_RATE;
+// 767 = 3 * 256 - 1 = 3*N - 1: we need 3 bytes per coefficient for rejection sampling,
+// and we request enough blocks to have a high probability of filling all N coefficients.
+const UNIFORM_NBLOCKS: usize = (3 * N - 1 + fips202::SHAKE128_RATE) / fips202::SHAKE128_RATE;
 const D_SHL: i32 = 1 << (params::D - 1);
 
 /// Represents a polynomial
@@ -132,9 +134,10 @@ pub fn pointwise_montgomery(c: &mut Poly, a: &Poly, b: &Poly) {
 ///
 /// # Arguments
 ///
-/// * 'a' - input polynomial
+/// * `a1` - input polynomial; on output contains high bits c1
+/// * `a0` - output polynomial for low bits c0
 ///
-/// Returns a touple of polynomials with coefficients c0, c1
+/// After the call, `a1` contains the high bits and `a0` contains the low bits.
 pub fn power2round(a1: &mut Poly, a0: &mut Poly) {
 	for i in 0..N {
 		(a0.coeffs[i], a1.coeffs[i]) = rounding::power2round(a1.coeffs[i]);
@@ -176,10 +179,12 @@ pub fn check_norm(a: &Poly, b: i32) -> bool {
 ///
 /// # Arguments
 ///
-/// * 'a' - output array (allocated)
-/// * 'b' - array of random bytes
+/// * `a` - output coefficient array (allocated)
+/// * `alen` - maximum number of coefficients to sample
+/// * `buf` - array of random bytes to sample from
+/// * `buflen` - length of the random byte buffer
 ///
-/// Returns number of sampled coefficients. Can be smaller than a.len() if not enough random bytes
+/// Returns number of sampled coefficients. Can be smaller than `alen` if not enough random bytes
 /// were given.
 pub fn rej_uniform(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
 	let mut ctr: usize = 0;

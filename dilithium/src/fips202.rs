@@ -364,10 +364,7 @@ fn keccak_squeeze(
 		}
 		let mut i = pos;
 		while i < r && i < pos + outlen {
-			// println!("i = {}", i);
-			// println!("out[idx] przed przypisaniem: {}", out[idx]);
 			out[idx] = (s[i / 8] >> 8 * (i % 8)) as u8;
-			// println!("out[idx] po przypisaniu: {}", out[idx]);
 			idx += 1;
 			i += 1;
 		}

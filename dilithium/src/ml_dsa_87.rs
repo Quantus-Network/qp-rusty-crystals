@@ -274,8 +274,8 @@ mod tests {
 		let msg = get_random_msg();
 		let entropy = get_random_bytes();
 		let keys = Keypair::generate(entropy);
-		let hedge = get_random_bytes();
-		let sig = keys.sign(&msg, None, Some(hedge.0)).unwrap();
+		// Test non-hedged signing (deterministic) by passing None for hedge
+		let sig = keys.sign(&msg, None, None).unwrap();
 		assert!(keys.verify(&msg, &sig, None));
 	}
 

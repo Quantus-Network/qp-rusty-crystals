@@ -8,15 +8,17 @@ use qp_rusty_crystals_dilithium::{fips202, packing, params as dilithium_params, 
 // ============================================================================
 // Constants for ML-DSA-87
 // ============================================================================
+// Import from dilithium crate to avoid parameter re-definition (HQ15)
 
-pub(crate) const N: usize = 256;
-pub(crate) const K: usize = 8;
-pub(crate) const L: usize = 7;
-pub(crate) const Q: i32 = 8380417;
+pub(crate) const N: usize = dilithium_params::N as usize;
+pub(crate) const K: usize = dilithium_params::K;
+pub(crate) const L: usize = dilithium_params::L;
+pub(crate) const Q: i32 = dilithium_params::Q;
 
 // Constants for decompose (ML-DSA-87)
-const ALPHA: u32 = 2 * 261888; // 2 * Gamma2 = 523776
-const Q_U32: u32 = 8380417;
+// ALPHA = 2 * GAMMA2 = 2 * ((Q-1)/32) = 523776
+const ALPHA: u32 = 2 * dilithium_params::GAMMA2 as u32;
+const Q_U32: u32 = dilithium_params::Q as u32;
 
 // ============================================================================
 // Modular Arithmetic Helpers
