@@ -216,6 +216,10 @@ pub fn uniform(a: &mut Poly, seed: &[u8], nonce: u16) {
 	let mut buflen: usize = UNIFORM_NBLOCKS * fips202::SHAKE128_RATE;
 	let mut ctr = rej_uniform(&mut a.coeffs, N, &buf, buflen);
 
+	// Safety fallback: request more randomness if initial buffer wasn't sufficient.
+	// For ML-DSA-87 parameters, this loop has probability ~10^-39 of executing,
+	// making it statistically dead code. However, it's kept for correctness and
+	// to match the reference implementation (HQ14).
 	while ctr < N {
 		let off = buflen % 3;
 		for i in 0..off {
