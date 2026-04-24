@@ -62,8 +62,10 @@ jobs:
         with:
           ref: ${{ needs.create-tag.outputs.version }}
 
-      - name: Install required components
-        run: rustup component add rustfmt --toolchain nightly
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add rustfmt --toolchain nightly
 
       - name: Install taplo
         run: cargo install taplo-cli --locked
@@ -83,10 +85,10 @@ jobs:
         with:
           ref: ${{ needs.create-tag.outputs.version }}
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rust-src
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add clippy rust-src
 
       - name: Cache cargo registry
         uses: actions/cache@v3
