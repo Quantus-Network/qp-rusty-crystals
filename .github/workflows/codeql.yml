@@ -1,0 +1,41 @@
+---
+name: CodeQL
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# No scheduled scans by design: every code change reaches master via push or PR,
+# both of which trigger this workflow. Security advisories for Rust dependencies
+# are independently caught by `cargo audit` in ci.yml.
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # `actions` covers GitHub Actions workflow hygiene (e.g. the
+        # `actions/missing-workflow-permissions` rule that triggered this setup).
+        # `rust` can be added once you decide whether to scan source as well.
+        language: [actions]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
