@@ -20,20 +20,29 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # `actions` covers GitHub Actions workflow hygiene (e.g. the
-        # `actions/missing-workflow-permissions` rule that triggered this setup).
-        # `rust` can be added once you decide whether to scan source as well.
-        language: [actions]
+        include:
+          # `actions` covers GitHub Actions workflow hygiene (e.g. the
+          # `actions/missing-workflow-permissions` rule).
+          - language: actions
+            build-mode: none
+          # `rust` is GA since Oct 2025 and supports build-mode `none`,
+          # so we get source-level analysis without compiling the workspace.
+          # Note: `cargo audit` in ci.yml stays as the authoritative source
+          # for known CVEs in dependencies; CodeQL adds taint/quality checks
+          # on our own source.
+          - language: rust
+            build-mode: none
     steps:
       - uses: actions/checkout@v5
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
           queries: security-and-quality
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
