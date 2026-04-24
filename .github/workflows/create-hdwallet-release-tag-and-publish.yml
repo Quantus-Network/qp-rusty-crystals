@@ -69,7 +69,7 @@ jobs:
 
       - name: Install Rust toolchain (from rust-toolchain file)
         run: |
-          rustup show active-toolchain || rustup toolchain install
+          rustup toolchain install
           rustup component add rustfmt --toolchain nightly
 
       - name: Install taplo
@@ -92,7 +92,7 @@ jobs:
 
       - name: Install Rust toolchain (from rust-toolchain file)
         run: |
-          rustup show active-toolchain || rustup toolchain install
+          rustup toolchain install
           rustup component add clippy rust-src
 
       - name: Cache cargo registry
@@ -156,6 +156,12 @@ jobs:
           ref: ${{ needs.create-tag.outputs.version }}
           fetch-depth: 0
           fetch-tags: true
+
+      # Required before `cargo publish` below: rustup does not auto-install the
+      # active toolchain anymore, so we must install the version pinned in
+      # `rust-toolchain` explicitly. Idempotent if already present.
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: rustup toolchain install
 
       - name: Create GitHub Release
         env:
