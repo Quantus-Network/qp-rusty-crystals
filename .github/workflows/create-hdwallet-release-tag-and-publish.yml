@@ -10,6 +10,11 @@ on:
     branches:
       - master
 
+# Default to read-only; jobs that need to push tags or create releases
+# override this with explicit `contents: write` (see create-tag, create-github-release).
+permissions:
+  contents: read
+
 jobs:
   create-tag:
     name: Create HDWallet Tag

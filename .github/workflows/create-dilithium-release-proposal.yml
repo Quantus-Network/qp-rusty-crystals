@@ -30,6 +30,11 @@ on:
         type: boolean
         default: false
 
+# Default to read-only; the version-bump job overrides with `contents: write`
+# (it pushes a release branch and uses ADMIN_PAT for `gh pr create`).
+permissions:
+  contents: read
+
 jobs:
   calculate-next-version:
     name: 🧮 Calculate Next Dilithium Version
