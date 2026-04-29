@@ -613,4 +613,64 @@ mod tests {
 		println!("  ✓ All coefficients in [-{}, {}]", eta, eta);
 		println!("  ✓ Seed-based DKG correctly produces η-bounded secrets");
 	}
+
+	/// Test that all parties in the same subset compute identical s1_I and s2_I.
+	///
+	/// This is a critical property of the seed-based DKG: since all parties in a
+	/// subset combine the same seeds and use the same derivation function, they
+	/// must all arrive at the same secret polynomials for that subset.
+	///
+	/// We test all subsets across multiple random seeds.
+	#[test]
+	fn test_dkg_subset_shares_identical() {
+		use rand::{Rng, SeedableRng};
+		
+		let num_trials = 20;
+		let mut rng = rand::rngs::StdRng::seed_from_u64(54321);
+
+		for trial in 0..num_trials {
+			let seed: [u8; 32] = rng.gen();
+			let outputs = run_local_dkg(2, 3, seed).unwrap();
+
+			// For a 2-of-3 scheme, subsets are:
+			// - 0b011 (parties 0, 1)
+			// - 0b101 (parties 0, 2)
+			// - 0b110 (parties 1, 2)
+
+			// Check subset {0, 1} (mask 0b011 = 3)
+			let p0_share_01 = outputs[0].private_share.shares().get(&0b011);
+			let p1_share_01 = outputs[1].private_share.shares().get(&0b011);
+			if let (Some(s0), Some(s1)) = (p0_share_01, p1_share_01) {
+				assert_eq!(s0.s1, s1.s1, "Trial {}: Party 0 and 1 should have same s1 for subset {{0,1}}", trial);
+				assert_eq!(s0.s2, s1.s2, "Trial {}: Party 0 and 1 should have same s2 for subset {{0,1}}", trial);
+			} else {
+				panic!("Trial {}: Missing shares for subset {{0,1}}", trial);
+			}
+
+			// Check subset {0, 2} (mask 0b101 = 5)
+			let p0_share_02 = outputs[0].private_share.shares().get(&0b101);
+			let p2_share_02 = outputs[2].private_share.shares().get(&0b101);
+			if let (Some(s0), Some(s2)) = (p0_share_02, p2_share_02) {
+				assert_eq!(s0.s1, s2.s1, "Trial {}: Party 0 and 2 should have same s1 for subset {{0,2}}", trial);
+				assert_eq!(s0.s2, s2.s2, "Trial {}: Party 0 and 2 should have same s2 for subset {{0,2}}", trial);
+			} else {
+				panic!("Trial {}: Missing shares for subset {{0,2}}", trial);
+			}
+
+			// Check subset {1, 2} (mask 0b110 = 6)
+			let p1_share_12 = outputs[1].private_share.shares().get(&0b110);
+			let p2_share_12 = outputs[2].private_share.shares().get(&0b110);
+			if let (Some(s1), Some(s2)) = (p1_share_12, p2_share_12) {
+				assert_eq!(s1.s1, s2.s1, "Trial {}: Party 1 and 2 should have same s1 for subset {{1,2}}", trial);
+				assert_eq!(s1.s2, s2.s2, "Trial {}: Party 1 and 2 should have same s2 for subset {{1,2}}", trial);
+			} else {
+				panic!("Trial {}: Missing shares for subset {{1,2}}", trial);
+			}
+		}
+
+		println!("Subset share identity verified across {} DKG trials:", num_trials);
+		println!("  ✓ All parties in subset {{0,1}} have identical shares");
+		println!("  ✓ All parties in subset {{0,2}} have identical shares");
+		println!("  ✓ All parties in subset {{1,2}} have identical shares");
+	}
 }
