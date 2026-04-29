@@ -95,9 +95,8 @@ mod types;
 pub use protocol::{Action, DilithiumDkg, DkgProtocolError};
 pub use state::{DkgState, DkgStateData};
 pub use types::{
-	DkgConfig, DkgMessage, DkgOutput, DkgRound1Broadcast, DkgRound2Broadcast, DkgRound3Broadcast,
-	DkgRound4Private, DkgRound5Broadcast, ParticipantId, PartyContributions, SubsetContribution,
-	SubsetMask,
+	DkgConfig, DkgMessage, DkgOutput, DkgRound1Broadcast, DkgRound2Broadcast, DkgRound3Private,
+	DkgRound4Broadcast, DkgRound5Broadcast, ParticipantId, SubsetContribution, SubsetMask,
 };
 
 /// Convenience function to run a complete local DKG for testing.
@@ -440,32 +439,34 @@ mod tests {
 		}
 
 		// =========================================================================
-		// VERIFICATION 1: Broadcast messages don't contain raw secrets
+		// VERIFICATION 1: Broadcast messages don't contain raw secrets/seeds
 		// =========================================================================
-		// Parse all broadcast messages and verify Round 3 broadcasts contain
-		// PartyPublicContributions (partial public keys), not PartyContributions (secrets)
+		// Round 2 broadcasts contain seed hashes (not raw seeds)
+		// Round 3 is P2P (seeds)
+		// Round 4 broadcasts contain partial public keys (derived from combined seeds)
 		for msg_bytes in &broadcast_messages {
 			let msg: DkgMessage = bincode::deserialize(msg_bytes).unwrap();
-			if let DkgMessage::Round3(round3) = msg {
-				// Round 3 broadcast should contain PartyPublicContributions
-				// which has partial_public_keys, NOT subset_contributions (raw secrets)
-				let public_contrib = &round3.public_contributions;
+			if let DkgMessage::Round2(ref round2) = msg {
+				// Round 2 broadcast should contain seed hashes
+				let public_contrib = &round2.public_contributions;
 
-				// Verify it has partial public keys
+				// Verify it has seed hashes (not raw seeds)
 				assert!(
-					!public_contrib.partial_public_keys.is_empty(),
-					"Round 3 broadcast should contain partial public keys"
+					!public_contrib.subset_seed_hashes.is_empty(),
+					"Round 2 broadcast should contain seed hashes"
 				);
-
-				// The PartyPublicContributions type doesn't have subset_contributions field
-				// (that's only in PartyContributions which is never broadcast)
-				// This is verified by the type system, but we can check the data doesn't
-				// contain the secret polynomial structure
+			}
+			if let DkgMessage::Round4(ref round4) = msg {
+				// Round 4 broadcast contains partial public keys (not secrets)
+				assert!(
+					!round4.partial_public_keys.is_empty(),
+					"Round 4 broadcast should contain partial public keys"
+				);
 			}
 		}
 
 		// =========================================================================
-		// VERIFICATION 2: Each party only receives P2P secrets for their subsets
+		// VERIFICATION 2: Each party only receives P2P seeds for their subsets
 		// =========================================================================
 		// For a 2-of-3 scheme, subset size is 3-2+1=2
 		// Party 0 is in subsets: {0,1} (mask 0b011) and {0,2} (mask 0b101)
@@ -478,13 +479,13 @@ mod tests {
 			// Parse each P2P message and verify the subset
 			for (from, msg_bytes) in received {
 				let msg: DkgMessage = bincode::deserialize(msg_bytes).unwrap();
-				if let DkgMessage::Round4(round4_private) = msg {
-					let subset_mask = round4_private.subset_mask;
+				if let DkgMessage::Round3(round3_private) = msg {
+					let subset_mask = round3_private.subset_mask;
 
 					// Verify this party (recipient) is in the subset
 					assert!(
 						(subset_mask & (1 << party_id)) != 0,
-						"Party {} received P2P secret for subset {:b} but is not in that subset",
+						"Party {} received P2P seed for subset {:b} but is not in that subset",
 						party_id,
 						subset_mask
 					);
@@ -492,7 +493,7 @@ mod tests {
 					// Verify the sender is also in the subset
 					assert!(
 						(subset_mask & (1 << from)) != 0,
-						"Party {} sent P2P secret for subset {:b} but is not in that subset",
+						"Party {} sent P2P seed for subset {:b} but is not in that subset",
 						from,
 						subset_mask
 					);
@@ -550,5 +551,66 @@ mod tests {
 		println!("  ✓ P2P secrets are only sent to parties in the same subset");
 		println!("  ✓ Parties only have shares for subsets they belong to");
 		println!("  ✓ Parties in the same subset compute identical combined shares");
+	}
+
+	/// Test that DKG produces η-bounded shares (coefficients in [-η, η]).
+	///
+	/// This is the critical test for the bound fix: in the old DKG, combining
+	/// k=n-t+1 contributions would produce coefficients in [-k·η, k·η].
+	/// With the seed-based approach, all parties in a subset derive the SAME
+	/// secret from combined seeds, resulting in properly η-bounded coefficients.
+	///
+	/// We test with many random seeds to ensure the bound holds statistically.
+	#[test]
+	fn test_dkg_eta_bounded_shares() {
+		use rand::{Rng, SeedableRng};
+		
+		let eta = 2i32; // ML-DSA-87 η parameter
+		let num_trials = 50; // Run 50 DKG instances with different seeds
+		let mut rng = rand::rngs::StdRng::seed_from_u64(12345);
+		
+		let mut total_coefficients_checked = 0u64;
+
+		for trial in 0..num_trials {
+			// Generate a random seed for this trial
+			let seed: [u8; 32] = rng.gen();
+			
+			let outputs = run_local_dkg(2, 3, seed).unwrap();
+
+			for (party_id, output) in outputs.iter().enumerate() {
+				let shares = output.private_share.shares();
+
+				for (subset_mask, share) in shares {
+					// Check s1 coefficients
+					for (poly_idx, poly) in share.s1.iter().enumerate() {
+						for (coeff_idx, &coeff) in poly.iter().enumerate() {
+							total_coefficients_checked += 1;
+							assert!(
+								coeff >= -eta && coeff <= eta,
+								"Trial {} Party {} subset {:b} s1[{}][{}] = {} is outside η bound [-{}, {}]",
+								trial, party_id, subset_mask, poly_idx, coeff_idx, coeff, eta, eta
+							);
+						}
+					}
+
+					// Check s2 coefficients
+					for (poly_idx, poly) in share.s2.iter().enumerate() {
+						for (coeff_idx, &coeff) in poly.iter().enumerate() {
+							total_coefficients_checked += 1;
+							assert!(
+								coeff >= -eta && coeff <= eta,
+								"Trial {} Party {} subset {:b} s2[{}][{}] = {} is outside η bound [-{}, {}]",
+								trial, party_id, subset_mask, poly_idx, coeff_idx, coeff, eta, eta
+							);
+						}
+					}
+				}
+			}
+		}
+
+		println!("η-bounded shares verified across {} DKG trials:", num_trials);
+		println!("  ✓ Checked {} total coefficients", total_coefficients_checked);
+		println!("  ✓ All coefficients in [-{}, {}]", eta, eta);
+		println!("  ✓ Seed-based DKG correctly produces η-bounded secrets");
 	}
 }

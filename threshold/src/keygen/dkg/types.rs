@@ -32,8 +32,9 @@ pub const SESSION_ID_SIZE: usize = 32;
 /// Size of commitment hash in bytes.
 pub const COMMITMENT_HASH_SIZE: usize = 32;
 
-/// Size of rho contribution in bytes.
-pub const RHO_CONTRIBUTION_SIZE: usize = 32;
+/// Size of subset seed contribution in bytes.
+/// This matches Mithril's 64-byte seed used for PolyDeriveUniformLeqEta.
+pub const SUBSET_SEED_SIZE: usize = 64;
 
 // ML-DSA-87 parameters
 /// Number of polynomials in s1 vector.
@@ -148,6 +149,41 @@ impl Default for SubsetContribution {
 	}
 }
 
+/// Seed contribution for a single subset.
+///
+/// Each party generates a random seed for each subset they belong to.
+/// The combined seed (hash of all parties' seeds in the subset) is used
+/// to deterministically derive the actual η-bounded secret contribution.
+///
+/// This is the key to the HQ1-secure DKG: instead of each party generating
+/// independent η-bounded contributions (which would blow up bounds when summed),
+/// parties contribute entropy that is combined before sampling.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct SubsetSeedContribution {
+	/// Random seed bytes contributed by this party for this subset.
+	#[cfg_attr(feature = "serde", serde(with = "crate::serde_helpers::serde_byte_array"))]
+	pub seed: [u8; SUBSET_SEED_SIZE],
+}
+
+impl SubsetSeedContribution {
+	/// Create a new subset seed contribution with zero bytes.
+	pub fn new() -> Self {
+		Self { seed: [0u8; SUBSET_SEED_SIZE] }
+	}
+
+	/// Create a new subset seed contribution from the given bytes.
+	pub fn from_bytes(seed: [u8; SUBSET_SEED_SIZE]) -> Self {
+		Self { seed }
+	}
+}
+
+impl Default for SubsetSeedContribution {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 /// Partial public key for a single subset.
 ///
 /// This is the public component t_I = A·s_I (mod q) computed from secret
@@ -185,20 +221,19 @@ impl PartialPublicKey {
 	}
 }
 
-/// Public contributions from one party for all subsets they belong to.
+/// Public contributions from one party (revealed in Round 3).
 ///
-/// SECURITY: This contains only PUBLIC information (partial public keys and rho).
-/// The secret contributions (s1, s2) are stored locally and never broadcast.
+/// In the seed-based DKG protocol, this contains only the rho contribution.
+/// The seed contributions are sent via P2P in Round 3, not broadcast.
+/// Partial public keys are computed in Round 4 after seeds are combined.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PartyPublicContributions {
 	/// The party that generated these contributions.
 	pub party_id: ParticipantId,
-	/// Random bytes contributed to the final rho seed.
-	pub rho_contribution: [u8; RHO_CONTRIBUTION_SIZE],
-	/// Partial public keys for each subset this party belongs to.
-	/// Key is the subset mask (bitmask of party IDs in the subset).
-	pub partial_public_keys: HashMap<SubsetMask, PartialPublicKey>,
+	/// Hashes of seed contributions for each subset (for verification without revealing).
+	/// Key is the subset mask. Value is H(seed) - allows P2P recipients to verify.
+	pub subset_seed_hashes: HashMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>,
 }
 
 impl PartyPublicContributions {
@@ -206,38 +241,37 @@ impl PartyPublicContributions {
 	pub fn new(party_id: ParticipantId) -> Self {
 		Self {
 			party_id,
-			rho_contribution: [0u8; RHO_CONTRIBUTION_SIZE],
-			partial_public_keys: HashMap::new(),
+			subset_seed_hashes: HashMap::new(),
 		}
 	}
 }
 
-/// Secret contributions from one party for all subsets they belong to.
+/// Seed contributions from one party for all subsets they belong to.
 ///
-/// This type is used internally to store secret contributions. It is:
-/// - Stored locally and NEVER broadcast
-/// - Shared via P2P only with other parties in the same subsets
+/// In the seed-based DKG protocol, each party generates random seeds
+/// (not secret polynomials) for each subset. These seeds are:
+/// - Committed to in Round 2
+/// - Revealed via P2P in Round 3 to other subset members
+/// - Combined with other parties' seeds to derive the final η-bounded secret
 ///
-/// For Round 3 broadcast (public data), use PartyPublicContributions instead.
+/// This ensures the combined secret has the correct distribution (bounded by η)
+/// rather than having bounds blow up when multiple parties' contributions are summed.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct PartyContributions {
-	/// The party that generated these contributions.
+pub struct PartySeedContributions {
+	/// The party that generated these seed contributions.
 	pub party_id: ParticipantId,
-	/// Random bytes contributed to the final rho seed.
-	pub rho_contribution: [u8; RHO_CONTRIBUTION_SIZE],
-	/// Contributions for each subset this party belongs to.
+	/// Seed contributions for each subset this party belongs to.
 	/// Key is the subset mask (bitmask of party IDs in the subset).
-	pub subset_contributions: HashMap<SubsetMask, SubsetContribution>,
+	pub subset_seeds: HashMap<SubsetMask, SubsetSeedContribution>,
 }
 
-impl PartyContributions {
-	/// Create a new empty party contributions structure.
+impl PartySeedContributions {
+	/// Create a new empty party seed contributions structure.
 	pub fn new(party_id: ParticipantId) -> Self {
 		Self {
 			party_id,
-			rho_contribution: [0u8; RHO_CONTRIBUTION_SIZE],
-			subset_contributions: HashMap::new(),
+			subset_seeds: HashMap::new(),
 		}
 	}
 }
@@ -268,45 +302,53 @@ pub struct DkgRound1Broadcast {
 pub struct DkgRound2Broadcast {
 	/// The party sending this message.
 	pub party_id: ParticipantId,
-	/// Hash of (party_id || rho_contribution || all subset contributions).
+	/// Hash of (party_id || seed_hashes).
+	/// This commits to the public contributions before others reveal.
 	pub commitment_hash: [u8; COMMITMENT_HASH_SIZE],
-}
-
-/// Round 3 message: Revealed public contributions.
-///
-/// SECURITY FIX (HQ1): Each party reveals their partial public keys and rho
-/// contribution. The raw secret polynomials (s1, s2) are NEVER broadcast.
-///
-/// Other parties verify:
-/// 1. The hash matches what was committed in Round 2
-/// 2. Partial public keys are well-formed (coefficients in valid range)
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct DkgRound3Broadcast {
-	/// The party sending this message.
-	pub party_id: ParticipantId,
-	/// The public contributions (partial public keys + rho, must hash to Round 2 commitment).
+	/// Public contributions: seed hashes for each subset.
+	/// Sent along with commitment so others can verify P2P seeds later.
 	pub public_contributions: PartyPublicContributions,
 }
 
-/// Round 4 P2P message: Secret contribution for a specific subset.
+/// Round 3 P2P message: Seed contribution for a specific subset.
 ///
-/// SECURITY FIX (HQ1): Secret contributions are sent via P2P only to
-/// parties who are members of the same subset. This ensures:
-/// 1. Each party only learns secrets for subsets they belong to
+/// SEED-BASED DKG: Seeds are exchanged via P2P only with parties in the same subset.
+/// This ensures:
+/// 1. Each party only learns seeds for subsets they belong to
 /// 2. The threshold property is preserved (t-1 parties cannot reconstruct s)
 ///
-/// Recipients verify that A·s_I matches the partial public key t_I
-/// that was broadcast in the Round 3 broadcast message.
+/// After receiving all seeds for a subset, each party:
+/// 1. Computes combined_seed = H(seed_0 || seed_1 || ... || seed_{k-1})
+/// 2. Derives the actual secret s_I = DeriveUniformLeqEta(combined_seed)
+/// 3. Computes the partial public key t_I = A·s_I for broadcast in Round 4
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct DkgRound4Private {
+pub struct DkgRound3Private {
 	/// The party sending this message.
 	pub from_party_id: ParticipantId,
-	/// The subset this contribution is for.
+	/// The subset this seed is for.
 	pub subset_mask: SubsetMask,
-	/// The secret contribution for this subset.
-	pub contribution: SubsetContribution,
+	/// The seed contribution for this subset (combined with others to derive secret).
+	pub seed_contribution: SubsetSeedContribution,
+}
+
+/// Round 4 broadcast message: Partial public keys derived from combined seeds.
+///
+/// SEED-BASED DKG: After combining seeds and deriving η-bounded secrets,
+/// each party broadcasts their partial public keys for subsets they're in.
+/// All parties receive these and sum them to compute the final public key.
+///
+/// This is the key to achieving η-bounded secrets: the partial public key t_I
+/// corresponds to a single s_I that was derived from combined seeds, NOT
+/// the sum of k independent contributions.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct DkgRound4Broadcast {
+	/// The party sending this message.
+	pub party_id: ParticipantId,
+	/// Partial public keys for each subset this party belongs to.
+	/// Key is subset_mask, value is t_I = A·s1_I + s2_I (K polynomials).
+	pub partial_public_keys: HashMap<SubsetMask, PartialPublicKey>,
 }
 
 /// Round 5 message: Confirmation.
@@ -335,15 +377,15 @@ pub struct DkgRound5Broadcast {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum DkgMessage {
-	/// Round 1: Session ID contribution.
+	/// Round 1: Session ID contribution (broadcast).
 	Round1(DkgRound1Broadcast),
-	/// Round 2: Commitment hash.
+	/// Round 2: Commitment hash for seeds (broadcast).
 	Round2(DkgRound2Broadcast),
-	/// Round 3: Revealed public contributions (partial public keys).
-	Round3(DkgRound3Broadcast),
-	/// Round 4: P2P secret contribution for a subset (sent only to subset members).
-	Round4(DkgRound4Private),
-	/// Round 5: Confirmation.
+	/// Round 3: P2P seed contribution (sent only to subset members).
+	Round3(DkgRound3Private),
+	/// Round 4: Partial public keys derived from combined seeds (broadcast).
+	Round4(DkgRound4Broadcast),
+	/// Round 5: Confirmation (broadcast).
 	Round5(DkgRound5Broadcast),
 }
 
@@ -353,8 +395,8 @@ impl DkgMessage {
 		match self {
 			DkgMessage::Round1(msg) => msg.party_id,
 			DkgMessage::Round2(msg) => msg.party_id,
-			DkgMessage::Round3(msg) => msg.party_id,
-			DkgMessage::Round4(msg) => msg.from_party_id,
+			DkgMessage::Round3(msg) => msg.from_party_id,
+			DkgMessage::Round4(msg) => msg.party_id,
 			DkgMessage::Round5(msg) => msg.party_id,
 		}
 	}
@@ -384,6 +426,141 @@ pub struct DkgOutput {
 	pub public_key: PublicKey,
 	/// This party's private key share.
 	pub private_share: PrivateKeyShare,
+}
+
+// ============================================================================
+// Seed-Based Secret Derivation
+// ============================================================================
+
+use qp_rusty_crystals_dilithium::fips202;
+
+/// Combine multiple seed contributions into a single combined seed.
+///
+/// This function takes seed contributions from all parties in a subset
+/// and combines them using SHAKE256 to produce a deterministic combined seed.
+/// The combination is done by sorting parties by ID (to ensure all parties
+/// get the same result) and hashing all seeds together.
+///
+/// # Arguments
+/// * `seeds` - HashMap from party_id to their seed contribution
+///
+/// # Returns
+/// A 64-byte combined seed that can be used with `derive_subset_contribution`
+pub fn combine_seeds(seeds: &HashMap<ParticipantId, SubsetSeedContribution>) -> [u8; SUBSET_SEED_SIZE] {
+	let mut state = fips202::KeccakState::default();
+	
+	// Sort by party ID to ensure deterministic ordering
+	let mut sorted_parties: Vec<_> = seeds.keys().collect();
+	sorted_parties.sort();
+	
+	// Domain separator for seed combination
+	let domain = b"DKG_SEED_COMBINE_V1";
+	fips202::shake256_absorb(&mut state, domain, domain.len());
+	
+	// Absorb each seed in order
+	for party_id in sorted_parties {
+		// Include party ID to prevent malleability
+		let id_bytes = party_id.to_le_bytes();
+		fips202::shake256_absorb(&mut state, &id_bytes, 4);
+		
+		let seed = &seeds[party_id];
+		fips202::shake256_absorb(&mut state, &seed.seed, SUBSET_SEED_SIZE);
+	}
+	
+	fips202::shake256_finalize(&mut state);
+	
+	let mut combined = [0u8; SUBSET_SEED_SIZE];
+	fips202::shake256_squeeze(&mut combined, SUBSET_SEED_SIZE, &mut state);
+	combined
+}
+
+/// Hash a seed to produce a commitment hash.
+///
+/// This is used in Round 3 to broadcast seed hashes without revealing the seeds.
+pub fn hash_seed(seed: &SubsetSeedContribution) -> [u8; COMMITMENT_HASH_SIZE] {
+	let mut state = fips202::KeccakState::default();
+	
+	let domain = b"DKG_SEED_HASH_V1";
+	fips202::shake256_absorb(&mut state, domain, domain.len());
+	fips202::shake256_absorb(&mut state, &seed.seed, SUBSET_SEED_SIZE);
+	fips202::shake256_finalize(&mut state);
+	
+	let mut hash = [0u8; COMMITMENT_HASH_SIZE];
+	fips202::shake256_squeeze(&mut hash, COMMITMENT_HASH_SIZE, &mut state);
+	hash
+}
+
+/// Derive an η-bounded SubsetContribution from a combined seed.
+///
+/// This implements the same sampling strategy as Mithril's PolyDeriveUniformLeqEta:
+/// - Uses SHAKE256 with the seed and a nonce
+/// - Rejection samples to get uniform values in [0, 2*eta]
+/// - Shifts to get values in [-eta, eta]
+///
+/// The resulting contribution has all coefficients in [-η, η] and is
+/// deterministically derived from the seed, so all parties in the subset
+/// will compute the same contribution.
+///
+/// # Arguments
+/// * `combined_seed` - The 64-byte seed from `combine_seeds`
+/// * `eta` - The bound for coefficients (typically 2 for ML-DSA-87)
+pub fn derive_subset_contribution(combined_seed: &[u8; SUBSET_SEED_SIZE], eta: i32) -> SubsetContribution {
+	let mut contribution = SubsetContribution::new();
+	
+	// Sample s1 (L polynomials)
+	for i in 0..L {
+		sample_poly_leq_eta(&mut contribution.s1[i], combined_seed, i as u16, eta);
+	}
+	
+	// Sample s2 (K polynomials)
+	for i in 0..K {
+		sample_poly_leq_eta(&mut contribution.s2[i], combined_seed, (L + i) as u16, eta);
+	}
+	
+	contribution
+}
+
+/// Sample a polynomial with coefficients uniformly in [-eta, eta].
+///
+/// This uses rejection sampling similar to Mithril's PolyDeriveUniformLeqEta.
+/// For eta=2, we need uniform samples in {-2, -1, 0, 1, 2} (5 values).
+///
+/// # Arguments
+/// * `poly` - Output polynomial (N=256 coefficients)
+/// * `seed` - 64-byte seed
+/// * `nonce` - 16-bit nonce to derive different polynomials from same seed
+/// * `eta` - Bound for coefficients
+fn sample_poly_leq_eta(poly: &mut [i32; N], seed: &[u8; SUBSET_SEED_SIZE], nonce: u16, eta: i32) {
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, seed, SUBSET_SEED_SIZE);
+	fips202::shake256_absorb(&mut state, &nonce.to_le_bytes(), 2);
+	fips202::shake256_finalize(&mut state);
+	
+	let mut buf = [0u8; 512];
+	fips202::shake256_squeeze(&mut buf, 512, &mut state);
+	
+	let mut idx = 0;
+	for i in 0..N {
+		loop {
+			if idx >= buf.len() {
+				// Need more random bytes
+				fips202::shake256_squeeze(&mut buf, 512, &mut state);
+				idx = 0;
+			}
+			
+			let b = buf[idx] as i32;
+			idx += 1;
+			
+			// Rejection sampling for uniform in [-eta, eta]
+			// bound = 2*eta + 1 = number of valid values
+			// We reject values >= (256 / bound) * bound to avoid bias
+			let bound = 2 * eta + 1;
+			if b < (256 / bound) * bound {
+				poly[i] = (b % bound) - eta;
+				break;
+			}
+		}
+	}
 }
 
 #[cfg(test)]
@@ -446,5 +623,102 @@ mod tests {
 		});
 		assert_eq!(msg.party_id(), 2);
 		assert_eq!(msg.round(), 1);
+	}
+
+	#[test]
+	fn test_derive_subset_contribution_bounds() {
+		// Test that derived contributions are within [-eta, eta]
+		let seed = [42u8; SUBSET_SEED_SIZE];
+		let contribution = derive_subset_contribution(&seed, 2);
+		
+		assert!(contribution.verify_bounds(2), "Derived contribution should be within [-2, 2]");
+		
+		// Verify all coefficients are actually bounded
+		for poly in &contribution.s1 {
+			for &coeff in poly {
+				assert!(coeff >= -2 && coeff <= 2, "s1 coefficient {} out of bounds", coeff);
+			}
+		}
+		for poly in &contribution.s2 {
+			for &coeff in poly {
+				assert!(coeff >= -2 && coeff <= 2, "s2 coefficient {} out of bounds", coeff);
+			}
+		}
+	}
+
+	#[test]
+	fn test_derive_subset_contribution_deterministic() {
+		// Same seed should produce same contribution
+		let seed = [123u8; SUBSET_SEED_SIZE];
+		let contribution1 = derive_subset_contribution(&seed, 2);
+		let contribution2 = derive_subset_contribution(&seed, 2);
+		
+		for i in 0..L {
+			assert_eq!(contribution1.s1[i], contribution2.s1[i], "s1[{}] mismatch", i);
+		}
+		for i in 0..K {
+			assert_eq!(contribution1.s2[i], contribution2.s2[i], "s2[{}] mismatch", i);
+		}
+	}
+
+	#[test]
+	fn test_combine_seeds_deterministic() {
+		// Same seeds in same order should produce same combined seed
+		let mut seeds = HashMap::new();
+		seeds.insert(0, SubsetSeedContribution::from_bytes([1u8; SUBSET_SEED_SIZE]));
+		seeds.insert(1, SubsetSeedContribution::from_bytes([2u8; SUBSET_SEED_SIZE]));
+		seeds.insert(2, SubsetSeedContribution::from_bytes([3u8; SUBSET_SEED_SIZE]));
+		
+		let combined1 = combine_seeds(&seeds);
+		let combined2 = combine_seeds(&seeds);
+		
+		assert_eq!(combined1, combined2);
+	}
+
+	#[test]
+	fn test_combine_seeds_order_independent() {
+		// Seeds should be combined in party ID order, regardless of insertion order
+		let mut seeds1 = HashMap::new();
+		seeds1.insert(0, SubsetSeedContribution::from_bytes([1u8; SUBSET_SEED_SIZE]));
+		seeds1.insert(1, SubsetSeedContribution::from_bytes([2u8; SUBSET_SEED_SIZE]));
+		
+		let mut seeds2 = HashMap::new();
+		seeds2.insert(1, SubsetSeedContribution::from_bytes([2u8; SUBSET_SEED_SIZE]));
+		seeds2.insert(0, SubsetSeedContribution::from_bytes([1u8; SUBSET_SEED_SIZE]));
+		
+		let combined1 = combine_seeds(&seeds1);
+		let combined2 = combine_seeds(&seeds2);
+		
+		assert_eq!(combined1, combined2, "Seed combination should be order-independent");
+	}
+
+	#[test]
+	fn test_combine_seeds_different_inputs() {
+		// Different seeds should produce different combined seeds
+		let mut seeds1 = HashMap::new();
+		seeds1.insert(0, SubsetSeedContribution::from_bytes([1u8; SUBSET_SEED_SIZE]));
+		
+		let mut seeds2 = HashMap::new();
+		seeds2.insert(0, SubsetSeedContribution::from_bytes([2u8; SUBSET_SEED_SIZE]));
+		
+		let combined1 = combine_seeds(&seeds1);
+		let combined2 = combine_seeds(&seeds2);
+		
+		assert_ne!(combined1, combined2, "Different seeds should produce different combined seeds");
+	}
+
+	#[test]
+	fn test_hash_seed() {
+		let seed = SubsetSeedContribution::from_bytes([42u8; SUBSET_SEED_SIZE]);
+		let hash1 = hash_seed(&seed);
+		let hash2 = hash_seed(&seed);
+		
+		assert_eq!(hash1, hash2, "Hash should be deterministic");
+		
+		// Different seed should produce different hash
+		let seed2 = SubsetSeedContribution::from_bytes([43u8; SUBSET_SEED_SIZE]);
+		let hash3 = hash_seed(&seed2);
+		
+		assert_ne!(hash1, hash3, "Different seeds should have different hashes");
 	}
 }
