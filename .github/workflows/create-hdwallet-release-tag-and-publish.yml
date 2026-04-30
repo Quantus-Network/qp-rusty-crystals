@@ -10,6 +10,11 @@ on:
     branches:
       - master
 
+# Default to read-only; jobs that need to push tags or create releases
+# override this with explicit `contents: write` (see create-tag, create-github-release).
+permissions:
+  contents: read
+
 jobs:
   create-tag:
     name: Create HDWallet Tag
@@ -22,7 +27,7 @@ jobs:
       is_draft: ${{ steps.extract_version.outputs.is_draft }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -58,12 +63,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code at tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.create-tag.outputs.version }}
 
-      - name: Install required components
-        run: rustup component add rustfmt --toolchain nightly
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: |
+          rustup toolchain install
+          rustup component add rustfmt --toolchain nightly
 
       - name: Install taplo
         run: cargo install taplo-cli --locked
@@ -79,17 +86,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code at tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.create-tag.outputs.version }}
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rust-src
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: |
+          rustup toolchain install
+          rustup component add clippy rust-src
 
       - name: Cache cargo registry
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -126,7 +133,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code at tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.create-tag.outputs.version }}
 
@@ -144,11 +151,17 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.create-tag.outputs.version }}
           fetch-depth: 0
           fetch-tags: true
+
+      # Required before `cargo publish` below: rustup does not auto-install the
+      # active toolchain anymore, so we must install the version pinned in
+      # `rust-toolchain` explicitly. Idempotent if already present.
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: rustup toolchain install
 
       - name: Create GitHub Release
         env:

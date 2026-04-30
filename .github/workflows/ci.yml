@@ -19,6 +19,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Principle of least privilege: all jobs only read the repo (checkout + cargo).
+# Per-job override is unnecessary because no job pushes, creates releases or PRs.
+permissions:
+  contents: read
+
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
@@ -28,9 +33,11 @@ jobs:
     name: 🏁 Fast Checks (Format)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install required components
-        run: rustup component add rustfmt --toolchain nightly
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: |
+          rustup toolchain install
+          rustup component add rustfmt --toolchain nightly
       - name: Install taplo
         run: cargo install taplo-cli --locked
       - name: Run format checks
@@ -48,16 +55,12 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-        rust:
-          - stable
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust ${{ matrix.rust }}
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.rust }}
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: rustup toolchain install
       - name: Cache cargo registry
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -69,18 +72,42 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace --locked
 
+  no-std-build:
+    name: 📦 no_std Build (wasm32v1-none)
+    needs: fast-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: rustup toolchain install
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+      # wasm32v1-none is the target used by Substrate runtimes (chain, chain-update2512,
+      # libp2p-identity-pqc, qp-libp2p-identity) which depend on these crates as no_std.
+      # A regression here breaks the entire downstream stack.
+      - name: Build dilithium for wasm32v1-none (no_std)
+        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-dilithium --no-default-features
+      - name: Build hdwallet for wasm32v1-none (no_std)
+        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-hdwallet --no-default-features
+
   analysis:
     name: 🤖 Analysis (Clippy & Doc)
     needs: fast-checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rust-src
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: |
+          rustup toolchain install
+          rustup component add clippy rust-src
       - name: Cache cargo registry
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -99,7 +126,7 @@ jobs:
     needs: fast-checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Run security audit

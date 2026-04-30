@@ -30,6 +30,11 @@ on:
         type: boolean
         default: false
 
+# Default to read-only; the version-bump job overrides with `contents: write`
+# (it pushes a release branch and uses ADMIN_PAT for `gh pr create`).
+permissions:
+  contents: read
+
 jobs:
   calculate-next-version:
     name: 🧮 Calculate Next Dilithium Version
@@ -40,7 +45,7 @@ jobs:
       source_branch: ${{ steps.vars.outputs.source_branch }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -117,7 +122,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
