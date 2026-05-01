@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use qp_rusty_crystals_threshold::{
 	generate_with_dealer,
-	keygen::dkg::run_local_dkg,
+	keygen::dkg::{run_local_mithril_dkg, TranscriptSigner},
 	signing_protocol::{run_local_signing, run_local_signing_with_stats},
 	verify_signature, ThresholdConfig, ThresholdSigner,
 };
@@ -526,12 +526,39 @@ fn test_threshold_matrix() {
 /// Test threshold signing with DKG-generated keys across multiple configurations.
 #[test]
 fn test_threshold_matrix_dkg() {
+	use rand::SeedableRng;
+
+	// Simple test signer for DKG transcript signing
+	#[derive(Clone, Debug)]
+	struct TestSigner { id: u32 }
+
+	impl TranscriptSigner for TestSigner {
+		type Signature = Vec<u8>;
+		type PublicKey = u32;
+
+		fn sign(&self, hash: &[u8; 32]) -> Self::Signature {
+			let mut sig = vec![0u8; 36];
+			sig[..4].copy_from_slice(&self.id.to_le_bytes());
+			sig[4..36].copy_from_slice(hash);
+			sig
+		}
+
+		fn verify(pk: &Self::PublicKey, hash: &[u8; 32], sig: &Self::Signature) -> bool {
+			Self::verify_bytes(pk, hash, sig)
+		}
+
+		fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
+			if sig.len() < 36 { return false; }
+			let sig_id = u32::from_le_bytes(sig[..4].try_into().unwrap());
+			sig_id == *pk && &sig[4..36] == hash
+		}
+
+		fn public_key(&self) -> Self::PublicKey { self.id }
+	}
+
 	println!("\n=== THRESHOLD MATRIX TEST (DKG + 4-Round Protocol) ===\n");
 
-	let mut seed = [0u8; 32];
-	for (i, byte) in seed.iter_mut().enumerate() {
-		*byte = i as u8;
-	}
+	let seed = 12345u64;
 
 	let message = b"DKG matrix test message";
 	let context: &[u8] = b"dkg-test";
@@ -580,8 +607,13 @@ fn test_threshold_matrix_dkg() {
 	for (threshold, total_parties) in configs.iter() {
 		let start = Instant::now();
 
+		// Create signers and public keys for DKG
+		let dkg_signers: Vec<TestSigner> = (0..*total_parties).map(|id| TestSigner { id }).collect();
+		let dkg_public_keys: Vec<u32> = (0..*total_parties).collect();
+		let rng = rand::rngs::StdRng::seed_from_u64(seed + *threshold as u64 * 100 + *total_parties as u64);
+
 		// Run DKG to generate keys
-		let dkg_outputs = match run_local_dkg(*threshold, *total_parties, seed) {
+		let dkg_outputs = match run_local_mithril_dkg(*threshold, *total_parties, dkg_signers, dkg_public_keys, rng) {
 			Ok(outputs) => outputs,
 			Err(e) => {
 				println!("❌ {}-of-{}: DKG error: {:?}", threshold, total_parties, e);

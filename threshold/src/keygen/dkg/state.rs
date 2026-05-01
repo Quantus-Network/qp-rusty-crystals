@@ -1,1102 +1,190 @@
-//! DKG Protocol State Machine.
+//! State structures for the Mithril DKG protocol.
 //!
-//! This module defines the state machine for the 5-round DKG protocol.
-//! The state machine tracks which round we're in, what data we've collected
-//! from other parties, and manages transitions between rounds.
-//!
-//! ## Message Buffering
-//!
-//! In distributed systems, messages may arrive out of order. For example, a fast
-//! node might send its Round 2 message before a slower node has finished processing
-//! all Round 1 messages. To handle this, we buffer messages that arrive for future
-//! rounds and process them when we transition to the appropriate state.
+//! These are internal state structures used by the DKG state machine.
+//! They track the progress through each round and store intermediate values.
+
+#![allow(missing_docs)] // Internal state structures don't need public docs
 
 use std::collections::HashMap;
 
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use crate::keys::{PrivateKeyShare, PublicKey};
 
 use super::types::{
-	DkgConfig, DkgMessage, DkgOutput, DkgRound1Broadcast, DkgRound2Broadcast, DkgRound3Private,
-	DkgRound4Broadcast, DkgRound5Broadcast, ParticipantId, PartyPublicContributions,
-	SubsetContribution, SubsetMask, SubsetSeedContribution, COMMITMENT_HASH_SIZE, SESSION_ID_SIZE,
+    MithrilDkgConfig, MithrilRound1Broadcast, MithrilRound2Broadcast,
+    MithrilRound3Broadcast, MithrilRound4Broadcast, ParticipantId, PartialPublicKey,
+    SubsetMask, TranscriptSigner, SubsetContribution,
+    RANDOMNESS_SIZE, SHARED_SECRET_SIZE,
 };
 
-use crate::participants::ParticipantList;
+/// State for Round 1.
+pub struct MithrilRound1State<S: TranscriptSigner> {
+    pub config: MithrilDkgConfig<S>,
+    pub my_randomness: [u8; RANDOMNESS_SIZE],
+    pub my_commitment: [u8; 32],
+    pub my_shared_secrets: HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+    pub received_broadcasts: HashMap<ParticipantId, MithrilRound1Broadcast>,
+    pub received_shared_secrets: HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+    pub broadcast_sent: bool,
+    pub privates_sent: bool,
+}
 
-/// The current state of the DKG protocol.
+impl<S: TranscriptSigner> std::fmt::Debug for MithrilRound1State<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MithrilRound1State")
+            .field("my_party_id", &self.config.my_party_id)
+            .field("received_broadcasts", &self.received_broadcasts.len())
+            .field("received_shared_secrets", &self.received_shared_secrets.len())
+            .field("broadcast_sent", &self.broadcast_sent)
+            .field("privates_sent", &self.privates_sent)
+            .finish()
+    }
+}
+
+/// State for Round 2.
+pub struct MithrilRound2State<S: TranscriptSigner> {
+    pub config: MithrilDkgConfig<S>,
+    pub my_randomness: [u8; RANDOMNESS_SIZE],
+    pub round1_broadcasts: HashMap<ParticipantId, MithrilRound1Broadcast>,
+    pub shared_secrets: HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+    pub received_broadcasts: HashMap<ParticipantId, MithrilRound2Broadcast>,
+    pub broadcast_sent: bool,
+}
+
+impl<S: TranscriptSigner> std::fmt::Debug for MithrilRound2State<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MithrilRound2State")
+            .field("my_party_id", &self.config.my_party_id)
+            .field("received_broadcasts", &self.received_broadcasts.len())
+            .field("broadcast_sent", &self.broadcast_sent)
+            .finish()
+    }
+}
+
+/// State for Round 3.
+pub struct MithrilRound3State<S: TranscriptSigner> {
+    pub config: MithrilDkgConfig<S>,
+    pub round1_broadcasts: HashMap<ParticipantId, MithrilRound1Broadcast>,
+    pub round2_broadcasts: HashMap<ParticipantId, MithrilRound2Broadcast>,
+    pub shared_secrets: HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+    pub global_randomness: Vec<u8>,
+    pub rho: [u8; 32],
+    pub my_partial_pks: HashMap<SubsetMask, PartialPublicKey>,
+    pub my_contributions: HashMap<SubsetMask, SubsetContribution>,
+    pub my_pk_commitments: HashMap<SubsetMask, [u8; 32]>,
+    pub received_broadcasts: HashMap<ParticipantId, MithrilRound3Broadcast>,
+    pub broadcast_sent: bool,
+}
+
+impl<S: TranscriptSigner> std::fmt::Debug for MithrilRound3State<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MithrilRound3State")
+            .field("my_party_id", &self.config.my_party_id)
+            .field("my_partial_pks", &self.my_partial_pks.len())
+            .field("received_broadcasts", &self.received_broadcasts.len())
+            .field("broadcast_sent", &self.broadcast_sent)
+            .finish()
+    }
+}
+
+/// State for Round 4.
+pub struct MithrilRound4State<S: TranscriptSigner> {
+    pub config: MithrilDkgConfig<S>,
+    pub round1_broadcasts: HashMap<ParticipantId, MithrilRound1Broadcast>,
+    pub round2_broadcasts: HashMap<ParticipantId, MithrilRound2Broadcast>,
+    pub round3_broadcasts: HashMap<ParticipantId, MithrilRound3Broadcast>,
+    pub shared_secrets: HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+    pub global_randomness: Vec<u8>,
+    pub rho: [u8; 32],
+    pub my_partial_pks: HashMap<SubsetMask, PartialPublicKey>,
+    pub my_contributions: HashMap<SubsetMask, SubsetContribution>,
+    pub received_broadcasts: HashMap<ParticipantId, MithrilRound4Broadcast>,
+    pub broadcast_sent: bool,
+}
+
+impl<S: TranscriptSigner> std::fmt::Debug for MithrilRound4State<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MithrilRound4State")
+            .field("my_party_id", &self.config.my_party_id)
+            .field("received_broadcasts", &self.received_broadcasts.len())
+            .field("broadcast_sent", &self.broadcast_sent)
+            .finish()
+    }
+}
+
+/// Final output.
 #[derive(Debug, Clone)]
-pub enum DkgState {
-	/// Initial state, ready to start Round 1.
-	Initialized,
-
-	/// Round 1: Generating and sending session ID contribution.
-	Round1Generating,
-
-	/// Round 1: Waiting for session ID contributions from other parties.
-	Round1Waiting,
-
-	/// Round 2: Generating seed contributions and sending commitment hash.
-	Round2Generating,
-
-	/// Round 2: Waiting for commitment hashes from other parties.
-	Round2Waiting,
-
-	/// Round 3: Sending P2P seed contributions to subset members.
-	Round3Sending,
-
-	/// Round 3: Waiting for P2P seed contributions from subset members.
-	Round3Waiting,
-
-	/// Round 4: Computing partial public keys from combined seeds and broadcasting.
-	Round4Broadcasting,
-
-	/// Round 4: Waiting for partial public key broadcasts from other parties.
-	Round4Waiting,
-
-	/// Round 5: Computing final output and sending confirmation.
-	Round5Confirming,
-
-	/// Round 5: Waiting for confirmations from other parties.
-	Round5Waiting,
-
-	/// Protocol completed successfully.
-	Complete,
-
-	/// Protocol failed with an error.
-	Failed(String),
+pub struct MithrilDkgOutput {
+    pub public_key: PublicKey,
+    pub private_share: PrivateKeyShare,
 }
 
-impl DkgState {
-	/// Get a human-readable name for the current state.
-	pub fn name(&self) -> &'static str {
-		match self {
-			DkgState::Initialized => "Initialized",
-			DkgState::Round1Generating => "Round1Generating",
-			DkgState::Round1Waiting => "Round1Waiting",
-			DkgState::Round2Generating => "Round2Generating",
-			DkgState::Round2Waiting => "Round2Waiting",
-			DkgState::Round3Sending => "Round3Sending",
-			DkgState::Round3Waiting => "Round3Waiting",
-			DkgState::Round4Broadcasting => "Round4Broadcasting",
-			DkgState::Round4Waiting => "Round4Waiting",
-			DkgState::Round5Confirming => "Round5Confirming",
-			DkgState::Round5Waiting => "Round5Waiting",
-			DkgState::Complete => "Complete",
-			DkgState::Failed(_) => "Failed",
-		}
-	}
-
-	/// Check if the protocol is still in progress.
-	pub fn is_in_progress(&self) -> bool {
-		!matches!(self, DkgState::Complete | DkgState::Failed(_))
-	}
-
-	/// Check if the protocol has completed successfully.
-	pub fn is_complete(&self) -> bool {
-		matches!(self, DkgState::Complete)
-	}
-
-	/// Check if the protocol has failed.
-	pub fn is_failed(&self) -> bool {
-		matches!(self, DkgState::Failed(_))
-	}
-
-	/// Get the current round number (0 = not started, 1-5 = in progress, 6 = complete).
-	pub fn round_number(&self) -> u8 {
-		match self {
-			DkgState::Initialized => 0,
-			DkgState::Round1Generating | DkgState::Round1Waiting => 1,
-			DkgState::Round2Generating | DkgState::Round2Waiting => 2,
-			DkgState::Round3Sending | DkgState::Round3Waiting => 3,
-			DkgState::Round4Broadcasting | DkgState::Round4Waiting => 4,
-			DkgState::Round5Confirming | DkgState::Round5Waiting => 5,
-			DkgState::Complete => 6,
-			DkgState::Failed(_) => 0,
-		}
-	}
-
-	/// Check if messages for a given round can be accepted in this state.
-	pub fn can_accept_round(&self, msg_round: u8) -> bool {
-		let current_round = self.round_number();
-		// Can accept messages for current round or already-processed rounds (duplicates will be
-		// caught later)
-		msg_round <= current_round
-	}
+/// DKG state machine.
+pub enum MithrilDkgState<S: TranscriptSigner> {
+    Initialized(MithrilDkgConfig<S>),
+    Round1(MithrilRound1State<S>),
+    Round2(MithrilRound2State<S>),
+    Round3(MithrilRound3State<S>),
+    Round4(MithrilRound4State<S>),
+    Complete(MithrilDkgOutput),
+    Failed(String),
 }
 
-/// Buffer for messages that arrive before we're ready to process them.
-///
-/// In distributed systems, messages may arrive out of order. For example:
-/// - Node A is still in Round1Waiting (hasn't received all Round1 messages)
-/// - Node B has moved to Round2 and sends its Round2 message
-/// - Node A receives the Round2 message but can't process it yet
-///
-/// Instead of dropping these messages, we buffer them and process them
-/// when we transition to the appropriate state.
-#[derive(Debug, Clone, Default)]
-pub struct MessageBuffer {
-	/// Buffered Round 2 messages (from parties that are ahead of us).
-	pub round2: Vec<DkgRound2Broadcast>,
-	/// Buffered Round 3 P2P messages (seed contributions).
-	pub round3: Vec<DkgRound3Private>,
-	/// Buffered Round 4 broadcast messages (partial public keys).
-	pub round4: Vec<DkgRound4Broadcast>,
-	/// Buffered Round 5 messages.
-	pub round5: Vec<DkgRound5Broadcast>,
+impl<S: TranscriptSigner> std::fmt::Debug for MithrilDkgState<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Initialized(_) => write!(f, "Initialized"),
+            Self::Round1(s) => write!(f, "Round1({:?})", s),
+            Self::Round2(s) => write!(f, "Round2({:?})", s),
+            Self::Round3(s) => write!(f, "Round3({:?})", s),
+            Self::Round4(s) => write!(f, "Round4({:?})", s),
+            Self::Complete(_) => write!(f, "Complete"),
+            Self::Failed(msg) => write!(f, "Failed({})", msg),
+        }
+    }
 }
 
-impl MessageBuffer {
-	/// Create a new empty message buffer.
-	pub fn new() -> Self {
-		Self { round2: Vec::new(), round3: Vec::new(), round4: Vec::new(), round5: Vec::new() }
-	}
+impl<S: TranscriptSigner> MithrilDkgState<S> {
+    pub fn new(config: MithrilDkgConfig<S>) -> Self {
+        MithrilDkgState::Initialized(config)
+    }
 
-	/// Buffer a message for later processing.
-	pub fn buffer(&mut self, msg: DkgMessage) {
-		match msg {
-			DkgMessage::Round1(_) => {
-				// Round 1 messages should never need buffering since it's the first round
-				// If we receive a Round1 message late, we're already past it
-			},
-			DkgMessage::Round2(m) => self.round2.push(m),
-			DkgMessage::Round3(m) => self.round3.push(m),
-			DkgMessage::Round4(m) => self.round4.push(m),
-			DkgMessage::Round5(m) => self.round5.push(m),
-		}
-	}
+    pub fn is_complete(&self) -> bool {
+        matches!(self, MithrilDkgState::Complete(_))
+    }
 
-	/// Take all buffered messages for a specific round.
-	pub fn take_round2(&mut self) -> Vec<DkgRound2Broadcast> {
-		std::mem::take(&mut self.round2)
-	}
+    pub fn is_failed(&self) -> bool {
+        matches!(self, MithrilDkgState::Failed(_))
+    }
 
-	/// Take all buffered Round 3 P2P messages.
-	pub fn take_round3(&mut self) -> Vec<DkgRound3Private> {
-		std::mem::take(&mut self.round3)
-	}
-
-	/// Take all buffered Round 4 broadcast messages.
-	pub fn take_round4(&mut self) -> Vec<DkgRound4Broadcast> {
-		std::mem::take(&mut self.round4)
-	}
-
-	/// Take all buffered Round 5 messages.
-	pub fn take_round5(&mut self) -> Vec<DkgRound5Broadcast> {
-		std::mem::take(&mut self.round5)
-	}
-
-	/// Check if there are any buffered messages.
-	pub fn is_empty(&self) -> bool {
-		self.round2.is_empty() &&
-			self.round3.is_empty() &&
-			self.round4.is_empty() &&
-			self.round5.is_empty()
-	}
+    pub fn output(&self) -> Option<&MithrilDkgOutput> {
+        match self {
+            MithrilDkgState::Complete(output) => Some(output),
+            _ => None,
+        }
+    }
 }
 
-/// Accumulated data from Round 1.
-#[derive(Debug, Clone)]
-pub struct Round1Data {
-	/// My session ID contribution.
-	pub my_contribution: [u8; SESSION_ID_SIZE],
-	/// Session ID contributions from all parties (including self).
-	pub session_ids: HashMap<ParticipantId, [u8; SESSION_ID_SIZE]>,
-	/// Combined session ID (computed after all contributions received).
-	pub combined_session_id: Option<[u8; SESSION_ID_SIZE]>,
+/// Check if all broadcasts received.
+pub fn all_broadcasts_received<T>(
+    received: &HashMap<ParticipantId, T>,
+    all_participants: &[ParticipantId],
+    my_party_id: ParticipantId,
+) -> bool {
+    let expected_count = all_participants.len() - 1;
+    let actual_count = received.keys().filter(|&&p| p != my_party_id).count();
+    actual_count >= expected_count
 }
 
-impl Round1Data {
-	/// Create new Round 1 data storage.
-	pub fn new() -> Self {
-		Self {
-			my_contribution: [0u8; SESSION_ID_SIZE],
-			session_ids: HashMap::new(),
-			combined_session_id: None,
-		}
-	}
-
-	/// Check if we've received all session ID contributions.
-	pub fn is_complete(&self, expected_count: usize) -> bool {
-		self.session_ids.len() == expected_count
-	}
-
-	/// Add a session ID contribution from a party.
-	pub fn add_contribution(
-		&mut self,
-		party_id: ParticipantId,
-		contribution: [u8; SESSION_ID_SIZE],
-	) {
-		self.session_ids.insert(party_id, contribution);
-	}
-}
-
-impl Default for Round1Data {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
-/// Accumulated data from Round 2.
-#[derive(Debug, Clone)]
-pub struct Round2Data {
-	/// My commitment hash.
-	pub my_commitment_hash: [u8; COMMITMENT_HASH_SIZE],
-	/// Commitment hashes from all parties (including self).
-	pub commitment_hashes: HashMap<ParticipantId, [u8; COMMITMENT_HASH_SIZE]>,
-	/// Public contributions from all parties (seed hashes).
-	/// Used to verify P2P seeds in Round 3.
-	pub public_contributions: HashMap<ParticipantId, PartyPublicContributions>,
-}
-
-impl Round2Data {
-	/// Create new Round 2 data storage.
-	pub fn new() -> Self {
-		Self {
-			my_commitment_hash: [0u8; COMMITMENT_HASH_SIZE],
-			commitment_hashes: HashMap::new(),
-			public_contributions: HashMap::new(),
-		}
-	}
-
-	/// Check if we've received all commitment hashes.
-	pub fn is_complete(&self, expected_count: usize) -> bool {
-		self.commitment_hashes.len() == expected_count
-	}
-
-	/// Add a commitment hash and public contributions from a party.
-	pub fn add_commitment(
-		&mut self,
-		party_id: ParticipantId,
-		hash: [u8; COMMITMENT_HASH_SIZE],
-		public_contrib: PartyPublicContributions,
-	) {
-		self.commitment_hashes.insert(party_id, hash);
-		self.public_contributions.insert(party_id, public_contrib);
-	}
-
-	/// Add a commitment hash from a party (legacy compatibility).
-	pub fn add_commitment_hash(
-		&mut self,
-		party_id: ParticipantId,
-		hash: [u8; COMMITMENT_HASH_SIZE],
-	) {
-		self.commitment_hashes.insert(party_id, hash);
-	}
-}
-
-impl Default for Round2Data {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
-/// Accumulated data from Round 3 (P2P seed exchange).
-///
-/// SEED-BASED DKG: Round 3 is now P2P seed exchange within subsets.
-/// Seeds are combined to derive η-bounded secret contributions.
-#[derive(Debug, Clone)]
-pub struct Round3Data {
-	/// Received seed contributions from other parties via P2P.
-	/// Key is (from_party_id, subset_mask), value is the seed contribution.
-	pub received_seed_contributions: HashMap<(ParticipantId, SubsetMask), SubsetSeedContribution>,
-	/// Track which parties have sent us their P2P seeds for each subset.
-	/// Key is subset_mask, value is list of parties who have sent their contribution.
-	pub received_seeds_by_subset: HashMap<SubsetMask, Vec<ParticipantId>>,
-}
-
-impl Round3Data {
-	/// Create new Round 3 data storage.
-	pub fn new() -> Self {
-		Self {
-			received_seed_contributions: HashMap::new(),
-			received_seeds_by_subset: HashMap::new(),
-		}
-	}
-
-	/// Check if we've received all P2P seed contributions for our subsets.
-	/// Each subset should have seeds from all its members (except ourselves).
-	pub fn is_p2p_complete(&self, my_subsets: &[SubsetMask], _total_parties: u32) -> bool {
-		for subset_mask in my_subsets {
-			// Count how many parties are in this subset
-			let subset_size = subset_mask.count_ones() as usize;
-			// We need seeds from all OTHER parties in the subset
-			let received = self.received_seeds_by_subset.get(subset_mask);
-			let received_count = received.map(|v| v.len()).unwrap_or(0);
-			// We have our own seed, so we need subset_size - 1 from others
-			if received_count < subset_size - 1 {
-				return false;
-			}
-		}
-		true
-	}
-
-	/// Add a seed contribution received via P2P from another party.
-	pub fn add_received_seed(
-		&mut self,
-		from_party_id: ParticipantId,
-		subset_mask: SubsetMask,
-		seed_contribution: SubsetSeedContribution,
-	) {
-		self.received_seed_contributions
-			.insert((from_party_id, subset_mask), seed_contribution);
-		self.received_seeds_by_subset
-			.entry(subset_mask)
-			.or_insert_with(Vec::new)
-			.push(from_party_id);
-	}
-}
-
-impl Default for Round3Data {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
-/// Accumulated data from Round 4 (partial public key broadcast).
-///
-/// SEED-BASED DKG: After combining seeds and deriving secrets,
-/// each party broadcasts partial public keys for their subsets.
-#[derive(Debug, Clone)]
-pub struct Round4Data {
-	/// Partial public keys from all parties.
-	/// Key is party_id, value contains their partial public keys and rho.
-	pub partial_public_keys: HashMap<ParticipantId, DkgRound4Broadcast>,
-	/// Derived secret contributions for this party's subsets.
-	/// Computed from combined seeds, stored for final output.
-	pub my_derived_secrets: HashMap<SubsetMask, SubsetContribution>,
-}
-
-impl Round4Data {
-	/// Create new Round 4 data storage.
-	pub fn new() -> Self {
-		Self {
-			partial_public_keys: HashMap::new(),
-			my_derived_secrets: HashMap::new(),
-		}
-	}
-
-	/// Check if we've received all partial public key broadcasts.
-	pub fn is_complete(&self, expected_count: usize) -> bool {
-		self.partial_public_keys.len() == expected_count
-	}
-
-	/// Add partial public keys from a party.
-	pub fn add_partial_public_keys(&mut self, party_id: ParticipantId, msg: DkgRound4Broadcast) {
-		self.partial_public_keys.insert(party_id, msg);
-	}
-
-	/// Store derived secret contribution for a subset.
-	pub fn set_derived_secret(&mut self, subset_mask: SubsetMask, secret: SubsetContribution) {
-		self.my_derived_secrets.insert(subset_mask, secret);
-	}
-}
-
-impl Default for Round4Data {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
-/// Accumulated data from Round 5.
-#[derive(Debug, Clone)]
-pub struct Round5Data {
-	/// My confirmation message.
-	pub my_confirmation: Option<DkgRound5Broadcast>,
-	/// Confirmations from all parties (including self).
-	pub confirmations: HashMap<ParticipantId, DkgRound5Broadcast>,
-	/// The computed public key hash (for consensus).
-	pub my_public_key_hash: [u8; COMMITMENT_HASH_SIZE],
-}
-
-impl Round5Data {
-	/// Create new Round 5 data storage.
-	pub fn new() -> Self {
-		Self {
-			my_confirmation: None,
-			confirmations: HashMap::new(),
-			my_public_key_hash: [0u8; COMMITMENT_HASH_SIZE],
-		}
-	}
-
-	/// Check if we've received all confirmations.
-	pub fn is_complete(&self, expected_count: usize) -> bool {
-		self.confirmations.len() == expected_count
-	}
-
-	/// Add a confirmation from a party.
-	pub fn add_confirmation(&mut self, party_id: ParticipantId, confirmation: DkgRound5Broadcast) {
-		self.confirmations.insert(party_id, confirmation);
-	}
-
-	/// Check if all parties succeeded and agree on the public key.
-	pub fn consensus_reached(&self) -> bool {
-		if self.confirmations.is_empty() {
-			return false;
-		}
-
-		// All must have succeeded
-		if !self.confirmations.values().all(|c| c.success) {
-			return false;
-		}
-
-		// All must agree on the public key hash
-		self.confirmations
-			.values()
-			.all(|c| c.public_key_hash == self.my_public_key_hash)
-	}
-
-	/// Get the list of parties that failed.
-	pub fn failed_parties(&self) -> Vec<ParticipantId> {
-		self.confirmations
-			.iter()
-			.filter(|(_, c)| !c.success)
-			.map(|(&id, _)| id)
-			.collect()
-	}
-
-	/// Get the list of parties with mismatched public key hashes.
-	pub fn mismatched_parties(&self) -> Vec<ParticipantId> {
-		self.confirmations
-			.iter()
-			.filter(|(_, c)| c.public_key_hash != self.my_public_key_hash)
-			.map(|(&id, _)| id)
-			.collect()
-	}
-}
-
-impl Default for Round5Data {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
-/// Complete state storage for the DKG protocol.
-///
-/// This structure holds all accumulated data across all rounds,
-/// allowing the protocol to be driven by the state machine.
-pub struct DkgStateData {
-	/// The DKG configuration.
-	pub config: DkgConfig,
-	/// Current protocol state.
-	pub state: DkgState,
-	/// Participant list for ID-to-index mapping.
-	/// This allows arbitrary party IDs (like NEAR's large IDs) to be mapped
-	/// to sequential indices (0, 1, 2, ...) for bitmask operations.
-	pub participants: ParticipantList,
-	/// Data from Round 1.
-	pub round1: Round1Data,
-	/// Data from Round 2.
-	pub round2: Round2Data,
-	/// Data from Round 3 (P2P seed exchange).
-	pub round3: Round3Data,
-	/// Data from Round 4 (partial public key broadcast).
-	pub round4: Round4Data,
-	/// Data from Round 5 (confirmation).
-	pub round5: Round5Data,
-	/// The final output (set when protocol completes).
-	pub output: Option<DkgOutput>,
-	/// Buffer for messages that arrive before we're ready to process them.
-	pub message_buffer: MessageBuffer,
-}
-
-impl DkgStateData {
-	/// Create a new DKG state data structure.
-	///
-	/// # Panics
-	/// Panics if the participant list cannot be created (e.g., duplicate IDs).
-	pub fn new(config: DkgConfig) -> Self {
-		let participants = ParticipantList::new(&config.all_participants)
-			.expect("DkgConfig should have valid participant IDs");
-		Self {
-			config,
-			state: DkgState::Initialized,
-			participants,
-			round1: Round1Data::new(),
-			round2: Round2Data::new(),
-			round3: Round3Data::new(),
-			round4: Round4Data::new(),
-			round5: Round5Data::new(),
-			output: None,
-			message_buffer: MessageBuffer::new(),
-		}
-	}
-
-	/// Get the index for a party ID.
-	/// Returns None if the party ID is not in the participant list.
-	pub fn party_index(&self, party_id: ParticipantId) -> Option<usize> {
-		self.participants.index_of(party_id)
-	}
-
-	/// Get the party ID for an index.
-	/// Returns None if the index is out of bounds.
-	pub fn party_id_at(&self, index: usize) -> Option<ParticipantId> {
-		self.participants.get(index)
-	}
-
-	/// Get the index for this party (my_party_id).
-	pub fn my_index(&self) -> usize {
-		self.participants
-			.index_of(self.config.my_party_id)
-			.expect("my_party_id should be in participant list")
-	}
-
-	/// Get the expected number of participants.
-	pub fn expected_count(&self) -> usize {
-		self.config.total_parties() as usize
-	}
-
-	/// Transition to a new state and process any buffered messages for that state.
-	///
-	/// Returns a list of errors from processing buffered messages (if any).
-	/// These are logged but don't prevent the transition.
-	pub fn transition_to(&mut self, new_state: DkgState) -> Vec<String> {
-		self.state = new_state;
-		self.process_buffered_messages()
-	}
-
-	/// Process any buffered messages that are now valid for the current state.
-	fn process_buffered_messages(&mut self) -> Vec<String> {
-		let mut errors = Vec::new();
-
-		match &self.state {
-			DkgState::Round2Generating | DkgState::Round2Waiting => {
-				let buffered = self.message_buffer.take_round2();
-				for msg in buffered {
-					if let Err(e) = self.process_round2(msg) {
-						errors.push(e);
-					}
-				}
-			},
-			DkgState::Round3Sending | DkgState::Round3Waiting => {
-				// Process Round 3 P2P messages (seed contributions)
-				let buffered = self.message_buffer.take_round3();
-				for msg in buffered {
-					if let Err(e) = self.process_round3_private(msg) {
-						errors.push(e);
-					}
-				}
-			},
-			DkgState::Round4Broadcasting | DkgState::Round4Waiting => {
-				// Process Round 4 broadcast messages (partial public keys)
-				let buffered = self.message_buffer.take_round4();
-				for msg in buffered {
-					if let Err(e) = self.process_round4(msg) {
-						errors.push(e);
-					}
-				}
-			},
-			DkgState::Round5Confirming | DkgState::Round5Waiting => {
-				let buffered = self.message_buffer.take_round5();
-				for msg in buffered {
-					if let Err(e) = self.process_round5(msg) {
-						errors.push(e);
-					}
-				}
-			},
-			_ => {},
-		}
-
-		errors
-	}
-
-	/// Mark the protocol as failed with a reason.
-	pub fn fail(&mut self, reason: String) {
-		self.state = DkgState::Failed(reason);
-	}
-
-	/// Mark the protocol as complete and set the output.
-	pub fn complete(&mut self, output: DkgOutput) {
-		self.output = Some(output);
-		self.state = DkgState::Complete;
-	}
-
-	/// Check if we can proceed to the next state based on received messages.
-	pub fn can_advance(&self) -> bool {
-		let expected = self.expected_count();
-		match &self.state {
-			DkgState::Round1Waiting => self.round1.is_complete(expected),
-			DkgState::Round2Waiting => self.round2.is_complete(expected),
-			// Round 3 waiting is for P2P seeds - checked separately in protocol.rs
-			DkgState::Round4Waiting => self.round4.is_complete(expected),
-			DkgState::Round5Waiting => self.round5.is_complete(expected),
-			_ => false,
-		}
-	}
-
-	/// Process a Round 1 message.
-	pub fn process_round1(&mut self, msg: DkgRound1Broadcast) -> Result<(), String> {
-		if !matches!(self.state, DkgState::Round1Generating | DkgState::Round1Waiting) {
-			return Err(format!("Cannot process Round 1 message in state {}", self.state.name()));
-		}
-
-		if !self.config.all_participants.contains(&msg.party_id) {
-			return Err(format!("Unknown party ID: {}", msg.party_id));
-		}
-
-		if self.round1.session_ids.contains_key(&msg.party_id) {
-			return Err(format!("Duplicate Round 1 message from party {}", msg.party_id));
-		}
-
-		self.round1.add_contribution(msg.party_id, msg.session_id_contribution);
-		Ok(())
-	}
-
-	/// Process a Round 2 message.
-	pub fn process_round2(&mut self, msg: DkgRound2Broadcast) -> Result<(), String> {
-		if !matches!(self.state, DkgState::Round2Generating | DkgState::Round2Waiting) {
-			return Err(format!("Cannot process Round 2 message in state {}", self.state.name()));
-		}
-
-		if !self.config.all_participants.contains(&msg.party_id) {
-			return Err(format!("Unknown party ID: {}", msg.party_id));
-		}
-
-		if self.round2.commitment_hashes.contains_key(&msg.party_id) {
-			return Err(format!("Duplicate Round 2 message from party {}", msg.party_id));
-		}
-
-		self.round2.add_commitment(msg.party_id, msg.commitment_hash, msg.public_contributions);
-		Ok(())
-	}
-
-	/// Process a Round 3 P2P message (seed contribution).
-	///
-	/// SEED-BASED DKG: Seeds are exchanged via P2P with subset members.
-	pub fn process_round3_private(&mut self, msg: DkgRound3Private) -> Result<(), String> {
-		if !matches!(self.state, DkgState::Round3Sending | DkgState::Round3Waiting) {
-			return Err(format!(
-				"Cannot process Round 3 P2P message in state {}",
-				self.state.name()
-			));
-		}
-
-		if !self.config.all_participants.contains(&msg.from_party_id) {
-			return Err(format!("Unknown party ID: {}", msg.from_party_id));
-		}
-
-		// Verify this party is in the subset they claim to be sharing for
-		let from_index = self
-			.participants
-			.index_of(msg.from_party_id)
-			.ok_or_else(|| format!("Party {} not in participant list", msg.from_party_id))?;
-		if (msg.subset_mask & (1 << from_index)) == 0 {
-			return Err(format!(
-				"Party {} claims seed for subset {:b} but is not in that subset",
-				msg.from_party_id, msg.subset_mask
-			));
-		}
-
-		// Verify we are in this subset
-		let my_index = self
-			.participants
-			.index_of(self.config.my_party_id)
-			.ok_or_else(|| "My party ID not in participant list".to_string())?;
-		if (msg.subset_mask & (1 << my_index)) == 0 {
-			return Err(format!(
-				"Received seed for subset {:b} but I (index {}) am not in that subset",
-				msg.subset_mask, my_index
-			));
-		}
-
-		// Check for duplicate
-		if self
-			.round3
-			.received_seed_contributions
-			.contains_key(&(msg.from_party_id, msg.subset_mask))
-		{
-			return Err(format!(
-				"Duplicate Round 3 P2P message from party {} for subset {:b}",
-				msg.from_party_id, msg.subset_mask
-			));
-		}
-
-		self.round3
-			.add_received_seed(msg.from_party_id, msg.subset_mask, msg.seed_contribution);
-		Ok(())
-	}
-
-	/// Process a Round 4 broadcast message (partial public keys).
-	///
-	/// SEED-BASED DKG: After combining seeds, parties broadcast partial public keys.
-	pub fn process_round4(&mut self, msg: DkgRound4Broadcast) -> Result<(), String> {
-		if !matches!(self.state, DkgState::Round4Broadcasting | DkgState::Round4Waiting) {
-			return Err(format!("Cannot process Round 4 message in state {}", self.state.name()));
-		}
-
-		if !self.config.all_participants.contains(&msg.party_id) {
-			return Err(format!("Unknown party ID: {}", msg.party_id));
-		}
-
-		if self.round4.partial_public_keys.contains_key(&msg.party_id) {
-			return Err(format!("Duplicate Round 4 message from party {}", msg.party_id));
-		}
-
-		self.round4.add_partial_public_keys(msg.party_id, msg);
-		Ok(())
-	}
-
-	/// Process a Round 5 message.
-	pub fn process_round5(&mut self, msg: DkgRound5Broadcast) -> Result<(), String> {
-		if !matches!(self.state, DkgState::Round5Confirming | DkgState::Round5Waiting) {
-			return Err(format!("Cannot process Round 5 message in state {}", self.state.name()));
-		}
-
-		if !self.config.all_participants.contains(&msg.party_id) {
-			return Err(format!("Unknown party ID: {}", msg.party_id));
-		}
-
-		if self.round5.confirmations.contains_key(&msg.party_id) {
-			return Err(format!("Duplicate Round 5 message from party {}", msg.party_id));
-		}
-
-		self.round5.add_confirmation(msg.party_id, msg);
-		Ok(())
-	}
-}
-
-impl Zeroize for DkgStateData {
-	fn zeroize(&mut self) {
-		// Zeroize sensitive data
-		self.round1.my_contribution.zeroize();
-		for (_, sid) in self.round1.session_ids.iter_mut() {
-			sid.zeroize();
-		}
-		self.round2.my_commitment_hash.zeroize();
-		// Zeroize derived secrets in Round 4
-		for (_, subset) in self.round4.my_derived_secrets.iter_mut() {
-			for poly in &mut subset.s1 {
-				poly.zeroize();
-			}
-			for poly in &mut subset.s2 {
-				poly.zeroize();
-			}
-		}
-		self.round5.my_public_key_hash.zeroize();
-	}
-}
-
-impl ZeroizeOnDrop for DkgStateData {}
-
-impl std::fmt::Debug for DkgStateData {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("DkgStateData")
-			.field("config", &self.config)
-			.field("state", &self.state)
-			.field("round1_complete", &self.round1.is_complete(self.expected_count()))
-			.field("round2_complete", &self.round2.is_complete(self.expected_count()))
-			.field("round3_p2p_received", &self.round3.received_seed_contributions.len())
-			.field("round4_complete", &self.round4.is_complete(self.expected_count()))
-			.field("round5_complete", &self.round5.is_complete(self.expected_count()))
-			.field("has_output", &self.output.is_some())
-			.finish()
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use crate::config::ThresholdConfig;
-
-	fn make_test_config() -> DkgConfig {
-		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
-		DkgConfig::new(threshold_config, 0, vec![0, 1, 2]).unwrap()
-	}
-
-	#[test]
-	fn test_dkg_state_names() {
-		assert_eq!(DkgState::Initialized.name(), "Initialized");
-		assert_eq!(DkgState::Round1Waiting.name(), "Round1Waiting");
-		assert_eq!(DkgState::Complete.name(), "Complete");
-		assert_eq!(DkgState::Failed("test".into()).name(), "Failed");
-	}
-
-	#[test]
-	fn test_dkg_state_round_numbers() {
-		assert_eq!(DkgState::Initialized.round_number(), 0);
-		assert_eq!(DkgState::Round1Generating.round_number(), 1);
-		assert_eq!(DkgState::Round2Waiting.round_number(), 2);
-		assert_eq!(DkgState::Round3Sending.round_number(), 3);
-		assert_eq!(DkgState::Round4Broadcasting.round_number(), 4);
-		assert_eq!(DkgState::Round5Confirming.round_number(), 5);
-		assert_eq!(DkgState::Complete.round_number(), 6);
-	}
-
-	#[test]
-	fn test_dkg_state_predicates() {
-		assert!(DkgState::Round1Waiting.is_in_progress());
-		assert!(!DkgState::Complete.is_in_progress());
-		assert!(!DkgState::Failed("err".into()).is_in_progress());
-
-		assert!(DkgState::Complete.is_complete());
-		assert!(!DkgState::Round1Waiting.is_complete());
-
-		assert!(DkgState::Failed("err".into()).is_failed());
-		assert!(!DkgState::Complete.is_failed());
-	}
-
-	#[test]
-	fn test_round1_data() {
-		let mut data = Round1Data::new();
-		assert!(!data.is_complete(3));
-
-		data.add_contribution(0, [1u8; 32]);
-		data.add_contribution(1, [2u8; 32]);
-		assert!(!data.is_complete(3));
-
-		data.add_contribution(2, [3u8; 32]);
-		assert!(data.is_complete(3));
-	}
-
-	#[test]
-	fn test_round5_consensus() {
-		let mut data = Round5Data::new();
-		data.my_public_key_hash = [42u8; 32];
-
-		// Empty - no consensus
-		assert!(!data.consensus_reached());
-
-		// Add matching confirmations
-		data.add_confirmation(
-			0,
-			DkgRound5Broadcast { party_id: 0, success: true, public_key_hash: [42u8; 32] },
-		);
-		data.add_confirmation(
-			1,
-			DkgRound5Broadcast { party_id: 1, success: true, public_key_hash: [42u8; 32] },
-		);
-		assert!(data.consensus_reached());
-
-		// Add mismatched confirmation
-		data.add_confirmation(
-			2,
-			DkgRound5Broadcast { party_id: 2, success: true, public_key_hash: [99u8; 32] },
-		);
-		assert!(!data.consensus_reached());
-		assert_eq!(data.mismatched_parties(), vec![2]);
-	}
-
-	#[test]
-	fn test_dkg_state_data_creation() {
-		let config = make_test_config();
-		let state_data = DkgStateData::new(config);
-
-		assert!(matches!(state_data.state, DkgState::Initialized));
-		assert_eq!(state_data.expected_count(), 3);
-		assert!(state_data.output.is_none());
-	}
-
-	#[test]
-	fn test_dkg_state_data_transition() {
-		let config = make_test_config();
-		let mut state_data = DkgStateData::new(config);
-
-		state_data.transition_to(DkgState::Round1Generating);
-		assert!(matches!(state_data.state, DkgState::Round1Generating));
-
-		state_data.fail("test error".into());
-		assert!(matches!(state_data.state, DkgState::Failed(_)));
-	}
-
-	#[test]
-	fn test_process_round1_message() {
-		let config = make_test_config();
-		let mut state_data = DkgStateData::new(config);
-		state_data.transition_to(DkgState::Round1Generating);
-
-		let msg = DkgRound1Broadcast { party_id: 1, session_id_contribution: [1u8; 32] };
-
-		assert!(state_data.process_round1(msg.clone()).is_ok());
-		assert!(state_data.round1.session_ids.contains_key(&1));
-
-		// Duplicate should fail
-		assert!(state_data.process_round1(msg).is_err());
-	}
-
-	#[test]
-	fn test_process_round1_wrong_state() {
-		let config = make_test_config();
-		let mut state_data = DkgStateData::new(config);
-		// Still in Initialized state
-
-		let msg = DkgRound1Broadcast { party_id: 1, session_id_contribution: [1u8; 32] };
-
-		assert!(state_data.process_round1(msg).is_err());
-	}
-
-	#[test]
-	fn test_process_round1_unknown_party() {
-		let config = make_test_config();
-		let mut state_data = DkgStateData::new(config);
-		state_data.transition_to(DkgState::Round1Generating);
-
-		let msg = DkgRound1Broadcast {
-			party_id: 99, // Not in participants
-			session_id_contribution: [1u8; 32],
-		};
-
-		assert!(state_data.process_round1(msg).is_err());
-	}
-
-	#[test]
-	fn test_can_advance() {
-		let config = make_test_config();
-		let mut state_data = DkgStateData::new(config);
-		state_data.transition_to(DkgState::Round1Waiting);
-
-		assert!(!state_data.can_advance());
-
-		state_data.round1.add_contribution(0, [0u8; 32]);
-		state_data.round1.add_contribution(1, [1u8; 32]);
-		assert!(!state_data.can_advance());
-
-		state_data.round1.add_contribution(2, [2u8; 32]);
-		assert!(state_data.can_advance());
-	}
-
-	#[test]
-	fn test_message_buffer_creation() {
-		let buffer = MessageBuffer::new();
-		assert!(buffer.is_empty());
-		assert!(buffer.round2.is_empty());
-		assert!(buffer.round3.is_empty());
-		assert!(buffer.round5.is_empty());
-	}
-
-	#[test]
-	fn test_message_buffer_round2() {
-		let mut buffer = MessageBuffer::new();
-		assert!(buffer.is_empty());
-
-		let public_contrib = PartyPublicContributions::new(1);
-		let msg =
-			DkgMessage::Round2(DkgRound2Broadcast { 
-				party_id: 1, 
-				commitment_hash: [42u8; 32],
-				public_contributions: public_contrib,
-			});
-		buffer.buffer(msg);
-
-		assert!(!buffer.is_empty());
-		assert_eq!(buffer.round2.len(), 1);
-		assert!(buffer.round3.is_empty());
-
-		let taken = buffer.take_round2();
-		assert_eq!(taken.len(), 1);
-		assert_eq!(taken[0].party_id, 1);
-		assert!(buffer.is_empty());
-	}
-
-	#[test]
-	fn test_message_buffer_round3() {
-		let mut buffer = MessageBuffer::new();
-
-		// Round 3 is now P2P seed exchange
-		let seed_contrib = SubsetSeedContribution { seed: [42u8; 64] };
-		let msg = DkgMessage::Round3(DkgRound3Private { 
-			from_party_id: 2, 
-			subset_mask: 0b111,
-			seed_contribution: seed_contrib,
-		});
-		buffer.buffer(msg);
-
-		assert!(!buffer.is_empty());
-		assert_eq!(buffer.round3.len(), 1);
-
-		let taken = buffer.take_round3();
-		assert_eq!(taken.len(), 1);
-		assert_eq!(taken[0].from_party_id, 2);
-		assert!(buffer.is_empty());
-	}
-
-	#[test]
-	fn test_message_buffer_round5() {
-		let mut buffer = MessageBuffer::new();
-
-		let msg = DkgMessage::Round5(DkgRound5Broadcast {
-			party_id: 1,
-			success: true,
-			public_key_hash: [99u8; 32],
-		});
-		buffer.buffer(msg);
-
-		assert!(!buffer.is_empty());
-		assert_eq!(buffer.round5.len(), 1);
-
-		let taken = buffer.take_round5();
-		assert_eq!(taken.len(), 1);
-		assert_eq!(taken[0].party_id, 1);
-		assert!(taken[0].success);
-		assert!(buffer.is_empty());
-	}
-
-	#[test]
-	fn test_message_buffer_round1_ignored() {
-		let mut buffer = MessageBuffer::new();
-
-		// Round 1 messages should not be buffered (first round, never needs buffering)
-		let msg = DkgMessage::Round1(DkgRound1Broadcast {
-			party_id: 1,
-			session_id_contribution: [1u8; 32],
-		});
-		buffer.buffer(msg);
-
-		// Buffer should still be empty since Round1 messages are ignored
-		assert!(buffer.is_empty());
-	}
-
-	#[test]
-	fn test_state_data_has_message_buffer() {
-		let config = make_test_config();
-		let state_data = DkgStateData::new(config);
-
-		assert!(state_data.message_buffer.is_empty());
-	}
-
-	#[test]
-	fn test_transition_processes_buffered_messages() {
-		let config = make_test_config();
-		let mut state_data = DkgStateData::new(config);
-
-		// Start in Round1Generating
-		let _ = state_data.transition_to(DkgState::Round1Generating);
-
-		// Buffer a Round2 message (simulating out-of-order delivery)
-		let public_contrib = PartyPublicContributions::new(1);
-		let msg = DkgRound2Broadcast { 
-			party_id: 1, 
-			commitment_hash: [42u8; 32],
-			public_contributions: public_contrib,
-		};
-		state_data.message_buffer.round2.push(msg);
-
-		// Transition through Round1 states
-		let _ = state_data.transition_to(DkgState::Round1Waiting);
-		// Add fake Round1 data to allow advancement
-		state_data.round1.add_contribution(0, [0u8; 32]);
-		state_data.round1.add_contribution(1, [1u8; 32]);
-		state_data.round1.add_contribution(2, [2u8; 32]);
-
-		// Now transition to Round2Generating - this should process the buffered message
-		let errors = state_data.transition_to(DkgState::Round2Generating);
-
-		// The buffered message should have been processed
-		assert!(state_data.message_buffer.round2.is_empty());
-		// The message should have been added to round2 data
-		assert!(state_data.round2.commitment_hashes.contains_key(&1));
-		// No errors expected since the message was valid
-		assert!(errors.is_empty());
-	}
-
-	#[test]
-	fn test_dkg_state_can_accept_round() {
-		assert!(DkgState::Round1Waiting.can_accept_round(1));
-		assert!(!DkgState::Round1Waiting.can_accept_round(2));
-
-		assert!(DkgState::Round2Waiting.can_accept_round(1));
-		assert!(DkgState::Round2Waiting.can_accept_round(2));
-		assert!(!DkgState::Round2Waiting.can_accept_round(3));
-
-		assert!(DkgState::Round3Waiting.can_accept_round(3));
-		assert!(!DkgState::Round3Waiting.can_accept_round(4));
-	}
+/// Check if all private messages received.
+pub fn all_private_messages_received(
+    received_secrets: &HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+    my_shared_secrets: &HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+    my_subsets: &[SubsetMask],
+) -> bool {
+    for &subset in my_subsets {
+        if !received_secrets.contains_key(&subset) && !my_shared_secrets.contains_key(&subset) {
+            return false;
+        }
+    }
+    true
 }

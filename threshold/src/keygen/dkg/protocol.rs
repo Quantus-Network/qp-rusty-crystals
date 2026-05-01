@@ -1,1289 +1,1496 @@
-//! Protocol trait implementation for DKG.
-//!
-//! This module implements the `Protocol` trait pattern used by NEAR MPC,
-//! allowing the DKG to be driven by the standard `run_protocol` function.
-//!
-//! The protocol uses a poke/message pattern:
-//! - `poke()` is called repeatedly to advance the protocol
-//! - `message()` is called when a message arrives from another party
-//! - `poke()` returns an `Action` indicating what to do next
+//! Protocol implementation for the Mithril DKG.
 
 use std::collections::HashMap;
 
-use rand::{Rng, SeedableRng};
+use rand::{CryptoRng, RngCore};
 
-use crate::{error::ThresholdError, participants::ParticipantList};
+use crate::config::ThresholdConfig;
+use crate::keys::{PrivateKeyShare, PublicKey, SecretShareData};
+use crate::participants::ParticipantList;
 
-use super::{
-	state::{DkgState, DkgStateData},
-	types::{
-		combine_seeds, derive_subset_contribution, hash_seed, DkgConfig, DkgMessage, DkgOutput,
-		DkgRound1Broadcast, DkgRound2Broadcast, DkgRound3Private, DkgRound4Broadcast,
-		DkgRound5Broadcast, ParticipantId, PartialPublicKey, PartyPublicContributions,
-		PartySeedContributions, SubsetContribution, SubsetMask, SubsetSeedContribution,
-		COMMITMENT_HASH_SIZE, K, L, N, SESSION_ID_SIZE, SUBSET_SEED_SIZE,
-	},
+use super::state::{
+    all_broadcasts_received, all_private_messages_received, MithrilDkgOutput, MithrilDkgState,
+    MithrilRound1State, MithrilRound2State, MithrilRound3State, MithrilRound4State,
+};
+use super::types::{
+    compute_partial_output_hash, compute_signing_message, compute_transcript_hash, h_commit,
+    h_commit_pk, h_keygen, h_seed, MithrilDkgConfig, MithrilDkgMessage, MithrilRound1Broadcast,
+    MithrilRound1Private, MithrilRound2Broadcast, MithrilRound3Broadcast, MithrilRound4Broadcast,
+    ParticipantId, PartialPublicKey, SubsetMask, TranscriptSigner, SubsetContribution,
+    derive_subset_contribution, RANDOMNESS_SIZE, SHARED_SECRET_SIZE, K, N,
 };
 
-// ============================================================================
-// Action Enum (mirrors NEAR's threshold-signatures Protocol trait)
-// ============================================================================
+use qp_rusty_crystals_dilithium::{fips202, packing, polyvec};
 
-/// Represents an action to be taken by the protocol driver.
-///
-/// This mirrors the `Action` enum from NEAR's `threshold-signatures` crate.
-#[derive(Debug, Clone)]
-pub enum Action<T> {
-	/// Do nothing, waiting for more messages.
-	Wait,
-	/// Send a message to all other participants.
-	SendMany(Vec<u8>),
-	/// Send a private message to a specific participant.
-	SendPrivate(ParticipantId, Vec<u8>),
-	/// The protocol has completed, returning the output.
-	Return(T),
-}
+const ETA: i32 = 2; // ML-DSA-87 eta parameter
+const Q: i32 = 8380417;
+const PUBLIC_KEY_SIZE: usize = 2592; // ML-DSA-87
+const TR_SIZE: usize = 64;
 
 // ============================================================================
-// Protocol Error
+// Error Types
 // ============================================================================
 
 /// Errors that can occur during the DKG protocol.
-#[derive(Debug, Clone)]
-pub enum DkgProtocolError {
-	/// The protocol is in an invalid state for the requested operation.
-	InvalidState(String),
-	/// A message was received from an unknown party.
-	UnknownParty(ParticipantId),
-	/// A duplicate message was received from a party.
-	DuplicateMessage(ParticipantId),
-	/// Commitment verification failed for a party.
-	CommitmentMismatch(ParticipantId),
-	/// Contribution bounds verification failed for a party.
-	InvalidContributionBounds(ParticipantId),
-	/// Consensus was not reached on the public key.
-	ConsensusFailure(Vec<ParticipantId>),
-	/// A party reported failure.
-	PartyFailure(Vec<ParticipantId>),
-	/// Serialization error.
-	SerializationError(String),
-	/// Randomness generation error.
-	RandomnessError,
-	/// Internal error.
-	InternalError(String),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MithrilDkgError {
+    /// The protocol is in an invalid state for the requested operation.
+    InvalidState(String),
+    /// A party's revealed randomness doesn't match their Round 1 commitment.
+    CommitmentMismatch {
+        /// The party whose commitment didn't match.
+        party_id: ParticipantId,
+    },
+    /// A party's revealed partial public key doesn't match their Round 3 commitment.
+    PkCommitmentMismatch {
+        /// The party whose PK commitment didn't match.
+        party_id: ParticipantId,
+        /// The subset for which the commitment failed.
+        subset: SubsetMask,
+    },
+    /// A party's partial public key failed verification against the shared secret.
+    PkVerificationFailed {
+        /// The party whose PK verification failed.
+        party_id: ParticipantId,
+        /// The subset for which verification failed.
+        subset: SubsetMask,
+    },
+    /// A party's transcript signature failed verification.
+    SignatureVerificationFailed {
+        /// The party whose signature failed verification.
+        party_id: ParticipantId,
+    },
+    /// Required data is missing from a previous round.
+    MissingData(String),
+    /// An invalid message was received.
+    InvalidMessage(String),
+    /// An internal error occurred.
+    InternalError(String),
 }
 
-impl std::fmt::Display for DkgProtocolError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		match self {
-			DkgProtocolError::InvalidState(s) => write!(f, "Invalid state: {}", s),
-			DkgProtocolError::UnknownParty(p) => write!(f, "Unknown party: {}", p),
-			DkgProtocolError::DuplicateMessage(p) => {
-				write!(f, "Duplicate message from party: {}", p)
-			},
-			DkgProtocolError::CommitmentMismatch(p) => {
-				write!(f, "Commitment mismatch for party: {}", p)
-			},
-			DkgProtocolError::InvalidContributionBounds(p) => {
-				write!(f, "Invalid contribution bounds for party: {}", p)
-			},
-			DkgProtocolError::ConsensusFailure(parties) => {
-				write!(f, "Consensus failure, mismatched parties: {:?}", parties)
-			},
-			DkgProtocolError::PartyFailure(parties) => {
-				write!(f, "Party failure: {:?}", parties)
-			},
-			DkgProtocolError::SerializationError(s) => write!(f, "Serialization error: {}", s),
-			DkgProtocolError::RandomnessError => write!(f, "Randomness generation error"),
-			DkgProtocolError::InternalError(s) => write!(f, "Internal error: {}", s),
-		}
-	}
+impl std::fmt::Display for MithrilDkgError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidState(msg) => write!(f, "invalid state: {}", msg),
+            Self::CommitmentMismatch { party_id } => write!(f, "commitment mismatch from party {}", party_id),
+            Self::PkCommitmentMismatch { party_id, subset } => write!(f, "PK commitment mismatch from party {} for subset {:b}", party_id, subset),
+            Self::PkVerificationFailed { party_id, subset } => write!(f, "PK verification failed from party {} for subset {:b}", party_id, subset),
+            Self::SignatureVerificationFailed { party_id } => write!(f, "signature verification failed from party {}", party_id),
+            Self::MissingData(msg) => write!(f, "missing data: {}", msg),
+            Self::InvalidMessage(msg) => write!(f, "invalid message: {}", msg),
+            Self::InternalError(msg) => write!(f, "internal error: {}", msg),
+        }
+    }
 }
 
-impl std::error::Error for DkgProtocolError {}
+impl std::error::Error for MithrilDkgError {}
 
-impl From<DkgProtocolError> for ThresholdError {
-	fn from(e: DkgProtocolError) -> Self {
-		ThresholdError::InvalidConfiguration(e.to_string())
-	}
+// ============================================================================
+// Action Type
+// ============================================================================
+
+/// Actions returned by the DKG protocol state machine.
+///
+/// The caller should handle each action appropriately:
+/// - `Wait`: No action needed, call `poke()` again after receiving messages
+/// - `SendMany`: Broadcast the data to all other participants
+/// - `SendPrivate`: Send the data to a specific participant via secure channel
+/// - `Return`: The DKG is complete, the output contains the keys
+#[derive(Debug)]
+pub enum MithrilAction {
+    /// Wait for more messages before proceeding.
+    Wait,
+    /// Broadcast data to all other participants.
+    SendMany(Vec<u8>),
+    /// Send data privately to a specific participant.
+    SendPrivate(ParticipantId, Vec<u8>),
+    /// DKG is complete, return the output.
+    Return(MithrilDkgOutput),
 }
 
 // ============================================================================
-// DKG Protocol Implementation
+// Protocol Implementation
 // ============================================================================
 
 /// The main DKG protocol state machine.
 ///
-/// This struct implements the distributed key generation protocol for
-/// threshold Dilithium signatures. It follows the poke/message pattern
-/// used by NEAR MPC.
+/// This implements the 4-round Mithril DKG protocol. Create an instance with
+/// [`MithrilDkg::new`], then repeatedly call [`MithrilDkg::poke`] and
+/// [`MithrilDkg::message`] to drive the protocol.
 ///
-/// # Usage
+/// # Example
 ///
 /// ```ignore
-/// let mut dkg = DilithiumDkg::new(config, rng)?;
+/// let config = MithrilDkgConfig::new(...)?;
+/// let mut dkg = MithrilDkg::new(config, rng);
 ///
 /// loop {
 ///     match dkg.poke()? {
-///         Action::Wait => {
-///             // Wait for messages from other parties
-///         }
-///         Action::SendMany(data) => {
-///             // Broadcast data to all other parties
-///             for party in other_parties {
-///                 send(party, data.clone());
-///             }
-///         }
-///         Action::SendPrivate(party, data) => {
-///             // Send data privately to the specified party
-///             send(party, data);
-///         }
-///         Action::Return(output) => {
-///             // Protocol complete!
-///             break;
+///         MithrilAction::Wait => { /* wait for messages */ }
+///         MithrilAction::SendMany(data) => { /* broadcast to all */ }
+///         MithrilAction::SendPrivate(to, data) => { /* send to one party */ }
+///         MithrilAction::Return(output) => {
+///             // DKG complete!
+///             return Ok(output);
 ///         }
 ///     }
-///
-///     // When a message arrives:
-///     dkg.message(from_party, data);
+///     // When messages arrive: dkg.message(from, data);
 /// }
 /// ```
-pub struct DilithiumDkg {
-	/// Internal state data.
-	state_data: DkgStateData,
-	/// Random number generator.
-	rng: rand::rngs::StdRng,
-	/// Whether we've sent our broadcast message for the current round.
-	sent_current_round: bool,
-	/// SEED-BASED DKG: Public contributions to broadcast in Round 3.
-	/// Contains seed hashes (not partial public keys) and rho contribution.
-	my_public_contributions: Option<PartyPublicContributions>,
-	/// SEED-BASED DKG: Our seed contributions (kept secret until Round 3 P2P).
-	my_seed_contributions: Option<PartySeedContributions>,
-	/// SEED-BASED DKG: P2P messages to send in Round 3.
-	/// Contains seed contributions for each (party, subset) pair.
-	round3_private_messages: Vec<DkgRound3Private>,
-	/// Number of P2P messages sent so far in Round 3.
-	round3_private_sent_count: usize,
+pub struct MithrilDkg<S: TranscriptSigner, R: RngCore + CryptoRng> {
+    state: MithrilDkgState<S>,
+    rng: R,
+    pending_privates: Vec<(ParticipantId, Vec<u8>)>,
 }
 
-impl DilithiumDkg {
-	/// Create a new DKG protocol instance from a seed.
-	///
-	/// # Arguments
-	/// * `config` - The DKG configuration
-	/// * `seed` - A 32-byte seed for deterministic randomness
-	pub fn new(config: DkgConfig, seed: [u8; 32]) -> Self {
-		Self {
-			state_data: DkgStateData::new(config),
-			rng: rand::rngs::StdRng::from_seed(seed),
-			sent_current_round: false,
-			my_public_contributions: None,
-			my_seed_contributions: None,
-			round3_private_messages: Vec::new(),
-			round3_private_sent_count: 0,
-		}
-	}
-
-	/// Get the current protocol state.
-	pub fn state(&self) -> &DkgState {
-		&self.state_data.state
-	}
-
-	/// Get this party's ID.
-	pub fn my_party_id(&self) -> ParticipantId {
-		self.state_data.config.my_party_id
-	}
-
-	/// Get the DKG configuration.
-	pub fn config(&self) -> &DkgConfig {
-		&self.state_data.config
-	}
-
-	/// Poke the protocol to advance it.
-	///
-	/// This should be called repeatedly until it returns `Action::Return`
-	/// or an error. Between calls, messages from other parties should be
-	/// delivered via the `message()` method.
-	///
-	/// ## SEED-BASED DKG Protocol Flow:
-	/// - Round 1: Session ID contribution (broadcast)
-	/// - Round 2: Commit to seeds (broadcast commitment hash)
-	/// - Round 3: P2P seed exchange (send seeds to subset members)
-	/// - Round 4: Broadcast partial public keys (derived from combined seeds)
-	/// - Round 5: Confirmation (verify consensus on public key)
-	pub fn poke(&mut self) -> Result<Action<DkgOutput>, DkgProtocolError> {
-		match &self.state_data.state {
-			DkgState::Initialized => {
-				// Start Round 1
-				let _ = self.state_data.transition_to(DkgState::Round1Generating);
-				self.sent_current_round = false;
-				self.poke()
-			},
-
-			DkgState::Round1Generating => {
-				if self.sent_current_round {
-					let _ = self.state_data.transition_to(DkgState::Round1Waiting);
-					return Ok(Action::Wait);
-				}
-
-				// Generate session ID contribution
-				let session_id: [u8; SESSION_ID_SIZE] = self.rng.gen();
-
-				self.state_data.round1.my_contribution = session_id;
-				self.state_data.round1.add_contribution(self.my_party_id(), session_id);
-
-				let msg = DkgRound1Broadcast {
-					party_id: self.my_party_id(),
-					session_id_contribution: session_id,
-				};
-
-				self.sent_current_round = true;
-				Ok(Action::SendMany(self.serialize_message(&DkgMessage::Round1(msg))?))
-			},
-
-			DkgState::Round1Waiting => {
-				if self.state_data.can_advance() {
-					// Compute combined session ID
-					self.compute_combined_session_id();
-					let errors = self.state_data.transition_to(DkgState::Round2Generating);
-					for e in errors {
-						eprintln!("Error processing buffered message: {}", e);
-					}
-					self.sent_current_round = false;
-					self.poke()
-				} else {
-					Ok(Action::Wait)
-				}
-			},
-
-			DkgState::Round2Generating => {
-				if self.sent_current_round {
-					let errors = self.state_data.transition_to(DkgState::Round2Waiting);
-					for e in errors {
-						eprintln!("Error processing buffered message: {}", e);
-					}
-					return Ok(Action::Wait);
-				}
-
-				// SEED-BASED DKG: Generate random seeds for each subset
-				let (seed_contributions, public_contributions) =
-					self.generate_seed_contributions()?;
-
-				// Commit to seed hashes + rho
-				let commitment_hash = self.compute_public_commitment_hash(&public_contributions);
-
-				// Store for later rounds
-				self.my_seed_contributions = Some(seed_contributions.clone());
-				self.my_public_contributions = Some(public_contributions.clone());
-
-				// Generate P2P messages for Round 3
-				self.round3_private_messages = self.generate_round3_seed_messages(&seed_contributions);
-				self.round3_private_sent_count = 0;
-
-				self.state_data.round2.my_commitment_hash = commitment_hash;
-				// Add our own commitment and public contributions
-				self.state_data.round2.add_commitment(self.my_party_id(), commitment_hash, public_contributions.clone());
-
-				let msg = DkgRound2Broadcast { 
-					party_id: self.my_party_id(), 
-					commitment_hash,
-					public_contributions,
-				};
-
-				self.sent_current_round = true;
-				Ok(Action::SendMany(self.serialize_message(&DkgMessage::Round2(msg))?))
-			},
-
-			DkgState::Round2Waiting =>
-				if self.state_data.can_advance() {
-					// Verify all commitments before starting P2P seed exchange
-					self.verify_all_contributions()?;
-					
-					let errors = self.state_data.transition_to(DkgState::Round3Sending);
-					for e in errors {
-						eprintln!("Error processing buffered message: {}", e);
-					}
-					self.sent_current_round = false;
-					self.poke()
-				} else {
-					Ok(Action::Wait)
-				},
-
-			DkgState::Round3Sending => {
-				// Send P2P messages with seed contributions
-				if self.round3_private_sent_count < self.round3_private_messages.len() {
-					return self.send_next_round3_private();
-				}
-
-				// All P2P messages sent, transition to waiting
-				let errors = self.state_data.transition_to(DkgState::Round3Waiting);
-				for e in errors {
-					eprintln!("Error processing buffered message: {}", e);
-				}
-				self.poke()
-			},
-
-			DkgState::Round3Waiting => {
-				// Check if we have all P2P seed messages for our subsets
-				let my_subsets = self.compute_my_subsets();
-				let p2p_complete = self
-					.state_data
-					.round3
-					.is_p2p_complete(&my_subsets, self.state_data.config.total_parties());
-
-				if !p2p_complete {
-					return Ok(Action::Wait);
-				}
-
-				// Verify received seeds match broadcast commitment hashes
-				self.verify_received_secrets()?;
-
-				// Transition to Round 4 (partial public key broadcast)
-				let errors = self.state_data.transition_to(DkgState::Round4Broadcasting);
-				for e in errors {
-					eprintln!("Error processing buffered message: {}", e);
-				}
-				self.sent_current_round = false;
-				self.poke()
-			},
-
-			DkgState::Round4Broadcasting => {
-				if self.sent_current_round {
-					let errors = self.state_data.transition_to(DkgState::Round4Waiting);
-					for e in errors {
-						eprintln!("Error processing buffered message: {}", e);
-					}
-					return Ok(Action::Wait);
-				}
-
-				// Combine seeds and derive secrets, then compute partial public keys
-				let round4_msg = self.compute_partial_public_keys()?;
-
-				// Store our own partial public keys
-				self.state_data.round4.add_partial_public_keys(self.my_party_id(), round4_msg.clone());
-
-				self.sent_current_round = true;
-				Ok(Action::SendMany(self.serialize_message(&DkgMessage::Round4(round4_msg))?))
-			},
-
-			DkgState::Round4Waiting => {
-				if self.state_data.can_advance() {
-					// All partial public keys received
-					let errors = self.state_data.transition_to(DkgState::Round5Confirming);
-					for e in errors {
-						eprintln!("Error processing buffered message: {}", e);
-					}
-					self.sent_current_round = false;
-					self.poke()
-				} else {
-					Ok(Action::Wait)
-				}
-			},
-
-			DkgState::Round5Confirming => {
-				if self.sent_current_round {
-					let errors = self.state_data.transition_to(DkgState::Round5Waiting);
-					for e in errors {
-						eprintln!("Error processing buffered message: {}", e);
-					}
-					return Ok(Action::Wait);
-				}
-
-				// Compute final output from all partial public keys
-				let (success, public_key_hash) = match self.compute_final_output() {
-					Ok(output) => {
-						let pk_hash = self.hash_public_key(&output.public_key);
-						self.state_data.round5.my_public_key_hash = pk_hash;
-						self.state_data.output = Some(output);
-						(true, pk_hash)
-					},
-					Err(e) => {
-						eprintln!("DKG computation failed: {}", e);
-						(false, [0u8; COMMITMENT_HASH_SIZE])
-					},
-				};
-
-				let msg =
-					DkgRound5Broadcast { party_id: self.my_party_id(), success, public_key_hash };
-
-				self.state_data.round5.add_confirmation(self.my_party_id(), msg.clone());
-
-				self.sent_current_round = true;
-				Ok(Action::SendMany(self.serialize_message(&DkgMessage::Round5(msg))?))
-			},
-
-			DkgState::Round5Waiting => {
-				if self.state_data.can_advance() {
-					// Verify consensus
-					if !self.state_data.round5.consensus_reached() {
-						let failed_parties: Vec<_> = self
-							.state_data
-							.round5
-							.confirmations
-							.iter()
-							.filter(|(_, c)| {
-								!c.success ||
-									c.public_key_hash != self.state_data.round5.my_public_key_hash
-							})
-							.map(|(&id, _)| id)
-							.collect();
-
-						return Err(DkgProtocolError::ConsensusFailure(failed_parties));
-					}
-
-					let errors = self.state_data.transition_to(DkgState::Complete);
-					for e in errors {
-						eprintln!("Error processing buffered message: {}", e);
-					}
-
-					let output = self
-						.state_data
-						.output
-						.clone()
-						.ok_or_else(|| DkgProtocolError::InternalError("No output".into()))?;
-
-					Ok(Action::Return(output))
-				} else {
-					Ok(Action::Wait)
-				}
-			},
-
-			DkgState::Complete => {
-				let output = self
-					.state_data
-					.output
-					.clone()
-					.ok_or_else(|| DkgProtocolError::InternalError("No output".into()))?;
-				Ok(Action::Return(output))
-			},
-
-			DkgState::Failed(reason) => {
-				Err(DkgProtocolError::InvalidState(reason.clone()))
-			},
-		}
-	}
-
-	/// Deliver a message from another party.
-	///
-	/// This should be called when a message is received from another party.
-	/// The message will be processed according to the current protocol state.
-	pub fn message(&mut self, from: ParticipantId, data: Vec<u8>) {
-		// Deserialize and process the message
-		let msg = match self.deserialize_message(&data) {
-			Ok(m) => m,
-			Err(e) => {
-				eprintln!("Failed to deserialize message from {}: {}", from, e);
-				return;
-			},
-		};
-
-		// Verify sender matches message
-		if msg.party_id() != from {
-			eprintln!("Message party_id {} doesn't match sender {}", msg.party_id(), from);
-			return;
-		}
-
-		let msg_round = msg.round();
-		let current_round = self.state_data.state.round_number();
-
-		// If message is for a future round, buffer it for later processing
-		if msg_round > current_round {
-			// Debug: buffering out-of-order message
-			#[cfg(debug_assertions)]
-			eprintln!(
-				"Buffering round {} message from {} (current state: {})",
-				msg_round,
-				from,
-				self.state_data.state.name()
-			);
-			self.state_data.message_buffer.buffer(msg);
-			return;
-		}
-
-		// Process based on message type
-		let result = match msg {
-			DkgMessage::Round1(m) => self.state_data.process_round1(m),
-			DkgMessage::Round2(m) => self.state_data.process_round2(m),
-			DkgMessage::Round3(m) => self.state_data.process_round3_private(m),
-			DkgMessage::Round4(m) => self.state_data.process_round4(m),
-			DkgMessage::Round5(m) => self.state_data.process_round5(m),
-		};
-
-		if let Err(e) = result {
-			eprintln!("Failed to process message from {}: {}", from, e);
-		}
-	}
-
-	// ========================================================================
-	// Helper Methods
-	// ========================================================================
-
-	/// Serialize a message for transmission.
-	fn serialize_message(&self, msg: &DkgMessage) -> Result<Vec<u8>, DkgProtocolError> {
-		bincode::serialize(msg).map_err(|e| DkgProtocolError::SerializationError(e.to_string()))
-	}
-
-	/// Deserialize a message from received bytes.
-	fn deserialize_message(&self, data: &[u8]) -> Result<DkgMessage, DkgProtocolError> {
-		bincode::deserialize(data).map_err(|e| DkgProtocolError::SerializationError(e.to_string()))
-	}
-
-	/// Compute the combined session ID from all contributions.
-	fn compute_combined_session_id(&mut self) {
-		use qp_rusty_crystals_dilithium::fips202;
-
-		let mut state = fips202::KeccakState::default();
-
-		// Sort by party ID for deterministic ordering
-		let mut contributions: Vec<_> = self.state_data.round1.session_ids.iter().collect();
-		contributions.sort_by_key(|(id, _)| *id);
-
-		for (_, contribution) in contributions {
-			fips202::shake256_absorb(&mut state, contribution, SESSION_ID_SIZE);
-		}
-		fips202::shake256_finalize(&mut state);
-
-		let mut combined = [0u8; SESSION_ID_SIZE];
-		fips202::shake256_squeeze(&mut combined, SESSION_ID_SIZE, &mut state);
-
-		self.state_data.round1.combined_session_id = Some(combined);
-	}
-
-	/// Generate both secret contributions AND partial public keys.
-	///
-	/// SEED-BASED DKG: Generate random seed contributions for each subset.
-	///
-	/// This method generates:
-	/// 1. Random seeds for each subset this party belongs to
-	/// 2. Hashes of those seeds (for commitment verification)
-	///
-	/// The actual secret polynomials are derived later in Round 5, AFTER
-	/// all parties have exchanged their seeds and combined them.
-	fn generate_seed_contributions(
-		&mut self,
-	) -> Result<(PartySeedContributions, PartyPublicContributions), DkgProtocolError> {
-		let my_id = self.my_party_id();
-		let threshold = self.state_data.config.threshold();
-		let parties = self.state_data.config.total_parties();
-
-		let mut seed_contributions = PartySeedContributions::new(my_id);
-		let mut public_contributions = PartyPublicContributions::new(my_id);
-
-		// Get subsets this party belongs to
-		let subsets = self.compute_subsets_for_party(my_id, threshold, parties);
-
-		for subset_mask in subsets {
-			// Generate random seed for this subset (64 bytes)
-			let mut seed = [0u8; SUBSET_SEED_SIZE];
-			self.rng.fill(&mut seed);
-			let seed_contrib = SubsetSeedContribution::from_bytes(seed);
-
-			// Compute hash of the seed (for commitment verification)
-			let seed_hash = hash_seed(&seed_contrib);
-
-			// Store seed and its hash
-			seed_contributions.subset_seeds.insert(subset_mask, seed_contrib);
-			public_contributions.subset_seed_hashes.insert(subset_mask, seed_hash);
-		}
-
-		Ok((seed_contributions, public_contributions))
-	}
-
-	/// Compute all subset masks that contain a given party.
-	///
-	/// This function uses the party's **index** (from ParticipantList) for bitmask
-	/// operations, not the raw party ID. This allows arbitrary party IDs (like
-	/// NEAR's large IDs) to work correctly.
-	fn compute_subsets_for_party(
-		&self,
-		party_id: ParticipantId,
-		threshold: u32,
-		parties: u32,
-	) -> Vec<SubsetMask> {
-		// Get the party's index (0, 1, 2, ...) for bitmask operations
-		let party_index = self
-			.state_data
-			.party_index(party_id)
-			.expect("party_id should be in participant list");
-
-		let subset_size = (parties - threshold + 1) as usize;
-		let mut subsets = Vec::new();
-
-		// Generate all subsets of size (n - t + 1) containing this party
-		let mut subset: SubsetMask = (1 << subset_size) - 1;
-		let max_val: SubsetMask = 1 << parties;
-
-		while subset < max_val {
-			// Check if this party (by index) is in the subset
-			if (subset & (1 << party_index)) != 0 {
-				subsets.push(subset);
-			}
-
-			// Gosper's hack for next subset of same size
-			let c = subset & (!subset + 1);
-			let r = subset + c;
-			subset = (((r ^ subset) >> 2) / c) | r;
-		}
-
-		subsets
-	}
-
-	/// Compute the subsets this party belongs to.
-	fn compute_my_subsets(&self) -> Vec<SubsetMask> {
-		let my_id = self.my_party_id();
-		let threshold = self.state_data.config.threshold();
-		let parties = self.state_data.config.total_parties();
-		self.compute_subsets_for_party(my_id, threshold, parties)
-	}
-
-	/// SEED-BASED DKG: Generate P2P messages to send seed contributions
-	/// to other parties in the same subsets.
-	///
-	/// For each subset this party belongs to, we generate a message for each
-	/// OTHER party in that subset (not ourselves).
-	fn generate_round3_seed_messages(
-		&self,
-		seed_contributions: &PartySeedContributions,
-	) -> Vec<DkgRound3Private> {
-		let my_id = self.my_party_id();
-		let mut messages = Vec::new();
-
-		for (subset_mask, seed_contribution) in &seed_contributions.subset_seeds {
-			// Find other parties in this subset
-			for i in 0..self.state_data.config.total_parties() {
-				let party_bit = 1u16 << i;
-				if (*subset_mask & party_bit) != 0 {
-					// This party is in the subset
-					if let Some(party_id) = self.state_data.party_id_at(i as usize) {
-						if party_id != my_id {
-							// Send our seed contribution to this party
-							messages.push(DkgRound3Private {
-								from_party_id: my_id,
-								subset_mask: *subset_mask,
-								seed_contribution: seed_contribution.clone(),
-							});
-						}
-					}
-				}
-			}
-		}
-
-		messages
-	}
-
-	/// Send the next P2P message in the Round 3 queue.
-	fn send_next_round3_private(&mut self) -> Result<Action<DkgOutput>, DkgProtocolError> {
-		if self.round3_private_sent_count >= self.round3_private_messages.len() {
-			return Ok(Action::Wait);
-		}
-
-		let msg = &self.round3_private_messages[self.round3_private_sent_count];
-
-		// Find the target party ID from the subset mask
-		let target_party_id =
-			self.find_recipient_for_private_message(self.round3_private_sent_count)?;
-
-		let dkg_msg = DkgMessage::Round3(msg.clone());
-		let data = self.serialize_message(&dkg_msg)?;
-
-		self.round3_private_sent_count += 1;
-
-		Ok(Action::SendPrivate(target_party_id, data))
-	}
-
-	/// Find the recipient party ID for a given P2P message index.
-	fn find_recipient_for_private_message(
-		&self,
-		msg_index: usize,
-	) -> Result<ParticipantId, DkgProtocolError> {
-		let my_id = self.my_party_id();
-		let seed_contributions =
-			self.my_seed_contributions.as_ref().ok_or_else(|| {
-				DkgProtocolError::InternalError("Missing my seed contributions".into())
-			})?;
-
-		let mut current_index = 0;
-		for (subset_mask, _) in &seed_contributions.subset_seeds {
-			for i in 0..self.state_data.config.total_parties() {
-				let party_bit = 1u16 << i;
-				if (*subset_mask & party_bit) != 0 {
-					if let Some(party_id) = self.state_data.party_id_at(i as usize) {
-						if party_id != my_id {
-							if current_index == msg_index {
-								return Ok(party_id);
-							}
-							current_index += 1;
-						}
-					}
-				}
-			}
-		}
-
-		Err(DkgProtocolError::InternalError(format!(
-			"Could not find recipient for message index {}",
-			msg_index
-		)))
-	}
-
-	/// SEED-BASED DKG: Verify that received seeds match broadcast seed hashes.
-	///
-	/// For each received seed contribution, we verify that its hash matches
-	/// the seed hash that was broadcast by the same party in Round 2.
-	fn verify_received_secrets(&self) -> Result<(), DkgProtocolError> {
-		// For each received seed contribution
-		for ((from_party_id, subset_mask), received_seed) in
-			&self.state_data.round3.received_seed_contributions
-		{
-			// Get the public contributions from Round 2 (seed hashes + rho)
-			let public_contrib =
-				self.state_data.round2.public_contributions.get(from_party_id).ok_or_else(
-					|| {
-						DkgProtocolError::InternalError(format!(
-							"Missing public contributions from party {}",
-							from_party_id
-						))
-					},
-				)?;
-
-			// Get the broadcast seed hash for this subset
-			let expected_hash =
-				public_contrib.subset_seed_hashes.get(subset_mask).ok_or_else(|| {
-					DkgProtocolError::InternalError(format!(
-						"Missing seed hash for subset {:b} from party {}",
-						subset_mask, from_party_id
-					))
-				})?;
-
-			// Compute hash of received seed and compare
-			let actual_hash = hash_seed(received_seed);
-			if actual_hash != *expected_hash {
-				return Err(DkgProtocolError::CommitmentMismatch(*from_party_id));
-			}
-		}
-
-		Ok(())
-	}
-
-	/// SEED-BASED DKG: Compute commitment hash for PUBLIC contributions.
-	///
-	/// This commits to:
-	/// - Party ID
-	/// - Rho contribution
-	/// - Seed hashes (H(seed) for each subset), NOT raw seeds
-	/// - Session ID (for domain separation)
-	///
-	/// SECURITY: The raw seeds are NEVER included in the commitment.
-	fn compute_public_commitment_hash(
-		&self,
-		public_contributions: &PartyPublicContributions,
-	) -> [u8; COMMITMENT_HASH_SIZE] {
-		use qp_rusty_crystals_dilithium::fips202;
-
-		let mut state = fips202::KeccakState::default();
-
-		// Include party ID
-		fips202::shake256_absorb(&mut state, &public_contributions.party_id.to_le_bytes(), 4);
-
-		// Include seed hashes in sorted order by subset mask
-		let mut seed_hashes: Vec<_> = public_contributions.subset_seed_hashes.iter().collect();
-		seed_hashes.sort_by_key(|(mask, _)| *mask);
-
-		for (mask, seed_hash) in seed_hashes {
-			fips202::shake256_absorb(&mut state, &mask.to_le_bytes(), 2);
-			fips202::shake256_absorb(&mut state, seed_hash, COMMITMENT_HASH_SIZE);
-		}
-
-		// Include session ID for domain separation
-		if let Some(session_id) = &self.state_data.round1.combined_session_id {
-			fips202::shake256_absorb(&mut state, session_id, SESSION_ID_SIZE);
-		}
-
-		fips202::shake256_finalize(&mut state);
-
-		let mut hash = [0u8; COMMITMENT_HASH_SIZE];
-		fips202::shake256_squeeze(&mut hash, COMMITMENT_HASH_SIZE, &mut state);
-
-		hash
-	}
-
-	/// SEED-BASED DKG: Verify all revealed PUBLIC contributions against their commitments.
-	///
-	/// This verifies that each party's public_contributions (seed hashes + rho)
-	/// match their commitment_hash from Round 2.
-	fn verify_all_contributions(&self) -> Result<(), DkgProtocolError> {
-		let my_id = self.my_party_id();
-
-		for (party_id, public_contributions) in &self.state_data.round2.public_contributions {
-			// Skip self (already verified implicitly)
-			if *party_id == my_id {
-				continue;
-			}
-
-			// Verify commitment hash matches
-			let expected_hash =
-				*self.state_data.round2.commitment_hashes.get(party_id).ok_or_else(|| {
-					DkgProtocolError::InternalError(format!(
-						"Missing commitment hash for party {}",
-						party_id
-					))
-				})?;
-
-			let actual_hash = self.compute_public_commitment_hash(public_contributions);
-
-			if actual_hash != expected_hash {
-				return Err(DkgProtocolError::CommitmentMismatch(*party_id));
-			}
-
-			// In seed-based DKG, seed hashes are just 32-byte values - no range check needed
-			// The actual η-bounded check happens when we derive secrets from combined seeds
-		}
-
-		Ok(())
-	}
-
-	/// SEED-BASED DKG: Compute partial public keys from combined seeds.
-	///
-	/// After Round 3 P2P seed exchange, each party can:
-	/// 1. Combine seeds from all parties for each subset
-	/// 2. Derive η-bounded secrets from combined seeds
-	/// 3. Compute partial public keys t_I = A·s1_I + s2_I
-	///
-	/// These partial public keys are then broadcast in Round 4.
-	fn compute_partial_public_keys(&mut self) -> Result<DkgRound4Broadcast, DkgProtocolError> {
-		use qp_rusty_crystals_dilithium::{poly, polyvec};
-		use crate::protocol::primitives::Q;
-
-		let my_id = self.my_party_id();
-		let threshold = self.state_data.config.threshold();
-		let parties = self.state_data.config.total_parties();
-
-		// Use session_id as rho for matrix A expansion
-		let rho = self
-			.state_data
-			.round1
-			.combined_session_id
-			.ok_or_else(|| DkgProtocolError::InternalError("Session ID not computed".into()))?;
-
-		// Expand matrix A
-		let mut a_matrix: Vec<polyvec::Polyvecl> =
-			(0..K).map(|_| polyvec::Polyvecl::default()).collect();
-		polyvec::matrix_expand(&mut a_matrix, &rho);
-
-		// Get our own seed contributions
-		let my_seed_contributions = self.my_seed_contributions.clone().ok_or_else(|| {
-			DkgProtocolError::InternalError("Missing my seed contributions".into())
-		})?;
-
-		let my_subsets = self.compute_subsets_for_party(my_id, threshold, parties);
-
-		let mut partial_public_keys: HashMap<SubsetMask, PartialPublicKey> = HashMap::new();
-		let mut derived_secrets: HashMap<SubsetMask, SubsetContribution> = HashMap::new();
-
-		for subset_mask in &my_subsets {
-			// Collect seeds from all parties in this subset
-			let mut seeds_for_subset: HashMap<ParticipantId, SubsetSeedContribution> = HashMap::new();
-
-			// Add seeds from received seed contributions
-			for ((from_party_id, received_mask), received_seed) in
-				&self.state_data.round3.received_seed_contributions
-			{
-				if *received_mask == *subset_mask {
-					seeds_for_subset.insert(*from_party_id, received_seed.clone());
-				}
-			}
-
-			// Add our own seed
-			if let Some(my_seed) = my_seed_contributions.subset_seeds.get(subset_mask) {
-				seeds_for_subset.insert(my_id, my_seed.clone());
-			}
-
-			// Combine all seeds to get a single combined seed
-			let combined_seed = combine_seeds(&seeds_for_subset);
-
-			// Derive the η-bounded secret contribution from the combined seed
-			let eta = 2i32; // ML-DSA-87 η parameter
-			let derived_secret = derive_subset_contribution(&combined_seed, eta);
-
-			// Compute partial public key t_I = A·s1_I + s2_I
-			let mut s1_polyvec = polyvec::Polyvecl::default();
-			for (i, poly_coeffs) in derived_secret.s1.iter().enumerate().take(L) {
-				for (j, &coeff) in poly_coeffs.iter().enumerate().take(N) {
-					s1_polyvec.vec[i].coeffs[j] = coeff;
-				}
-			}
-
-			// Convert to NTT domain
-			let mut s1h = s1_polyvec.clone();
-			for s1h_poly in s1h.vec.iter_mut() {
-				crate::circl_ntt::ntt(s1h_poly);
-			}
-
-			// Compute t_I = A * s1_I
-			let mut t_subset = polyvec::Polyveck::default();
-			for (i, a_row) in a_matrix.iter().enumerate().take(K) {
-				for (a_poly, s1h_poly) in a_row.vec.iter().zip(s1h.vec.iter()).take(L) {
-					let mut temp = poly::Poly::default();
-					poly::pointwise_montgomery(&mut temp, a_poly, s1h_poly);
-					t_subset.vec[i] = poly::add(&t_subset.vec[i], &temp);
-				}
-				poly::reduce(&mut t_subset.vec[i]);
-				poly::invntt_tomont(&mut t_subset.vec[i]);
-			}
-
-			// Add s2_I: t_I = A * s1_I + s2_I
-			for (i, poly_coeffs) in derived_secret.s2.iter().enumerate().take(K) {
-				for (j, &coeff) in poly_coeffs.iter().enumerate().take(N) {
-					t_subset.vec[i].coeffs[j] = t_subset.vec[i].coeffs[j].wrapping_add(coeff);
-				}
-			}
-
-			// Reduce mod Q
-			for t_poly in t_subset.vec.iter_mut().take(K) {
-				poly::reduce(t_poly);
-				for coeff in t_poly.coeffs.iter_mut() {
-					*coeff = ((*coeff % Q) + Q) % Q;
-				}
-			}
-
-			// Convert to PartialPublicKey format
-			let t_coeffs: Vec<[i32; N]> = t_subset.vec.iter().take(K)
-				.map(|p| p.coeffs)
-				.collect();
-			let partial_pk = PartialPublicKey {
-				subset_mask: *subset_mask,
-				t: t_coeffs,
-			};
-
-			partial_public_keys.insert(*subset_mask, partial_pk);
-			derived_secrets.insert(*subset_mask, derived_secret);
-		}
-
-		// Store derived secrets for later use in compute_final_output
-		self.state_data.round4.my_derived_secrets = derived_secrets;
-
-		Ok(DkgRound4Broadcast {
-			party_id: my_id,
-			partial_public_keys,
-		})
-	}
-
-	/// SEED-BASED DKG: Compute the final DKG output (public key and private share).
-	///
-	/// This method:
-	/// 1. Sums partial public keys from Round 4 to get final public key t
-	/// 2. Uses derived secrets (from Round 4) for private key shares
-	///
-	/// SECURITY: All parties in a subset derive the same η-bounded secret
-	/// from combined seeds, matching the Mithril trusted dealer distribution.
-	fn compute_final_output(&mut self) -> Result<DkgOutput, DkgProtocolError> {
-		use crate::{
-			keys::{PrivateKeyShare, PublicKey, SecretShareData, PUBLIC_KEY_SIZE, TR_SIZE},
-			protocol::primitives::Q,
-		};
-		use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec};
-
-		let my_id = self.my_party_id();
-		let threshold = self.state_data.config.threshold();
-		let parties = self.state_data.config.total_parties();
-
-		// Use session_id as rho for matrix A expansion.
-		let rho = self
-			.state_data
-			.round1
-			.combined_session_id
-			.ok_or_else(|| DkgProtocolError::InternalError("Session ID not computed".into()))?;
-
-		// Accumulate partial public keys from all parties to compute final t
-		let mut t = polyvec::Polyveck::default();
-
-		// Collect all unique subsets from Round 4 partial public keys
-		let mut all_subsets: std::collections::HashSet<SubsetMask> = std::collections::HashSet::new();
-		for round4_msg in self.state_data.round4.partial_public_keys.values() {
-			for &subset_mask in round4_msg.partial_public_keys.keys() {
-				all_subsets.insert(subset_mask);
-			}
-		}
-
-		// For each subset, we need exactly one partial public key (all parties in subset have same one)
-		// In the seed-based DKG, ALL parties in a subset compute the SAME partial public key
-		// because they all derive from the same combined seed.
-		// We just need one copy from any party in the subset.
-		for subset_mask in &all_subsets {
-			// Find a partial public key for this subset from any party
-			let mut found_partial_pk: Option<&PartialPublicKey> = None;
-			for round4_msg in self.state_data.round4.partial_public_keys.values() {
-				if let Some(ppk) = round4_msg.partial_public_keys.get(subset_mask) {
-					found_partial_pk = Some(ppk);
-					break;
-				}
-			}
-
-			if let Some(ppk) = found_partial_pk {
-				// Add this subset's partial public key to total t
-				for (i, poly_coeffs) in ppk.t.iter().enumerate().take(K) {
-					for (j, &coeff) in poly_coeffs.iter().enumerate().take(N) {
-						t.vec[i].coeffs[j] = t.vec[i].coeffs[j].wrapping_add(coeff);
-					}
-				}
-			} else {
-				return Err(DkgProtocolError::InternalError(format!(
-					"Missing partial public key for subset {:b}",
-					subset_mask
-				)));
-			}
-		}
-
-		// Normalize t mod Q
-		for t_poly in t.vec.iter_mut().take(K) {
-			poly::reduce(t_poly);
-			for coeff in t_poly.coeffs.iter_mut() {
-				*coeff = ((*coeff % Q) + Q) % Q;
-			}
-		}
-
-		// Extract t1 (high bits)
-		let mut t0 = polyvec::Polyveck::default();
-		let mut t1 = t.clone();
-		polyvec::k_power2round(&mut t1, &mut t0);
-
-		// Pack public key
-		let mut pk_packed = [0u8; PUBLIC_KEY_SIZE];
-		packing::pack_pk(&mut pk_packed, &rho, &t1);
-
-		// Compute TR = SHAKE256(pk)
-		let mut tr = [0u8; TR_SIZE];
-		let mut h_tr = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut h_tr, &pk_packed, pk_packed.len());
-		fips202::shake256_finalize(&mut h_tr);
-		fips202::shake256_squeeze(&mut tr, TR_SIZE, &mut h_tr);
-
-		let public_key = PublicKey::new(pk_packed, tr);
-
-		// Get our derived secrets from Round 4 computation
-		let my_subsets = self.compute_subsets_for_party(my_id, threshold, parties);
-		let mut combined_shares: HashMap<SubsetMask, SecretShareData> = HashMap::new();
-		
-		for subset_mask in &my_subsets {
-			if let Some(derived_secret) = self.state_data.round4.my_derived_secrets.get(subset_mask) {
-				let s1_share: Vec<[i32; N]> = derived_secret.s1.clone();
-				let s2_share: Vec<[i32; N]> = derived_secret.s2.clone();
-				combined_shares.insert(*subset_mask, SecretShareData { s1: s1_share, s2: s2_share });
-			} else {
-				return Err(DkgProtocolError::InternalError(format!(
-					"Missing derived secret for subset {:b}",
-					subset_mask
-				)));
-			}
-		}
-
-		// Generate a deterministic key for this party
-		let mut party_key = [0u8; 32];
-		{
-			let mut state = fips202::KeccakState::default();
-			// Use rho (which is session_id) and party_id to derive a unique key
-			fips202::shake256_absorb(&mut state, &rho, 32);
-			fips202::shake256_absorb(&mut state, &my_id.to_le_bytes(), 4);
-			fips202::shake256_finalize(&mut state);
-			fips202::shake256_squeeze(&mut party_key, 32, &mut state);
-		}
-
-		// Create ParticipantList from the DKG participants
-		let dkg_participants =
-			ParticipantList::new(&self.config().all_participants).ok_or_else(|| {
-				DkgProtocolError::InternalError("Invalid DKG participants".to_string())
-			})?;
-
-		let private_share = PrivateKeyShare::new(
-			my_id,
-			parties,
-			threshold,
-			party_key,
-			rho,
-			tr,
-			combined_shares,
-			dkg_participants,
-		);
-
-		Ok(DkgOutput { public_key, private_share })
-	}
-
-	/// Hash the public key for consensus verification.
-	fn hash_public_key(&self, public_key: &crate::keys::PublicKey) -> [u8; COMMITMENT_HASH_SIZE] {
-		use qp_rusty_crystals_dilithium::fips202;
-
-		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, public_key.as_bytes(), public_key.as_bytes().len());
-		fips202::shake256_finalize(&mut state);
-
-		let mut hash = [0u8; COMMITMENT_HASH_SIZE];
-		fips202::shake256_squeeze(&mut hash, COMMITMENT_HASH_SIZE, &mut state);
-
-		hash
-	}
+impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
+    /// Create a new DKG instance.
+    ///
+    /// # Arguments
+    /// * `config` - The DKG configuration including threshold, participants, and signing keys
+    /// * `rng` - A cryptographically secure random number generator
+    pub fn new(config: MithrilDkgConfig<S>, rng: R) -> Self {
+        Self {
+            state: MithrilDkgState::new(config),
+            rng,
+            pending_privates: Vec::new(),
+        }
+    }
+
+    /// Advance the protocol state machine.
+    ///
+    /// Call this method repeatedly to drive the protocol forward. It returns
+    /// an action that the caller should perform (broadcast, send private, wait,
+    /// or return the final output).
+    ///
+    /// # Returns
+    /// * `Ok(MithrilAction)` - The action to perform
+    /// * `Err(MithrilDkgError)` - If the protocol encounters an error
+    pub fn poke(&mut self) -> Result<MithrilAction, MithrilDkgError> {
+        if let Some((to, data)) = self.pending_privates.pop() {
+            return Ok(MithrilAction::SendPrivate(to, data));
+        }
+
+        match &self.state {
+            MithrilDkgState::Initialized(_) => self.start_round1(),
+            MithrilDkgState::Round1(_) => self.process_round1(),
+            MithrilDkgState::Round2(_) => self.process_round2(),
+            MithrilDkgState::Round3(_) => self.process_round3(),
+            MithrilDkgState::Round4(_) => self.process_round4(),
+            MithrilDkgState::Complete(output) => Ok(MithrilAction::Return(output.clone())),
+            MithrilDkgState::Failed(msg) => Err(MithrilDkgError::InvalidState(msg.clone())),
+        }
+    }
+
+    /// Process an incoming message from another party.
+    ///
+    /// Call this method when a message is received from another DKG participant.
+    /// Messages from unknown parties or with invalid formats are silently ignored.
+    ///
+    /// # Arguments
+    /// * `from` - The party ID of the sender
+    /// * `data` - The serialized message bytes
+    pub fn message(&mut self, from: ParticipantId, data: Vec<u8>) {
+        let msg: MithrilDkgMessage = match bincode::deserialize(&data) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        match (&mut self.state, msg) {
+            (MithrilDkgState::Round1(state), MithrilDkgMessage::Round1Broadcast(broadcast)) => {
+                if broadcast.party_id == from {
+                    state.received_broadcasts.insert(from, broadcast);
+                }
+            }
+            (MithrilDkgState::Round1(state), MithrilDkgMessage::Round1Private(private)) => {
+                if private.from_party_id == from {
+                    state.received_shared_secrets.insert(private.subset_mask, private.shared_secret);
+                }
+            }
+            (MithrilDkgState::Round2(state), MithrilDkgMessage::Round2Broadcast(broadcast)) => {
+                if broadcast.party_id == from {
+                    state.received_broadcasts.insert(from, broadcast);
+                }
+            }
+            (MithrilDkgState::Round3(state), MithrilDkgMessage::Round3Broadcast(broadcast)) => {
+                if broadcast.party_id == from {
+                    state.received_broadcasts.insert(from, broadcast);
+                }
+            }
+            (MithrilDkgState::Round4(state), MithrilDkgMessage::Round4Broadcast(broadcast)) => {
+                if broadcast.party_id == from {
+                    state.received_broadcasts.insert(from, broadcast);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ========================================================================
+    // Round 1
+    // ========================================================================
+
+    fn start_round1(&mut self) -> Result<MithrilAction, MithrilDkgError> {
+        let config = match std::mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into())) {
+            MithrilDkgState::Initialized(c) => c,
+            _ => return Err(MithrilDkgError::InvalidState("expected Initialized".into())),
+        };
+
+        let mut my_randomness = [0u8; RANDOMNESS_SIZE];
+        self.rng.fill_bytes(&mut my_randomness);
+
+        let my_commitment = h_commit(config.my_party_id, &my_randomness);
+
+        let mut my_shared_secrets = HashMap::new();
+        for subset in config.my_leader_subsets() {
+            let mut secret = [0u8; SHARED_SECRET_SIZE];
+            self.rng.fill_bytes(&mut secret);
+            my_shared_secrets.insert(subset, secret);
+        }
+
+        self.state = MithrilDkgState::Round1(MithrilRound1State {
+            config,
+            my_randomness,
+            my_commitment,
+            my_shared_secrets,
+            received_broadcasts: HashMap::new(),
+            received_shared_secrets: HashMap::new(),
+            broadcast_sent: false,
+            privates_sent: false,
+        });
+
+        self.poke()
+    }
+
+    fn process_round1(&mut self) -> Result<MithrilAction, MithrilDkgError> {
+        let state = match &mut self.state {
+            MithrilDkgState::Round1(s) => s,
+            _ => return Err(MithrilDkgError::InvalidState("expected Round1".into())),
+        };
+
+        if !state.broadcast_sent {
+            let broadcast = MithrilRound1Broadcast {
+                party_id: state.config.my_party_id,
+                commitment: state.my_commitment,
+            };
+            let msg = MithrilDkgMessage::Round1Broadcast(broadcast);
+            let data = bincode::serialize(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+            state.broadcast_sent = true;
+            return Ok(MithrilAction::SendMany(data));
+        }
+
+        if !state.privates_sent {
+            for (&subset, &secret) in &state.my_shared_secrets {
+                let parties = state.config.get_parties_in_subset(subset);
+                for &party in &parties {
+                    if party != state.config.my_party_id {
+                        let private = MithrilRound1Private {
+                            from_party_id: state.config.my_party_id,
+                            subset_mask: subset,
+                            shared_secret: secret,
+                        };
+                        let msg = MithrilDkgMessage::Round1Private(private);
+                        let data = bincode::serialize(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+                        self.pending_privates.push((party, data));
+                    }
+                }
+            }
+            
+            match &mut self.state {
+                MithrilDkgState::Round1(s) => s.privates_sent = true,
+                _ => {}
+            }
+
+            if let Some((to, data)) = self.pending_privates.pop() {
+                return Ok(MithrilAction::SendPrivate(to, data));
+            }
+        }
+
+        let state = match &self.state {
+            MithrilDkgState::Round1(s) => s,
+            _ => return Err(MithrilDkgError::InvalidState("expected Round1".into())),
+        };
+
+        let all_broadcasts = all_broadcasts_received(&state.received_broadcasts, &state.config.all_participants, state.config.my_party_id);
+        let my_subsets = state.config.my_subsets();
+        let all_privates = all_private_messages_received(&state.received_shared_secrets, &state.my_shared_secrets, &my_subsets);
+
+        if all_broadcasts && all_privates {
+            self.transition_to_round2()?;
+            return self.poke();
+        }
+
+        Ok(MithrilAction::Wait)
+    }
+
+    fn transition_to_round2(&mut self) -> Result<(), MithrilDkgError> {
+        let old_state = std::mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
+
+        let state = match old_state {
+            MithrilDkgState::Round1(s) => s,
+            _ => return Err(MithrilDkgError::InvalidState("expected Round1".into())),
+        };
+
+        let mut shared_secrets = state.my_shared_secrets;
+        for (subset, secret) in state.received_shared_secrets {
+            shared_secrets.insert(subset, secret);
+        }
+
+        self.state = MithrilDkgState::Round2(MithrilRound2State {
+            config: state.config,
+            my_randomness: state.my_randomness,
+            round1_broadcasts: state.received_broadcasts,
+            shared_secrets,
+            received_broadcasts: HashMap::new(),
+            broadcast_sent: false,
+        });
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Round 2
+    // ========================================================================
+
+    fn process_round2(&mut self) -> Result<MithrilAction, MithrilDkgError> {
+        let state = match &mut self.state {
+            MithrilDkgState::Round2(s) => s,
+            _ => return Err(MithrilDkgError::InvalidState("expected Round2".into())),
+        };
+
+        if !state.broadcast_sent {
+            let broadcast = MithrilRound2Broadcast {
+                party_id: state.config.my_party_id,
+                randomness: state.my_randomness,
+            };
+            let msg = MithrilDkgMessage::Round2Broadcast(broadcast);
+            let data = bincode::serialize(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+            state.broadcast_sent = true;
+            return Ok(MithrilAction::SendMany(data));
+        }
+
+        let state = match &self.state {
+            MithrilDkgState::Round2(s) => s,
+            _ => return Err(MithrilDkgError::InvalidState("expected Round2".into())),
+        };
+
+        let all_broadcasts = all_broadcasts_received(&state.received_broadcasts, &state.config.all_participants, state.config.my_party_id);
+
+        if all_broadcasts {
+            // Verify commitments
+            for (&party_id, broadcast) in &state.received_broadcasts {
+                let expected = state.round1_broadcasts.get(&party_id)
+                    .ok_or_else(|| MithrilDkgError::MissingData(format!("missing Round 1 from party {}", party_id)))?;
+                let actual = h_commit(party_id, &broadcast.randomness);
+                if actual != expected.commitment {
+                    return Err(MithrilDkgError::CommitmentMismatch { party_id });
+                }
+            }
+
+            self.transition_to_round3()?;
+            return self.poke();
+        }
+
+        Ok(MithrilAction::Wait)
+    }
+
+    fn transition_to_round3(&mut self) -> Result<(), MithrilDkgError> {
+        let old_state = std::mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
+
+        let state = match old_state {
+            MithrilDkgState::Round2(s) => s,
+            _ => return Err(MithrilDkgError::InvalidState("expected Round2".into())),
+        };
+
+        // Compute global randomness
+        let mut all_randomness: Vec<_> = state.received_broadcasts.iter().collect();
+        let my_broadcast = MithrilRound2Broadcast {
+            party_id: state.config.my_party_id,
+            randomness: state.my_randomness,
+        };
+        all_randomness.push((&state.config.my_party_id, &my_broadcast));
+        all_randomness.sort_by_key(|(id, _)| *id);
+
+        let mut global_randomness = Vec::with_capacity(all_randomness.len() * RANDOMNESS_SIZE);
+        for (_, broadcast) in &all_randomness {
+            global_randomness.extend_from_slice(&broadcast.randomness);
+        }
+
+        let rho = h_seed(&global_randomness);
+
+        // Compute contributions for leader subsets
+        let my_leader_subsets = state.config.my_leader_subsets();
+        let mut my_contributions = HashMap::new();
+        let mut my_partial_pks = HashMap::new();
+        let mut my_pk_commitments = HashMap::new();
+
+        for &subset in &my_leader_subsets {
+            if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
+                let seed = h_keygen(subset, &shared_secret, &global_randomness);
+                let contribution = derive_subset_contribution(&seed, ETA);
+                let partial_pk = compute_partial_pk(&rho, &contribution, subset);
+                let pk_commitment = h_commit_pk(subset, &partial_pk);
+
+                my_contributions.insert(subset, contribution);
+                my_partial_pks.insert(subset, partial_pk);
+                my_pk_commitments.insert(subset, pk_commitment);
+            }
+        }
+
+        // Compute contributions for non-leader subsets
+        for &subset in &state.config.my_subsets() {
+            if !my_contributions.contains_key(&subset) {
+                if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
+                    let seed = h_keygen(subset, &shared_secret, &global_randomness);
+                    let contribution = derive_subset_contribution(&seed, ETA);
+                    my_contributions.insert(subset, contribution);
+                }
+            }
+        }
+
+        // Reconstruct broadcasts including our own
+        let mut round1_broadcasts = state.round1_broadcasts;
+        round1_broadcasts.insert(
+            state.config.my_party_id,
+            MithrilRound1Broadcast {
+                party_id: state.config.my_party_id,
+                commitment: h_commit(state.config.my_party_id, &state.my_randomness),
+            },
+        );
+
+        let mut round2_broadcasts = state.received_broadcasts;
+        round2_broadcasts.insert(state.config.my_party_id, my_broadcast);
+
+        self.state = MithrilDkgState::Round3(MithrilRound3State {
+            config: state.config,
+            round1_broadcasts,
+            round2_broadcasts,
+            shared_secrets: state.shared_secrets,
+            global_randomness,
+            rho,
+            my_partial_pks,
+            my_contributions,
+            my_pk_commitments,
+            received_broadcasts: HashMap::new(),
+            broadcast_sent: false,
+        });
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Round 3
+    // ========================================================================
+
+    fn process_round3(&mut self) -> Result<MithrilAction, MithrilDkgError> {
+        let state = match &mut self.state {
+            MithrilDkgState::Round3(s) => s,
+            _ => return Err(MithrilDkgError::InvalidState("expected Round3".into())),
+        };
+
+        if !state.broadcast_sent {
+            let broadcast = MithrilRound3Broadcast {
+                party_id: state.config.my_party_id,
+                partial_pk_commitments: state.my_pk_commitments.clone(),
+            };
+            let msg = MithrilDkgMessage::Round3Broadcast(broadcast);
+            let data = bincode::serialize(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+            state.broadcast_sent = true;
+            return Ok(MithrilAction::SendMany(data));
+        }
+
+        let state = match &self.state {
+            MithrilDkgState::Round3(s) => s,
+            _ => return Err(MithrilDkgError::InvalidState("expected Round3".into())),
+        };
+
+        let all_broadcasts = all_broadcasts_received(&state.received_broadcasts, &state.config.all_participants, state.config.my_party_id);
+
+        if all_broadcasts {
+            self.transition_to_round4()?;
+            return self.poke();
+        }
+
+        Ok(MithrilAction::Wait)
+    }
+
+    fn transition_to_round4(&mut self) -> Result<(), MithrilDkgError> {
+        let old_state = std::mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
+
+        let state = match old_state {
+            MithrilDkgState::Round3(s) => s,
+            _ => return Err(MithrilDkgError::InvalidState("expected Round3".into())),
+        };
+
+        let mut round3_broadcasts = state.received_broadcasts;
+        round3_broadcasts.insert(
+            state.config.my_party_id,
+            MithrilRound3Broadcast {
+                party_id: state.config.my_party_id,
+                partial_pk_commitments: state.my_pk_commitments.clone(),
+            },
+        );
+
+        self.state = MithrilDkgState::Round4(MithrilRound4State {
+            config: state.config,
+            round1_broadcasts: state.round1_broadcasts,
+            round2_broadcasts: state.round2_broadcasts,
+            round3_broadcasts,
+            shared_secrets: state.shared_secrets,
+            global_randomness: state.global_randomness,
+            rho: state.rho,
+            my_partial_pks: state.my_partial_pks,
+            my_contributions: state.my_contributions,
+            received_broadcasts: HashMap::new(),
+            broadcast_sent: false,
+        });
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Round 4
+    // ========================================================================
+
+    fn process_round4(&mut self) -> Result<MithrilAction, MithrilDkgError> {
+        let state = match &mut self.state {
+            MithrilDkgState::Round4(s) => s,
+            _ => return Err(MithrilDkgError::InvalidState("expected Round4".into())),
+        };
+
+        if !state.broadcast_sent {
+            let transcript_hash = compute_transcript_hash(
+                &state.round1_broadcasts,
+                &state.round2_broadcasts,
+                &state.round3_broadcasts,
+            );
+            let partial_output_hash = compute_partial_output_hash(&state.my_partial_pks);
+            let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
+            let signature = state.config.my_signer.sign(&signing_message);
+
+            let broadcast = MithrilRound4Broadcast {
+                party_id: state.config.my_party_id,
+                partial_public_keys: state.my_partial_pks.clone(),
+                transcript_signature: signature.as_ref().to_vec(),
+            };
+            let msg = MithrilDkgMessage::Round4Broadcast(broadcast);
+            let data = bincode::serialize(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+            state.broadcast_sent = true;
+            return Ok(MithrilAction::SendMany(data));
+        }
+
+        let state = match &self.state {
+            MithrilDkgState::Round4(s) => s,
+            _ => return Err(MithrilDkgError::InvalidState("expected Round4".into())),
+        };
+
+        let all_broadcasts = all_broadcasts_received(&state.received_broadcasts, &state.config.all_participants, state.config.my_party_id);
+
+        if all_broadcasts {
+            self.complete()?;
+            return self.poke();
+        }
+
+        Ok(MithrilAction::Wait)
+    }
+
+    fn complete(&mut self) -> Result<(), MithrilDkgError> {
+        let old_state = std::mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
+
+        let state = match old_state {
+            MithrilDkgState::Round4(s) => s,
+            _ => return Err(MithrilDkgError::InvalidState("expected Round4".into())),
+        };
+
+        let transcript_hash = compute_transcript_hash(
+            &state.round1_broadcasts,
+            &state.round2_broadcasts,
+            &state.round3_broadcasts,
+        );
+
+        // Collect and verify partial PKs
+        let mut all_partial_pks: HashMap<SubsetMask, PartialPublicKey> = HashMap::new();
+
+        for (subset, pk) in &state.my_partial_pks {
+            all_partial_pks.insert(*subset, pk.clone());
+        }
+
+        for (&party_id, broadcast) in &state.received_broadcasts {
+            let partial_output_hash = compute_partial_output_hash(&broadcast.partial_public_keys);
+            let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
+
+            let public_key = state.config.participant_public_keys.get(&party_id)
+                .ok_or_else(|| MithrilDkgError::MissingData(format!("missing public key for party {}", party_id)))?;
+
+            // Verify transcript signature
+            if !S::verify_bytes(public_key, &signing_message, &broadcast.transcript_signature) {
+                return Err(MithrilDkgError::SignatureVerificationFailed { party_id });
+            }
+
+            // Verify PK commitments
+            let round3 = state.round3_broadcasts.get(&party_id)
+                .ok_or_else(|| MithrilDkgError::MissingData(format!("missing Round 3 from party {}", party_id)))?;
+
+            for (&subset, pk) in &broadcast.partial_public_keys {
+                let expected = round3.partial_pk_commitments.get(&subset)
+                    .ok_or_else(|| MithrilDkgError::MissingData(format!("missing PK commitment from party {} for subset {:b}", party_id, subset)))?;
+                let actual = h_commit_pk(subset, pk);
+                if actual != *expected {
+                    return Err(MithrilDkgError::PkCommitmentMismatch { party_id, subset });
+                }
+
+                // Verify PK if we have the shared secret
+                if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
+                    let seed = h_keygen(subset, &shared_secret, &state.global_randomness);
+                    let expected_contribution = derive_subset_contribution(&seed, ETA);
+                    let expected_pk = compute_partial_pk(&state.rho, &expected_contribution, subset);
+                    if pk.t != expected_pk.t {
+                        return Err(MithrilDkgError::PkVerificationFailed { party_id, subset });
+                    }
+                }
+
+                all_partial_pks.insert(subset, pk.clone());
+            }
+        }
+
+        // Combine partial PKs to get final public key
+        let public_key = combine_partial_pks(&state.rho, &all_partial_pks)?;
+
+        // Build private key share
+        let private_share = build_private_share(&state, &public_key)?;
+
+        self.state = MithrilDkgState::Complete(MithrilDkgOutput {
+            public_key,
+            private_share,
+        });
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+fn compute_partial_pk(rho: &[u8; 32], contribution: &SubsetContribution, subset_mask: SubsetMask) -> PartialPublicKey {
+    // Create and expand matrix A row by row to avoid Copy requirement
+    let mut mat: Vec<polyvec::Polyvecl> = (0..K).map(|_| polyvec::Polyvecl::default()).collect();
+    polyvec::matrix_expand(&mut mat, rho);
+
+    let mut s1 = polyvec::Polyvecl::default();
+    for (i, poly_coeffs) in contribution.s1.iter().enumerate() {
+        for (j, &coeff) in poly_coeffs.iter().enumerate() {
+            s1.vec[i].coeffs[j] = coeff;
+        }
+    }
+
+    let mut s2 = polyvec::Polyveck::default();
+    for (i, poly_coeffs) in contribution.s2.iter().enumerate() {
+        for (j, &coeff) in poly_coeffs.iter().enumerate() {
+            s2.vec[i].coeffs[j] = coeff;
+        }
+    }
+
+    let mut s1_hat = s1.clone();
+    polyvec::l_ntt(&mut s1_hat);
+
+    let mut t = polyvec::Polyveck::default();
+    polyvec::matrix_pointwise_montgomery(&mut t, &mat, &s1_hat);
+    polyvec::k_invntt_tomont(&mut t);
+    polyvec::k_add(&mut t, &s2);
+    polyvec::k_reduce(&mut t);
+    polyvec::k_caddq(&mut t);
+
+    let mut t_coeffs = vec![[0i32; N]; K];
+    for (i, poly) in t.vec.iter().enumerate() {
+        for (j, &coeff) in poly.coeffs.iter().enumerate() {
+            t_coeffs[i][j] = coeff;
+        }
+    }
+
+    PartialPublicKey { subset_mask, t: t_coeffs }
+}
+
+fn combine_partial_pks(rho: &[u8; 32], partial_pks: &HashMap<SubsetMask, PartialPublicKey>) -> Result<PublicKey, MithrilDkgError> {
+    let mut t = polyvec::Polyveck::default();
+
+    for (_, pk) in partial_pks {
+        for (i, poly_coeffs) in pk.t.iter().enumerate() {
+            for (j, &coeff) in poly_coeffs.iter().enumerate() {
+                t.vec[i].coeffs[j] = (t.vec[i].coeffs[j] + coeff) % Q;
+            }
+        }
+    }
+
+    polyvec::k_reduce(&mut t);
+    polyvec::k_caddq(&mut t);
+
+    let mut t0 = polyvec::Polyveck::default();
+    let mut t1 = t.clone();
+    polyvec::k_power2round(&mut t1, &mut t0);
+
+    let mut pk_packed = [0u8; PUBLIC_KEY_SIZE];
+    packing::pack_pk(&mut pk_packed, rho, &t1);
+
+    let mut tr = [0u8; TR_SIZE];
+    let mut h_tr = fips202::KeccakState::default();
+    fips202::shake256_absorb(&mut h_tr, &pk_packed, pk_packed.len());
+    fips202::shake256_finalize(&mut h_tr);
+    fips202::shake256_squeeze(&mut tr, TR_SIZE, &mut h_tr);
+
+    Ok(PublicKey::new(pk_packed, tr))
+}
+
+fn build_private_share<S: TranscriptSigner>(
+    state: &MithrilRound4State<S>,
+    public_key: &PublicKey,
+) -> Result<PrivateKeyShare, MithrilDkgError> {
+    let dkg_participants = ParticipantList::new(&state.config.all_participants)
+        .ok_or_else(|| MithrilDkgError::InternalError("invalid participants".into()))?;
+
+    let mut combined_shares: HashMap<SubsetMask, SecretShareData> = HashMap::new();
+    for (subset_mask, contribution) in &state.my_contributions {
+        combined_shares.insert(*subset_mask, SecretShareData {
+            s1: contribution.s1.clone(),
+            s2: contribution.s2.clone(),
+        });
+    }
+
+    // Generate a deterministic key for this party
+    let mut party_key = [0u8; 32];
+    {
+        let mut h = fips202::KeccakState::default();
+        fips202::shake256_absorb(&mut h, &state.rho, 32);
+        fips202::shake256_absorb(&mut h, &state.config.my_party_id.to_le_bytes(), 4);
+        fips202::shake256_finalize(&mut h);
+        fips202::shake256_squeeze(&mut party_key, 32, &mut h);
+    }
+
+    // Use the TR from the public key (tr = H(pk))
+    let tr = *public_key.tr();
+
+    Ok(PrivateKeyShare::new(
+        state.config.my_party_id,
+        state.config.total_parties(),
+        state.config.threshold(),
+        party_key,
+        state.rho,
+        tr,
+        combined_shares,
+        dkg_participants,
+    ))
+}
+
+// ============================================================================
+// Convenience Function
+// ============================================================================
+
+/// Run a complete local DKG for testing purposes.
+///
+/// This function simulates the DKG protocol with all parties running locally.
+/// It's useful for testing but should not be used in production where parties
+/// are on separate machines.
+///
+/// # Arguments
+/// * `threshold` - Minimum parties required to sign (t)
+/// * `total_parties` - Total number of parties (n)
+/// * `signers` - Transcript signers for each party
+/// * `public_keys` - Public keys for transcript signature verification
+/// * `rng` - Random number generator (will be cloned for each party)
+///
+/// # Returns
+/// A vector of `MithrilDkgOutput` structs, one for each party, containing
+/// the shared public key and each party's private key share.
+///
+/// # Example
+///
+/// ```ignore
+/// let signers: Vec<MySigner> = (0..3).map(|id| MySigner::new(id)).collect();
+/// let public_keys: Vec<_> = signers.iter().map(|s| s.public_key()).collect();
+/// let rng = rand::rngs::StdRng::seed_from_u64(42);
+///
+/// let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng)?;
+/// // All parties have the same public key
+/// assert_eq!(outputs[0].public_key, outputs[1].public_key);
+/// ```
+pub fn run_local_mithril_dkg<S, R>(
+    threshold: u32,
+    total_parties: u32,
+    signers: Vec<S>,
+    public_keys: Vec<S::PublicKey>,
+    rng: R,
+) -> Result<Vec<MithrilDkgOutput>, MithrilDkgError>
+where
+    S: TranscriptSigner + Clone,
+    R: RngCore + CryptoRng + Clone,
+{
+    let threshold_config = ThresholdConfig::new(threshold, total_parties)
+        .map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+
+    let participants: Vec<ParticipantId> = (0..total_parties).collect();
+
+    let mut pk_map: HashMap<ParticipantId, S::PublicKey> = HashMap::new();
+    for (i, pk) in public_keys.into_iter().enumerate() {
+        pk_map.insert(i as ParticipantId, pk);
+    }
+
+    let mut dkgs: Vec<MithrilDkg<S, R>> = signers
+        .into_iter()
+        .enumerate()
+        .map(|(i, signer)| {
+            let config = MithrilDkgConfig::new(
+                threshold_config,
+                i as ParticipantId,
+                participants.clone(),
+                signer,
+                pk_map.clone(),
+            ).unwrap();
+            MithrilDkg::new(config, rng.clone())
+        })
+        .collect();
+
+    let mut outputs: Vec<Option<MithrilDkgOutput>> = vec![None; total_parties as usize];
+    let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> = vec![Vec::new(); total_parties as usize];
+
+    let mut iterations = 0;
+    const MAX_ITERATIONS: usize = 1000;
+
+    while outputs.iter().any(|o| o.is_none()) {
+        iterations += 1;
+        if iterations > MAX_ITERATIONS {
+            return Err(MithrilDkgError::InternalError("DKG did not complete in time".into()));
+        }
+
+        // Deliver pending messages
+        for party_id in 0..total_parties as usize {
+            let messages = std::mem::take(&mut pending_messages[party_id]);
+            for (from, data) in messages {
+                dkgs[party_id].message(from, data);
+            }
+        }
+
+        // Poke each party until they all return Wait or Return
+        let mut made_progress = true;
+        while made_progress {
+            made_progress = false;
+            
+            for party_id in 0..total_parties as usize {
+                if outputs[party_id].is_some() {
+                    continue;
+                }
+
+                match dkgs[party_id].poke()? {
+                    MithrilAction::Wait => {}
+                    MithrilAction::SendMany(data) => {
+                        made_progress = true;
+                        let from = party_id as ParticipantId;
+                        for (other, pending) in pending_messages.iter_mut().enumerate() {
+                            if other != party_id {
+                                pending.push((from, data.clone()));
+                            }
+                        }
+                    }
+                    MithrilAction::SendPrivate(to, data) => {
+                        made_progress = true;
+                        let from = party_id as ParticipantId;
+                        pending_messages[to as usize].push((from, data));
+                    }
+                    MithrilAction::Return(output) => {
+                        made_progress = true;
+                        outputs[party_id] = Some(output);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(outputs.into_iter().map(|o| o.unwrap()).collect())
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::config::ThresholdConfig;
+    use super::*;
+    use rand::SeedableRng;
 
-	fn make_test_config(party_id: u32) -> DkgConfig {
-		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
-		DkgConfig::new(threshold_config, party_id, vec![0u32, 1, 2]).unwrap()
-	}
+    #[derive(Clone, Debug)]
+    struct TestSigner { id: u32 }
 
-	#[test]
-	fn test_dkg_creation() {
-		let config = make_test_config(0);
-		let dkg = DilithiumDkg::new(config, [0u8; 32]);
+    impl TranscriptSigner for TestSigner {
+        type Signature = Vec<u8>;
+        type PublicKey = u32;
 
-		assert!(matches!(dkg.state(), DkgState::Initialized));
-		assert_eq!(dkg.my_party_id(), 0);
-	}
+        fn sign(&self, hash: &[u8; 32]) -> Self::Signature {
+            let mut sig = vec![0u8; 36];
+            sig[..4].copy_from_slice(&self.id.to_le_bytes());
+            sig[4..36].copy_from_slice(hash);
+            sig
+        }
 
-	#[test]
-	fn test_dkg_round1_generation() {
-		let config = make_test_config(0);
-		let mut dkg = DilithiumDkg::new(config, [0u8; 32]);
+        fn verify(pk: &Self::PublicKey, hash: &[u8; 32], sig: &Self::Signature) -> bool {
+            Self::verify_bytes(pk, hash, sig)
+        }
 
-		// First poke should transition to Round1Generating and generate message
-		let action = dkg.poke().unwrap();
-		assert!(matches!(action, Action::SendMany(_)));
+        fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
+            if sig.len() < 36 { return false; }
+            let sig_id = u32::from_le_bytes(sig[..4].try_into().unwrap());
+            sig_id == *pk && &sig[4..36] == hash
+        }
 
-		// Second poke should transition to waiting
-		let action = dkg.poke().unwrap();
-		assert!(matches!(action, Action::Wait));
-		assert!(matches!(dkg.state(), DkgState::Round1Waiting));
-	}
+        fn public_key(&self) -> Self::PublicKey { self.id }
+    }
 
-	#[test]
-	fn test_dkg_message_processing() {
-		let config = make_test_config(0);
-		let mut dkg = DilithiumDkg::new(config, [0u8; 32]);
+    #[test]
+    fn test_mithril_dkg_2_of_3() {
+        let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+        let public_keys: Vec<u32> = (0..3).collect();
+        let rng = rand::rngs::StdRng::seed_from_u64(42);
 
-		// Start round 1
-		let _ = dkg.poke().unwrap();
-		let _ = dkg.poke().unwrap();
+        let result = run_local_mithril_dkg(2, 3, signers, public_keys, rng);
+        
+        match &result {
+            Ok(outputs) => {
+                assert_eq!(outputs.len(), 3);
 
-		// Should be waiting
-		assert!(matches!(dkg.state(), DkgState::Round1Waiting));
+                let pk0 = outputs[0].public_key.as_bytes();
+                let pk1 = outputs[1].public_key.as_bytes();
+                let pk2 = outputs[2].public_key.as_bytes();
 
-		// Receive messages from other parties
-		let msg1 = DkgMessage::Round1(DkgRound1Broadcast {
-			party_id: 1,
-			session_id_contribution: [1u8; 32],
-		});
-		let msg2 = DkgMessage::Round1(DkgRound1Broadcast {
-			party_id: 2,
-			session_id_contribution: [2u8; 32],
-		});
+                assert_eq!(pk0, pk1);
+                assert_eq!(pk1, pk2);
+            }
+            Err(e) => {
+                panic!("DKG failed: {:?}", e);
+            }
+        }
+    }
 
-		// Use the DKG's serialization method to ensure compatibility
-		let data1 = dkg.serialize_message(&msg1).unwrap();
-		let data2 = dkg.serialize_message(&msg2).unwrap();
+    #[test]
+    fn test_mithril_dkg_eta_bounded() {
+        let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+        let public_keys: Vec<u32> = (0..3).collect();
+        let rng = rand::rngs::StdRng::seed_from_u64(123);
 
-		dkg.message(1, data1);
-		dkg.message(2, data2);
+        let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
 
-		// Should be able to advance now
-		let action = dkg.poke().unwrap();
-		assert!(matches!(action, Action::SendMany(_)));
-	}
+        for (party_id, output) in outputs.iter().enumerate() {
+            let shares = output.private_share.shares();
+            for (subset_mask, share) in shares {
+                for (poly_idx, poly) in share.s1.iter().enumerate() {
+                    for (coeff_idx, &coeff) in poly.iter().enumerate() {
+                        assert!(
+                            coeff >= -ETA && coeff <= ETA,
+                            "Party {} subset {:b} s1[{}][{}] = {} outside η bound",
+                            party_id, subset_mask, poly_idx, coeff_idx, coeff
+                        );
+                    }
+                }
+                for (poly_idx, poly) in share.s2.iter().enumerate() {
+                    for (coeff_idx, &coeff) in poly.iter().enumerate() {
+                        assert!(
+                            coeff >= -ETA && coeff <= ETA,
+                            "Party {} subset {:b} s2[{}][{}] = {} outside η bound",
+                            party_id, subset_mask, poly_idx, coeff_idx, coeff
+                        );
+                    }
+                }
+            }
+        }
+    }
 
-	#[test]
-	fn test_subset_computation() {
-		let config = make_test_config(0);
-		let dkg = DilithiumDkg::new(config, [0u8; 32]);
+    /// Test DKG with ML-DSA-87 (Dilithium) for transcript signing.
+    ///
+    /// This verifies that the TranscriptSigner trait works correctly with
+    /// a real post-quantum signature scheme.
+    #[test]
+    fn test_mithril_dkg_with_dilithium_signing() {
+        use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, PublicKey, SecretKey, SIGNBYTES};
+        use qp_rusty_crystals_dilithium::SensitiveBytes32;
 
-		// For 2-of-3, subset size is 3 - 2 + 1 = 2
-		// Party 0 should be in subsets: {0,1}, {0,2}
-		let subsets = dkg.compute_subsets_for_party(0, 2, 3);
-		assert_eq!(subsets.len(), 2);
-		assert!(subsets.contains(&0b011)); // Party 0 and 1
-		assert!(subsets.contains(&0b101)); // Party 0 and 2
-	}
+        #[derive(Clone)]
+        struct DilithiumSigner {
+            sk: SecretKey,
+            pk: PublicKey,
+        }
 
-	#[test]
-	fn test_message_buffering_out_of_order() {
-		// Test that messages arriving out of order are buffered and processed later
-		let config = make_test_config(0);
-		let mut dkg = DilithiumDkg::new(config, [0u8; 32]);
+        impl std::fmt::Debug for DilithiumSigner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("DilithiumSigner")
+                    .field("pk", &hex::encode(&self.pk.bytes[..8]))
+                    .finish()
+            }
+        }
 
-		// Start round 1 - generates and sends our Round1 message
-		let _ = dkg.poke().unwrap();
-		// Transition to waiting
-		let _ = dkg.poke().unwrap();
-		assert!(matches!(dkg.state(), DkgState::Round1Waiting));
+        impl TranscriptSigner for DilithiumSigner {
+            type Signature = Vec<u8>;
+            type PublicKey = PublicKey;
 
-		// Now simulate receiving a Round2 message BEFORE we've received all Round1 messages
-		// This is what happens in distributed systems with network delays
-		let public_contrib = super::super::types::PartyPublicContributions::new(1);
-		let round2_msg = DkgMessage::Round2(super::super::types::DkgRound2Broadcast {
-			party_id: 1,
-			commitment_hash: [42u8; 32],
-			public_contributions: public_contrib,
-		});
-		let round2_data = dkg.serialize_message(&round2_msg).unwrap();
+            fn sign(&self, hash: &[u8; 32]) -> Self::Signature {
+                // Sign with no context and deterministic (no hedging)
+                self.sk.sign(hash, None, None).unwrap().to_vec()
+            }
 
-		// Send the Round2 message - it should be buffered, not rejected
-		dkg.message(1, round2_data);
+            fn verify(pk: &Self::PublicKey, hash: &[u8; 32], sig: &Self::Signature) -> bool {
+                Self::verify_bytes(pk, hash, sig)
+            }
 
-		// Verify the message was buffered
-		assert!(!dkg.state_data.message_buffer.round2.is_empty());
-		assert_eq!(dkg.state_data.message_buffer.round2.len(), 1);
-		assert_eq!(dkg.state_data.message_buffer.round2[0].party_id, 1);
+            fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
+                if sig.len() != SIGNBYTES {
+                    return false;
+                }
+                pk.verify(hash, sig, None)
+            }
 
-		// Now complete Round1 by receiving Round1 messages from other parties
-		let r1_msg1 = DkgMessage::Round1(super::super::types::DkgRound1Broadcast {
-			party_id: 1,
-			session_id_contribution: [1u8; 32],
-		});
-		let r1_msg2 = DkgMessage::Round1(super::super::types::DkgRound1Broadcast {
-			party_id: 2,
-			session_id_contribution: [2u8; 32],
-		});
-		let r1_data1 = dkg.serialize_message(&r1_msg1).unwrap();
-		let r1_data2 = dkg.serialize_message(&r1_msg2).unwrap();
+            fn public_key(&self) -> Self::PublicKey {
+                self.pk.clone()
+            }
+        }
 
-		dkg.message(1, r1_data1);
-		dkg.message(2, r1_data2);
+        // Generate Dilithium keypairs for each party
+        let mut signers = Vec::new();
+        let mut public_keys = Vec::new();
 
-		// Poke should now advance to Round2
-		let action = dkg.poke().unwrap();
-		assert!(matches!(action, Action::SendMany(_)));
+        for i in 0..3u32 {
+            // Use deterministic seed for reproducibility
+            let mut seed = [0u8; 32];
+            seed[..4].copy_from_slice(&i.to_le_bytes());
+            seed[4] = 0xDE;
+            seed[5] = 0xAD;
+            
+            let keypair = Keypair::generate(SensitiveBytes32::from(&mut seed));
+            
+            public_keys.push(keypair.public.clone());
+            signers.push(DilithiumSigner { 
+                sk: keypair.secret.clone(), 
+                pk: keypair.public 
+            });
+        }
 
-		// The buffered Round2 message should have been processed during the transition
-		assert!(dkg.state_data.message_buffer.round2.is_empty());
-		// And the commitment hash from party 1 should be in round2 data
-		assert!(dkg.state_data.round2.commitment_hashes.contains_key(&1));
-	}
+        let rng = rand::rngs::StdRng::seed_from_u64(456);
+        let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
 
-	#[test]
-	fn test_message_buffering_multiple_rounds() {
-		// Test buffering messages from multiple future rounds
-		let config = make_test_config(0);
-		let mut dkg = DilithiumDkg::new(config, [0u8; 32]);
+        // Verify DKG succeeded
+        assert_eq!(outputs.len(), 3);
 
-		// Start round 1
-		let _ = dkg.poke().unwrap();
-		let _ = dkg.poke().unwrap();
-		assert!(matches!(dkg.state(), DkgState::Round1Waiting));
+        // All parties should have the same public key
+        let pk0 = outputs[0].public_key.as_bytes();
+        for output in &outputs[1..] {
+            assert_eq!(pk0, output.public_key.as_bytes());
+        }
 
-		// Buffer Round2 message (simulating very fast peer)
-		let public_contrib = super::super::types::PartyPublicContributions::new(1);
-		let round2_msg = DkgMessage::Round2(super::super::types::DkgRound2Broadcast {
-			party_id: 1,
-			commitment_hash: [42u8; 32],
-			public_contributions: public_contrib,
-		});
-		let round2_data = dkg.serialize_message(&round2_msg).unwrap();
-		dkg.message(1, round2_data);
+        // Verify η-bounded shares
+        for output in &outputs {
+            for (_, share) in output.private_share.shares() {
+                for poly in &share.s1 {
+                    for &coeff in poly {
+                        assert!(coeff >= -ETA && coeff <= ETA);
+                    }
+                }
+                for poly in &share.s2 {
+                    for &coeff in poly {
+                        assert!(coeff >= -ETA && coeff <= ETA);
+                    }
+                }
+            }
+        }
+    }
 
-		// Should be buffered appropriately
-		assert_eq!(dkg.state_data.message_buffer.round2.len(), 1);
+    /// Test that DKG rejects invalid transcript signatures.
+    ///
+    /// This is a security-critical test: malicious parties should not be able
+    /// to complete DKG with forged signatures.
+    #[test]
+    fn test_mithril_dkg_rejects_bad_signature() {
+        use std::collections::HashMap;
 
-		// Verify state hasn't changed unexpectedly
-		assert!(matches!(dkg.state(), DkgState::Round1Waiting));
-	}
+        // A signer that produces bad signatures for party 2
+        #[derive(Clone, Debug)]
+        struct BadSigner {
+            id: u32,
+            produce_bad_sig: bool,
+        }
+
+        impl TranscriptSigner for BadSigner {
+            type Signature = Vec<u8>;
+            type PublicKey = u32;
+
+            fn sign(&self, hash: &[u8; 32]) -> Self::Signature {
+                let mut sig = vec![0u8; 36];
+                sig[..4].copy_from_slice(&self.id.to_le_bytes());
+                if self.produce_bad_sig {
+                    // Produce a signature with wrong hash
+                    sig[4..36].copy_from_slice(&[0xBA; 32]);
+                } else {
+                    sig[4..36].copy_from_slice(hash);
+                }
+                sig
+            }
+
+            fn verify(pk: &Self::PublicKey, hash: &[u8; 32], sig: &Self::Signature) -> bool {
+                Self::verify_bytes(pk, hash, sig)
+            }
+
+            fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
+                if sig.len() < 36 { return false; }
+                let sig_id = u32::from_le_bytes(sig[..4].try_into().unwrap());
+                sig_id == *pk && &sig[4..36] == hash
+            }
+
+            fn public_key(&self) -> Self::PublicKey { self.id }
+        }
+
+        // Party 2 will produce bad signatures
+        let signers: Vec<BadSigner> = (0..3).map(|id| BadSigner { 
+            id, 
+            produce_bad_sig: id == 2 
+        }).collect();
+        let public_keys: Vec<u32> = (0..3).collect();
+
+        let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+        let participants: Vec<ParticipantId> = (0..3).collect();
+
+        let mut pk_map: HashMap<ParticipantId, u32> = HashMap::new();
+        for (i, pk) in public_keys.into_iter().enumerate() {
+            pk_map.insert(i as ParticipantId, pk);
+        }
+
+        let rng = rand::rngs::StdRng::seed_from_u64(789);
+
+        let mut dkgs: Vec<MithrilDkg<BadSigner, _>> = signers
+            .into_iter()
+            .enumerate()
+            .map(|(i, signer)| {
+                let config = MithrilDkgConfig::new(
+                    threshold_config,
+                    i as ParticipantId,
+                    participants.clone(),
+                    signer,
+                    pk_map.clone(),
+                ).unwrap();
+                MithrilDkg::new(config, rng.clone())
+            })
+            .collect();
+
+        let mut outputs: Vec<Option<MithrilDkgOutput>> = vec![None; 3];
+        let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> = vec![Vec::new(); 3];
+        let mut errors: Vec<Option<MithrilDkgError>> = vec![None; 3];
+
+        let mut iterations = 0;
+        const MAX_ITERATIONS: usize = 1000;
+
+        while outputs.iter().any(|o| o.is_none()) && errors.iter().all(|e| e.is_none()) {
+            iterations += 1;
+            if iterations > MAX_ITERATIONS {
+                break;
+            }
+
+            // Deliver pending messages
+            for party_id in 0..3 {
+                let messages = std::mem::take(&mut pending_messages[party_id]);
+                for (from, data) in messages {
+                    dkgs[party_id].message(from, data);
+                }
+            }
+
+            // Poke each party
+            let mut made_progress = true;
+            while made_progress {
+                made_progress = false;
+
+                for party_id in 0..3 {
+                    if outputs[party_id].is_some() || errors[party_id].is_some() {
+                        continue;
+                    }
+
+                    match dkgs[party_id].poke() {
+                        Ok(MithrilAction::Wait) => {}
+                        Ok(MithrilAction::SendMany(data)) => {
+                            made_progress = true;
+                            let from = party_id as ParticipantId;
+                            for (other, pending) in pending_messages.iter_mut().enumerate() {
+                                if other != party_id {
+                                    pending.push((from, data.clone()));
+                                }
+                            }
+                        }
+                        Ok(MithrilAction::SendPrivate(to, data)) => {
+                            made_progress = true;
+                            let from = party_id as ParticipantId;
+                            pending_messages[to as usize].push((from, data));
+                        }
+                        Ok(MithrilAction::Return(output)) => {
+                            made_progress = true;
+                            outputs[party_id] = Some(output);
+                        }
+                        Err(e) => {
+                            errors[party_id] = Some(e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // The DKG should fail for honest parties when they try to verify party 2's bad signature
+        // Party 2's bad signature will be detected when other parties verify it in complete()
+        
+        // At least one honest party should have received an error
+        let has_sig_error = errors.iter().any(|e| {
+            matches!(e, Some(MithrilDkgError::SignatureVerificationFailed { party_id: 2 }))
+        });
+        
+        // Print debug info
+        for (party_id, error) in errors.iter().enumerate() {
+            if let Some(e) = error {
+                println!("Party {} got error: {:?}", party_id, e);
+            }
+        }
+        for (party_id, output) in outputs.iter().enumerate() {
+            if output.is_some() {
+                println!("Party {} completed successfully", party_id);
+            }
+        }
+        
+        assert!(has_sig_error, "At least one honest party should reject party 2's bad signature");
+    }
+
+    /// Test that DKG rejects bad randomness commitment (Round 2 reveal doesn't match Round 1 commit).
+    #[test]
+    fn test_mithril_dkg_rejects_bad_commitment() {
+        use std::collections::HashMap;
+
+        // We'll intercept and modify party 2's Round 2 message to have wrong randomness
+        let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+        let public_keys: Vec<u32> = (0..3).collect();
+
+        let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+        let participants: Vec<ParticipantId> = (0..3).collect();
+
+        let mut pk_map: HashMap<ParticipantId, u32> = HashMap::new();
+        for (i, pk) in public_keys.into_iter().enumerate() {
+            pk_map.insert(i as ParticipantId, pk);
+        }
+
+        let rng = rand::rngs::StdRng::seed_from_u64(555);
+
+        let mut dkgs: Vec<MithrilDkg<TestSigner, _>> = signers
+            .into_iter()
+            .enumerate()
+            .map(|(i, signer)| {
+                let config = MithrilDkgConfig::new(
+                    threshold_config,
+                    i as ParticipantId,
+                    participants.clone(),
+                    signer,
+                    pk_map.clone(),
+                ).unwrap();
+                MithrilDkg::new(config, rng.clone())
+            })
+            .collect();
+
+        let mut outputs: Vec<Option<MithrilDkgOutput>> = vec![None; 3];
+        let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> = vec![Vec::new(); 3];
+        let mut errors: Vec<Option<MithrilDkgError>> = vec![None; 3];
+
+        let mut iterations = 0;
+        const MAX_ITERATIONS: usize = 1000;
+
+        while outputs.iter().any(|o| o.is_none()) && errors.iter().all(|e| e.is_none()) {
+            iterations += 1;
+            if iterations > MAX_ITERATIONS {
+                break;
+            }
+
+            // Deliver pending messages, but tamper with party 2's Round 2 broadcast
+            for party_id in 0..3 {
+                let messages = std::mem::take(&mut pending_messages[party_id]);
+                for (from, mut data) in messages {
+                    // Tamper with party 2's Round 2 message
+                    if from == 2 {
+                        if let Ok(msg) = bincode::deserialize::<MithrilDkgMessage>(&data) {
+                            if let MithrilDkgMessage::Round2Broadcast(mut r2) = msg {
+                                // Corrupt the randomness
+                                r2.randomness[0] ^= 0xFF;
+                                let tampered = MithrilDkgMessage::Round2Broadcast(r2);
+                                data = bincode::serialize(&tampered).unwrap();
+                            }
+                        }
+                    }
+                    dkgs[party_id].message(from, data);
+                }
+            }
+
+            // Poke each party
+            let mut made_progress = true;
+            while made_progress {
+                made_progress = false;
+
+                for party_id in 0..3 {
+                    if outputs[party_id].is_some() || errors[party_id].is_some() {
+                        continue;
+                    }
+
+                    match dkgs[party_id].poke() {
+                        Ok(MithrilAction::Wait) => {}
+                        Ok(MithrilAction::SendMany(data)) => {
+                            made_progress = true;
+                            let from = party_id as ParticipantId;
+                            for (other, pending) in pending_messages.iter_mut().enumerate() {
+                                if other != party_id {
+                                    pending.push((from, data.clone()));
+                                }
+                            }
+                        }
+                        Ok(MithrilAction::SendPrivate(to, data)) => {
+                            made_progress = true;
+                            let from = party_id as ParticipantId;
+                            pending_messages[to as usize].push((from, data));
+                        }
+                        Ok(MithrilAction::Return(output)) => {
+                            made_progress = true;
+                            outputs[party_id] = Some(output);
+                        }
+                        Err(e) => {
+                            errors[party_id] = Some(e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // At least one honest party should have detected the commitment mismatch
+        let has_commitment_error = errors.iter().any(|e| {
+            matches!(e, Some(MithrilDkgError::CommitmentMismatch { party_id: 2 }))
+        });
+
+        assert!(has_commitment_error, "At least one party should reject party 2's bad commitment");
+    }
+
+    /// Test DKG with 3-of-5 threshold.
+    #[test]
+    fn test_mithril_dkg_3_of_5() {
+        let signers: Vec<TestSigner> = (0..5).map(|id| TestSigner { id }).collect();
+        let public_keys: Vec<u32> = (0..5).collect();
+        let rng = rand::rngs::StdRng::seed_from_u64(12345);
+
+        let outputs = run_local_mithril_dkg(3, 5, signers, public_keys, rng).unwrap();
+
+        assert_eq!(outputs.len(), 5);
+
+        // All parties should have the same public key
+        let pk0 = outputs[0].public_key.as_bytes();
+        for output in &outputs[1..] {
+            assert_eq!(pk0, output.public_key.as_bytes());
+        }
+
+        // Verify η-bounded shares
+        for output in &outputs {
+            for (_, share) in output.private_share.shares() {
+                for poly in &share.s1 {
+                    for &coeff in poly {
+                        assert!(coeff >= -ETA && coeff <= ETA);
+                    }
+                }
+                for poly in &share.s2 {
+                    for &coeff in poly {
+                        assert!(coeff >= -ETA && coeff <= ETA);
+                    }
+                }
+            }
+        }
+
+        // Verify each party has correct number of subsets
+        // For 3-of-5, subset size k = 5-3+1 = 3
+        // Party 0 should be in C(4,2) = 6 subsets (choosing 2 others from 4)
+        for (party_id, output) in outputs.iter().enumerate() {
+            let num_subsets = output.private_share.shares().len();
+            // Each party is in C(n-1, k-1) = C(4, 2) = 6 subsets
+            assert_eq!(num_subsets, 6, "Party {} should have 6 subsets, got {}", party_id, num_subsets);
+        }
+    }
+
+    /// Test that parties in the same subset have identical shares.
+    #[test]
+    fn test_mithril_dkg_subset_share_consistency() {
+        let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+        let public_keys: Vec<u32> = (0..3).collect();
+        let rng = rand::rngs::StdRng::seed_from_u64(777);
+
+        let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
+
+        // For 2-of-3: subsets are {0,1}=0b011, {0,2}=0b101, {1,2}=0b110
+        
+        // Check subset {0, 1} (mask 0b011 = 3)
+        let p0_share_01 = outputs[0].private_share.shares().get(&0b011).unwrap();
+        let p1_share_01 = outputs[1].private_share.shares().get(&0b011).unwrap();
+        assert_eq!(p0_share_01.s1, p1_share_01.s1, "Party 0 and 1 should have same s1 for subset {{0,1}}");
+        assert_eq!(p0_share_01.s2, p1_share_01.s2, "Party 0 and 1 should have same s2 for subset {{0,1}}");
+
+        // Check subset {0, 2} (mask 0b101 = 5)
+        let p0_share_02 = outputs[0].private_share.shares().get(&0b101).unwrap();
+        let p2_share_02 = outputs[2].private_share.shares().get(&0b101).unwrap();
+        assert_eq!(p0_share_02.s1, p2_share_02.s1, "Party 0 and 2 should have same s1 for subset {{0,2}}");
+        assert_eq!(p0_share_02.s2, p2_share_02.s2, "Party 0 and 2 should have same s2 for subset {{0,2}}");
+
+        // Check subset {1, 2} (mask 0b110 = 6)
+        let p1_share_12 = outputs[1].private_share.shares().get(&0b110).unwrap();
+        let p2_share_12 = outputs[2].private_share.shares().get(&0b110).unwrap();
+        assert_eq!(p1_share_12.s1, p2_share_12.s1, "Party 1 and 2 should have same s1 for subset {{1,2}}");
+        assert_eq!(p1_share_12.s2, p2_share_12.s2, "Party 1 and 2 should have same s2 for subset {{1,2}}");
+
+        // Verify parties only have shares for subsets they belong to
+        assert!(!outputs[0].private_share.shares().contains_key(&0b110), "Party 0 should not have subset {{1,2}}");
+        assert!(!outputs[1].private_share.shares().contains_key(&0b101), "Party 1 should not have subset {{0,2}}");
+        assert!(!outputs[2].private_share.shares().contains_key(&0b011), "Party 2 should not have subset {{0,1}}");
+    }
+
+    /// Test config validation rejects invalid parameters.
+    #[test]
+    fn test_mithril_dkg_config_validation() {
+        let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+        let mut pk_map: HashMap<ParticipantId, u32> = HashMap::new();
+        pk_map.insert(0, 0);
+        pk_map.insert(1, 1);
+        pk_map.insert(2, 2);
+
+        // Valid config should work
+        let result = MithrilDkgConfig::new(
+            threshold_config,
+            0,
+            vec![0, 1, 2],
+            TestSigner { id: 0 },
+            pk_map.clone(),
+        );
+        assert!(result.is_ok());
+
+        // Wrong participant count
+        let result = MithrilDkgConfig::new(
+            threshold_config,
+            0,
+            vec![0, 1], // Only 2 participants but config says 3
+            TestSigner { id: 0 },
+            pk_map.clone(),
+        );
+        assert!(result.is_err());
+
+        // Party not in participants
+        let result = MithrilDkgConfig::new(
+            threshold_config,
+            99, // Not in the list
+            vec![0, 1, 2],
+            TestSigner { id: 99 },
+            pk_map.clone(),
+        );
+        assert!(result.is_err());
+
+        // Missing public key
+        let mut incomplete_pk_map = pk_map.clone();
+        incomplete_pk_map.remove(&2);
+        let result = MithrilDkgConfig::new(
+            threshold_config,
+            0,
+            vec![0, 1, 2],
+            TestSigner { id: 0 },
+            incomplete_pk_map,
+        );
+        assert!(result.is_err());
+    }
 }
