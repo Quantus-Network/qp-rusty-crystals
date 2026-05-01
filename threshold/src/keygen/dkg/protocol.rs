@@ -559,6 +559,42 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
         };
 
         if !state.broadcast_sent {
+            // Per Mithril paper DKGRound4 lines 11-16: Non-leaders MUST verify
+            // PK commitments BEFORE signing the transcript. This ensures we don't
+            // sign a transcript containing invalid commitments from malicious leaders.
+            for &subset in &state.config.my_subsets() {
+                let leader_id = state.config.get_leader(subset)
+                    .ok_or_else(|| MithrilDkgError::InternalError(
+                        format!("no leader for subset {:b}", subset)
+                    ))?;
+                if leader_id != state.config.my_party_id {
+                    // I'm not the leader for this subset - verify the leader's commitment
+                    if let Some(contribution) = state.my_contributions.get(&subset) {
+                        // Compute my expected partial PK
+                        let expected_pk = compute_partial_pk(&state.rho, contribution, subset);
+                        let expected_commitment = h_commit_pk(subset, &expected_pk);
+
+                        // Get the leader's commitment from Round 3
+                        let round3 = state.round3_broadcasts.get(&leader_id)
+                            .ok_or_else(|| MithrilDkgError::MissingData(
+                                format!("missing Round 3 from leader {} for subset {:b}", leader_id, subset)
+                            ))?;
+
+                        let leader_commitment = round3.partial_pk_commitments.get(&subset)
+                            .ok_or_else(|| MithrilDkgError::MissingData(
+                                format!("missing PK commitment from leader {} for subset {:b}", leader_id, subset)
+                            ))?;
+
+                        if *leader_commitment != expected_commitment {
+                            return Err(MithrilDkgError::PkCommitmentMismatch {
+                                party_id: leader_id,
+                                subset,
+                            });
+                        }
+                    }
+                }
+            }
+
             let transcript_hash = compute_transcript_hash(
                 &state.round1_broadcasts,
                 &state.round2_broadcasts,
@@ -1362,6 +1398,135 @@ mod tests {
         });
 
         assert!(has_commitment_error, "At least one party should reject party 2's bad commitment");
+    }
+
+    /// Test that non-leaders detect tampered PK commitments in Round 4 before signing.
+    /// Per Mithril paper DKGRound4 lines 11-16: non-leaders verify PK commitments BEFORE signing.
+    #[test]
+    fn test_mithril_dkg_rejects_bad_pk_commitment() {
+        use std::collections::HashMap;
+
+        // For 2-of-3: subset size k = 3-2+1 = 2
+        // Subsets: {0,1}=0b011, {0,2}=0b101, {1,2}=0b110
+        // Leaders: min of each subset
+        //   - {0,1}: leader is 0
+        //   - {0,2}: leader is 0
+        //   - {1,2}: leader is 1
+        // Party 0 is leader for subsets 0b011 and 0b101
+        // Party 1 is leader for subset 0b110
+        // Party 2 is never a leader but is a non-leader member of 0b101 and 0b110
+        
+        // We'll tamper with party 0's Round 3 PK commitment for subset 0b101
+        // Party 2 (non-leader member of 0b101) should detect this BEFORE signing
+
+        let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+        let public_keys: Vec<u32> = (0..3).collect();
+
+        let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+        let participants: Vec<ParticipantId> = (0..3).collect();
+
+        let mut pk_map: HashMap<ParticipantId, u32> = HashMap::new();
+        for (i, pk) in public_keys.into_iter().enumerate() {
+            pk_map.insert(i as ParticipantId, pk);
+        }
+
+        let rng = rand::rngs::StdRng::seed_from_u64(888);
+
+        let mut dkgs: Vec<MithrilDkg<TestSigner, _>> = signers
+            .into_iter()
+            .enumerate()
+            .map(|(i, signer)| {
+                let config = MithrilDkgConfig::new(
+                    threshold_config,
+                    i as ParticipantId,
+                    participants.clone(),
+                    signer,
+                    pk_map.clone(),
+                ).unwrap();
+                MithrilDkg::new(config, rng.clone())
+            })
+            .collect();
+
+        let mut outputs: Vec<Option<MithrilDkgOutput>> = vec![None; 3];
+        let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> = vec![Vec::new(); 3];
+        let mut errors: Vec<Option<MithrilDkgError>> = vec![None; 3];
+
+        let mut iterations = 0;
+        const MAX_ITERATIONS: usize = 1000;
+
+        while outputs.iter().any(|o| o.is_none()) && errors.iter().all(|e| e.is_none()) {
+            iterations += 1;
+            if iterations > MAX_ITERATIONS {
+                break;
+            }
+
+            // Deliver pending messages, but tamper with party 0's Round 3 broadcast
+            for party_id in 0..3 {
+                let messages = std::mem::take(&mut pending_messages[party_id]);
+                for (from, mut data) in messages {
+                    // Tamper with party 0's Round 3 message (PK commitments)
+                    if from == 0 {
+                        if let Ok(msg) = bincode::deserialize::<MithrilDkgMessage>(&data) {
+                            if let MithrilDkgMessage::Round3Broadcast(mut r3) = msg {
+                                // Corrupt a PK commitment for subset 0b101 where party 2 is a member
+                                if let Some(commitment) = r3.partial_pk_commitments.get_mut(&0b101) {
+                                    commitment[0] ^= 0xFF;
+                                }
+                                let tampered = MithrilDkgMessage::Round3Broadcast(r3);
+                                data = bincode::serialize(&tampered).unwrap();
+                            }
+                        }
+                    }
+                    dkgs[party_id].message(from, data);
+                }
+            }
+
+            // Poke each party
+            let mut made_progress = true;
+            while made_progress {
+                made_progress = false;
+
+                for party_id in 0..3 {
+                    if outputs[party_id].is_some() || errors[party_id].is_some() {
+                        continue;
+                    }
+
+                    match dkgs[party_id].poke() {
+                        Ok(MithrilAction::Wait) => {}
+                        Ok(MithrilAction::SendMany(data)) => {
+                            made_progress = true;
+                            let from = party_id as ParticipantId;
+                            for (other, pending) in pending_messages.iter_mut().enumerate() {
+                                if other != party_id {
+                                    pending.push((from, data.clone()));
+                                }
+                            }
+                        }
+                        Ok(MithrilAction::SendPrivate(to, data)) => {
+                            made_progress = true;
+                            let from = party_id as ParticipantId;
+                            pending_messages[to as usize].push((from, data));
+                        }
+                        Ok(MithrilAction::Return(output)) => {
+                            made_progress = true;
+                            outputs[party_id] = Some(output);
+                        }
+                        Err(e) => {
+                            errors[party_id] = Some(e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Party 2 should detect the PK commitment mismatch in Round 4 BEFORE signing
+        // (Party 2 is a non-leader member of subset 0b101 where party 0 is leader)
+        let party2_error = &errors[2];
+        assert!(
+            matches!(party2_error, Some(MithrilDkgError::PkCommitmentMismatch { party_id: 0, subset: 0b101 })),
+            "Party 2 should detect party 0's bad PK commitment for subset 0b101, got: {:?}",
+            party2_error
+        );
     }
 
     /// Test DKG with 3-of-5 threshold.
