@@ -4,6 +4,7 @@
 //! including hyperball sampling, matrix operations, and modular arithmetic helpers.
 
 use qp_rusty_crystals_dilithium::{fips202, packing, params as dilithium_params, poly, polyvec};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // ============================================================================
 // Constants for ML-DSA-87
@@ -346,6 +347,23 @@ impl HyperballSampleVector {
 		Self { data: data.into_boxed_slice() }
 	}
 }
+
+impl Zeroize for HyperballSampleVector {
+	fn zeroize(&mut self) {
+		// Zeroize all f64 values in the boxed slice
+		// This contains secret witness data (y + cs2) that could reveal s1
+		// Use zeroize crate's implementation for f64 slices
+		self.data.zeroize();
+	}
+}
+
+impl Drop for HyperballSampleVector {
+	fn drop(&mut self) {
+		self.zeroize();
+	}
+}
+
+impl ZeroizeOnDrop for HyperballSampleVector {}
 
 // ============================================================================
 // Hint Computation

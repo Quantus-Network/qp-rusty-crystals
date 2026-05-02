@@ -45,11 +45,14 @@ use crate::{
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey},
-	protocol::signing::{
-		aggregate_commitments_dilithium, combine_signature, generate_round1,
-		generate_round3_response, pack_responses, pack_round1_commitment, process_round2,
-		unpack_commitment_dilithium, unpack_responses, verify_commitment_hash, Round1Data,
-		Round2Data,
+	protocol::{
+		primitives::L,
+		signing::{
+			aggregate_commitments_dilithium, combine_signature, generate_round1,
+			generate_round3_response, pack_responses, pack_round1_commitment, process_round2,
+			unpack_commitment_dilithium, unpack_responses, verify_commitment_hash, Round1Data,
+			Round2Data,
+		},
 	},
 };
 
@@ -582,7 +585,7 @@ impl ThresholdSigner {
 				round2_data.zeroize();
 				// polyvec doesn't implement Zeroize, clear manually
 				for resp in my_responses.iter_mut() {
-					for i in 0..7 {
+					for i in 0..L {
 						resp.vec[i].coeffs.fill(0);
 					}
 				}

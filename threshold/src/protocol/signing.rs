@@ -45,8 +45,18 @@ impl Zeroize for Round1Data {
 	fn zeroize(&mut self) {
 		self.commitment_hash.zeroize();
 		self.rho_prime.zeroize();
-		// w_commitments and hyperball_samples will be cleared when dropped
+		// Zeroize w_commitments (polyvec doesn't implement Zeroize)
+		for w in &mut self.w_commitments {
+			for i in 0..K {
+				w.vec[i].coeffs.fill(0);
+			}
+		}
 		self.w_commitments.clear();
+		// HyperballSampleVector implements Zeroize/ZeroizeOnDrop,
+		// but we explicitly zeroize before clearing for defense in depth
+		for sample in &mut self.hyperball_samples {
+			sample.zeroize();
+		}
 		self.hyperball_samples.clear();
 	}
 }
