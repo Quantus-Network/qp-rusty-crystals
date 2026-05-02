@@ -81,201 +81,236 @@ mod state;
 mod types;
 
 // Re-export public types
-pub use protocol::{MithrilAction, MithrilDkg, MithrilDkgError, run_local_mithril_dkg};
+pub use protocol::{run_local_mithril_dkg, MithrilAction, MithrilDkg, MithrilDkgError};
 pub use state::{
-    MithrilDkgOutput, MithrilDkgState, MithrilRound1State, MithrilRound2State,
-    MithrilRound3State, MithrilRound4State,
-    all_broadcasts_received, all_private_messages_received,
+	all_broadcasts_received, all_private_messages_received, MithrilDkgOutput, MithrilDkgState,
+	MithrilRound1State, MithrilRound2State, MithrilRound3State, MithrilRound4State,
 };
 pub use types::{
-    // Configuration
-    MithrilDkgConfig,
-    // Message types
-    MithrilDkgMessage, MithrilRound1Broadcast, MithrilRound1Private,
-    MithrilRound2Broadcast, MithrilRound3Broadcast, MithrilRound4Broadcast,
-    // Core types
-    ParticipantId, SubsetMask, SubsetContribution, PartialPublicKey,
-    // Transcript signing
-    TranscriptSigner, NoOpSigner,
-    // Constants
-    COMMITMENT_HASH_SIZE, SUBSET_SEED_SIZE, SHARED_SECRET_SIZE, RANDOMNESS_SIZE,
-    DOMAIN_COMMIT, DOMAIN_SEED, DOMAIN_KEYGEN, DOMAIN_PK_COMMIT, DOMAIN_TRANSCRIPT,
-    L, K, N,
-    // Hash functions
-    h_commit, h_commit_pk, h_seed, h_keygen,
-    compute_transcript_hash, compute_partial_output_hash, compute_signing_message,
-    derive_subset_contribution,
+	compute_partial_output_hash,
+	compute_signing_message,
+	compute_transcript_hash,
+	derive_subset_contribution,
+	// Hash functions
+	h_commit,
+	h_commit_pk,
+	h_keygen,
+	h_seed,
+	// Configuration
+	MithrilDkgConfig,
+	// Message types
+	MithrilDkgMessage,
+	MithrilRound1Broadcast,
+	MithrilRound1Private,
+	MithrilRound2Broadcast,
+	MithrilRound3Broadcast,
+	MithrilRound4Broadcast,
+	NoOpSigner,
+	PartialPublicKey,
+	// Core types
+	ParticipantId,
+	SubsetContribution,
+	SubsetMask,
+	// Transcript signing
+	TranscriptSigner,
+	// Constants
+	COMMITMENT_HASH_SIZE,
+	DOMAIN_COMMIT,
+	DOMAIN_KEYGEN,
+	DOMAIN_PK_COMMIT,
+	DOMAIN_SEED,
+	DOMAIN_TRANSCRIPT,
+	K,
+	L,
+	N,
+	RANDOMNESS_SIZE,
+	SHARED_SECRET_SIZE,
+	SUBSET_SEED_SIZE,
 };
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use rand::SeedableRng;
+	use super::*;
+	use rand::SeedableRng;
 
-    #[derive(Clone, Debug)]
-    struct TestSigner { id: u32 }
+	#[derive(Clone, Debug)]
+	struct TestSigner {
+		id: u32,
+	}
 
-    impl TranscriptSigner for TestSigner {
-        type Signature = Vec<u8>;
-        type PublicKey = u32;
+	impl TranscriptSigner for TestSigner {
+		type Signature = Vec<u8>;
+		type PublicKey = u32;
 
-        fn sign(&self, hash: &[u8; 32]) -> Self::Signature {
-            let mut sig = vec![0u8; 36];
-            sig[..4].copy_from_slice(&self.id.to_le_bytes());
-            sig[4..36].copy_from_slice(hash);
-            sig
-        }
+		fn sign(&self, hash: &[u8; 32]) -> Self::Signature {
+			let mut sig = vec![0u8; 36];
+			sig[..4].copy_from_slice(&self.id.to_le_bytes());
+			sig[4..36].copy_from_slice(hash);
+			sig
+		}
 
-        fn verify(pk: &Self::PublicKey, hash: &[u8; 32], sig: &Self::Signature) -> bool {
-            Self::verify_bytes(pk, hash, sig)
-        }
+		fn verify(pk: &Self::PublicKey, hash: &[u8; 32], sig: &Self::Signature) -> bool {
+			Self::verify_bytes(pk, hash, sig)
+		}
 
-        fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
-            if sig.len() < 36 { return false; }
-            let sig_id = u32::from_le_bytes(sig[..4].try_into().unwrap());
-            sig_id == *pk && &sig[4..36] == hash
-        }
+		fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
+			if sig.len() < 36 {
+				return false;
+			}
+			let sig_id = u32::from_le_bytes(sig[..4].try_into().unwrap());
+			sig_id == *pk && &sig[4..36] == hash
+		}
 
-        fn public_key(&self) -> Self::PublicKey { self.id }
-    }
+		fn public_key(&self) -> Self::PublicKey {
+			self.id
+		}
+	}
 
-    #[test]
-    fn test_dkg_2_of_3() {
-        let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
-        let public_keys: Vec<u32> = (0..3).collect();
-        let rng = rand::rngs::StdRng::seed_from_u64(42);
+	#[test]
+	fn test_dkg_2_of_3() {
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let rng = rand::rngs::StdRng::seed_from_u64(42);
 
-        let result = run_local_mithril_dkg(2, 3, signers, public_keys, rng);
-        
-        match &result {
-            Ok(outputs) => {
-                assert_eq!(outputs.len(), 3);
+		let result = run_local_mithril_dkg(2, 3, signers, public_keys, rng);
 
-                let pk0 = outputs[0].public_key.as_bytes();
-                let pk1 = outputs[1].public_key.as_bytes();
-                let pk2 = outputs[2].public_key.as_bytes();
+		match &result {
+			Ok(outputs) => {
+				assert_eq!(outputs.len(), 3);
 
-                assert_eq!(pk0, pk1);
-                assert_eq!(pk1, pk2);
-            }
-            Err(e) => {
-                panic!("DKG failed: {:?}", e);
-            }
-        }
-    }
+				let pk0 = outputs[0].public_key.as_bytes();
+				let pk1 = outputs[1].public_key.as_bytes();
+				let pk2 = outputs[2].public_key.as_bytes();
 
-    #[test]
-    fn test_dkg_eta_bounded() {
-        let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
-        let public_keys: Vec<u32> = (0..3).collect();
-        let rng = rand::rngs::StdRng::seed_from_u64(123);
+				assert_eq!(pk0, pk1);
+				assert_eq!(pk1, pk2);
+			},
+			Err(e) => {
+				panic!("DKG failed: {:?}", e);
+			},
+		}
+	}
 
-        let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
+	#[test]
+	fn test_dkg_eta_bounded() {
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let rng = rand::rngs::StdRng::seed_from_u64(123);
 
-        const ETA: i32 = 2;
-        for (party_id, output) in outputs.iter().enumerate() {
-            let shares = output.private_share.shares();
-            for (subset_mask, share) in shares {
-                for (poly_idx, poly) in share.s1.iter().enumerate() {
-                    for (coeff_idx, &coeff) in poly.iter().enumerate() {
-                        assert!(
-                            coeff >= -ETA && coeff <= ETA,
-                            "Party {} subset {:b} s1[{}][{}] = {} outside η bound",
-                            party_id, subset_mask, poly_idx, coeff_idx, coeff
-                        );
-                    }
-                }
-                for (poly_idx, poly) in share.s2.iter().enumerate() {
-                    for (coeff_idx, &coeff) in poly.iter().enumerate() {
-                        assert!(
-                            coeff >= -ETA && coeff <= ETA,
-                            "Party {} subset {:b} s2[{}][{}] = {} outside η bound",
-                            party_id, subset_mask, poly_idx, coeff_idx, coeff
-                        );
-                    }
-                }
-            }
-        }
-    }
+		let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
 
-    /// Test that DKG-generated keys work with ThresholdSigner for signing
-    #[test]
-    fn test_dkg_signing_integration() {
-        use crate::{verify_signature, ThresholdConfig, ThresholdSigner};
+		const ETA: i32 = 2;
+		for (party_id, output) in outputs.iter().enumerate() {
+			let shares = output.private_share.shares();
+			for (subset_mask, share) in shares {
+				for (poly_idx, poly) in share.s1.iter().enumerate() {
+					for (coeff_idx, &coeff) in poly.iter().enumerate() {
+						assert!(
+							coeff >= -ETA && coeff <= ETA,
+							"Party {} subset {:b} s1[{}][{}] = {} outside η bound",
+							party_id,
+							subset_mask,
+							poly_idx,
+							coeff_idx,
+							coeff
+						);
+					}
+				}
+				for (poly_idx, poly) in share.s2.iter().enumerate() {
+					for (coeff_idx, &coeff) in poly.iter().enumerate() {
+						assert!(
+							coeff >= -ETA && coeff <= ETA,
+							"Party {} subset {:b} s2[{}][{}] = {} outside η bound",
+							party_id,
+							subset_mask,
+							poly_idx,
+							coeff_idx,
+							coeff
+						);
+					}
+				}
+			}
+		}
+	}
 
-        let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
-        let public_keys: Vec<u32> = (0..3).collect();
-        let rng = rand::rngs::StdRng::seed_from_u64(99);
+	/// Test that DKG-generated keys work with ThresholdSigner for signing
+	#[test]
+	fn test_dkg_signing_integration() {
+		use crate::{verify_signature, ThresholdConfig, ThresholdSigner};
 
-        let dkg_outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let rng = rand::rngs::StdRng::seed_from_u64(99);
 
-        // All parties should have the same public key
-        let public_key = dkg_outputs[0].public_key.clone();
-        for output in &dkg_outputs[1..] {
-            assert_eq!(public_key.as_bytes(), output.public_key.as_bytes());
-        }
+		let dkg_outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
 
-        let config = ThresholdConfig::new(2, 3).unwrap();
-        let message = b"Test message for DKG signing";
-        let context = b"test-context";
+		// All parties should have the same public key
+		let public_key = dkg_outputs[0].public_key.clone();
+		for output in &dkg_outputs[1..] {
+			assert_eq!(public_key.as_bytes(), output.public_key.as_bytes());
+		}
 
-        // Retry signing up to 100 times (rejection sampling may fail)
-        let mut success = false;
-        for _ in 0..100 {
-            // Create fresh signers for each attempt
-            let mut signers: Vec<ThresholdSigner> = dkg_outputs
-                .iter()
-                .take(2)
-                .map(|output| {
-                    ThresholdSigner::new(output.private_share.clone(), public_key.clone(), config)
-                        .unwrap()
-                })
-                .collect();
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let message = b"Test message for DKG signing";
+		let context = b"test-context";
 
-            let mut rng = rand::thread_rng();
+		// Retry signing up to 100 times (rejection sampling may fail)
+		let mut success = false;
+		for _ in 0..100 {
+			// Create fresh signers for each attempt
+			let mut signers: Vec<ThresholdSigner> = dkg_outputs
+				.iter()
+				.take(2)
+				.map(|output| {
+					ThresholdSigner::new(output.private_share.clone(), public_key.clone(), config)
+						.unwrap()
+				})
+				.collect();
 
-            // Round 1: Generate commitments
-            let r1_broadcasts: Vec<_> =
-                signers.iter_mut().map(|s| s.round1_commit(&mut rng).unwrap()).collect();
+			let mut rng = rand::thread_rng();
 
-            // Round 2: Reveal commitments
-            let r2_broadcasts: Vec<_> = signers
-                .iter_mut()
-                .enumerate()
-                .map(|(i, s)| {
-                    let others: Vec<_> =
-                        r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-                    s.round2_reveal(message, context, &others).unwrap()
-                })
-                .collect();
+			// Round 1: Generate commitments
+			let r1_broadcasts: Vec<_> =
+				signers.iter_mut().map(|s| s.round1_commit(&mut rng).unwrap()).collect();
 
-            // Round 3: Compute responses
-            let r3_broadcasts: Vec<_> = signers
-                .iter_mut()
-                .enumerate()
-                .map(|(i, s)| {
-                    let others_r1: Vec<_> =
-                        r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-                    let others_r2: Vec<_> =
-                        r2_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-                    s.round3_respond(&others_r1, &others_r2).unwrap()
-                })
-                .collect();
+			// Round 2: Reveal commitments
+			let r2_broadcasts: Vec<_> = signers
+				.iter_mut()
+				.enumerate()
+				.map(|(i, s)| {
+					let others: Vec<_> =
+						r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+					s.round2_reveal(message, context, &others).unwrap()
+				})
+				.collect();
 
-            // Try to combine signature (may fail due to rejection sampling)
-            if let Ok(signature) =
-                signers[0].combine_with_message(message, context, &r2_broadcasts, &r3_broadcasts)
-            {
-                // Verify signature
-                assert!(
-                    verify_signature(&public_key, message, context, &signature),
-                    "Signature from DKG-generated keys should verify"
-                );
-                success = true;
-                break;
-            }
-        }
+			// Round 3: Compute responses
+			let r3_broadcasts: Vec<_> = signers
+				.iter_mut()
+				.enumerate()
+				.map(|(i, s)| {
+					let others_r1: Vec<_> =
+						r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+					let others_r2: Vec<_> =
+						r2_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+					s.round3_respond(&others_r1, &others_r2).unwrap()
+				})
+				.collect();
 
-        assert!(success, "Signing with DKG keys should succeed within 100 attempts");
-    }
+			// Try to combine signature (may fail due to rejection sampling)
+			if let Ok(signature) =
+				signers[0].combine_with_message(message, context, &r2_broadcasts, &r3_broadcasts)
+			{
+				// Verify signature
+				assert!(
+					verify_signature(&public_key, message, context, &signature),
+					"Signature from DKG-generated keys should verify"
+				);
+				success = true;
+				break;
+			}
+		}
+
+		assert!(success, "Signing with DKG keys should succeed within 100 attempts");
+	}
 }

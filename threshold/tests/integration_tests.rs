@@ -530,7 +530,9 @@ fn test_threshold_matrix_dkg() {
 
 	// Simple test signer for DKG transcript signing
 	#[derive(Clone, Debug)]
-	struct TestSigner { id: u32 }
+	struct TestSigner {
+		id: u32,
+	}
 
 	impl TranscriptSigner for TestSigner {
 		type Signature = Vec<u8>;
@@ -548,12 +550,16 @@ fn test_threshold_matrix_dkg() {
 		}
 
 		fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
-			if sig.len() < 36 { return false; }
+			if sig.len() < 36 {
+				return false;
+			}
 			let sig_id = u32::from_le_bytes(sig[..4].try_into().unwrap());
 			sig_id == *pk && &sig[4..36] == hash
 		}
 
-		fn public_key(&self) -> Self::PublicKey { self.id }
+		fn public_key(&self) -> Self::PublicKey {
+			self.id
+		}
 	}
 
 	println!("\n=== THRESHOLD MATRIX TEST (DKG + 4-Round Protocol) ===\n");
@@ -608,12 +614,21 @@ fn test_threshold_matrix_dkg() {
 		let start = Instant::now();
 
 		// Create signers and public keys for DKG
-		let dkg_signers: Vec<TestSigner> = (0..*total_parties).map(|id| TestSigner { id }).collect();
+		let dkg_signers: Vec<TestSigner> =
+			(0..*total_parties).map(|id| TestSigner { id }).collect();
 		let dkg_public_keys: Vec<u32> = (0..*total_parties).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(seed + *threshold as u64 * 100 + *total_parties as u64);
+		let rng = rand::rngs::StdRng::seed_from_u64(
+			seed + *threshold as u64 * 100 + *total_parties as u64,
+		);
 
 		// Run DKG to generate keys
-		let dkg_outputs = match run_local_mithril_dkg(*threshold, *total_parties, dkg_signers, dkg_public_keys, rng) {
+		let dkg_outputs = match run_local_mithril_dkg(
+			*threshold,
+			*total_parties,
+			dkg_signers,
+			dkg_public_keys,
+			rng,
+		) {
 			Ok(outputs) => outputs,
 			Err(e) => {
 				println!("❌ {}-of-{}: DKG error: {:?}", threshold, total_parties, e);
