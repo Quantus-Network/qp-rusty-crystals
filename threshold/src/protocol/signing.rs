@@ -4,7 +4,10 @@
 //! protocol, including commitment generation, response computation, and signature
 //! combination.
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::participants::{ParticipantId, ParticipantList};
 
@@ -149,8 +152,8 @@ pub(crate) fn verify_commitment_hash(
 
 /// Convert PrivateKeyShare to the internal share format.
 /// Uses u16 subset masks to support up to 16 parties.
-fn convert_shares(share: &PrivateKeyShare) -> HashMap<u16, SecretShare> {
-	let mut shares: HashMap<u16, SecretShare> = HashMap::new();
+fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
+	let mut shares: BTreeMap<u16, SecretShare> = BTreeMap::new();
 
 	for (subset_id, share_data) in share.shares() {
 		let mut s1_share = polyvec::Polyvecl::default();

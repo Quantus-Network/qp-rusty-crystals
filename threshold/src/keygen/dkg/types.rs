@@ -26,7 +26,10 @@
 //! - Verify all transcript signatures
 //! - Compute final public key: t = Σ t_S
 
-use std::collections::{BTreeMap, HashMap};
+use alloc::collections::BTreeMap;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -165,7 +168,7 @@ pub struct MithrilDkgConfig<S: TranscriptSigner> {
 	/// This party's signing key for transcript authentication.
 	pub my_signer: S,
 	/// Public keys of all participants for signature verification.
-	pub participant_public_keys: HashMap<ParticipantId, S::PublicKey>,
+	pub participant_public_keys: BTreeMap<ParticipantId, S::PublicKey>,
 }
 
 impl<S: TranscriptSigner> MithrilDkgConfig<S> {
@@ -175,7 +178,7 @@ impl<S: TranscriptSigner> MithrilDkgConfig<S> {
 		my_party_id: ParticipantId,
 		all_participants: Vec<ParticipantId>,
 		my_signer: S,
-		participant_public_keys: HashMap<ParticipantId, S::PublicKey>,
+		participant_public_keys: BTreeMap<ParticipantId, S::PublicKey>,
 	) -> Result<Self, &'static str> {
 		if all_participants.len() != threshold_config.total_parties() as usize {
 			return Err("participant count doesn't match threshold config");
@@ -280,11 +283,11 @@ impl<S: TranscriptSigner> MithrilDkgConfig<S> {
 	}
 }
 
-impl<S: TranscriptSigner + std::fmt::Debug> std::fmt::Debug for MithrilDkgConfig<S>
+impl<S: TranscriptSigner + fmt::Debug> fmt::Debug for MithrilDkgConfig<S>
 where
-	S::PublicKey: std::fmt::Debug,
+	S::PublicKey: fmt::Debug,
 {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("MithrilDkgConfig")
 			.field("threshold_config", &self.threshold_config)
 			.field("my_party_id", &self.my_party_id)
@@ -504,39 +507,30 @@ pub fn h_keygen(
 
 /// Compute transcript hash from rounds 1-3.
 pub fn compute_transcript_hash(
-	round1_broadcasts: &HashMap<ParticipantId, MithrilRound1Broadcast>,
-	round2_broadcasts: &HashMap<ParticipantId, MithrilRound2Broadcast>,
-	round3_broadcasts: &HashMap<ParticipantId, MithrilRound3Broadcast>,
+	round1_broadcasts: &BTreeMap<ParticipantId, MithrilRound1Broadcast>,
+	round2_broadcasts: &BTreeMap<ParticipantId, MithrilRound2Broadcast>,
+	round3_broadcasts: &BTreeMap<ParticipantId, MithrilRound3Broadcast>,
 ) -> [u8; 32] {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, DOMAIN_TRANSCRIPT, DOMAIN_TRANSCRIPT.len());
 
-	let mut parties: Vec<_> = round1_broadcasts.keys().collect();
-	parties.sort();
-
-	for party_id in &parties {
-		if let Some(msg) = round1_broadcasts.get(party_id) {
-			fips202::shake256_absorb(&mut state, &msg.party_id.to_le_bytes(), 4);
-			fips202::shake256_absorb(&mut state, &msg.commitment, COMMITMENT_HASH_SIZE);
-		}
+	// BTreeMap iterates in sorted order, so no need to sort
+	for (party_id, msg) in round1_broadcasts {
+		fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
+		fips202::shake256_absorb(&mut state, &msg.commitment, COMMITMENT_HASH_SIZE);
 	}
 
-	for party_id in &parties {
-		if let Some(msg) = round2_broadcasts.get(party_id) {
-			fips202::shake256_absorb(&mut state, &msg.party_id.to_le_bytes(), 4);
-			fips202::shake256_absorb(&mut state, &msg.randomness, RANDOMNESS_SIZE);
-		}
+	for (party_id, msg) in round2_broadcasts {
+		fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
+		fips202::shake256_absorb(&mut state, &msg.randomness, RANDOMNESS_SIZE);
 	}
 
-	for party_id in &parties {
-		if let Some(msg) = round3_broadcasts.get(party_id) {
-			fips202::shake256_absorb(&mut state, &msg.party_id.to_le_bytes(), 4);
-			let mut commitments: Vec<_> = msg.partial_pk_commitments.iter().collect();
-			commitments.sort_by_key(|(mask, _)| *mask);
-			for (mask, commitment) in commitments {
-				fips202::shake256_absorb(&mut state, &mask.to_le_bytes(), 2);
-				fips202::shake256_absorb(&mut state, commitment, COMMITMENT_HASH_SIZE);
-			}
+	for (party_id, msg) in round3_broadcasts {
+		fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
+		// partial_pk_commitments is already a BTreeMap, iterates in sorted order
+		for (mask, commitment) in &msg.partial_pk_commitments {
+			fips202::shake256_absorb(&mut state, &mask.to_le_bytes(), 2);
+			fips202::shake256_absorb(&mut state, commitment, COMMITMENT_HASH_SIZE);
 		}
 	}
 
@@ -674,7 +668,7 @@ mod tests {
 	#[test]
 	fn test_config_leader_detection() {
 		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
-		let mut public_keys = HashMap::new();
+		let mut public_keys = BTreeMap::new();
 		public_keys.insert(0, 0u32);
 		public_keys.insert(1, 1u32);
 		public_keys.insert(2, 2u32);

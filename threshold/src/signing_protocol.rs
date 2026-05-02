@@ -76,7 +76,13 @@
 //! This protocol adapter is designed to work with NEAR MPC's `run_protocol` function.
 //! The `Action` enum matches the pattern expected by cait-sith based protocols.
 
-use std::collections::HashMap;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
+use core::mem;
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -150,8 +156,8 @@ pub enum SignProtocolError {
 	},
 }
 
-impl std::fmt::Display for SignProtocolError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SignProtocolError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			SignProtocolError::SigningError(s) => write!(f, "Signing error: {}", s),
 			SignProtocolError::SerializationError(s) => write!(f, "Serialization error: {}", s),
@@ -171,8 +177,6 @@ impl std::fmt::Display for SignProtocolError {
 		}
 	}
 }
-
-impl std::error::Error for SignProtocolError {}
 
 // ============================================================================
 // Message Types
@@ -299,12 +303,12 @@ impl SignMessageBuffer {
 
 	/// Take all buffered Round 2 messages.
 	pub fn take_round2(&mut self) -> Vec<Round2Broadcast> {
-		std::mem::take(&mut self.round2)
+		mem::take(&mut self.round2)
 	}
 
 	/// Take all buffered Round 3 messages.
 	pub fn take_round3(&mut self) -> Vec<Round3Broadcast> {
-		std::mem::take(&mut self.round3)
+		mem::take(&mut self.round3)
 	}
 
 	/// Check if the buffer is empty.
@@ -361,11 +365,11 @@ pub struct DilithiumSignProtocol {
 	context: Vec<u8>,
 
 	/// Collected Round 1 broadcasts from other parties.
-	r1_broadcasts: HashMap<ParticipantId, Round1Broadcast>,
+	r1_broadcasts: BTreeMap<ParticipantId, Round1Broadcast>,
 	/// Collected Round 2 broadcasts from other parties.
-	r2_broadcasts: HashMap<ParticipantId, Round2Broadcast>,
+	r2_broadcasts: BTreeMap<ParticipantId, Round2Broadcast>,
 	/// Collected Round 3 broadcasts from other parties.
-	r3_broadcasts: HashMap<ParticipantId, Round3Broadcast>,
+	r3_broadcasts: BTreeMap<ParticipantId, Round3Broadcast>,
 
 	/// Our own Round 1 broadcast (stored for inclusion in collections).
 	my_r1: Option<Round1Broadcast>,
@@ -383,7 +387,7 @@ pub struct DilithiumSignProtocol {
 	received_signature: Option<Signature>,
 
 	/// Parties that have been dropped due to unresponsiveness (HQ7).
-	dropped_parties: std::collections::HashSet<ParticipantId>,
+	dropped_parties: BTreeSet<ParticipantId>,
 }
 
 impl DilithiumSignProtocol {
@@ -440,16 +444,16 @@ impl DilithiumSignProtocol {
 			leader_id,
 			message,
 			context,
-			r1_broadcasts: HashMap::new(),
-			r2_broadcasts: HashMap::new(),
-			r3_broadcasts: HashMap::new(),
+			r1_broadcasts: BTreeMap::new(),
+			r2_broadcasts: BTreeMap::new(),
+			r3_broadcasts: BTreeMap::new(),
 			my_r1: None,
 			my_r2: None,
 			my_r3: None,
 			message_buffer: SignMessageBuffer::new(),
 			retry_count: 0,
 			received_signature: None,
-			dropped_parties: std::collections::HashSet::new(),
+			dropped_parties: BTreeSet::new(),
 		}
 	}
 
@@ -779,8 +783,8 @@ impl DilithiumSignProtocol {
 	pub fn poke(&mut self) -> Result<Action<Signature>, SignProtocolError> {
 		match &self.state {
 			SignProtocolState::Round1Generate => {
-				// Generate Round 1 commitment
-				let mut rng = rand::thread_rng();
+				// Generate Round 1 commitment using OsRng for cryptographic randomness
+				let mut rng = rand::rngs::OsRng;
 				let r1 = self
 					.signer
 					.round1_commit(&mut rng)
@@ -1060,11 +1064,6 @@ impl DilithiumSignProtocol {
 					SignProtocolState::Round1Generate | SignProtocolState::Round1Waiting
 				) {
 					// Buffer Round 2 messages that arrive while we're still in Round 1
-					#[cfg(debug_assertions)]
-					eprintln!(
-						"Buffering Round 2 message from {} (current state: {:?})",
-						r2.party_id, self.state
-					);
 					self.message_buffer.buffer_round2(r2);
 				}
 			},
@@ -1086,11 +1085,6 @@ impl DilithiumSignProtocol {
 						SignProtocolState::Round2Waiting
 				) {
 					// Buffer Round 3 messages that arrive while we're still in earlier rounds
-					#[cfg(debug_assertions)]
-					eprintln!(
-						"Buffering Round 3 message from {} (current state: {:?})",
-						r3.party_id, self.state
-					);
 					self.message_buffer.buffer_round3(r3);
 				}
 			},
@@ -1308,7 +1302,7 @@ pub fn run_local_signing_with_stats(
 
 		// Deliver pending messages
 		for party_idx in 0..num_parties {
-			let messages = std::mem::take(&mut pending_messages[party_idx]);
+			let messages = mem::take(&mut pending_messages[party_idx]);
 			for (from, data) in messages {
 				protocols[party_idx].message(from, data)?;
 			}

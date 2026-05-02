@@ -17,8 +17,14 @@
 //! Round1Generate -> Round1Waiting -> Round2Generate -> Round2Waiting
 //!     -> Round3Generate -> Round3Waiting -> Combining -> Done
 //! ```
+//!
 
-use std::collections::{BTreeMap, HashMap};
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -100,8 +106,8 @@ pub enum ResharingProtocolError {
 	},
 }
 
-impl std::fmt::Display for ResharingProtocolError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ResharingProtocolError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			ResharingProtocolError::InvalidState(s) => write!(f, "Invalid state: {}", s),
 			ResharingProtocolError::UnknownParty(p) => write!(f, "Unknown party: {}", p),
@@ -130,8 +136,6 @@ impl std::fmt::Display for ResharingProtocolError {
 		}
 	}
 }
-
-impl std::error::Error for ResharingProtocolError {}
 
 // ============================================================================
 // Protocol State
@@ -204,7 +208,7 @@ pub struct ResharingProtocol {
 	/// Our Round 1 broadcast (if we're in old committee).
 	my_round1: Option<ResharingRound1Broadcast>,
 	/// Collected Round 1 broadcasts from old committee.
-	round1_broadcasts: HashMap<ParticipantId, ResharingRound1Broadcast>,
+	round1_broadcasts: BTreeMap<ParticipantId, ResharingRound1Broadcast>,
 
 	// Round 2 data
 	/// Our Round 2 messages to send (if we're THE designated dealer).
@@ -212,7 +216,7 @@ pub struct ResharingProtocol {
 	my_round2_messages: Vec<ResharingRound2Message>,
 	/// Collected Round 2 messages we received (if we're in new committee).
 	/// We only receive from the designated dealer.
-	round2_messages: HashMap<ParticipantId, ResharingRound2Message>,
+	round2_messages: BTreeMap<ParticipantId, ResharingRound2Message>,
 	/// Number of Round 2 messages sent.
 	round2_sent_count: usize,
 
@@ -220,11 +224,11 @@ pub struct ResharingProtocol {
 	/// Our Round 3 broadcast (if we're in new committee).
 	my_round3: Option<ResharingRound3Broadcast>,
 	/// Collected Round 3 broadcasts from new committee.
-	round3_broadcasts: HashMap<ParticipantId, ResharingRound3Broadcast>,
+	round3_broadcasts: BTreeMap<ParticipantId, ResharingRound3Broadcast>,
 
 	// Final output
 	/// The new shares we've received/computed (if we're in new committee).
-	new_shares: HashMap<SubsetMask, NewShareData>,
+	new_shares: BTreeMap<SubsetMask, NewShareData>,
 	/// The completed output (stored when protocol finishes).
 	completed_output: Option<ResharingOutput>,
 }
@@ -248,13 +252,13 @@ impl ResharingProtocol {
 			my_blinding_s1: None,
 			my_blinding_s2: None,
 			my_round1: None,
-			round1_broadcasts: HashMap::new(),
+			round1_broadcasts: BTreeMap::new(),
 			my_round2_messages: Vec::new(),
-			round2_messages: HashMap::new(),
+			round2_messages: BTreeMap::new(),
 			round2_sent_count: 0,
 			my_round3: None,
-			round3_broadcasts: HashMap::new(),
-			new_shares: HashMap::new(),
+			round3_broadcasts: BTreeMap::new(),
+			new_shares: BTreeMap::new(),
 			completed_output: None,
 		}
 	}
@@ -1107,10 +1111,10 @@ impl ResharingProtocol {
 		let subsets = generate_subsets(new_n as usize, subset_size as usize);
 
 		// Initialize share accumulator for each new party
-		let mut party_shares: HashMap<ParticipantId, HashMap<SubsetMask, NewShareData>> =
-			HashMap::new();
+		let mut party_shares: BTreeMap<ParticipantId, BTreeMap<SubsetMask, NewShareData>> =
+			BTreeMap::new();
 		for party_id in self.config.new_participants.iter() {
-			party_shares.insert(party_id, HashMap::new());
+			party_shares.insert(party_id, BTreeMap::new());
 		}
 
 		// Generate random shares for all but the last subset
@@ -1224,10 +1228,10 @@ impl ResharingProtocol {
 	}
 
 	/// Compute commitments to our new shares.
-	fn compute_share_commitments(&self) -> HashMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]> {
+	fn compute_share_commitments(&self) -> BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]> {
 		use qp_rusty_crystals_dilithium::fips202;
 
-		let mut commitments = HashMap::new();
+		let mut commitments = BTreeMap::new();
 
 		for (subset_mask, share_data) in &self.new_shares {
 			let mut state = fips202::KeccakState::default();
@@ -1259,10 +1263,10 @@ impl ResharingProtocol {
 	/// Verify that parties sharing the same subset have consistent commitments.
 	fn verify_share_consistency(&self) -> Result<(), ResharingProtocolError> {
 		// Group commitments by subset
-		let mut subset_commitments: HashMap<
+		let mut subset_commitments: BTreeMap<
 			SubsetMask,
 			Vec<(ParticipantId, [u8; COMMITMENT_HASH_SIZE])>,
-		> = HashMap::new();
+		> = BTreeMap::new();
 
 		for (party_id, broadcast) in &self.round3_broadcasts {
 			for (subset_mask, commitment) in &broadcast.share_commitments {

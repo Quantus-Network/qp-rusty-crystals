@@ -115,6 +115,8 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs, rust_2018_idioms)]
 
+extern crate alloc;
+
 // Core modules
 pub mod broadcast;
 mod config;
@@ -127,19 +129,22 @@ mod signer;
 #[cfg(feature = "serde")]
 pub(crate) mod serde_helpers;
 
-// Key generation
+// Key generation (requires serde for DKG protocol message serialization)
+#[cfg(feature = "serde")]
 pub mod keygen;
 
 // Internal protocol implementation
 pub(crate) mod protocol;
 
-// Resharing (committee handoff) protocol
+// Resharing (committee handoff) protocol (requires serde for message serialization)
+#[cfg(feature = "serde")]
 pub mod resharing;
 
 // Key derivation for HD wallets
 pub mod derivation;
 
-// Signing protocol adapter for NEAR MPC integration
+// Signing protocol adapter for NEAR MPC integration (requires serde for message serialization)
+#[cfg(feature = "serde")]
 pub mod signing_protocol;
 
 // circl_ntt is public for cross-language NTT testing with Go reference
@@ -167,7 +172,8 @@ pub use broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature
 // The main signer
 pub use signer::ThresholdSigner;
 
-// Key generation
+// Key generation (requires serde feature)
+#[cfg(feature = "serde")]
 pub use keygen::generate_with_dealer;
 
 // Key derivation

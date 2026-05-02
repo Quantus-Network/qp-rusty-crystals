@@ -1,6 +1,12 @@
 //! Protocol implementation for the Mithril DKG.
 
-use std::collections::{BTreeMap, HashMap};
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
+use core::mem;
 
 use rand::{CryptoRng, RngCore};
 
@@ -83,8 +89,8 @@ pub enum MithrilDkgError {
 	},
 }
 
-impl std::fmt::Display for MithrilDkgError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for MithrilDkgError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::InvalidState(msg) => write!(f, "invalid state: {}", msg),
 			Self::CommitmentMismatch { party_id } =>
@@ -103,8 +109,6 @@ impl std::fmt::Display for MithrilDkgError {
 		}
 	}
 }
-
-impl std::error::Error for MithrilDkgError {}
 
 // ============================================================================
 // Action Type
@@ -259,7 +263,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 	// ========================================================================
 
 	fn start_round1(&mut self) -> Result<MithrilAction, MithrilDkgError> {
-		let config = match std::mem::replace(
+		let config = match mem::replace(
 			&mut self.state,
 			MithrilDkgState::Failed("transitioning".into()),
 		) {
@@ -284,7 +288,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			my_randomness,
 			my_commitment,
 			my_shared_secrets,
-			received_broadcasts: HashMap::new(),
+			received_broadcasts: BTreeMap::new(),
 			received_shared_secrets: BTreeMap::new(),
 			broadcast_sent: false,
 			privates_sent: false,
@@ -365,7 +369,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 
 	fn transition_to_round2(&mut self) -> Result<(), MithrilDkgError> {
 		let old_state =
-			std::mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
+			mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
 
 		let state = match old_state {
 			MithrilDkgState::Round1(s) => s,
@@ -382,7 +386,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			my_randomness: state.my_randomness,
 			round1_broadcasts: state.received_broadcasts,
 			shared_secrets,
-			received_broadcasts: HashMap::new(),
+			received_broadcasts: BTreeMap::new(),
 			broadcast_sent: false,
 		});
 
@@ -443,7 +447,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 
 	fn transition_to_round3(&mut self) -> Result<(), MithrilDkgError> {
 		let old_state =
-			std::mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
+			mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
 
 		let state = match old_state {
 			MithrilDkgState::Round2(s) => s,
@@ -487,7 +491,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 
 		// Compute contributions for non-leader subsets
 		for &subset in &state.config.my_subsets() {
-			if let std::collections::btree_map::Entry::Vacant(e) = my_contributions.entry(subset) {
+			if let alloc::collections::btree_map::Entry::Vacant(e) = my_contributions.entry(subset) {
 				if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
 					let seed = h_keygen(subset, &shared_secret, &global_randomness);
 					let contribution = derive_subset_contribution(&seed, ETA);
@@ -519,7 +523,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			my_partial_pks,
 			my_contributions,
 			my_pk_commitments,
-			received_broadcasts: HashMap::new(),
+			received_broadcasts: BTreeMap::new(),
 			broadcast_sent: false,
 		});
 
@@ -569,7 +573,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 
 	fn transition_to_round4(&mut self) -> Result<(), MithrilDkgError> {
 		let old_state =
-			std::mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
+			mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
 
 		let state = match old_state {
 			MithrilDkgState::Round3(s) => s,
@@ -595,7 +599,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			rho: state.rho,
 			my_partial_pks: state.my_partial_pks,
 			my_contributions: state.my_contributions,
-			received_broadcasts: HashMap::new(),
+			received_broadcasts: BTreeMap::new(),
 			broadcast_sent: false,
 		});
 
@@ -695,7 +699,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 
 	fn complete(&mut self) -> Result<(), MithrilDkgError> {
 		let old_state =
-			std::mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
+			mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
 
 		let state = match old_state {
 			MithrilDkgState::Round4(s) => s,
@@ -944,7 +948,7 @@ where
 
 	let participants: Vec<ParticipantId> = (0..total_parties).collect();
 
-	let mut pk_map: HashMap<ParticipantId, S::PublicKey> = HashMap::new();
+	let mut pk_map: BTreeMap<ParticipantId, S::PublicKey> = BTreeMap::new();
 	for (i, pk) in public_keys.into_iter().enumerate() {
 		pk_map.insert(i as ParticipantId, pk);
 	}
@@ -980,7 +984,7 @@ where
 
 		// Deliver pending messages
 		for party_id in 0..total_parties as usize {
-			let messages = std::mem::take(&mut pending_messages[party_id]);
+			let messages = mem::take(&mut pending_messages[party_id]);
 			for (from, data) in messages {
 				dkgs[party_id].message(from, data)?;
 			}
@@ -1146,7 +1150,7 @@ mod tests {
 		}
 
 		impl std::fmt::Debug for DilithiumSigner {
-			fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 				f.debug_struct("DilithiumSigner")
 					.field("pk", &hex::encode(&self.pk.bytes[..8]))
 					.finish()
@@ -1230,8 +1234,6 @@ mod tests {
 	/// to complete DKG with forged signatures.
 	#[test]
 	fn test_mithril_dkg_rejects_bad_signature() {
-		use std::collections::HashMap;
-
 		// A signer that produces bad signatures for party 2
 		#[derive(Clone, Debug)]
 		struct BadSigner {
@@ -1280,7 +1282,7 @@ mod tests {
 		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
 		let participants: Vec<ParticipantId> = (0..3).collect();
 
-		let mut pk_map: HashMap<ParticipantId, u32> = HashMap::new();
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
 		for (i, pk) in public_keys.into_iter().enumerate() {
 			pk_map.insert(i as ParticipantId, pk);
 		}
@@ -1318,7 +1320,7 @@ mod tests {
 
 			// Deliver pending messages
 			for party_id in 0..3 {
-				let messages = std::mem::take(&mut pending_messages[party_id]);
+				let messages = mem::take(&mut pending_messages[party_id]);
 				for (from, data) in messages {
 					// In tests, unwrap to fail fast on unexpected deserialization errors
 					dkgs[party_id].message(from, data).unwrap();
@@ -1390,8 +1392,6 @@ mod tests {
 	/// commit).
 	#[test]
 	fn test_mithril_dkg_rejects_bad_commitment() {
-		use std::collections::HashMap;
-
 		// We'll intercept and modify party 2's Round 2 message to have wrong randomness
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
@@ -1399,7 +1399,7 @@ mod tests {
 		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
 		let participants: Vec<ParticipantId> = (0..3).collect();
 
-		let mut pk_map: HashMap<ParticipantId, u32> = HashMap::new();
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
 		for (i, pk) in public_keys.into_iter().enumerate() {
 			pk_map.insert(i as ParticipantId, pk);
 		}
@@ -1437,7 +1437,7 @@ mod tests {
 
 			// Deliver pending messages, but tamper with party 2's Round 2 broadcast
 			for party_id in 0..3 {
-				let messages = std::mem::take(&mut pending_messages[party_id]);
+				let messages = mem::take(&mut pending_messages[party_id]);
 				for (from, mut data) in messages {
 					// Tamper with party 2's Round 2 message
 					if from == 2 {
@@ -1504,8 +1504,6 @@ mod tests {
 	/// Per Mithril paper DKGRound4 lines 11-16: non-leaders verify PK commitments BEFORE signing.
 	#[test]
 	fn test_mithril_dkg_rejects_bad_pk_commitment() {
-		use std::collections::HashMap;
-
 		// For 2-of-3: subset size k = 3-2+1 = 2
 		// Subsets: {0,1}=0b011, {0,2}=0b101, {1,2}=0b110
 		// Leaders: min of each subset
@@ -1525,7 +1523,7 @@ mod tests {
 		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
 		let participants: Vec<ParticipantId> = (0..3).collect();
 
-		let mut pk_map: HashMap<ParticipantId, u32> = HashMap::new();
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
 		for (i, pk) in public_keys.into_iter().enumerate() {
 			pk_map.insert(i as ParticipantId, pk);
 		}
@@ -1563,7 +1561,7 @@ mod tests {
 
 			// Deliver pending messages, but tamper with party 0's Round 3 broadcast
 			for party_id in 0..3 {
-				let messages = std::mem::take(&mut pending_messages[party_id]);
+				let messages = mem::take(&mut pending_messages[party_id]);
 				for (from, mut data) in messages {
 					// Tamper with party 0's Round 3 message (PK commitments)
 					if from == 0 {
@@ -1748,7 +1746,7 @@ mod tests {
 	#[test]
 	fn test_mithril_dkg_config_validation() {
 		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
-		let mut pk_map: HashMap<ParticipantId, u32> = HashMap::new();
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
 		pk_map.insert(0, 0);
 		pk_map.insert(1, 1);
 		pk_map.insert(2, 2);

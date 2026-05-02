@@ -1,5 +1,7 @@
 //! Error types for threshold ML-DSA operations.
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
 /// Result type for threshold operations.
@@ -265,9 +267,6 @@ impl fmt::Display for ThresholdError {
 		}
 	}
 }
-
-#[cfg(feature = "std")]
-impl std::error::Error for ThresholdError {}
 
 /// Maximum number of parties supported by the threshold scheme.
 pub const MAX_PARTIES: u32 = 7;

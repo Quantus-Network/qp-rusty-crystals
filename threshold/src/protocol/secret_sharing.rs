@@ -6,7 +6,11 @@
 //!
 //! Subset masks use u16 to support up to 16 parties (currently supporting n ≤ 12).
 
-use std::collections::{HashMap, HashSet};
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use qp_rusty_crystals_dilithium::{params as dilithium_params, polyvec};
 
@@ -67,7 +71,7 @@ pub(crate) fn compute_sharing_patterns(
 
 	// Initialize patterns for each position
 	let mut patterns: Vec<Vec<u16>> = vec![Vec::new(); t];
-	let mut used: HashSet<u16> = HashSet::new();
+	let mut used: BTreeSet<u16> = BTreeSet::new();
 
 	// Assign subsets to positions greedily:
 	// Position i gets all unassigned subsets that contain party i
@@ -131,7 +135,7 @@ fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
 ///
 /// A tuple of (s1_ntt, s2_ntt) representing the recovered secret shares in NTT domain.
 pub fn recover_share(
-	shares: &HashMap<u16, SecretShare>,
+	shares: &BTreeMap<u16, SecretShare>,
 	party_id: ParticipantId,
 	active_parties: &[ParticipantId],
 	threshold: u32,

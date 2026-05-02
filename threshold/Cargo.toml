@@ -14,7 +14,6 @@ categories = ["cryptography"]
 rand = { workspace = true }
 rand_core = { workspace = true }
 zeroize = { workspace = true }
-thiserror = { workspace = true }
 
 # Serialization
 serde = { workspace = true, optional = true }
@@ -27,6 +26,9 @@ qp-rusty-crystals-dilithium = { workspace = true }
 sha2 = { workspace = true }
 hkdf = { workspace = true }
 
+# no_std math support
+libm = { workspace = true }
+
 [dev-dependencies]
 criterion = { workspace = true }
 hex = { workspace = true }
@@ -37,7 +39,7 @@ bincode = { workspace = true }
 
 [features]
 default = ["serde", "std"]
-std = ["rand/std", "rand_core/std"]
+std = ["rand/std", "rand_core/std", "serde/std", "zeroize/std"]
 serde = ["dep:bincode", "dep:serde"]
 
 [[bench]]

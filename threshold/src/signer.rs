@@ -35,6 +35,10 @@
 //! let signature = signer.combine(&all_r2_broadcasts, &all_r3_broadcasts)?;
 //! ```
 
+use alloc::format;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+use core::mem;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -284,7 +288,7 @@ impl ThresholdSigner {
 		other_round1: &[Round1Broadcast],
 	) -> ThresholdResult<Round2Broadcast> {
 		// Check state and extract round1_data
-		let round1_data = match std::mem::take(&mut self.state) {
+		let round1_data = match mem::take(&mut self.state) {
 			SignerState::AfterRound1 { round1_data } => round1_data,
 			other => {
 				self.state = other;
@@ -366,7 +370,7 @@ impl ThresholdSigner {
 		other_round2: &[Round2Broadcast],
 	) -> ThresholdResult<Round3Broadcast> {
 		// Check state and extract data
-		let (round1_data, mut round2_data, message, context) = match std::mem::take(&mut self.state)
+		let (round1_data, mut round2_data, message, context) = match mem::take(&mut self.state)
 		{
 			SignerState::AfterRound2 { round1_data, round2_data, message, context } =>
 				(round1_data, round2_data, message, context),

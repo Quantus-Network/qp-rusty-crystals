@@ -5,7 +5,10 @@
 
 #![allow(missing_docs)] // Internal state structures don't need public docs
 
-use std::collections::{BTreeMap, HashMap};
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
 
 use crate::keys::{PrivateKeyShare, PublicKey};
 
@@ -21,14 +24,14 @@ pub struct MithrilRound1State<S: TranscriptSigner> {
 	pub my_randomness: [u8; RANDOMNESS_SIZE],
 	pub my_commitment: [u8; 32],
 	pub my_shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
-	pub received_broadcasts: HashMap<ParticipantId, MithrilRound1Broadcast>,
+	pub received_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
 	pub received_shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	pub broadcast_sent: bool,
 	pub privates_sent: bool,
 }
 
-impl<S: TranscriptSigner> std::fmt::Debug for MithrilRound1State<S> {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<S: TranscriptSigner> fmt::Debug for MithrilRound1State<S> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("MithrilRound1State")
 			.field("my_party_id", &self.config.my_party_id)
 			.field("received_broadcasts", &self.received_broadcasts.len())
@@ -43,14 +46,14 @@ impl<S: TranscriptSigner> std::fmt::Debug for MithrilRound1State<S> {
 pub struct MithrilRound2State<S: TranscriptSigner> {
 	pub config: MithrilDkgConfig<S>,
 	pub my_randomness: [u8; RANDOMNESS_SIZE],
-	pub round1_broadcasts: HashMap<ParticipantId, MithrilRound1Broadcast>,
+	pub round1_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
 	pub shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
-	pub received_broadcasts: HashMap<ParticipantId, MithrilRound2Broadcast>,
+	pub received_broadcasts: BTreeMap<ParticipantId, MithrilRound2Broadcast>,
 	pub broadcast_sent: bool,
 }
 
-impl<S: TranscriptSigner> std::fmt::Debug for MithrilRound2State<S> {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<S: TranscriptSigner> fmt::Debug for MithrilRound2State<S> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("MithrilRound2State")
 			.field("my_party_id", &self.config.my_party_id)
 			.field("received_broadcasts", &self.received_broadcasts.len())
@@ -62,20 +65,20 @@ impl<S: TranscriptSigner> std::fmt::Debug for MithrilRound2State<S> {
 /// State for Round 3.
 pub struct MithrilRound3State<S: TranscriptSigner> {
 	pub config: MithrilDkgConfig<S>,
-	pub round1_broadcasts: HashMap<ParticipantId, MithrilRound1Broadcast>,
-	pub round2_broadcasts: HashMap<ParticipantId, MithrilRound2Broadcast>,
+	pub round1_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
+	pub round2_broadcasts: BTreeMap<ParticipantId, MithrilRound2Broadcast>,
 	pub shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	pub global_randomness: Vec<u8>,
 	pub rho: [u8; 32],
 	pub my_partial_pks: BTreeMap<SubsetMask, PartialPublicKey>,
 	pub my_contributions: BTreeMap<SubsetMask, SubsetContribution>,
 	pub my_pk_commitments: BTreeMap<SubsetMask, [u8; 32]>,
-	pub received_broadcasts: HashMap<ParticipantId, MithrilRound3Broadcast>,
+	pub received_broadcasts: BTreeMap<ParticipantId, MithrilRound3Broadcast>,
 	pub broadcast_sent: bool,
 }
 
-impl<S: TranscriptSigner> std::fmt::Debug for MithrilRound3State<S> {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<S: TranscriptSigner> fmt::Debug for MithrilRound3State<S> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("MithrilRound3State")
 			.field("my_party_id", &self.config.my_party_id)
 			.field("my_partial_pks", &self.my_partial_pks.len())
@@ -88,20 +91,20 @@ impl<S: TranscriptSigner> std::fmt::Debug for MithrilRound3State<S> {
 /// State for Round 4.
 pub struct MithrilRound4State<S: TranscriptSigner> {
 	pub config: MithrilDkgConfig<S>,
-	pub round1_broadcasts: HashMap<ParticipantId, MithrilRound1Broadcast>,
-	pub round2_broadcasts: HashMap<ParticipantId, MithrilRound2Broadcast>,
-	pub round3_broadcasts: HashMap<ParticipantId, MithrilRound3Broadcast>,
+	pub round1_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
+	pub round2_broadcasts: BTreeMap<ParticipantId, MithrilRound2Broadcast>,
+	pub round3_broadcasts: BTreeMap<ParticipantId, MithrilRound3Broadcast>,
 	pub shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	pub global_randomness: Vec<u8>,
 	pub rho: [u8; 32],
 	pub my_partial_pks: BTreeMap<SubsetMask, PartialPublicKey>,
 	pub my_contributions: BTreeMap<SubsetMask, SubsetContribution>,
-	pub received_broadcasts: HashMap<ParticipantId, MithrilRound4Broadcast>,
+	pub received_broadcasts: BTreeMap<ParticipantId, MithrilRound4Broadcast>,
 	pub broadcast_sent: bool,
 }
 
-impl<S: TranscriptSigner> std::fmt::Debug for MithrilRound4State<S> {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<S: TranscriptSigner> fmt::Debug for MithrilRound4State<S> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("MithrilRound4State")
 			.field("my_party_id", &self.config.my_party_id)
 			.field("received_broadcasts", &self.received_broadcasts.len())
@@ -128,8 +131,8 @@ pub enum MithrilDkgState<S: TranscriptSigner> {
 	Failed(String),
 }
 
-impl<S: TranscriptSigner> std::fmt::Debug for MithrilDkgState<S> {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<S: TranscriptSigner> fmt::Debug for MithrilDkgState<S> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::Initialized(_) => write!(f, "Initialized"),
 			Self::Round1(s) => write!(f, "Round1({:?})", s),
@@ -165,7 +168,7 @@ impl<S: TranscriptSigner> MithrilDkgState<S> {
 
 /// Check if all broadcasts received.
 pub fn all_broadcasts_received<T>(
-	received: &HashMap<ParticipantId, T>,
+	received: &BTreeMap<ParticipantId, T>,
 	all_participants: &[ParticipantId],
 	my_party_id: ParticipantId,
 ) -> bool {

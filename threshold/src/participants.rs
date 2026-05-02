@@ -29,7 +29,9 @@
 //! assert_eq!(participants.get(0), Some(524342676));
 //! ```
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::iter;
 
 /// Type alias for participant identifiers.
 ///
@@ -55,7 +57,7 @@ pub struct ParticipantList {
 	/// Sorted list of participant IDs
 	participants: Vec<ParticipantId>,
 	/// Maps participant ID to index in the sorted list
-	indices: HashMap<ParticipantId, usize>,
+	indices: BTreeMap<ParticipantId, usize>,
 }
 
 impl ParticipantList {
@@ -86,10 +88,10 @@ impl ParticipantList {
 		sorted.sort();
 
 		// Build index mapping
-		let indices: HashMap<_, _> =
+		let indices: BTreeMap<_, _> =
 			sorted.iter().enumerate().map(|(idx, &id)| (id, idx)).collect();
 
-		// Check for duplicates (HashMap will have fewer entries if duplicates exist)
+		// Check for duplicates (BTreeMap will have fewer entries if duplicates exist)
 		if indices.len() != sorted.len() {
 			return None;
 		}
@@ -115,7 +117,7 @@ impl ParticipantList {
 			}
 		}
 
-		let indices: HashMap<_, _> =
+		let indices: BTreeMap<_, _> =
 			sorted_participants.iter().enumerate().map(|(idx, &id)| (id, idx)).collect();
 
 		Some(Self { participants: sorted_participants, indices })
@@ -302,7 +304,7 @@ impl From<ParticipantList> for Vec<ParticipantId> {
 
 impl<'a> IntoIterator for &'a ParticipantList {
 	type Item = ParticipantId;
-	type IntoIter = std::iter::Copied<std::slice::Iter<'a, ParticipantId>>;
+	type IntoIter = iter::Copied<core::slice::Iter<'a, ParticipantId>>;
 
 	fn into_iter(self) -> Self::IntoIter {
 		self.participants.iter().copied()

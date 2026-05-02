@@ -25,6 +25,8 @@
 //! that outsiders cannot compute the derived shares even though the tweak
 //! is public.
 
+use alloc::vec::Vec;
+
 use hkdf::Hkdf;
 use sha2::Sha256;
 

@@ -3,6 +3,10 @@
 //! This module provides the basic types and functions needed by the threshold protocol,
 //! including hyperball sampling, matrix operations, and modular arithmetic helpers.
 
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::f64::consts::PI;
 use qp_rusty_crystals_dilithium::{fips202, packing, params as dilithium_params, poly, polyvec};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -166,8 +170,6 @@ impl HyperballSampleVector {
 	/// This uses SHAKE256 for cryptographic randomness and Box-Muller
 	/// transform for normally distributed samples.
 	pub fn sample_hyperball(&mut self, radius: f64, nu: f64, rhop: &[u8; 64], nonce: u16) {
-		use std::f64::consts::PI;
-
 		let size = self.data.len();
 		let mut samples = vec![0.0f64; size + 2];
 
@@ -200,9 +202,12 @@ impl HyperballSampleVector {
 			// Ensure f1 > 0 for log to avoid NaN
 			let f1 = if f1 <= 0.0 { f64::MIN_POSITIVE } else { f1 };
 
-			// Box-Muller transform
-			let z1 = (-2.0 * f1.ln()).sqrt() * (2.0 * PI * f2).cos();
-			let z2 = (-2.0 * f1.ln()).sqrt() * (2.0 * PI * f2).sin();
+			// Box-Muller transform (using libm for no_std compatibility)
+			let ln_f1 = libm::log(f1);
+			let sqrt_neg2ln = libm::sqrt(-2.0 * ln_f1);
+			let angle = 2.0 * PI * f2;
+			let z1 = sqrt_neg2ln * libm::cos(angle);
+			let z2 = sqrt_neg2ln * libm::sin(angle);
 
 			// Store samples and add to sq BEFORE nu scaling (critical!)
 			samples[i] = z1;
@@ -218,7 +223,7 @@ impl HyperballSampleVector {
 			}
 		}
 
-		let factor = radius / sq.sqrt();
+		let factor = radius / libm::sqrt(sq);
 		for (data_val, sample_val) in self.data.iter_mut().zip(samples.iter()).take(size) {
 			*data_val = *sample_val * factor;
 		}
@@ -231,7 +236,7 @@ impl HyperballSampleVector {
 		for i in 0..dilithium_params::L {
 			for j in 0..dilithium_params::N as usize {
 				let idx = i * dilithium_params::N as usize + j;
-				let u = self.data[idx].round() as i32;
+				let u = libm::round(self.data[idx]) as i32;
 				let mut reduced = u % Q;
 				if reduced > Q / 2 {
 					reduced -= Q;
@@ -250,7 +255,7 @@ impl HyperballSampleVector {
 		for i in 0..dilithium_params::L {
 			for j in 0..dilithium_params::N as usize {
 				let idx = i * dilithium_params::N as usize + j;
-				let u = self.data[idx].round() as i32;
+				let u = libm::round(self.data[idx]) as i32;
 				// Keep values centered: if outside [-Q/2, Q/2], reduce modulo Q
 				let mut reduced = u % Q;
 				if reduced > Q / 2 {
@@ -266,7 +271,7 @@ impl HyperballSampleVector {
 		for i in 0..dilithium_params::K {
 			for j in 0..dilithium_params::N as usize {
 				let idx = (dilithium_params::L + i) * dilithium_params::N as usize + j;
-				let u = self.data[idx].round() as i32;
+				let u = libm::round(self.data[idx]) as i32;
 				// Keep values centered: if outside [-Q/2, Q/2], reduce modulo Q
 				let mut reduced = u % Q;
 				if reduced > Q / 2 {

@@ -4,7 +4,11 @@
 //! for the resharing protocol that enables changing the participant set while
 //! preserving the same public key.
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -257,8 +261,8 @@ pub enum ResharingConfigError {
 	MissingExistingShare,
 }
 
-impl std::fmt::Display for ResharingConfigError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ResharingConfigError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			ResharingConfigError::InvalidOldThreshold { threshold, parties } => {
 				write!(f, "Invalid old threshold: t={}, n={}", threshold, parties)
@@ -281,8 +285,6 @@ impl std::fmt::Display for ResharingConfigError {
 		}
 	}
 }
-
-impl std::error::Error for ResharingConfigError {}
 
 // ============================================================================
 // Resharing Messages
@@ -402,7 +404,7 @@ pub struct ResharingRound2Message {
 	/// Party ID of the recipient.
 	pub to_party_id: ParticipantId,
 	/// The new shares for the recipient, keyed by subset mask.
-	pub shares: HashMap<SubsetMask, NewShareData>,
+	pub shares: BTreeMap<SubsetMask, NewShareData>,
 }
 
 /// New share data for a specific subset.
@@ -444,7 +446,7 @@ pub struct ResharingRound3Broadcast {
 	/// Party ID of the sender.
 	pub party_id: ParticipantId,
 	/// Commitments to each subset share, keyed by subset mask.
-	pub share_commitments: HashMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>,
+	pub share_commitments: BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>,
 	/// Indicates success or failure of share reception.
 	pub success: bool,
 	/// Optional error message if success is false.
@@ -602,14 +604,14 @@ mod tests {
 		let r2 = ResharingMessage::Round2(ResharingRound2Message {
 			from_party_id: 1,
 			to_party_id: 2,
-			shares: HashMap::new(),
+			shares: BTreeMap::new(),
 		});
 		assert_eq!(r2.round(), 2);
 		assert_eq!(r2.party_id(), 1);
 
 		let r3 = ResharingMessage::Round3(ResharingRound3Broadcast {
 			party_id: 2,
-			share_commitments: HashMap::new(),
+			share_commitments: BTreeMap::new(),
 			success: true,
 			error_message: None,
 		});
@@ -801,14 +803,14 @@ mod tests {
 		let r2 = ResharingMessage::Round2(ResharingRound2Message {
 			from_party_id: 99,
 			to_party_id: 100,
-			shares: HashMap::new(),
+			shares: BTreeMap::new(),
 		});
 		assert_eq!(r2.party_id(), 99); // Should return from_party_id
 
 		// Test Round3
 		let r3 = ResharingMessage::Round3(ResharingRound3Broadcast {
 			party_id: 77,
-			share_commitments: HashMap::new(),
+			share_commitments: BTreeMap::new(),
 			success: true,
 			error_message: None,
 		});
@@ -820,7 +822,7 @@ mod tests {
 		// Test successful broadcast
 		let success = ResharingRound3Broadcast {
 			party_id: 0,
-			share_commitments: HashMap::new(),
+			share_commitments: BTreeMap::new(),
 			success: true,
 			error_message: None,
 		};
@@ -830,7 +832,7 @@ mod tests {
 		// Test failed broadcast with error message
 		let failure = ResharingRound3Broadcast {
 			party_id: 1,
-			share_commitments: HashMap::new(),
+			share_commitments: BTreeMap::new(),
 			success: false,
 			error_message: Some("Share verification failed".to_string()),
 		};

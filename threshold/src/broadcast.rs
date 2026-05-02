@@ -16,6 +16,8 @@
 //!
 //! After Round 3, any party can combine the broadcasts into a final `Signature`.
 
+use alloc::vec::Vec;
+
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 

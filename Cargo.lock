@@ -686,6 +686,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37c93d8daa9d8a012fd8ab92f088405fb202ea0b6ab73ee2482ae66af4f42091"
 
 [[package]]
+name = "libm"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8355be11b20d696c8f18f6cc018c4e372165b1fa8126cef092399c9951984ffa"
+
+[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1172,6 +1178,7 @@ dependencies = [
  "hex",
  "hex-literal",
  "hkdf",
+ "libm",
  "qp-rusty-crystals-dilithium",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -1179,7 +1186,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror",
  "zeroize",
 ]
 

@@ -4,7 +4,8 @@
 //! all the key shares from a single seed. The dealer must be trusted not
 //! to retain the shares or seed after distribution.
 
-use std::collections::{BTreeMap, HashMap};
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 use crate::participants::{ParticipantId, ParticipantList};
 
@@ -213,12 +214,12 @@ struct SecretShare {
 /// - s1_total: Polyvecl
 /// - s2_total: Polyveck
 /// - s1h_total: Polyvecl (NTT form)
-/// - party_shares: HashMap<u32, HashMap<u16, SecretShare>> (u16 subset masks)
+/// - party_shares: BTreeMap<u32, BTreeMap<u16, SecretShare>> (u16 subset masks)
 type ThresholdSharesResult = (
 	polyvec::Polyvecl,
 	polyvec::Polyveck,
 	polyvec::Polyvecl,
-	HashMap<u32, HashMap<u16, SecretShare>>,
+	BTreeMap<u32, BTreeMap<u16, SecretShare>>,
 );
 
 /// Generate threshold shares for all subset combinations.
@@ -228,9 +229,9 @@ fn generate_threshold_shares(
 	parties: u32,
 ) -> ThresholdResult<ThresholdSharesResult> {
 	// Initialize party shares
-	let mut party_shares: HashMap<u32, HashMap<u16, SecretShare>> = HashMap::new();
+	let mut party_shares: BTreeMap<u32, BTreeMap<u16, SecretShare>> = BTreeMap::new();
 	for i in 0..parties {
-		party_shares.insert(i, HashMap::new());
+		party_shares.insert(i, BTreeMap::new());
 	}
 
 	// Total secrets

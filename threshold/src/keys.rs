@@ -4,6 +4,10 @@
 //! threshold signing. The private key share is intentionally opaque to
 //! prevent accidental exposure of secret material.
 
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::vec::Vec;
+use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::participants::{ParticipantId, ParticipantList};
@@ -119,7 +123,7 @@ pub struct PrivateKeyShare {
 	/// Uses u16 as subset mask to support up to 16 parties.
 	/// BTreeMap ensures deterministic serialization order.
 	#[cfg_attr(feature = "serde", serde(with = "serde_u16_btreemap"))]
-	shares: std::collections::BTreeMap<u16, SecretShareData>,
+	shares: BTreeMap<u16, SecretShareData>,
 }
 
 /// Internal secret share data for a specific signer subset.
@@ -154,7 +158,7 @@ impl PrivateKeyShare {
 		key: [u8; 32],
 		rho: [u8; 32],
 		tr: [u8; TR_SIZE],
-		shares: std::collections::BTreeMap<u16, SecretShareData>,
+		shares: BTreeMap<u16, SecretShareData>,
 		dkg_participants: ParticipantList,
 	) -> Self {
 		Self { party_id, total_parties, threshold, key, rho, tr, shares, dkg_participants }
@@ -203,7 +207,7 @@ impl PrivateKeyShare {
 	}
 
 	/// Get the secret shares (for internal use).
-	pub(crate) fn shares(&self) -> &std::collections::BTreeMap<u16, SecretShareData> {
+	pub(crate) fn shares(&self) -> &BTreeMap<u16, SecretShareData> {
 		&self.shares
 	}
 }
@@ -225,8 +229,8 @@ impl Zeroize for PrivateKeyShare {
 
 impl ZeroizeOnDrop for PrivateKeyShare {}
 
-impl std::fmt::Debug for PrivateKeyShare {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for PrivateKeyShare {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("PrivateKeyShare")
 			.field("party_id", &self.party_id)
 			.field("total_parties", &self.total_parties)
@@ -264,7 +268,7 @@ mod tests {
 			[0x42u8; 32],
 			[0u8; 32],
 			[0u8; TR_SIZE],
-			std::collections::BTreeMap::new(),
+			BTreeMap::new(),
 			dkg_participants,
 		);
 		let debug_str = format!("{:?}", pk_share);
@@ -282,7 +286,7 @@ mod tests {
 			[0x42u8; 32],
 			[0x43u8; 32],
 			[0x44u8; TR_SIZE],
-			std::collections::BTreeMap::new(),
+			BTreeMap::new(),
 			dkg_participants,
 		);
 		pk_share.zeroize();
