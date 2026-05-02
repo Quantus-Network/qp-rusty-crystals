@@ -356,18 +356,15 @@ fn keccak_squeeze(
 	mut pos: usize,
 	r: usize,
 ) -> usize {
+	let mut idx = 0;
 	while outlen != 0 {
 		if pos == r {
 			keccakf1600_statepermute(s);
 			pos = 0;
 		}
 		let mut i = pos;
-		let mut idx = 0;
 		while i < r && i < pos + outlen {
-			// println!("i = {}", i);
-			// println!("out[idx] przed przypisaniem: {}", out[idx]);
 			out[idx] = (s[i / 8] >> 8 * (i % 8)) as u8;
-			// println!("out[idx] po przypisaniu: {}", out[idx]);
 			idx += 1;
 			i += 1;
 		}
