@@ -144,6 +144,27 @@ pub enum ThresholdError {
 		/// Parties that reported failure.
 		parties: Vec<u32>,
 	},
+	/// Failed to unpack signature share data from a party.
+	///
+	/// This indicates the party sent malformed Round 3 response data that
+	/// could not be deserialized. Unlike `InvalidSignatureShare`, this error
+	/// occurs during unpacking rather than validation.
+	InvalidSignatureShareData {
+		/// Party ID that sent the invalid data.
+		party_id: u32,
+		/// Reason for the failure.
+		reason: String,
+	},
+	/// Failed to unpack commitment data from a party.
+	///
+	/// This indicates the party sent malformed commitment data that passed
+	/// the hash check but could not be deserialized.
+	InvalidCommitmentData {
+		/// Party ID that sent the invalid data.
+		party_id: u32,
+		/// Reason for the failure.
+		reason: String,
+	},
 }
 
 impl fmt::Display for ThresholdError {
@@ -234,6 +255,12 @@ impl fmt::Display for ThresholdError {
 			},
 			ThresholdError::DkgPartyFailure { parties } => {
 				write!(f, "DKG party failure: {:?}", parties)
+			},
+			ThresholdError::InvalidSignatureShareData { party_id, reason } => {
+				write!(f, "Invalid signature share data from party {}: {}", party_id, reason)
+			},
+			ThresholdError::InvalidCommitmentData { party_id, reason } => {
+				write!(f, "Invalid commitment data from party {}: {}", party_id, reason)
 			},
 		}
 	}

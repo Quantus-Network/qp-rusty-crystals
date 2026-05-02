@@ -263,7 +263,7 @@ mod party_management_tests {
 			protocol1.poke()
 		{
 			// Feed it to protocol 0
-			protocol.message(1, data);
+			protocol.message(1, data).unwrap();
 		}
 
 		// Now drop party 2 (who hasn't responded)

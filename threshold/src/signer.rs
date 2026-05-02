@@ -403,19 +403,24 @@ impl ThresholdSigner {
 				}
 
 				// Commitment verified, now aggregate
+				// If unpacking fails after the hash check passed, something is seriously wrong
 				for k_idx in 0..k {
 					let start = k_idx * single_commitment_size;
 					let end = start + single_commitment_size;
 
 					if end <= r2.commitment_data.len() && k_idx < round2_data.w_aggregated.len() {
-						if let Ok(w_other) =
-							unpack_commitment_dilithium(&r2.commitment_data[start..end])
-						{
-							aggregate_commitments_dilithium(
-								&mut round2_data.w_aggregated[k_idx],
-								&w_other,
-							);
-						}
+						let w_other = unpack_commitment_dilithium(&r2.commitment_data[start..end])
+							.map_err(|e| ThresholdError::InvalidCommitmentData {
+								party_id: r2.party_id,
+								reason: format!(
+									"Commitment passed hash check but failed to unpack (k={}): {}",
+									k_idx, e
+								),
+							})?;
+						aggregate_commitments_dilithium(
+							&mut round2_data.w_aggregated[k_idx],
+							&w_other,
+						);
 					}
 				}
 			}
@@ -479,9 +484,13 @@ impl ThresholdSigner {
 
 		for r3 in all_round3 {
 			if r3.party_id != self.private_key.party_id() {
-				if let Ok(responses) = unpack_responses(&r3.response, &self.config) {
-					all_responses.push(responses);
-				}
+				let responses = unpack_responses(&r3.response, &self.config).map_err(|e| {
+					ThresholdError::InvalidSignatureShareData {
+						party_id: r3.party_id,
+						reason: format!("Failed to unpack Round 3 response: {}", e),
+					}
+				})?;
+				all_responses.push(responses);
 			}
 		}
 
@@ -530,9 +539,13 @@ impl ThresholdSigner {
 
 		for r3 in all_round3 {
 			if r3.party_id != self.private_key.party_id() {
-				if let Ok(responses) = unpack_responses(&r3.response, &self.config) {
-					all_responses.push(responses);
-				}
+				let responses = unpack_responses(&r3.response, &self.config).map_err(|e| {
+					ThresholdError::InvalidSignatureShareData {
+						party_id: r3.party_id,
+						reason: format!("Failed to unpack Round 3 response: {}", e),
+					}
+				})?;
+				all_responses.push(responses);
 			}
 		}
 

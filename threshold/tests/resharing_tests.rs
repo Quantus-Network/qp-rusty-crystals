@@ -92,7 +92,7 @@ fn run_resharing_protocol(
 			let messages_to_deliver: Vec<_> = std::mem::take(messages);
 
 			for (from, data) in messages_to_deliver {
-				protocol.message(from, data);
+				protocol.message(from, data).unwrap();
 			}
 
 			// Poke the protocol
@@ -728,12 +728,15 @@ fn test_resharing_round1_message_from_non_member_ignored() {
 	// Generate Round 1 message
 	let _ = protocol.poke().expect("poke should succeed");
 
-	// Try to deliver a message from party 10 (not in old committee)
-	// This should be silently ignored
-	let fake_message = vec![0u8; 100]; // Invalid message, but that's fine - it should be ignored first
-	protocol.message(10, fake_message);
+	// Try to deliver a truly malformed message (single byte can't be valid bincode for our types)
+	// This should return an error since it can't be deserialized
+	let malformed_message = vec![0xFF]; // Single byte - definitely can't deserialize to ResharingMessage
+	let result = protocol.message(10, malformed_message);
 
-	// Protocol should still be in Round1Waiting
+	// Should return MalformedMessage error
+	assert!(result.is_err(), "Malformed message should return an error, got: {:?}", result);
+
+	// Protocol should still be in Round1Waiting (error doesn't change state)
 	assert_eq!(*protocol.state(), ResharingState::Round1Waiting);
 }
 
@@ -778,10 +781,10 @@ fn test_resharing_duplicate_message_ignored() {
 	let _ = protocol1.poke().expect("poke should succeed");
 
 	// Deliver message from party 0 to party 1
-	protocol1.message(0, msg0.clone());
+	protocol1.message(0, msg0.clone()).unwrap();
 
 	// Deliver the same message again (duplicate)
-	protocol1.message(0, msg0);
+	protocol1.message(0, msg0).unwrap();
 
 	// Should only be counted once - need 2 messages total (from parties 0 and 2)
 	// to have "enough" Round 1 messages

@@ -119,6 +119,16 @@ pub enum SignProtocolError {
 	},
 	/// Party not found when trying to drop.
 	PartyNotFound(u32),
+	/// Malformed message received from a party.
+	///
+	/// This indicates a participant sent data that could not be deserialized.
+	/// This could indicate a bug, network corruption, or malicious behavior.
+	MalformedMessage {
+		/// Party ID that sent the malformed message.
+		from: u32,
+		/// Reason for the failure.
+		reason: String,
+	},
 }
 
 impl std::fmt::Display for SignProtocolError {
@@ -136,6 +146,9 @@ impl std::fmt::Display for SignProtocolError {
 				remaining, threshold
 			),
 			SignProtocolError::PartyNotFound(id) => write!(f, "Party not found: {}", id),
+			SignProtocolError::MalformedMessage { from, reason } => {
+				write!(f, "Malformed message from party {}: {}", from, reason)
+			},
 		}
 	}
 }
@@ -944,45 +957,58 @@ impl DilithiumSignProtocol {
 	/// Process an incoming message from another participant.
 	///
 	/// Messages are automatically routed to the appropriate collection
-	/// based on the message type. Invalid or duplicate messages are
-	/// silently ignored.
+	/// based on the message type. Messages from self, non-participants,
+	/// or in terminal states are ignored with `Ok(())`.
 	///
 	/// # Arguments
 	///
 	/// * `from` - The participant ID that sent the message
 	/// * `data` - The serialized message bytes
-	pub fn message(&mut self, from: ParticipantId, data: Vec<u8>) {
+	///
+	/// # Errors
+	///
+	/// Returns `Err(SignProtocolError::MalformedMessage)` if the message
+	/// cannot be deserialized. This allows callers to detect and log
+	/// malformed messages from participants.
+	///
+	/// # Returns
+	///
+	/// * `Ok(())` - Message was processed (or legitimately ignored)
+	/// * `Err(_)` - Message was malformed and could not be deserialized
+	pub fn message(&mut self, from: ParticipantId, data: Vec<u8>) -> Result<(), SignProtocolError> {
 		// Don't process messages in terminal states
 		if matches!(self.state, SignProtocolState::Done | SignProtocolState::Failed(_)) {
-			return;
+			return Ok(());
 		}
 
 		// Ignore messages from self
 		if from == self.my_participant_id {
-			return;
+			return Ok(());
 		}
 
 		// Ignore messages from non-participants
 		if !self.participants.contains(from) {
-			return;
+			return Ok(());
 		}
 
 		// Deserialize and route the message
 		let msg = match self.deserialize_message(&data) {
 			Ok(m) => m,
-			Err(_) => return, // Silently ignore malformed messages
+			Err(e) => {
+				return Err(SignProtocolError::MalformedMessage { from, reason: e.to_string() });
+			},
 		};
 
 		// For Round 1-3 messages, verify the claimed sender matches
 		if let Some(party_id) = msg.party_id() {
 			if party_id != from {
-				return; // Sender mismatch, ignore
+				return Ok(()); // Sender mismatch, ignore (not an error, just a bad actor)
 			}
 		}
 
 		// Round 4 messages must come from leader
 		if msg.is_round4() && from != self.leader_id {
-			return; // Only leader can send Round 4 messages
+			return Ok(()); // Only leader can send Round 4 messages
 		}
 
 		// Route to appropriate collection or buffer for later
@@ -1069,12 +1095,14 @@ impl DilithiumSignProtocol {
 							"Exceeded maximum retry attempts ({})",
 							MAX_RETRY_ATTEMPTS
 						));
-						return;
+						return Ok(());
 					}
 					self.reset_for_retry();
 				}
 			},
 		}
+
+		Ok(())
 	}
 
 	/// Process buffered Round 2 messages after transitioning to Round 2.
@@ -1263,7 +1291,7 @@ pub fn run_local_signing_with_stats(
 		for party_idx in 0..num_parties {
 			let messages = std::mem::take(&mut pending_messages[party_idx]);
 			for (from, data) in messages {
-				protocols[party_idx].message(from, data);
+				protocols[party_idx].message(from, data)?;
 			}
 		}
 
@@ -1517,9 +1545,9 @@ mod tests {
 			_ => panic!("Expected SendMany"),
 		};
 
-		// Try to deliver our own message (should be ignored)
+		// Try to deliver our own message (should be ignored with Ok(()))
 		let initial_count = protocol.r1_broadcasts.len();
-		protocol.message(0, data);
+		assert!(protocol.message(0, data).is_ok());
 		assert_eq!(protocol.r1_broadcasts.len(), initial_count);
 	}
 
@@ -1546,9 +1574,9 @@ mod tests {
 		let msg = SigningMessage::Round1(r1);
 		let data = protocol.serialize_message(&msg).unwrap();
 
-		// Deliver message from non-participant (should be ignored)
+		// Deliver message from non-participant (should be ignored with Ok(()))
 		let initial_count = protocol.r1_broadcasts.len();
-		protocol.message(99, data);
+		assert!(protocol.message(99, data).is_ok());
 		assert_eq!(protocol.r1_broadcasts.len(), initial_count);
 	}
 
@@ -1619,7 +1647,7 @@ mod tests {
 		let data = protocol.serialize_message(&msg).unwrap();
 
 		// Send the Round 2 message - it should be buffered, not rejected
-		protocol.message(1, data);
+		protocol.message(1, data).unwrap();
 
 		// Verify the message was buffered (not in r2_broadcasts yet)
 		assert!(!protocol.message_buffer.round2.is_empty());
@@ -1654,7 +1682,7 @@ mod tests {
 		let data = protocol.serialize_message(&msg).unwrap();
 
 		// Send the Round 3 message - it should be buffered
-		protocol.message(2, data);
+		protocol.message(2, data).unwrap();
 
 		// Verify the message was buffered
 		assert!(!protocol.message_buffer.round3.is_empty());
@@ -1702,13 +1730,13 @@ mod tests {
 		};
 
 		// Party 1 receives Round 1 from party 0 and advances
-		protocol1.message(0, r1_data0.clone());
+		protocol1.message(0, r1_data0.clone()).unwrap();
 
 		// Create a fake Round 1 from party 2
 		let r1_party2 = Round1Broadcast::new(2, [0x42u8; 32]);
 		let r1_msg2 = SigningMessage::Round1(r1_party2);
 		let r1_data2 = protocol1.serialize_message(&r1_msg2).unwrap();
-		protocol1.message(2, r1_data2.clone());
+		protocol1.message(2, r1_data2.clone()).unwrap();
 
 		// Party 1 should now advance to Round 2
 		let r2_data1 = match protocol1.poke().unwrap() {
@@ -1718,13 +1746,13 @@ mod tests {
 
 		// Now party 0 receives the Round 2 message from party 1 BEFORE completing Round 1
 		// This should be buffered
-		protocol0.message(1, r2_data1);
+		protocol0.message(1, r2_data1).unwrap();
 		assert!(!protocol0.message_buffer.round2.is_empty());
 		assert!(!protocol0.r2_broadcasts.contains_key(&1));
 
 		// Now party 0 receives the remaining Round 1 messages
-		protocol0.message(1, r1_data1);
-		protocol0.message(2, r1_data2);
+		protocol0.message(1, r1_data1).unwrap();
+		protocol0.message(2, r1_data2).unwrap();
 
 		// Party 0 should now advance to Round 2 and process the buffered Round 2 message
 		let _ = protocol0.poke().unwrap();
@@ -1757,7 +1785,7 @@ mod tests {
 		let r2 = Round2Broadcast::new(1, vec![1, 2, 3, 4]);
 		let msg = SigningMessage::Round2(r2);
 		let data = protocol.serialize_message(&msg).unwrap();
-		protocol.message(1, data);
+		protocol.message(1, data).unwrap();
 
 		assert!(!protocol.message_buffer.is_empty());
 

@@ -88,6 +88,16 @@ pub enum ResharingProtocolError {
 	},
 	/// Internal error.
 	InternalError(String),
+	/// A malformed message was received from a party.
+	///
+	/// This indicates the message could not be deserialized, which could
+	/// indicate a bug, network corruption, or malicious behavior.
+	MalformedMessage {
+		/// The party that sent the malformed message.
+		from: ParticipantId,
+		/// Reason for the failure.
+		reason: String,
+	},
 }
 
 impl std::fmt::Display for ResharingProtocolError {
@@ -114,6 +124,9 @@ impl std::fmt::Display for ResharingProtocolError {
 				write!(f, "Insufficient parties: required {}, received {}", required, received)
 			},
 			ResharingProtocolError::InternalError(s) => write!(f, "Internal error: {}", s),
+			ResharingProtocolError::MalformedMessage { from, reason } => {
+				write!(f, "Malformed message from party {}: {}", from, reason)
+			},
 		}
 	}
 }
@@ -351,25 +364,42 @@ impl ResharingProtocol {
 	///
 	/// * `from` - The party ID that sent the message
 	/// * `data` - The serialized message data
-	pub fn message(&mut self, from: ParticipantId, data: Vec<u8>) {
+	///
+	/// # Errors
+	///
+	/// Returns `Err(ResharingProtocolError::MalformedMessage)` if the message
+	/// cannot be deserialized. This allows callers to detect and log
+	/// malformed messages from participants.
+	///
+	/// # Returns
+	///
+	/// * `Ok(())` - Message was processed (or legitimately ignored)
+	/// * `Err(_)` - Message was malformed and could not be deserialized
+	pub fn message(
+		&mut self,
+		from: ParticipantId,
+		data: Vec<u8>,
+	) -> Result<(), ResharingProtocolError> {
 		// Ignore messages if protocol is done or failed
 		if matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
-			return;
+			return Ok(());
 		}
 
 		// Deserialize and route the message
 		let msg = match Self::deserialize_message(&data) {
 			Ok(m) => m,
-			Err(_) => {
-				// Failed to deserialize message - ignore it
-				return;
+			Err(e) => {
+				return Err(ResharingProtocolError::MalformedMessage {
+					from,
+					reason: e.to_string(),
+				});
 			},
 		};
 
 		// Verify sender matches message
 		if msg.party_id() != from {
-			// Message party_id doesn't match sender - ignore it
-			return;
+			// Message party_id doesn't match sender - ignore it (not an error, just bad actor)
+			return Ok(());
 		}
 
 		match msg {
@@ -383,6 +413,8 @@ impl ResharingProtocol {
 				self.handle_round3_message(from, broadcast);
 			},
 		}
+
+		Ok(())
 	}
 
 	// ========================================================================
