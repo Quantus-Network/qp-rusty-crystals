@@ -390,7 +390,7 @@ impl ThresholdSigner {
 				let r1 = other_round1
 					.iter()
 					.find(|r1| r1.party_id == r2.party_id)
-					.ok_or_else(|| ThresholdError::MissingBroadcast { party_id: r2.party_id })?;
+					.ok_or(ThresholdError::MissingBroadcast { party_id: r2.party_id })?;
 
 				if !verify_commitment_hash(
 					tr,

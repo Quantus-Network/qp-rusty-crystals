@@ -151,6 +151,7 @@ pub(crate) fn compute_ntt_dot_product(
 /// Used for rejection sampling in the threshold signing protocol. Samples are
 /// drawn from a hyperball of specified radius and scaled by nu for the s1
 /// components.
+#[derive(Clone)]
 pub struct HyperballSampleVector {
 	data: Box<[f64]>,
 }
@@ -304,11 +305,6 @@ impl HyperballSampleVector {
 		for i in 0..self.data.len() {
 			self.data[i] += other.data[i];
 		}
-	}
-
-	/// Clone this vector.
-	pub fn clone(&self) -> Self {
-		Self { data: self.data.clone() }
 	}
 
 	/// Create a vector from polynomial vectors (s1, s2).

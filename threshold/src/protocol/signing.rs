@@ -358,6 +358,7 @@ fn pack_w_dilithium(w: &polyvec::Polyveck, buf: &mut [u8]) {
 /// - ML-DSA-44: nu = 3
 /// - ML-DSA-65: nu = 5
 /// - ML-DSA-87: nu = 7
+///
 /// This implementation targets ML-DSA-87, so nu = 7.
 fn get_threshold_params(config: &ThresholdConfig) -> (f64, f64, f64) {
 	// Threshold parameters (r, r', nu) from the reference implementation

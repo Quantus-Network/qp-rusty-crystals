@@ -14,7 +14,7 @@ use crate::{
 	config::ThresholdConfig,
 	error::ThresholdResult,
 	keys::{PrivateKeyShare, PublicKey, SecretShareData, PUBLIC_KEY_SIZE, TR_SIZE},
-	protocol::primitives::{K, L, N, Q},
+	protocol::primitives::{mod_q, K, L, N, Q},
 };
 
 /// Generate threshold keys using a trusted dealer.
@@ -68,6 +68,15 @@ pub fn generate_with_dealer(
 ) -> ThresholdResult<(PublicKey, Vec<PrivateKeyShare>)> {
 	let threshold = config.threshold();
 	let parties = config.total_parties();
+
+	// Defensive check: ThresholdConfig::new enforces this, but guard against
+	// future refactors that might construct configs differently.
+	debug_assert!(
+		parties <= crate::error::MAX_PARTIES,
+		"total_parties {} exceeds MAX_PARTIES {}",
+		parties,
+		crate::error::MAX_PARTIES
+	);
 
 	// Initialize SHAKE-256 stream for deterministic randomness
 	let mut h = fips202::KeccakState::default();
@@ -358,26 +367,6 @@ fn sample_poly_leq_eta(p: &mut poly::Poly, seed: &[u8; 64], nonce: u16, eta: i32
 			}
 		}
 	}
-}
-
-/// Reduce x to a value ≤ 2Q.
-fn reduce_le2q(x: u32) -> u32 {
-	let x1 = x >> 23;
-	let x2 = x & 0x7FFFFF;
-	x2 + (x1 << 13) - x1
-}
-
-/// Returns x mod q for 0 ≤ x < 2q.
-fn le2q_mod_q(x: u32) -> u32 {
-	let q = Q as u32;
-	let result = x.wrapping_sub(q);
-	let mask = (result as i32 >> 31) as u32;
-	result.wrapping_add(mask & q)
-}
-
-/// Returns x mod q.
-fn mod_q(x: u32) -> u32 {
-	le2q_mod_q(reduce_le2q(x))
 }
 
 #[cfg(test)]

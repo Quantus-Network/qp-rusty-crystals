@@ -100,7 +100,6 @@ impl TranscriptSigner for NoOpSigner {
 	}
 
 	fn public_key(&self) -> Self::PublicKey {
-		()
 	}
 }
 
@@ -616,7 +615,7 @@ fn sample_poly_leq_eta(poly: &mut [i32; N], seed: &[u8; SUBSET_SEED_SIZE], nonce
 	fips202::shake256_squeeze(&mut buf, 512, &mut state);
 
 	let mut idx = 0;
-	for i in 0..N {
+	for coeff in poly.iter_mut() {
 		loop {
 			if idx >= buf.len() {
 				fips202::shake256_squeeze(&mut buf, 512, &mut state);
@@ -628,7 +627,7 @@ fn sample_poly_leq_eta(poly: &mut [i32; N], seed: &[u8; SUBSET_SEED_SIZE], nonce
 
 			let bound = 2 * eta + 1;
 			if b < (256 / bound) * bound {
-				poly[i] = (b % bound) - eta;
+				*coeff = (b % bound) - eta;
 				break;
 			}
 		}

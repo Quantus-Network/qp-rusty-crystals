@@ -15,6 +15,25 @@
 //! message and all parties reset and try again. If combination succeeds, the leader
 //! broadcasts the signature to all parties.
 //!
+//! # Trust Model
+//!
+//! The protocol uses a leader-based approach for Round 4 (signature combination):
+//!
+//! - The **leader** (party with lowest ID among participants) combines signature shares
+//!   and decides whether to broadcast `Round4Complete(signature)` or `Round4Retry`.
+//! - **Followers** accept the leader's decision without independently running `combine_signature`.
+//! - Signature verification happens outside the protocol (callers should verify).
+//!
+//! **Security assumptions:**
+//! - A malicious leader cannot forge signatures (requires threshold parties to collude).
+//! - A malicious leader CAN cause denial-of-signature by falsely claiming combination
+//!   failed, triggering unnecessary retries.
+//! - For NEAR MPC with a trusted committee, this is acceptable.
+//!
+//! **Mitigation (recommended for untrusted settings):**
+//! - Callers should verify signatures via `verify_signature(pk, msg, ctx, sig)` before
+//!   accepting them. This is cheap and defends against a byzantine leader.
+//!
 //! ## Message Buffering
 //!
 //! In distributed systems, messages may arrive out of order. For example, a fast

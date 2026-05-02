@@ -329,9 +329,8 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 				}
 			}
 
-			match &mut self.state {
-				MithrilDkgState::Round1(s) => s.privates_sent = true,
-				_ => {},
+			if let MithrilDkgState::Round1(s) = &mut self.state {
+				s.privates_sent = true;
 			}
 
 			if let Some((to, data)) = self.pending_privates.pop() {
@@ -488,11 +487,11 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 
 		// Compute contributions for non-leader subsets
 		for &subset in &state.config.my_subsets() {
-			if !my_contributions.contains_key(&subset) {
+			if let std::collections::btree_map::Entry::Vacant(e) = my_contributions.entry(subset) {
 				if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
 					let seed = h_keygen(subset, &shared_secret, &global_randomness);
 					let contribution = derive_subset_contribution(&seed, ETA);
-					my_contributions.insert(subset, contribution);
+					e.insert(contribution);
 				}
 			}
 		}
@@ -830,7 +829,7 @@ fn combine_partial_pks(
 ) -> Result<PublicKey, MithrilDkgError> {
 	let mut t = polyvec::Polyveck::default();
 
-	for (_, pk) in partial_pks {
+	for pk in partial_pks.values() {
 		for (i, poly_coeffs) in pk.t.iter().enumerate() {
 			for (j, &coeff) in poly_coeffs.iter().enumerate() {
 				t.vec[i].coeffs[j] = (t.vec[i].coeffs[j] + coeff) % Q;

@@ -133,6 +133,10 @@ impl<'de> serde::Deserialize<'de> for ThresholdConfig {
 	where
 		D: serde::Deserializer<'de>,
 	{
+		// Wire format only contains threshold and total_parties.
+		// k_iterations is re-derived via ThresholdConfig::new() to ensure
+		// it matches the current algorithm. If fields are added to ThresholdConfig
+		// in the future, update both Serialize and this struct to match.
 		#[derive(serde::Deserialize)]
 		struct ConfigData {
 			threshold: u32,
