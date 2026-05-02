@@ -4,7 +4,7 @@
 //! all the key shares from a single seed. The dealer must be trusted not
 //! to retain the shares or seed after distribution.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::participants::{ParticipantId, ParticipantList};
 
@@ -151,7 +151,7 @@ pub fn generate_with_dealer(
 		let party_shares_map = party_shares.get(&party_id).cloned().unwrap_or_default();
 
 		// Convert to SecretShareData format (u16 for subset masks to support up to 16 parties)
-		let mut shares_data: HashMap<u16, SecretShareData> = HashMap::new();
+		let mut shares_data: BTreeMap<u16, SecretShareData> = BTreeMap::new();
 		for (subset_id, share) in party_shares_map {
 			let s1_data: Vec<[i32; 256]> = (0..L)
 				.map(|i| {

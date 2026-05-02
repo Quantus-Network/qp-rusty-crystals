@@ -126,9 +126,9 @@ mod tests {
 			3, // total_parties
 			2, // threshold
 			key,
-			[0u8; 32],                        // rho
-			[0u8; 64],                        // tr
-			std::collections::HashMap::new(), // shares
+			[0u8; 32],                         // rho
+			[0u8; 64],                         // tr
+			std::collections::BTreeMap::new(), // shares
 			dkg_participants,
 		)
 	}

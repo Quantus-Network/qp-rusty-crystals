@@ -1,6 +1,6 @@
 //! Protocol implementation for the Mithril DKG.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rand::{CryptoRng, RngCore};
 
@@ -272,7 +272,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 
 		let my_commitment = h_commit(config.my_party_id, &my_randomness);
 
-		let mut my_shared_secrets = HashMap::new();
+		let mut my_shared_secrets = BTreeMap::new();
 		for subset in config.my_leader_subsets() {
 			let mut secret = [0u8; SHARED_SECRET_SIZE];
 			self.rng.fill_bytes(&mut secret);
@@ -285,7 +285,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			my_commitment,
 			my_shared_secrets,
 			received_broadcasts: HashMap::new(),
-			received_shared_secrets: HashMap::new(),
+			received_shared_secrets: BTreeMap::new(),
 			broadcast_sent: false,
 			privates_sent: false,
 		});
@@ -469,9 +469,9 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 
 		// Compute contributions for leader subsets
 		let my_leader_subsets = state.config.my_leader_subsets();
-		let mut my_contributions = HashMap::new();
-		let mut my_partial_pks = HashMap::new();
-		let mut my_pk_commitments = HashMap::new();
+		let mut my_contributions = BTreeMap::new();
+		let mut my_partial_pks = BTreeMap::new();
+		let mut my_pk_commitments = BTreeMap::new();
 
 		for &subset in &my_leader_subsets {
 			if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
@@ -710,7 +710,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 		);
 
 		// Collect and verify partial PKs
-		let mut all_partial_pks: HashMap<SubsetMask, PartialPublicKey> = HashMap::new();
+		let mut all_partial_pks: BTreeMap<SubsetMask, PartialPublicKey> = BTreeMap::new();
 
 		for (subset, pk) in &state.my_partial_pks {
 			all_partial_pks.insert(*subset, pk.clone());
@@ -826,7 +826,7 @@ fn compute_partial_pk(
 
 fn combine_partial_pks(
 	rho: &[u8; 32],
-	partial_pks: &HashMap<SubsetMask, PartialPublicKey>,
+	partial_pks: &BTreeMap<SubsetMask, PartialPublicKey>,
 ) -> Result<PublicKey, MithrilDkgError> {
 	let mut t = polyvec::Polyveck::default();
 
@@ -864,7 +864,7 @@ fn build_private_share<S: TranscriptSigner>(
 	let dkg_participants = ParticipantList::new(&state.config.all_participants)
 		.ok_or_else(|| MithrilDkgError::InternalError("invalid participants".into()))?;
 
-	let mut combined_shares: HashMap<SubsetMask, SecretShareData> = HashMap::new();
+	let mut combined_shares: BTreeMap<SubsetMask, SecretShareData> = BTreeMap::new();
 	for (subset_mask, contribution) in &state.my_contributions {
 		combined_shares.insert(
 			*subset_mask,

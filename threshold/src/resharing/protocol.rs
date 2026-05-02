@@ -18,7 +18,7 @@
 //!     -> Round3Generate -> Round3Waiting -> Combining -> Done
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -1319,7 +1319,7 @@ impl ResharingProtocol {
 		use crate::keys::SecretShareData;
 
 		// Convert new_shares to SecretShareData format
-		let mut shares_data: HashMap<u16, SecretShareData> = HashMap::new();
+		let mut shares_data: BTreeMap<u16, SecretShareData> = BTreeMap::new();
 		for (subset_mask, share) in &self.new_shares {
 			let s1_data: Vec<[i32; 256]> = share.s1.clone();
 			let s2_data: Vec<[i32; 256]> = share.s2.clone();

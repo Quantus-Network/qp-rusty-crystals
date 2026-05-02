@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "serde")]
 use crate::serde_helpers::{
-	serde_byte_array, serde_participant_list, serde_poly_vec, serde_u16_hashmap,
+	serde_byte_array, serde_participant_list, serde_poly_vec, serde_u16_btreemap,
 };
 
 /// Size of the packed ML-DSA-87 public key in bytes.
@@ -117,8 +117,9 @@ pub struct PrivateKeyShare {
 	/// Secret shares for this party, keyed by signer subset ID.
 	/// Each share contains (s1_share, s2_share) polynomial vectors.
 	/// Uses u16 as subset mask to support up to 16 parties.
-	#[cfg_attr(feature = "serde", serde(with = "serde_u16_hashmap"))]
-	shares: std::collections::HashMap<u16, SecretShareData>,
+	/// BTreeMap ensures deterministic serialization order.
+	#[cfg_attr(feature = "serde", serde(with = "serde_u16_btreemap"))]
+	shares: std::collections::BTreeMap<u16, SecretShareData>,
 }
 
 /// Internal secret share data for a specific signer subset.
@@ -153,7 +154,7 @@ impl PrivateKeyShare {
 		key: [u8; 32],
 		rho: [u8; 32],
 		tr: [u8; TR_SIZE],
-		shares: std::collections::HashMap<u16, SecretShareData>,
+		shares: std::collections::BTreeMap<u16, SecretShareData>,
 		dkg_participants: ParticipantList,
 	) -> Self {
 		Self { party_id, total_parties, threshold, key, rho, tr, shares, dkg_participants }
@@ -202,7 +203,7 @@ impl PrivateKeyShare {
 	}
 
 	/// Get the secret shares (for internal use).
-	pub(crate) fn shares(&self) -> &std::collections::HashMap<u16, SecretShareData> {
+	pub(crate) fn shares(&self) -> &std::collections::BTreeMap<u16, SecretShareData> {
 		&self.shares
 	}
 }
@@ -263,7 +264,7 @@ mod tests {
 			[0x42u8; 32],
 			[0u8; 32],
 			[0u8; TR_SIZE],
-			std::collections::HashMap::new(),
+			std::collections::BTreeMap::new(),
 			dkg_participants,
 		);
 		let debug_str = format!("{:?}", pk_share);
@@ -281,7 +282,7 @@ mod tests {
 			[0x42u8; 32],
 			[0x43u8; 32],
 			[0x44u8; TR_SIZE],
-			std::collections::HashMap::new(),
+			std::collections::BTreeMap::new(),
 			dkg_participants,
 		);
 		pk_share.zeroize();

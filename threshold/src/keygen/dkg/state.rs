@@ -5,7 +5,7 @@
 
 #![allow(missing_docs)] // Internal state structures don't need public docs
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::keys::{PrivateKeyShare, PublicKey};
 
@@ -20,9 +20,9 @@ pub struct MithrilRound1State<S: TranscriptSigner> {
 	pub config: MithrilDkgConfig<S>,
 	pub my_randomness: [u8; RANDOMNESS_SIZE],
 	pub my_commitment: [u8; 32],
-	pub my_shared_secrets: HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+	pub my_shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	pub received_broadcasts: HashMap<ParticipantId, MithrilRound1Broadcast>,
-	pub received_shared_secrets: HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+	pub received_shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	pub broadcast_sent: bool,
 	pub privates_sent: bool,
 }
@@ -44,7 +44,7 @@ pub struct MithrilRound2State<S: TranscriptSigner> {
 	pub config: MithrilDkgConfig<S>,
 	pub my_randomness: [u8; RANDOMNESS_SIZE],
 	pub round1_broadcasts: HashMap<ParticipantId, MithrilRound1Broadcast>,
-	pub shared_secrets: HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+	pub shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	pub received_broadcasts: HashMap<ParticipantId, MithrilRound2Broadcast>,
 	pub broadcast_sent: bool,
 }
@@ -64,12 +64,12 @@ pub struct MithrilRound3State<S: TranscriptSigner> {
 	pub config: MithrilDkgConfig<S>,
 	pub round1_broadcasts: HashMap<ParticipantId, MithrilRound1Broadcast>,
 	pub round2_broadcasts: HashMap<ParticipantId, MithrilRound2Broadcast>,
-	pub shared_secrets: HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+	pub shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	pub global_randomness: Vec<u8>,
 	pub rho: [u8; 32],
-	pub my_partial_pks: HashMap<SubsetMask, PartialPublicKey>,
-	pub my_contributions: HashMap<SubsetMask, SubsetContribution>,
-	pub my_pk_commitments: HashMap<SubsetMask, [u8; 32]>,
+	pub my_partial_pks: BTreeMap<SubsetMask, PartialPublicKey>,
+	pub my_contributions: BTreeMap<SubsetMask, SubsetContribution>,
+	pub my_pk_commitments: BTreeMap<SubsetMask, [u8; 32]>,
 	pub received_broadcasts: HashMap<ParticipantId, MithrilRound3Broadcast>,
 	pub broadcast_sent: bool,
 }
@@ -91,11 +91,11 @@ pub struct MithrilRound4State<S: TranscriptSigner> {
 	pub round1_broadcasts: HashMap<ParticipantId, MithrilRound1Broadcast>,
 	pub round2_broadcasts: HashMap<ParticipantId, MithrilRound2Broadcast>,
 	pub round3_broadcasts: HashMap<ParticipantId, MithrilRound3Broadcast>,
-	pub shared_secrets: HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+	pub shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	pub global_randomness: Vec<u8>,
 	pub rho: [u8; 32],
-	pub my_partial_pks: HashMap<SubsetMask, PartialPublicKey>,
-	pub my_contributions: HashMap<SubsetMask, SubsetContribution>,
+	pub my_partial_pks: BTreeMap<SubsetMask, PartialPublicKey>,
+	pub my_contributions: BTreeMap<SubsetMask, SubsetContribution>,
 	pub received_broadcasts: HashMap<ParticipantId, MithrilRound4Broadcast>,
 	pub broadcast_sent: bool,
 }
@@ -176,8 +176,8 @@ pub fn all_broadcasts_received<T>(
 
 /// Check if all private messages received.
 pub fn all_private_messages_received(
-	received_secrets: &HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
-	my_shared_secrets: &HashMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+	received_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+	my_shared_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	my_subsets: &[SubsetMask],
 ) -> bool {
 	for &subset in my_subsets {

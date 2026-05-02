@@ -73,22 +73,25 @@ pub mod serde_poly_vec {
 	}
 }
 
-/// Serde support for `HashMap<u16, T>` where T is serializable.
+/// Serde support for `BTreeMap<u16, T>` where T is serializable.
+/// BTreeMap provides deterministic iteration order (sorted by key),
+/// ensuring consistent serialization output.
 #[cfg(feature = "serde")]
-pub mod serde_u16_hashmap {
+pub mod serde_u16_btreemap {
 	use super::*;
-	use std::collections::HashMap;
+	use std::collections::BTreeMap;
 
-	pub fn serialize<S, T>(map: &HashMap<u16, T>, serializer: S) -> Result<S::Ok, S::Error>
+	pub fn serialize<S, T>(map: &BTreeMap<u16, T>, serializer: S) -> Result<S::Ok, S::Error>
 	where
 		S: Serializer,
 		T: Serialize,
 	{
+		// BTreeMap iterates in sorted key order, so output is deterministic
 		let vec: Vec<(u16, &T)> = map.iter().map(|(k, v)| (*k, v)).collect();
 		vec.serialize(serializer)
 	}
 
-	pub fn deserialize<'de, D, T>(deserializer: D) -> Result<HashMap<u16, T>, D::Error>
+	pub fn deserialize<'de, D, T>(deserializer: D) -> Result<BTreeMap<u16, T>, D::Error>
 	where
 		D: Deserializer<'de>,
 		T: Deserialize<'de>,

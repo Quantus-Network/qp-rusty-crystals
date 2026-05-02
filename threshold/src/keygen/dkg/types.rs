@@ -26,7 +26,7 @@
 //! - Verify all transcript signatures
 //! - Compute final public key: t = Σ t_S
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -403,7 +403,7 @@ pub struct MithrilRound3Broadcast {
 	/// The party sending this message.
 	pub party_id: ParticipantId,
 	/// Commitments to partial public keys.
-	pub partial_pk_commitments: HashMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>,
+	pub partial_pk_commitments: BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>,
 }
 
 /// Round 4 broadcast: Reveal partial PKs + transcript signature.
@@ -413,7 +413,7 @@ pub struct MithrilRound4Broadcast {
 	/// The party sending this message.
 	pub party_id: ParticipantId,
 	/// Partial public keys for subsets where this party is leader.
-	pub partial_public_keys: HashMap<SubsetMask, PartialPublicKey>,
+	pub partial_public_keys: BTreeMap<SubsetMask, PartialPublicKey>,
 	/// Signature on transcript.
 	pub transcript_signature: Vec<u8>,
 }
@@ -550,15 +550,13 @@ pub fn compute_transcript_hash(
 
 /// Compute hash of partial output.
 pub fn compute_partial_output_hash(
-	partial_pks: &HashMap<SubsetMask, PartialPublicKey>,
+	partial_pks: &BTreeMap<SubsetMask, PartialPublicKey>,
 ) -> [u8; 32] {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, b"PARTIAL_OUTPUT", 14);
 
-	let mut pks: Vec<_> = partial_pks.iter().collect();
-	pks.sort_by_key(|(mask, _)| *mask);
-
-	for (mask, pk) in pks {
+	// BTreeMap iterates in sorted order by key, so no need to sort
+	for (mask, pk) in partial_pks {
 		fips202::shake256_absorb(&mut state, &mask.to_le_bytes(), 2);
 		for poly in &pk.t {
 			for coeff in poly {
