@@ -1,10 +1,19 @@
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
 pub const SHAKE128_RATE: usize = 168;
 pub const SHAKE256_RATE: usize = 136;
 
 const NROUNDS: usize = 24;
 
-/// 1600-bit state of the algorithm, with an index of curent position.
-#[derive(Copy, Clone, Default)]
+/// 1600-bit state of the Keccak algorithm, with an index of current position.
+///
+/// # Security
+///
+/// This struct implements `Zeroize` and `ZeroizeOnDrop` to ensure sensitive
+/// state is cleared from memory when no longer needed. The `Copy` trait is
+/// intentionally NOT implemented to prevent accidental copies that could
+/// leave sensitive data in memory (HQ8).
+#[derive(Clone, Default, Zeroize, ZeroizeOnDrop)]
 pub struct KeccakState {
 	pub s: [u64; 25],
 	pub pos: usize,
