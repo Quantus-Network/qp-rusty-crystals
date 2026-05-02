@@ -4,9 +4,7 @@
 //! threshold signing. The private key share is intentionally opaque to
 //! prevent accidental exposure of secret material.
 
-use alloc::collections::BTreeMap;
-use alloc::format;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, format, vec::Vec};
 use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 

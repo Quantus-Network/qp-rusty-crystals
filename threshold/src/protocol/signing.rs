@@ -4,10 +4,7 @@
 //! protocol, including commitment generation, response computation, and signature
 //! combination.
 
-use alloc::collections::BTreeMap;
-use alloc::string::ToString;
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, string::ToString, vec, vec::Vec};
 
 use crate::participants::{ParticipantId, ParticipantList};
 

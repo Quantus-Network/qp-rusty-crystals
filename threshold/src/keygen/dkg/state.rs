@@ -5,9 +5,7 @@
 
 #![allow(missing_docs)] // Internal state structures don't need public docs
 
-use alloc::collections::BTreeMap;
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::fmt;
 
 use crate::keys::{PrivateKeyShare, PublicKey};

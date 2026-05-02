@@ -1,7 +1,6 @@
 //! Error types for threshold ML-DSA operations.
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 use core::fmt;
 
 /// Result type for threshold operations.

@@ -17,13 +17,14 @@
 //! Round1Generate -> Round1Waiting -> Round2Generate -> Round2Waiting
 //!     -> Round3Generate -> Round3Waiting -> Combining -> Done
 //! ```
-//!
 
-use alloc::collections::BTreeMap;
-use alloc::format;
-use alloc::string::{String, ToString};
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{
+	collections::BTreeMap,
+	format,
+	string::{String, ToString},
+	vec,
+	vec::Vec,
+};
 use core::fmt;
 
 #[cfg(feature = "serde")]

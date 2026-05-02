@@ -3,9 +3,7 @@
 //! This module provides the basic types and functions needed by the threshold protocol,
 //! including hyperball sampling, matrix operations, and modular arithmetic helpers.
 
-use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::f64::consts::PI;
 use qp_rusty_crystals_dilithium::{fips202, packing, params as dilithium_params, poly, polyvec};
 use zeroize::{Zeroize, ZeroizeOnDrop};

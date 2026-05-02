@@ -4,10 +4,7 @@
 //! for the resharing protocol that enables changing the participant set while
 //! preserving the same public key.
 
-use alloc::collections::BTreeMap;
-use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
 use core::fmt;
 
 #[cfg(feature = "serde")]

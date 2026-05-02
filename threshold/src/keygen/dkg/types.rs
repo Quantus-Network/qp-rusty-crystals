@@ -26,9 +26,7 @@
 //! - Verify all transcript signatures
 //! - Compute final public key: t = Σ t_S
 
-use alloc::collections::BTreeMap;
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::fmt;
 
 #[cfg(feature = "serde")]
@@ -102,8 +100,7 @@ impl TranscriptSigner for NoOpSigner {
 		true
 	}
 
-	fn public_key(&self) -> Self::PublicKey {
-	}
+	fn public_key(&self) -> Self::PublicKey {}
 }
 
 // ============================================================================

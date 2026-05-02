@@ -19,20 +19,20 @@
 //!
 //! The protocol uses a leader-based approach for Round 4 (signature combination):
 //!
-//! - The **leader** (party with lowest ID among participants) combines signature shares
-//!   and decides whether to broadcast `Round4Complete(signature)` or `Round4Retry`.
+//! - The **leader** (party with lowest ID among participants) combines signature shares and decides
+//!   whether to broadcast `Round4Complete(signature)` or `Round4Retry`.
 //! - **Followers** accept the leader's decision without independently running `combine_signature`.
 //! - Signature verification happens outside the protocol (callers should verify).
 //!
 //! **Security assumptions:**
 //! - A malicious leader cannot forge signatures (requires threshold parties to collude).
-//! - A malicious leader CAN cause denial-of-signature by falsely claiming combination
-//!   failed, triggering unnecessary retries.
+//! - A malicious leader CAN cause denial-of-signature by falsely claiming combination failed,
+//!   triggering unnecessary retries.
 //! - For NEAR MPC with a trusted committee, this is acceptable.
 //!
 //! **Mitigation (recommended for untrusted settings):**
-//! - Callers should verify signatures via `verify_signature(pk, msg, ctx, sig)` before
-//!   accepting them. This is cheap and defends against a byzantine leader.
+//! - Callers should verify signatures via `verify_signature(pk, msg, ctx, sig)` before accepting
+//!   them. This is cheap and defends against a byzantine leader.
 //!
 //! ## Message Buffering
 //!
@@ -76,13 +76,14 @@
 //! This protocol adapter is designed to work with NEAR MPC's `run_protocol` function.
 //! The `Action` enum matches the pattern expected by cait-sith based protocols.
 
-use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::format;
-use alloc::string::{String, ToString};
-use alloc::vec;
-use alloc::vec::Vec;
-use core::fmt;
-use core::mem;
+use alloc::{
+	collections::{BTreeMap, BTreeSet},
+	format,
+	string::{String, ToString},
+	vec,
+	vec::Vec,
+};
+use core::{fmt, mem};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};

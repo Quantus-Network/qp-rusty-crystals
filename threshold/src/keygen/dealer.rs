@@ -4,8 +4,7 @@
 //! all the key shares from a single seed. The dealer must be trusted not
 //! to retain the shares or seed after distribution.
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 
 use crate::participants::{ParticipantId, ParticipantList};
 

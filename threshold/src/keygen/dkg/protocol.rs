@@ -1,12 +1,13 @@
 //! Protocol implementation for the Mithril DKG.
 
-use alloc::collections::BTreeMap;
-use alloc::format;
-use alloc::string::{String, ToString};
-use alloc::vec;
-use alloc::vec::Vec;
-use core::fmt;
-use core::mem;
+use alloc::{
+	collections::BTreeMap,
+	format,
+	string::{String, ToString},
+	vec,
+	vec::Vec,
+};
+use core::{fmt, mem};
 
 use rand::{CryptoRng, RngCore};
 
@@ -263,13 +264,11 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 	// ========================================================================
 
 	fn start_round1(&mut self) -> Result<MithrilAction, MithrilDkgError> {
-		let config = match mem::replace(
-			&mut self.state,
-			MithrilDkgState::Failed("transitioning".into()),
-		) {
-			MithrilDkgState::Initialized(c) => c,
-			_ => return Err(MithrilDkgError::InvalidState("expected Initialized".into())),
-		};
+		let config =
+			match mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into())) {
+				MithrilDkgState::Initialized(c) => c,
+				_ => return Err(MithrilDkgError::InvalidState("expected Initialized".into())),
+			};
 
 		let mut my_randomness = [0u8; RANDOMNESS_SIZE];
 		self.rng.fill_bytes(&mut my_randomness);
@@ -491,7 +490,8 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 
 		// Compute contributions for non-leader subsets
 		for &subset in &state.config.my_subsets() {
-			if let alloc::collections::btree_map::Entry::Vacant(e) = my_contributions.entry(subset) {
+			if let alloc::collections::btree_map::Entry::Vacant(e) = my_contributions.entry(subset)
+			{
 				if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
 					let seed = h_keygen(subset, &shared_secret, &global_randomness);
 					let contribution = derive_subset_contribution(&seed, ETA);
@@ -1150,7 +1150,7 @@ mod tests {
 		}
 
 		impl std::fmt::Debug for DilithiumSigner {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 				f.debug_struct("DilithiumSigner")
 					.field("pk", &hex::encode(&self.pk.bytes[..8]))
 					.finish()

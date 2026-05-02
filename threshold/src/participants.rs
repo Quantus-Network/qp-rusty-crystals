@@ -29,8 +29,7 @@
 //! assert_eq!(participants.get(0), Some(524342676));
 //! ```
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::iter;
 
 /// Type alias for participant identifiers.

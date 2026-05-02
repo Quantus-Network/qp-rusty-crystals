@@ -6,11 +6,13 @@
 //!
 //! Subset masks use u16 to support up to 16 parties (currently supporting n ≤ 12).
 
-use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::format;
-use alloc::string::ToString;
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{
+	collections::{BTreeMap, BTreeSet},
+	format,
+	string::ToString,
+	vec,
+	vec::Vec,
+};
 
 use qp_rusty_crystals_dilithium::{params as dilithium_params, polyvec};
 

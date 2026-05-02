@@ -72,18 +72,27 @@ mod hdwallet_tests {
 
 		// Keys from same seed should be identical
 		assert_eq!(
-			master_key1.secret.to_bytes(), master_key2.secret.to_bytes(),
+			master_key1.secret.to_bytes(),
+			master_key2.secret.to_bytes(),
 			"keys are not deterministic"
 		);
 
 		// Keys from different seeds should be different
-		assert_ne!(master_key1.secret.to_bytes(), master_key3.secret.to_bytes(), "password has no effect");
+		assert_ne!(
+			master_key1.secret.to_bytes(),
+			master_key3.secret.to_bytes(),
+			"password has no effect"
+		);
 
 		// Derive a different path - need a fresh seed since seed1 was already consumed
 		let mut seed_for_derive = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
 		let derived_key =
 			derive_key_from_seed((&mut seed_for_derive).into(), "m/0'/2147483647'/1'").unwrap();
-		assert_ne!(master_key1.secret.to_bytes(), derived_key.secret.to_bytes(), "derived key not derived");
+		assert_ne!(
+			master_key1.secret.to_bytes(),
+			derived_key.secret.to_bytes(),
+			"derived key not derived"
+		);
 
 		// UNCOMMENT THIS AND RUN WITH `cargo test -- --nocapture` TO GENERATE TEST VECTORS
 		// let vecs = generate_test_vectors(10);
@@ -144,7 +153,8 @@ mod hdwallet_tests {
 
 			// Compare secret keys
 			assert_eq!(
-				generated_keys.secret.to_bytes(), expected_keys.secret.to_bytes(),
+				generated_keys.secret.to_bytes(),
+				expected_keys.secret.to_bytes(),
 				"Secret key mismatch for path: {derivation_path}"
 			);
 
@@ -272,7 +282,8 @@ mod hdwallet_tests {
 
 		// Keys derived from same path should be identical
 		assert_eq!(
-			key1.secret.to_bytes(), key2.secret.to_bytes(),
+			key1.secret.to_bytes(),
+			key2.secret.to_bytes(),
 			"Keys derived from same path should be identical"
 		);
 	}
@@ -323,7 +334,8 @@ mod hdwallet_tests {
 		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
 
 		assert_eq!(
-			key1.secret.to_bytes(), key2.secret.to_bytes(),
+			key1.secret.to_bytes(),
+			key2.secret.to_bytes(),
 			"Master key derivation should be deterministic"
 		);
 	}
