@@ -413,19 +413,16 @@ impl Default for NewShareData {
 ///
 /// Round 3 has two purposes:
 ///
-/// 1. **New committee verification.** Each new committee member broadcasts a
-///    commitment to each `s_J^new` they computed for new subsets `J` containing
-///    them. Other members of the same `J` should produce identical commitments;
-///    any mismatch indicates inconsistent dealing (e.g., a malicious dealer
-///    who sent different `r_{I→J}` to different recipients).
+/// 1. **New committee verification.** Each new committee member broadcasts a commitment to each
+///    `s_J^new` they computed for new subsets `J` containing them. Other members of the same `J`
+///    should produce identical commitments; any mismatch indicates inconsistent dealing (e.g., a
+///    malicious dealer who sent different `r_{I→J}` to different recipients).
 ///
-/// 2. **Old committee cross-verification.** Old committee members that share an
-///    old subset `I` with the dealer `D_I` independently recompute the
-///    deterministic `r_{I→J}` values from their own copy of `s_I^old` and
-///    compare them against `D_I`'s broadcast commitments. Any mismatch is
-///    reported as a `DealerAccusation`. If the accusation is correct (the
-///    accuser's recomputation matches their own private knowledge of `s_I`),
-///    the resharing fails.
+/// 2. **Old committee cross-verification.** Old committee members that share an old subset `I` with
+///    the dealer `D_I` independently recompute the deterministic `r_{I→J}` values from their own
+///    copy of `s_I^old` and compare them against `D_I`'s broadcast commitments. Any mismatch is
+///    reported as a `DealerAccusation`. If the accusation is correct (the accuser's recomputation
+///    matches their own private knowledge of `s_I`), the resharing fails.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ResharingRound3Broadcast {

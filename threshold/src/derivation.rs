@@ -232,10 +232,8 @@ mod tests {
 		// secret polynomial shares, not from `key`.
 		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
 		let mut shares = std::collections::BTreeMap::new();
-		shares.insert(
-			0b011,
-			SecretShareData { s1: vec![[7i32; 256]; 7], s2: vec![[7i32; 256]; 8] },
-		);
+		shares
+			.insert(0b011, SecretShareData { s1: vec![[7i32; 256]; 7], s2: vec![[7i32; 256]; 8] });
 		let share_a = PrivateKeyShare::new(
 			0,
 			3,

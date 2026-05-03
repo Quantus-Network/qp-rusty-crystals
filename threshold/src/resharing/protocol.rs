@@ -6,18 +6,16 @@
 //! See `resharing/mod.rs` for a full description of the cryptographic protocol.
 //! In short:
 //!
-//! - **Round 1 (Commitments)**: Each old committee member that is the
-//!   designated dealer for one or more old RSS subsets broadcasts hash
-//!   commitments to the per-subset sub-shares `r_{I→J}` they will deliver in
-//!   Round 2. Sub-shares are derived deterministically from `s_I^old`, so all
+//! - **Round 1 (Commitments)**: Each old committee member that is the designated dealer for one or
+//!   more old RSS subsets broadcasts hash commitments to the per-subset sub-shares `r_{I→J}` they
+//!   will deliver in Round 2. Sub-shares are derived deterministically from `s_I^old`, so all
 //!   members of `I` can independently recompute and verify these commitments.
-//! - **Round 2 (Reveal)**: Each designated dealer privately delivers
-//!   `r_{I→J}` to every member of new subset `J`.
-//! - **Round 3 (Verification)**: Each new committee member verifies received
-//!   sub-shares against the broadcast commitments, sums them into new shares
-//!   `s_J^new`, and broadcasts a commitment to each computed `s_J^new` so the
-//!   members of `J` can cross-verify. Old committee members file dealer
-//!   accusations if any broadcast commitment fails their independent recomputation.
+//! - **Round 2 (Reveal)**: Each designated dealer privately delivers `r_{I→J}` to every member of
+//!   new subset `J`.
+//! - **Round 3 (Verification)**: Each new committee member verifies received sub-shares against the
+//!   broadcast commitments, sums them into new shares `s_J^new`, and broadcasts a commitment to
+//!   each computed `s_J^new` so the members of `J` can cross-verify. Old committee members file
+//!   dealer accusations if any broadcast commitment fails their independent recomputation.
 //!
 //! # State Machine
 //!
@@ -321,10 +319,7 @@ impl ResharingProtocol {
 		let msg = match Self::deserialize_message(&data) {
 			Ok(m) => m,
 			Err(e) =>
-				return Err(ResharingProtocolError::MalformedMessage {
-					from,
-					reason: e.to_string(),
-				}),
+				return Err(ResharingProtocolError::MalformedMessage { from, reason: e.to_string() }),
 		};
 
 		if msg.party_id() != from {
@@ -356,8 +351,7 @@ impl ResharingProtocol {
 		self.compute_my_subshares()?;
 		let commitments = self.commit_to_my_subshares();
 
-		let broadcast =
-			ResharingRound1Broadcast { party_id: self.config.my_party_id, commitments };
+		let broadcast = ResharingRound1Broadcast { party_id: self.config.my_party_id, commitments };
 		self.my_round1 = Some(broadcast.clone());
 		self.round1_broadcasts.insert(self.config.my_party_id, broadcast.clone());
 
@@ -420,8 +414,7 @@ impl ResharingProtocol {
 
 	fn handle_round2_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
 		// Old-committee dealers continue to drain pending Round 2 messages.
-		if self.config.role.is_old_committee() &&
-			self.round2_sent_count < self.pending_round2.len()
+		if self.config.role.is_old_committee() && self.round2_sent_count < self.pending_round2.len()
 		{
 			return self.send_next_round2_message();
 		}
@@ -763,11 +756,10 @@ impl ResharingProtocol {
 	fn verify_and_aggregate_new_shares(
 		&mut self,
 	) -> Result<BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>, ResharingProtocolError> {
-		let my_idx = self
-			.config
-			.new_participants
-			.index_of(self.config.my_party_id)
-			.ok_or_else(|| ResharingProtocolError::InternalError("not in new committee".into()))?;
+		let my_idx =
+			self.config.new_participants.index_of(self.config.my_party_id).ok_or_else(|| {
+				ResharingProtocolError::InternalError("not in new committee".into())
+			})?;
 
 		// Collect every (I, J, dealer, r) we expect to use.
 		let new_subsets = &self.new_subset_order;
@@ -842,10 +834,8 @@ impl ResharingProtocol {
 	/// All members of new subset J must produce identical `s_J^new` (and thus identical
 	/// commitments). Cross-verify that.
 	fn verify_new_share_consistency(&self) -> Result<(), ResharingProtocolError> {
-		let mut by_subset: BTreeMap<
-			SubsetMask,
-			Vec<(ParticipantId, [u8; COMMITMENT_HASH_SIZE])>,
-		> = BTreeMap::new();
+		let mut by_subset: BTreeMap<SubsetMask, Vec<(ParticipantId, [u8; COMMITMENT_HASH_SIZE])>> =
+			BTreeMap::new();
 		for (party, broadcast) in &self.round3_broadcasts {
 			for (j_mask, commit) in &broadcast.share_commitments {
 				by_subset.entry(*j_mask).or_default().push((*party, *commit));
@@ -887,10 +877,8 @@ impl ResharingProtocol {
 	fn build_private_key_share(&self) -> Result<PrivateKeyShare, ResharingProtocolError> {
 		let mut shares_data: BTreeMap<u16, SecretShareData> = BTreeMap::new();
 		for (j_mask, share) in &self.new_shares {
-			shares_data.insert(
-				*j_mask,
-				SecretShareData { s1: share.s1.clone(), s2: share.s2.clone() },
-			);
+			shares_data
+				.insert(*j_mask, SecretShareData { s1: share.s1.clone(), s2: share.s2.clone() });
 		}
 
 		let (rho, tr) = if let Some(ref existing) = self.config.existing_share {
