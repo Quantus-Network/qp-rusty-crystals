@@ -94,19 +94,24 @@ impl fmt::Display for MithrilDkgError {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::InvalidState(msg) => write!(f, "invalid state: {}", msg),
-			Self::CommitmentMismatch { party_id } =>
-				write!(f, "commitment mismatch from party {}", party_id),
-			Self::PkCommitmentMismatch { party_id, subset } =>
-				write!(f, "PK commitment mismatch from party {} for subset {:b}", party_id, subset),
-			Self::PkVerificationFailed { party_id, subset } =>
-				write!(f, "PK verification failed from party {} for subset {:b}", party_id, subset),
-			Self::SignatureVerificationFailed { party_id } =>
-				write!(f, "signature verification failed from party {}", party_id),
+			Self::CommitmentMismatch { party_id } => {
+				write!(f, "commitment mismatch from party {}", party_id)
+			},
+			Self::PkCommitmentMismatch { party_id, subset } => {
+				write!(f, "PK commitment mismatch from party {} for subset {:b}", party_id, subset)
+			},
+			Self::PkVerificationFailed { party_id, subset } => {
+				write!(f, "PK verification failed from party {} for subset {:b}", party_id, subset)
+			},
+			Self::SignatureVerificationFailed { party_id } => {
+				write!(f, "signature verification failed from party {}", party_id)
+			},
 			Self::MissingData(msg) => write!(f, "missing data: {}", msg),
 			Self::InvalidMessage(msg) => write!(f, "invalid message: {}", msg),
 			Self::InternalError(msg) => write!(f, "internal error: {}", msg),
-			Self::MalformedMessage { from, reason } =>
-				write!(f, "malformed message from party {}: {}", from, reason),
+			Self::MalformedMessage { from, reason } => {
+				write!(f, "malformed message from party {}: {}", from, reason)
+			},
 		}
 	}
 }
