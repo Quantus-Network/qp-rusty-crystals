@@ -62,6 +62,13 @@ pub enum ThresholdError {
 		/// Actual size.
 		actual: usize,
 	},
+	/// Invalid public key size.
+	InvalidPublicKeySize {
+		/// Expected size.
+		expected: usize,
+		/// Actual size.
+		actual: usize,
+	},
 	/// Commitment verification failed.
 	CommitmentVerificationFailed {
 		/// Party ID.
@@ -199,6 +206,9 @@ impl fmt::Display for ThresholdError {
 			},
 			ThresholdError::InvalidCommitmentSize { expected, actual } => {
 				write!(f, "Invalid commitment size: expected {}, got {}", expected, actual)
+			},
+			ThresholdError::InvalidPublicKeySize { expected, actual } => {
+				write!(f, "Invalid public key size: expected {}, got {}", expected, actual)
 			},
 			ThresholdError::CommitmentVerificationFailed { party_id } => {
 				write!(f, "Commitment verification failed for party {}", party_id)

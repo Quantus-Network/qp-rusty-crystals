@@ -610,31 +610,37 @@ pub(crate) fn pack_responses(responses: &[polyvec::Polyvecl]) -> Vec<u8> {
 }
 
 /// Unpack responses from broadcast.
+///
+/// # Errors
+///
+/// Returns `InvalidResponseSize` if the data length doesn't match the expected
+/// size for k iterations. This prevents silent zero-padding of malformed input
+/// from malicious parties.
 pub(crate) fn unpack_responses(
 	data: &[u8],
 	config: &ThresholdConfig,
 ) -> ThresholdResult<Vec<polyvec::Polyvecl>> {
 	let k = config.k_iterations() as usize;
 	let single_response_size = L * 640; // L * POLY_LE_GAMMA1_SIZE
+	let expected_size = k * single_response_size;
+
+	// Validate input size upfront - never silently zero-pad malformed data
+	if data.len() != expected_size {
+		return Err(ThresholdError::InvalidResponseSize { expected: expected_size, actual: data.len() });
+	}
+
 	let mut responses = Vec::with_capacity(k);
 
 	for i in 0..k {
 		let start = i * single_response_size;
-		let end = start + single_response_size;
-
-		if end <= data.len() {
-			let mut z = polyvec::Polyvecl::default();
-			for j in 0..L {
-				let poly_start = start + j * 640;
-				let poly_end = poly_start + 640;
-				if poly_end <= data.len() {
-					poly::z_unpack(&mut z.vec[j], &data[poly_start..poly_end]);
-				}
-			}
-			responses.push(z);
-		} else {
-			responses.push(polyvec::Polyvecl::default());
+		let mut z = polyvec::Polyvecl::default();
+		for j in 0..L {
+			let poly_start = start + j * 640;
+			let poly_end = poly_start + 640;
+			// Size already validated, so this slice is guaranteed to be valid
+			poly::z_unpack(&mut z.vec[j], &data[poly_start..poly_end]);
 		}
+		responses.push(z);
 	}
 
 	Ok(responses)
@@ -676,7 +682,7 @@ pub(crate) fn combine_signature(
 	polyvec::matrix_expand(&mut a_matrix, &rho);
 
 	// Extract t1 from public key
-	let t1 = unpack_t1(public_key.as_bytes());
+	let t1 = unpack_t1(public_key.as_bytes())?;
 
 	// For each commitment iteration
 	for i in 0..k_iterations.min(w_aggregated.len()).min(z_aggregated.len()) {
@@ -850,7 +856,20 @@ pub(crate) fn combine_signature(
 }
 
 /// Unpack t1 from public key bytes.
-fn unpack_t1(pk_bytes: &[u8]) -> polyvec::Polyveck {
+///
+/// # Errors
+///
+/// Returns `InvalidPublicKeySize` if `pk_bytes` is not the expected size (2592 bytes).
+fn unpack_t1(pk_bytes: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
+	// Validate size: 32 (rho) + K * 320 (t1) = 32 + 8 * 320 = 2592
+	const EXPECTED_SIZE: usize = 32 + K * 320;
+	if pk_bytes.len() != EXPECTED_SIZE {
+		return Err(ThresholdError::InvalidPublicKeySize {
+			expected: EXPECTED_SIZE,
+			actual: pk_bytes.len(),
+		});
+	}
+
 	let mut t1 = polyvec::Polyveck::default();
 	let t1_bytes = &pk_bytes[32..]; // Skip rho
 
@@ -859,20 +878,18 @@ fn unpack_t1(pk_bytes: &[u8]) -> polyvec::Polyveck {
 		let poly_start = poly_idx * 320;
 		for i in (0..N).step_by(4) {
 			let byte_idx = poly_start + (i * 10) / 8;
-			if byte_idx + 4 < t1_bytes.len() {
-				let b0 = t1_bytes[byte_idx] as i32;
-				let b1 = t1_bytes[byte_idx + 1] as i32;
-				let b2 = t1_bytes[byte_idx + 2] as i32;
-				let b3 = t1_bytes[byte_idx + 3] as i32;
-				let b4 = t1_bytes[byte_idx + 4] as i32;
+			let b0 = t1_bytes[byte_idx] as i32;
+			let b1 = t1_bytes[byte_idx + 1] as i32;
+			let b2 = t1_bytes[byte_idx + 2] as i32;
+			let b3 = t1_bytes[byte_idx + 3] as i32;
+			let b4 = t1_bytes[byte_idx + 4] as i32;
 
-				t1.vec[poly_idx].coeffs[i] = b0 | ((b1 & 0x03) << 8);
-				t1.vec[poly_idx].coeffs[i + 1] = (b1 >> 2) | ((b2 & 0x0F) << 6);
-				t1.vec[poly_idx].coeffs[i + 2] = (b2 >> 4) | ((b3 & 0x3F) << 4);
-				t1.vec[poly_idx].coeffs[i + 3] = (b3 >> 6) | (b4 << 2);
-			}
+			t1.vec[poly_idx].coeffs[i] = b0 | ((b1 & 0x03) << 8);
+			t1.vec[poly_idx].coeffs[i + 1] = (b1 >> 2) | ((b2 & 0x0F) << 6);
+			t1.vec[poly_idx].coeffs[i + 2] = (b2 >> 4) | ((b3 & 0x3F) << 4);
+			t1.vec[poly_idx].coeffs[i + 3] = (b3 >> 6) | (b4 << 2);
 		}
 	}
 
-	t1
+	Ok(t1)
 }
