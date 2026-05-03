@@ -462,6 +462,10 @@ pub(crate) fn process_round2(
 // ============================================================================
 
 /// Generate Round 3 response.
+///
+/// # Errors
+///
+/// Returns an error if internal data structures have inconsistent lengths.
 pub(crate) fn generate_round3_response(
 	private_key: &PrivateKeyShare,
 	config: &ThresholdConfig,
@@ -487,16 +491,29 @@ pub(crate) fn generate_round3_response(
 	)?;
 
 	let k = config.k_iterations() as usize;
+
+	// Validate internal data consistency - never silently produce zero responses
+	if round2.w_aggregated.len() < k {
+		return Err(ThresholdError::InvalidData(alloc::format!(
+			"w_aggregated has {} entries, expected at least {}",
+			round2.w_aggregated.len(),
+			k
+		)));
+	}
+	if round1.hyperball_samples.len() < k {
+		return Err(ThresholdError::InvalidData(alloc::format!(
+			"hyperball_samples has {} entries, expected at least {}",
+			round1.hyperball_samples.len(),
+			k
+		)));
+	}
+
 	let mut zs: Vec<polyvec::Polyvecl> = vec![polyvec::Polyvecl::default(); k];
 
 	let (r, _, nu) = get_threshold_params(config);
 
-	// For each commitment iteration
+	// For each commitment iteration (lengths already validated above)
 	for (i, z_out_slot) in zs.iter_mut().enumerate().take(k) {
-		if i >= round2.w_aggregated.len() || i >= round1.hyperball_samples.len() {
-			continue;
-		}
-
 		// Decompose w into w0 and w1
 		let mut w0 = polyvec::Polyveck::default();
 		let mut w1 = polyvec::Polyveck::default();
@@ -626,7 +643,10 @@ pub(crate) fn unpack_responses(
 
 	// Validate input size upfront - never silently zero-pad malformed data
 	if data.len() != expected_size {
-		return Err(ThresholdError::InvalidResponseSize { expected: expected_size, actual: data.len() });
+		return Err(ThresholdError::InvalidResponseSize {
+			expected: expected_size,
+			actual: data.len(),
+		});
 	}
 
 	let mut responses = Vec::with_capacity(k);

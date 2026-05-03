@@ -12,7 +12,7 @@ use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec};
 
 use crate::{
 	config::ThresholdConfig,
-	error::ThresholdResult,
+	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey, SecretShareData, PUBLIC_KEY_SIZE, TR_SIZE},
 	protocol::primitives::{mod_q, K, L, N, Q},
 };
@@ -157,7 +157,12 @@ pub fn generate_with_dealer(
 	// 9. Create private key shares
 	let mut private_keys = Vec::with_capacity(parties as usize);
 	for party_id in 0..parties {
-		let party_shares_map = party_shares.get(&party_id).cloned().unwrap_or_default();
+		let party_shares_map = party_shares.get(&party_id).cloned().ok_or_else(|| {
+			ThresholdError::InvalidData(alloc::format!(
+				"Missing shares for party {} during key generation",
+				party_id
+			))
+		})?;
 
 		// Convert to SecretShareData format (u16 for subset masks to support up to 16 parties)
 		let mut shares_data: BTreeMap<u16, SecretShareData> = BTreeMap::new();

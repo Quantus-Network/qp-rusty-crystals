@@ -1325,8 +1325,13 @@ pub fn run_local_signing_with_stats(
 				},
 				Action::Return(signature) => {
 					// Get retry count from the leader (who tracks retries)
+					// Leader is always in participants since it came from participants.iter().min()
 					let leader_idx =
-						participants.iter().position(|&id| id == leader_id).unwrap_or(0);
+						participants.iter().position(|&id| id == leader_id).ok_or_else(|| {
+							SignProtocolError::MissingData(
+								"Leader not found in participants (internal error)".to_string(),
+							)
+						})?;
 					let retry_count = protocols[leader_idx].retry_count();
 					let stats = SigningStats { retry_count };
 					return Ok((signature, stats));

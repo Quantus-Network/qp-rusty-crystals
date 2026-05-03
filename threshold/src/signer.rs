@@ -407,25 +407,33 @@ impl ThresholdSigner {
 				}
 
 				// Commitment verified, now aggregate
-				// If unpacking fails after the hash check passed, something is seriously wrong
+				// Validate data length matches expected size for k iterations
+				let expected_len = k * single_commitment_size;
+				if r2.commitment_data.len() != expected_len {
+					return Err(ThresholdError::InvalidCommitmentData {
+						party_id: r2.party_id,
+						reason: format!(
+							"Commitment data length {} does not match expected {} for k={}",
+							r2.commitment_data.len(),
+							expected_len,
+							k
+						),
+					});
+				}
+
 				for k_idx in 0..k {
 					let start = k_idx * single_commitment_size;
 					let end = start + single_commitment_size;
 
-					if end <= r2.commitment_data.len() && k_idx < round2_data.w_aggregated.len() {
-						let w_other = unpack_commitment_dilithium(&r2.commitment_data[start..end])
-							.map_err(|e| ThresholdError::InvalidCommitmentData {
-								party_id: r2.party_id,
-								reason: format!(
-									"Commitment passed hash check but failed to unpack (k={}): {}",
-									k_idx, e
-								),
-							})?;
-						aggregate_commitments_dilithium(
-							&mut round2_data.w_aggregated[k_idx],
-							&w_other,
-						);
-					}
+					let w_other = unpack_commitment_dilithium(&r2.commitment_data[start..end])
+						.map_err(|e| ThresholdError::InvalidCommitmentData {
+							party_id: r2.party_id,
+							reason: format!(
+								"Commitment passed hash check but failed to unpack (k={}): {}",
+								k_idx, e
+							),
+						})?;
+					aggregate_commitments_dilithium(&mut round2_data.w_aggregated[k_idx], &w_other);
 				}
 			}
 		}
