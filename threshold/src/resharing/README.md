@@ -22,41 +22,54 @@ Without resharing, any change would require generating a new key and migrating a
 
 ### Phases
 
-```
-Round 1: Blinded Reconstruction
-├── Old committee members broadcast blinded contributions
-└── Reconstruct secret in blinded form (never exposed in clear)
+This module uses **distributed per-subset re-sharing** — at no point does any
+party ever assemble the full secret `s`, and at no point is any individual
+share exposed in clear on the wire.
 
-Round 2: Re-dealing  
-├── Designated dealer generates fresh RSS shares
-└── Distributes shares to new committee via secure channels
-
-Round 3: Verification
-├── New committee members broadcast share commitments
-└── Verify all parties in same subset have consistent shares
 ```
+Round 1: Per-subset commitments
+├── For each old subset I, the designated dealer D_I (lowest-ID old participant in I)
+│   deterministically derives sub-shares  r_{I→J}  for every new subset J such that
+│   Σ_J r_{I→J} = s_I^old   (where s_I^old is the η-bounded share that all members of
+│   I already hold).
+└── D_I broadcasts H(r_{I→J}) for each (I, J).  Members of I can independently
+    recompute the same r_{I→J} from s_I^old and verify D_I's commitments.
+
+Round 2: Private sub-share reveal
+├── D_I privately delivers r_{I→J} to each member of new subset J.
+└── No public traffic carries any share material.
+
+Round 3: Verification + accusations
+├── Each new party verifies received r_{I→J} against the Round 1 commitment, then
+│   sums  s_J^new = Σ_I r_{I→J}  for each new subset J they're in, and broadcasts
+│   a commitment to s_J^new so that the membership of J can cross-verify.
+└── Old subset members file DealerAccusation if any dealer's broadcast commitment
+    doesn't match their independent recomputation.
+```
+
+Because `Σ_J s_J^new = Σ_J Σ_I r_{I→J} = Σ_I s_I^old = s`, the secret — and
+hence the public key `t = A·s1 + s2` — is preserved.
 
 ## Security Properties
 
 | Property | Guarantee |
 |----------|-----------|
-| **Secrecy** | Secret `s` never exposed during resharing |
-| **Consistency** | All honest parties get shares of same secret |
-| **Freshness** | Old shares unusable after protocol completes |
-| **PK Preservation** | Public key `t = A·s1 + s2` unchanged |
+| **Secrecy of `s`** | No party — not even any dealer — ever holds `s` in clear. Each `D_I` only handles `s_I^old`, which they already had. |
+| **Confidentiality of contributions** | Round 1 broadcasts only hash commitments; Round 2 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
+| **Cheating-dealer detection** | Other members of `I` independently recompute `r_{I→J}` from `s_I^old` and accuse `D_I` if the broadcast commitment differs; new-subset members cross-verify computed `s_J^new`. |
+| **PK Preservation** | Public key `t = A·s1 + s2` unchanged. |
 
 ## Why Custom Protocol?
 
 Standard resharing protocols (CHURP, MPSS) assume Shamir polynomial secret sharing where shares are points on a polynomial. Our implementation uses **Replicated Secret Sharing (RSS)** with subset-indexed additive shares:
 
 ```
-secret = Σ share[S]  for all subsets S containing party i
+secret = Σ share[S]  for all subsets S of size n - t + 1
 ```
 
-This structure requires a different approach:
-1. Blinded reconstruction using additive homomorphism
-2. Fresh RSS share generation for new subset structure
-3. Commitment-based verification for consistency
+The custom design lets each old RSS subset re-share *its own* η-bounded share
+to the new committee independently, without anyone ever combining the
+sub-shares back into `s`.
 
 ## Usage
 
@@ -103,18 +116,19 @@ Each party has a role determined by committee membership:
 
 | Role | Old Committee | New Committee | Actions |
 |------|--------------|---------------|---------|
-| `OldOnly` | ✓ | ✗ | Contribute to reconstruction |
-| `NewOnly` | ✗ | ✓ | Receive and verify new shares |
-| `Both` | ✓ | ✓ | Contribute + receive |
+| `OldOnly` | ✓ | ✗ | Deal sub-shares for old subsets they own; file dealer accusations |
+| `NewOnly` | ✗ | ✓ | Receive sub-shares; verify against commitments; aggregate `s_J^new` |
+| `Both`    | ✓ | ✓ | Deal + receive + verify |
 
 ## Message Types
 
-- `Round1Broadcast`: Blinded share contributions from old committee
-- `Round2Message`: New share distributions (private, point-to-point)
-- `Round3Broadcast`: Share commitments from new committee for verification
+- `Round1Broadcast`: per-subset commitment hashes  `H(r_{I→J})`  (no plaintext shares)
+- `Round2Message`: private sub-share reveal — one message per (dealer, recipient) carrying every `r_{I→J}` the dealer owes that recipient
+- `Round3Broadcast`: commitments to computed `s_J^new` + any `DealerAccusation`s
 
 ## Limitations
 
-- Maximum 12 parties (due to u16 subset masks)
-- Requires `t_old` responsive old committee members
+- Maximum 16 parties (due to u16 subset masks)
+- Requires every designated dealer to be online; if a dealer is offline or
+  cheats, the protocol aborts (no recovery / re-deal in this implementation)
 - Secure channels required for Round 2 private messages

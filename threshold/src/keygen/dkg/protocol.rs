@@ -875,12 +875,32 @@ fn build_private_share<S: TranscriptSigner>(
 		);
 	}
 
-	// Generate a deterministic key for this party
+	// Derive `party_key` from the actual secret share polynomials so that this byte
+	// string carries real entropy, not just a hash of the public `rho` and `party_id`.
+	// We still mix in `rho` and `party_id` for domain separation, but the security of
+	// `party_key` now depends on knowing the secret subset shares.
 	let mut party_key = [0u8; 32];
 	{
 		let mut h = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut h, b"dkg-party-key-v2", 16);
 		fips202::shake256_absorb(&mut h, &state.rho, 32);
 		fips202::shake256_absorb(&mut h, &state.config.my_party_id.to_le_bytes(), 4);
+		let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+		for (subset_mask, contribution) in &state.my_contributions {
+			buf.clear();
+			buf.extend_from_slice(&subset_mask.to_le_bytes());
+			for poly in &contribution.s1 {
+				for coeff in poly {
+					buf.extend_from_slice(&coeff.to_le_bytes());
+				}
+			}
+			for poly in &contribution.s2 {
+				for coeff in poly {
+					buf.extend_from_slice(&coeff.to_le_bytes());
+				}
+			}
+			fips202::shake256_absorb(&mut h, &buf, buf.len());
+		}
 		fips202::shake256_finalize(&mut h);
 		fips202::shake256_squeeze(&mut party_key, 32, &mut h);
 	}
