@@ -27,8 +27,7 @@ use super::{
 		derive_subset_contribution, h_commit, h_commit_pk, h_keygen, h_seed, MithrilDkgConfig,
 		MithrilDkgMessage, MithrilRound1Broadcast, MithrilRound1Private, MithrilRound2Broadcast,
 		MithrilRound3Broadcast, MithrilRound4Broadcast, PartialPublicKey, ParticipantId,
-		SubsetContribution, SubsetMask, TranscriptSigner, RANDOMNESS_SIZE,
-		SHARED_SECRET_SIZE,
+		SubsetContribution, SubsetMask, TranscriptSigner, RANDOMNESS_SIZE, SHARED_SECRET_SIZE,
 	},
 };
 
@@ -791,11 +790,8 @@ fn compute_partial_pk(
 	contribution: &SubsetContribution,
 	subset_mask: SubsetMask,
 ) -> PartialPublicKey {
-	let t = crate::protocol::partial_pk::compute_partial_pk_t(
-		rho,
-		&contribution.s1,
-		&contribution.s2,
-	);
+	let t =
+		crate::protocol::partial_pk::compute_partial_pk_t(rho, &contribution.s1, &contribution.s2);
 	PartialPublicKey { subset_mask, t }
 }
 
@@ -803,10 +799,7 @@ fn combine_partial_pks(
 	rho: &[u8; 32],
 	partial_pks: &BTreeMap<SubsetMask, PartialPublicKey>,
 ) -> Result<PublicKey, MithrilDkgError> {
-	Ok(crate::protocol::partial_pk::pack_combined_pk(
-		rho,
-		partial_pks.values().map(|pk| &pk.t),
-	))
+	Ok(crate::protocol::partial_pk::pack_combined_pk(rho, partial_pks.values().map(|pk| &pk.t)))
 }
 
 fn build_private_share<S: TranscriptSigner>(

@@ -93,9 +93,7 @@ pub mod serde_partial_pks {
 		entries.serialize(serializer)
 	}
 
-	pub fn deserialize<'de, D>(
-		deserializer: D,
-	) -> Result<BTreeMap<u16, Vec<[i32; 256]>>, D::Error>
+	pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<u16, Vec<[i32; 256]>>, D::Error>
 	where
 		D: Deserializer<'de>,
 	{

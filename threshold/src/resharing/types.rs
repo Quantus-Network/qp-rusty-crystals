@@ -17,7 +17,7 @@ use crate::{
 };
 
 #[cfg(feature = "serde")]
-use crate::serde_helpers::{serde_participant_list, serde_partial_pks, serde_poly_vec};
+use crate::serde_helpers::{serde_partial_pks, serde_participant_list, serde_poly_vec};
 
 // ML-DSA-87 parameters (same as DKG)
 /// Number of polynomials in s1 vector.
@@ -427,10 +427,9 @@ impl Default for NewShareData {
 /// 3. **Public-key invariant verification.** Each new committee member additionally publishes
 ///    `t_J^new = A·s1_J^new + s2_J^new mod Q` for every new subset `J` it belongs to. Anyone can
 ///    sum these `t_J` and check that the result reconstructs the original public key. This catches
-///    a malicious dealer that lies about the residual `r_{I→J}` in a *size-1* old subset
-///    (`t = n` configurations), where there is no other old-subset member to cross-verify in
-///    purpose 2. Publishing `t_J^new` is safe: recovering `s_J^new` from `t_J^new` is the LWE
-///    problem.
+///    a malicious dealer that lies about the residual `r_{I→J}` in a *size-1* old subset (`t = n`
+///    configurations), where there is no other old-subset member to cross-verify in purpose 2.
+///    Publishing `t_J^new` is safe: recovering `s_J^new` from `t_J^new` is the LWE problem.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ResharingRound3Broadcast {

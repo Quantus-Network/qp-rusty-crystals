@@ -5,8 +5,7 @@
 //! partial contributions and pack them into the canonical ML-DSA-87 public-key
 //! encoding (`rho || t1`).
 
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 use qp_rusty_crystals_dilithium::{fips202, packing, polyvec};
 
@@ -21,13 +20,8 @@ pub const K: usize = 8;
 /// `s1` must contain `L` polynomials and `s2` must contain `K` polynomials, each
 /// of length `N`. Coefficients of `s1` and `s2` need not be `eta`-bounded; they
 /// only need to live in `i32` and the final result is reduced into `[0, Q)`.
-pub fn compute_partial_pk_t(
-	rho: &[u8; 32],
-	s1: &[[i32; N]],
-	s2: &[[i32; N]],
-) -> Vec<[i32; N]> {
-	let mut mat: Vec<polyvec::Polyvecl> =
-		(0..K).map(|_| polyvec::Polyvecl::default()).collect();
+pub fn compute_partial_pk_t(rho: &[u8; 32], s1: &[[i32; N]], s2: &[[i32; N]]) -> Vec<[i32; N]> {
+	let mut mat: Vec<polyvec::Polyvecl> = (0..K).map(|_| polyvec::Polyvecl::default()).collect();
 	polyvec::matrix_expand(&mut mat, rho);
 
 	let mut s1_pv = polyvec::Polyvecl::default();

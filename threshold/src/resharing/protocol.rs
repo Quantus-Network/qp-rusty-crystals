@@ -696,11 +696,8 @@ impl ResharingProtocol {
 		}
 		let me = self.config.my_party_id;
 		for (recipient, contributions) in by_recipient {
-			let msg = ResharingRound2Message {
-				from_party_id: me,
-				to_party_id: recipient,
-				contributions,
-			};
+			let msg =
+				ResharingRound2Message { from_party_id: me, to_party_id: recipient, contributions };
 			if recipient == me {
 				self.round2_messages.insert(me, msg);
 			} else {
@@ -905,9 +902,8 @@ impl ResharingProtocol {
 		self.new_shares
 			.iter()
 			.map(|(j_mask, share)| {
-				let t = crate::protocol::partial_pk::compute_partial_pk_t(
-					&rho, &share.s1, &share.s2,
-				);
+				let t =
+					crate::protocol::partial_pk::compute_partial_pk_t(&rho, &share.s1, &share.s2);
 				(*j_mask, t)
 			})
 			.collect()
@@ -942,8 +938,7 @@ impl ResharingProtocol {
 			}
 		}
 		let rho = self.derive_rho();
-		let recovered =
-			crate::protocol::partial_pk::pack_combined_pk(&rho, canonical.values());
+		let recovered = crate::protocol::partial_pk::pack_combined_pk(&rho, canonical.values());
 		if recovered.as_bytes() != self.config.public_key.as_bytes() {
 			return Err(ResharingProtocolError::ShareVerificationFailed(
 				"recovered public key does not match the original — a dealer corrupted at \
