@@ -119,13 +119,18 @@ pub struct MithrilDkgOutput {
 }
 
 /// DKG state machine.
+///
+/// `Complete` carries a boxed `MithrilDkgOutput` because the output is ~2.8 KB
+/// (full Dilithium key material), and inlining it would force every other
+/// variant — and every callsite holding a `MithrilDkgState` — to reserve that
+/// space. See `clippy::large_enum_variant`.
 pub enum MithrilDkgState<S: TranscriptSigner> {
 	Initialized(MithrilDkgConfig<S>),
 	Round1(MithrilRound1State<S>),
 	Round2(MithrilRound2State<S>),
 	Round3(MithrilRound3State<S>),
 	Round4(MithrilRound4State<S>),
-	Complete(MithrilDkgOutput),
+	Complete(Box<MithrilDkgOutput>),
 	Failed(String),
 }
 
@@ -158,7 +163,7 @@ impl<S: TranscriptSigner> MithrilDkgState<S> {
 
 	pub fn output(&self) -> Option<&MithrilDkgOutput> {
 		match self {
-			MithrilDkgState::Complete(output) => Some(output),
+			MithrilDkgState::Complete(output) => Some(output.as_ref()),
 			_ => None,
 		}
 	}

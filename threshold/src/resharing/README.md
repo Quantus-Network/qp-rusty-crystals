@@ -39,10 +39,17 @@ Round 2: Private sub-share reveal
 ├── D_I privately delivers r_{I→J} to each member of new subset J.
 └── No public traffic carries any share material.
 
-Round 3: Verification + accusations
+Round 3: Verification + accusations + public-key invariant
 ├── Each new party verifies received r_{I→J} against the Round 1 commitment, then
 │   sums  s_J^new = Σ_I r_{I→J}  for each new subset J they're in, and broadcasts
 │   a commitment to s_J^new so that the membership of J can cross-verify.
+├── Each new party also broadcasts t_J^new = A·s1_J^new + s2_J^new (mod Q) for
+│   every J they hold. After Round 3, anyone can sum these and confirm
+│   Σ_J t_J^new = T (the original public key). This is the only line of defense
+│   against a malicious dealer that owns a *size-1* old subset (e.g. t = n
+│   configurations), where there is no other I-member to cross-verify the
+│   dealer's commitments. Publishing t_J^new is safe — recovering s_J^new from
+│   t_J^new is the LWE problem.
 └── Old subset members file DealerAccusation if any dealer's broadcast commitment
     doesn't match their independent recomputation.
 ```
@@ -56,8 +63,8 @@ hence the public key `t = A·s1 + s2` — is preserved.
 |----------|-----------|
 | **Secrecy of `s`** | No party — not even any dealer — ever holds `s` in clear. Each `D_I` only handles `s_I^old`, which they already had. |
 | **Confidentiality of contributions** | Round 1 broadcasts only hash commitments; Round 2 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
-| **Cheating-dealer detection** | Other members of `I` independently recompute `r_{I→J}` from `s_I^old` and accuse `D_I` if the broadcast commitment differs; new-subset members cross-verify computed `s_J^new`. |
-| **PK Preservation** | Public key `t = A·s1 + s2` unchanged. |
+| **Cheating-dealer detection** | Other members of `I` independently recompute `r_{I→J}` from `s_I^old` and accuse `D_I` if the broadcast commitment differs; new-subset members cross-verify computed `s_J^new`; and a final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching any dealer that lied about a residual even when their old subset has size 1. |
+| **PK Preservation** | Public key `t = A·s1 + s2` unchanged, verified at the end of Round 3 via a deterministic byte-equality check against the original PK. |
 
 ## Why Custom Protocol?
 
@@ -123,8 +130,8 @@ Each party has a role determined by committee membership:
 ## Message Types
 
 - `Round1Broadcast`: per-subset commitment hashes  `H(r_{I→J})`  (no plaintext shares)
-- `Round2Message`: private sub-share reveal — one message per (dealer, recipient) carrying every `r_{I→J}` the dealer owes that recipient
-- `Round3Broadcast`: commitments to computed `s_J^new` + any `DealerAccusation`s
+- `Round2Message`: private sub-share reveal — one message per (dealer, recipient) carrying every `r_{I→J}` the dealer owes that recipient. Dealers handle self-deals locally and never emit `SendPrivate(self, _)`.
+- `Round3Broadcast`: commitments to computed `s_J^new`, partial public-key contributions `t_J^new`, and any `DealerAccusation`s
 
 ## Limitations
 

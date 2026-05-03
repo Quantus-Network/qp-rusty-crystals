@@ -17,7 +17,7 @@ use crate::{
 };
 
 #[cfg(feature = "serde")]
-use crate::serde_helpers::{serde_participant_list, serde_poly_vec};
+use crate::serde_helpers::{serde_participant_list, serde_partial_pks, serde_poly_vec};
 
 // ML-DSA-87 parameters (same as DKG)
 /// Number of polynomials in s1 vector.
@@ -411,7 +411,7 @@ impl Default for NewShareData {
 
 /// Round 3 broadcast.
 ///
-/// Round 3 has two purposes:
+/// Round 3 has three purposes:
 ///
 /// 1. **New committee verification.** Each new committee member broadcasts a commitment to each
 ///    `s_J^new` they computed for new subsets `J` containing them. Other members of the same `J`
@@ -423,6 +423,14 @@ impl Default for NewShareData {
 ///    copy of `s_I^old` and compare them against `D_I`'s broadcast commitments. Any mismatch is
 ///    reported as a `DealerAccusation`. If the accusation is correct (the accuser's recomputation
 ///    matches their own private knowledge of `s_I`), the resharing fails.
+///
+/// 3. **Public-key invariant verification.** Each new committee member additionally publishes
+///    `t_J^new = A·s1_J^new + s2_J^new mod Q` for every new subset `J` it belongs to. Anyone can
+///    sum these `t_J` and check that the result reconstructs the original public key. This catches
+///    a malicious dealer that lies about the residual `r_{I→J}` in a *size-1* old subset
+///    (`t = n` configurations), where there is no other old-subset member to cross-verify in
+///    purpose 2. Publishing `t_J^new` is safe: recovering `s_J^new` from `t_J^new` is the LWE
+///    problem.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ResharingRound3Broadcast {
@@ -430,6 +438,10 @@ pub struct ResharingRound3Broadcast {
 	pub party_id: ParticipantId,
 	/// Commitments to each computed new subset share (only populated by new committee members).
 	pub share_commitments: BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>,
+	/// Partial public-key contributions `t_J^new = A·s1_J^new + s2_J^new mod Q`,
+	/// one entry per new subset `J` this party belongs to. Empty for old-only parties.
+	#[cfg_attr(feature = "serde", serde(with = "serde_partial_pks"))]
+	pub partial_pks: BTreeMap<SubsetMask, Vec<[i32; N]>>,
 	/// Accusations against dealers whose broadcast commitments did not match
 	/// the sender's independent recomputation.
 	pub accusations: Vec<DealerAccusation>,
@@ -596,6 +608,7 @@ mod tests {
 		let r3 = ResharingMessage::Round3(ResharingRound3Broadcast {
 			party_id: 2,
 			share_commitments: BTreeMap::new(),
+			partial_pks: BTreeMap::new(),
 			accusations: Vec::new(),
 			success: true,
 			error_message: None,
@@ -773,6 +786,7 @@ mod tests {
 		let r3 = ResharingMessage::Round3(ResharingRound3Broadcast {
 			party_id: 77,
 			share_commitments: BTreeMap::new(),
+			partial_pks: BTreeMap::new(),
 			accusations: Vec::new(),
 			success: true,
 			error_message: None,
@@ -785,6 +799,7 @@ mod tests {
 		let success = ResharingRound3Broadcast {
 			party_id: 0,
 			share_commitments: BTreeMap::new(),
+			partial_pks: BTreeMap::new(),
 			accusations: Vec::new(),
 			success: true,
 			error_message: None,
@@ -795,6 +810,7 @@ mod tests {
 		let failure = ResharingRound3Broadcast {
 			party_id: 1,
 			share_commitments: BTreeMap::new(),
+			partial_pks: BTreeMap::new(),
 			accusations: Vec::new(),
 			success: false,
 			error_message: Some("Share verification failed".to_string()),

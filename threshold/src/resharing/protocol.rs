@@ -527,9 +527,21 @@ impl ResharingProtocol {
 			}
 		}
 
+		// Compute partial public-key contributions `t_J = A·s1_J + s2_J mod Q`
+		// for every new subset we hold. These are summed and checked against the
+		// original public key in Combining; this catches a malicious dealer that
+		// lies about a residual `r_{I→J}` in a size-1 old subset, where there is
+		// no peer in the old subset to cross-verify the commitment.
+		let partial_pks = if self.config.role.is_new_committee() && success {
+			self.compute_my_partial_pks()
+		} else {
+			BTreeMap::new()
+		};
+
 		let broadcast = ResharingRound3Broadcast {
 			party_id: self.config.my_party_id,
 			share_commitments,
+			partial_pks,
 			accusations,
 			success,
 			error_message,
@@ -606,6 +618,12 @@ impl ResharingProtocol {
 		// New committee members must agree on every shared new subset.
 		self.verify_new_share_consistency()?;
 
+		// Verify the resharing preserved the public key invariant. This is the
+		// only line of defense against a malicious dealer that owns a size-1 old
+		// subset (`t = n` configurations), since `collect_accusations` cannot
+		// catch them — there is nobody else in the old subset to cross-check.
+		self.verify_public_key_preservation()?;
+
 		let output = self.build_output()?;
 		self.completed_output = Some(output.clone());
 		self.state = ResharingState::Done;
@@ -660,6 +678,11 @@ impl ResharingProtocol {
 	}
 
 	/// Build the per-recipient Round 2 messages we will emit one-by-one in `poke`.
+	///
+	/// Self-deals (when this party is also a member of `J`) are inserted directly
+	/// into `round2_messages`; only outbound messages are queued in `pending_round2`.
+	/// This mirrors the DKG pattern (`process_round1` skips self) and removes the
+	/// implicit "network must loopback SendPrivate(self, _)" requirement.
 	fn build_pending_round2_messages(&mut self) {
 		let mut by_recipient: BTreeMap<ParticipantId, BTreeMap<SubsetPair, NewShareData>> =
 			BTreeMap::new();
@@ -671,12 +694,18 @@ impl ResharingProtocol {
 				}
 			}
 		}
+		let me = self.config.my_party_id;
 		for (recipient, contributions) in by_recipient {
-			self.pending_round2.push(ResharingRound2Message {
-				from_party_id: self.config.my_party_id,
+			let msg = ResharingRound2Message {
+				from_party_id: me,
 				to_party_id: recipient,
 				contributions,
-			});
+			};
+			if recipient == me {
+				self.round2_messages.insert(me, msg);
+			} else {
+				self.pending_round2.push(msg);
+			}
 		}
 	}
 
@@ -858,6 +887,73 @@ impl ResharingProtocol {
 		Ok(())
 	}
 
+	/// Extract `rho` (matrix-A seed). Old/Both parties take it from their existing
+	/// share; NewOnly parties extract it from the public key prefix.
+	fn derive_rho(&self) -> [u8; 32] {
+		if let Some(ref existing) = self.config.existing_share {
+			*existing.rho()
+		} else {
+			let mut rho = [0u8; 32];
+			rho.copy_from_slice(&self.config.public_key.as_bytes()[..32]);
+			rho
+		}
+	}
+
+	/// Compute `t_J = A·s1_J^new + s2_J^new mod Q` for every new subset we hold.
+	fn compute_my_partial_pks(&self) -> BTreeMap<SubsetMask, Vec<[i32; N]>> {
+		let rho = self.derive_rho();
+		self.new_shares
+			.iter()
+			.map(|(j_mask, share)| {
+				let t = crate::protocol::partial_pk::compute_partial_pk_t(
+					&rho, &share.s1, &share.s2,
+				);
+				(*j_mask, t)
+			})
+			.collect()
+	}
+
+	/// Cross-check the broadcast partial PKs and sum them to confirm the
+	/// resharing reconstructs the original public key.
+	fn verify_public_key_preservation(&self) -> Result<(), ResharingProtocolError> {
+		let mut canonical: BTreeMap<SubsetMask, Vec<[i32; N]>> = BTreeMap::new();
+		for broadcast in self.round3_broadcasts.values() {
+			for (j_mask, t_partial) in &broadcast.partial_pks {
+				match canonical.get(j_mask) {
+					None => {
+						canonical.insert(*j_mask, t_partial.clone());
+					},
+					Some(existing) =>
+						if existing != t_partial {
+							return Err(ResharingProtocolError::ShareVerificationFailed(format!(
+								"members of new subset {:b} disagree on partial PK t_J",
+								j_mask
+							)));
+						},
+				}
+			}
+		}
+		for j_mask in &self.new_subset_order {
+			if !canonical.contains_key(j_mask) {
+				return Err(ResharingProtocolError::ShareVerificationFailed(format!(
+					"missing partial PK contribution for new subset {:b}",
+					j_mask
+				)));
+			}
+		}
+		let rho = self.derive_rho();
+		let recovered =
+			crate::protocol::partial_pk::pack_combined_pk(&rho, canonical.values());
+		if recovered.as_bytes() != self.config.public_key.as_bytes() {
+			return Err(ResharingProtocolError::ShareVerificationFailed(
+				"recovered public key does not match the original — a dealer corrupted at \
+				 least one sub-share contribution"
+					.to_string(),
+			));
+		}
+		Ok(())
+	}
+
 	fn build_output(&self) -> Result<ResharingOutput, ResharingProtocolError> {
 		if !self.config.role.is_new_committee() {
 			return Ok(ResharingOutput {
@@ -881,13 +977,11 @@ impl ResharingProtocol {
 				.insert(*j_mask, SecretShareData { s1: share.s1.clone(), s2: share.s2.clone() });
 		}
 
-		let (rho, tr) = if let Some(ref existing) = self.config.existing_share {
-			(*existing.rho(), *existing.tr())
+		let rho = self.derive_rho();
+		let tr = if let Some(ref existing) = self.config.existing_share {
+			*existing.tr()
 		} else {
-			let pk_bytes = self.config.public_key.as_bytes();
-			let mut rho = [0u8; 32];
-			rho.copy_from_slice(&pk_bytes[..32]);
-			(rho, *self.config.public_key.tr())
+			*self.config.public_key.tr()
 		};
 
 		// Derive `party_key` from the actual share polynomials so it carries real

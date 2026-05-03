@@ -73,6 +73,56 @@ pub mod serde_poly_vec {
 	}
 }
 
+/// Serde support for `BTreeMap<u16, Vec<[i32; 256]>>` (partial-PK polynomial vectors).
+#[cfg(feature = "serde")]
+pub mod serde_partial_pks {
+	use super::*;
+	use std::collections::BTreeMap;
+
+	pub fn serialize<S>(
+		map: &BTreeMap<u16, Vec<[i32; 256]>>,
+		serializer: S,
+	) -> Result<S::Ok, S::Error>
+	where
+		S: Serializer,
+	{
+		let entries: Vec<(u16, Vec<Vec<i32>>)> = map
+			.iter()
+			.map(|(k, polys)| (*k, polys.iter().map(|arr| arr.to_vec()).collect()))
+			.collect();
+		entries.serialize(serializer)
+	}
+
+	pub fn deserialize<'de, D>(
+		deserializer: D,
+	) -> Result<BTreeMap<u16, Vec<[i32; 256]>>, D::Error>
+	where
+		D: Deserializer<'de>,
+	{
+		let entries: Vec<(u16, Vec<Vec<i32>>)> = Vec::deserialize(deserializer)?;
+		entries
+			.into_iter()
+			.map(|(k, polys)| {
+				let arrs: Result<Vec<[i32; 256]>, D::Error> = polys
+					.into_iter()
+					.map(|v| {
+						if v.len() != 256 {
+							return Err(serde::de::Error::custom(format!(
+								"expected 256 coefficients, got {}",
+								v.len()
+							)));
+						}
+						let mut arr = [0i32; 256];
+						arr.copy_from_slice(&v);
+						Ok(arr)
+					})
+					.collect();
+				arrs.map(|arrs| (k, arrs))
+			})
+			.collect()
+	}
+}
+
 /// Serde support for `BTreeMap<u16, T>` where T is serializable.
 /// BTreeMap provides deterministic iteration order (sorted by key),
 /// ensuring consistent serialization output.
