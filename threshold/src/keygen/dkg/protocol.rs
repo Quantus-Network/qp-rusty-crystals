@@ -240,12 +240,17 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 				if broadcast.party_id == from {
 					state.received_broadcasts.insert(from, broadcast);
 				},
-			(MithrilDkgState::Round1(state), MithrilDkgMessage::Round1Private(private)) =>
-				if private.from_party_id == from {
+			(MithrilDkgState::Round1(state), MithrilDkgMessage::Round1Private(private)) => {
+				// M2: Validate sender is the legitimate leader for this subset
+				// This prevents a malicious non-leader from overwriting the leader's secret
+				let expected_leader = state.config.get_leader(private.subset_mask);
+				if private.from_party_id == from && expected_leader == Some(from) {
 					state
 						.received_shared_secrets
 						.insert(private.subset_mask, private.shared_secret);
-				},
+				}
+				// Silently ignore messages from non-leaders (could be malicious)
+			},
 			(MithrilDkgState::Round2(state), MithrilDkgMessage::Round2Broadcast(broadcast)) =>
 				if broadcast.party_id == from {
 					state.received_broadcasts.insert(from, broadcast);

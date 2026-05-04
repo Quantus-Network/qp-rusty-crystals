@@ -200,25 +200,6 @@ pub(crate) fn aggregate_commitments_dilithium(
 	}
 }
 
-/// Aggregate response polynomials.
-pub(crate) fn aggregate_responses(zfinals: &mut [polyvec::Polyvecl], zs: &[polyvec::Polyvecl]) {
-	for (zfinal, z) in zfinals.iter_mut().zip(zs.iter()) {
-		for (zfinal_poly, z_poly) in zfinal.vec.iter_mut().zip(z.vec.iter()).take(L) {
-			for (zfinal_coeff, z_coeff) in zfinal_poly.coeffs.iter_mut().zip(z_poly.coeffs.iter()) {
-				*zfinal_coeff += *z_coeff;
-			}
-		}
-		// Normalize
-		for zfinal_poly in zfinal.vec.iter_mut().take(L) {
-			for coeff in zfinal_poly.coeffs.iter_mut() {
-				let c = *coeff;
-				let c_u32 = if c < 0 { (c + Q) as u32 } else { c as u32 };
-				*coeff = mod_q(c_u32) as i32;
-			}
-		}
-	}
-}
-
 // ============================================================================
 // Round 1: Commitment Generation
 // ============================================================================
@@ -679,7 +660,28 @@ pub(crate) fn unpack_responses(
 // Signature Combination
 // ============================================================================
 
+/// Check if a single party's z response for one iteration satisfies the norm bound.
+/// Returns true if the response is valid (within bounds).
+fn check_party_z_norm(z_i: &polyvec::Polyvecl, gamma1_minus_beta: i32) -> bool {
+	for z_poly in z_i.vec.iter().take(L) {
+		for coeff in z_poly.coeffs.iter() {
+			let centered = if *coeff > Q / 2 { *coeff - Q } else { *coeff };
+			if centered.abs() >= gamma1_minus_beta {
+				return false;
+			}
+		}
+	}
+	true
+}
+
 /// Combine all responses into a final signature.
+///
+/// # Security Note (M3)
+/// This function validates per-party z-norms before aggregation to prevent
+/// a single malicious party from causing all signature attempts to fail
+/// by contributing an out-of-bounds response. Parties with invalid z-norms
+/// are excluded on a per-iteration basis, maximizing the chance of producing
+/// a valid signature as long as at least t honest parties participate.
 pub(crate) fn combine_signature(
 	public_key: &PublicKey,
 	config: &ThresholdConfig,
@@ -691,12 +693,10 @@ pub(crate) fn combine_signature(
 	crate::error::validate_context(context)?;
 
 	let k_iterations = config.k_iterations() as usize;
+	let threshold = config.threshold() as usize;
 
-	// Aggregate all responses
-	let mut z_aggregated: Vec<polyvec::Polyvecl> = vec![polyvec::Polyvecl::default(); k_iterations];
-	for party_responses in all_responses {
-		aggregate_responses(&mut z_aggregated, party_responses);
-	}
+	// Per-party z-norm bound: γ1 - β (same as individual Dilithium bound)
+	let gamma1_minus_beta = (dilithium_params::GAMMA1 - dilithium_params::BETA) as i32;
 
 	// Compute μ
 	let mut tr = [0u8; 64];
@@ -713,17 +713,46 @@ pub(crate) fn combine_signature(
 	// Extract t1 from public key
 	let t1 = unpack_t1(public_key.as_bytes())?;
 
-	// For each commitment iteration
-	for i in 0..k_iterations.min(w_aggregated.len()).min(z_aggregated.len()) {
+	// For each commitment iteration, try to find a valid signature
+	for i in 0..k_iterations.min(w_aggregated.len()) {
+		// M3: Per-iteration exclusion - filter parties with valid z-norms for this iteration
+		let mut z_aggregated = polyvec::Polyvecl::default();
+		let mut valid_party_count = 0usize;
+
+		for party_responses in all_responses.iter() {
+			if i < party_responses.len() {
+				let z_i = &party_responses[i];
+				// Only include parties with valid z-norm for this iteration
+				if check_party_z_norm(z_i, gamma1_minus_beta) {
+					// Aggregate this party's response
+					for (agg_poly, party_poly) in
+						z_aggregated.vec.iter_mut().zip(z_i.vec.iter()).take(L)
+					{
+						for (agg_coeff, party_coeff) in
+							agg_poly.coeffs.iter_mut().zip(party_poly.coeffs.iter())
+						{
+							*agg_coeff = (*agg_coeff + *party_coeff) % Q;
+						}
+					}
+					valid_party_count += 1;
+				}
+				// Parties with invalid z-norm are silently excluded for this iteration
+			}
+		}
+
+		// Need at least t valid parties to produce a signature
+		if valid_party_count < threshold {
+			continue; // Try next iteration
+		}
+
 		// Decompose w into w0 and w1
 		let mut w0 = polyvec::Polyveck::default();
 		let mut w1 = polyvec::Polyveck::default();
 		decompose_polyveck(&w_aggregated[i], &mut w0, &mut w1);
 
-		// Ensure ||z||_∞ < γ1 - β
-		let gamma1_minus_beta = (dilithium_params::GAMMA1 - dilithium_params::BETA) as i32;
+		// Check aggregated z-norm (may still exceed due to sum of valid parties)
 		let mut z_exceeds = false;
-		'z_check: for z_poly in z_aggregated[i].vec.iter().take(L) {
+		'z_check: for z_poly in z_aggregated.vec.iter().take(L) {
 			for coeff in z_poly.coeffs.iter() {
 				let centered = if *coeff > Q / 2 { *coeff - Q } else { *coeff };
 				if centered.abs() >= gamma1_minus_beta {
@@ -737,7 +766,7 @@ pub(crate) fn combine_signature(
 		}
 
 		// Compute Az (z in NTT domain)
-		let mut zh = z_aggregated[i].clone();
+		let mut zh = z_aggregated.clone();
 		for zh_poly in zh.vec.iter_mut().take(L) {
 			for coeff in zh_poly.coeffs.iter_mut() {
 				if *coeff > Q / 2 {
@@ -863,7 +892,7 @@ pub(crate) fn combine_signature(
 
 		if hint_pop <= dilithium_params::OMEGA {
 			// Convert z to centered form for packing
-			let mut z_centered = z_aggregated[i].clone();
+			let mut z_centered = z_aggregated.clone();
 			for z_poly in z_centered.vec.iter_mut().take(L) {
 				for coeff in z_poly.coeffs.iter_mut() {
 					if *coeff > Q / 2 {
@@ -875,9 +904,8 @@ pub(crate) fn combine_signature(
 			// Pack signature with challenge and hint
 			let mut challenge_full = [0u8; 64];
 			challenge_full[..dilithium_params::C_DASH_BYTES].copy_from_slice(&challenge_bytes);
-			if let Ok(sig) = pack_signature(&challenge_full, &z_centered, &hint) {
-				return Ok(sig);
-			}
+			let sig = pack_signature(&challenge_full, &z_centered, &hint);
+			return Ok(sig);
 		}
 	}
 

@@ -21,8 +21,8 @@
 //!
 //! - The **leader** (party with lowest ID among participants) combines signature shares and decides
 //!   whether to broadcast `Round4Complete(signature)` or `Round4Retry`.
-//! - **Followers** verify the leader's signature before accepting it. This removes the leader
-//!   trust assumption for signature validity (a malicious leader cannot send a forged signature).
+//! - **Followers** verify the leader's signature before accepting it. This removes the leader trust
+//!   assumption for signature validity (a malicious leader cannot send a forged signature).
 //!
 //! **Security properties:**
 //! - A malicious leader cannot forge signatures (requires threshold parties to collude).
@@ -957,14 +957,14 @@ impl DilithiumSignProtocol {
 				if let Some(signature) = self.received_signature.take() {
 					// Verify the signature before accepting it (H4: don't trust the leader blindly)
 					let public_key = self.signer.public_key();
-					if crate::verify_signature(public_key, &self.message, &self.context, &signature) {
+					if crate::verify_signature(public_key, &self.message, &self.context, &signature)
+					{
 						self.state = SignProtocolState::Done;
 						return Ok(Action::Return(signature));
 					} else {
 						// Leader sent an invalid signature - this is a protocol failure
-						self.state = SignProtocolState::Failed(
-							"Leader sent invalid signature".to_string(),
-						);
+						self.state =
+							SignProtocolState::Failed("Leader sent invalid signature".to_string());
 						return Err(SignProtocolError::ProtocolFailed(
 							"Leader sent invalid signature".to_string(),
 						));
@@ -1876,8 +1876,7 @@ mod tests {
 			.take(2)
 			.enumerate()
 			.map(|(i, share)| {
-				let signer =
-					ThresholdSigner::new(share.clone(), pk.clone(), config).unwrap();
+				let signer = ThresholdSigner::new(share.clone(), pk.clone(), config).unwrap();
 				DilithiumSignProtocol::new(
 					signer,
 					message.clone(),
@@ -1895,13 +1894,12 @@ mod tests {
 			for i in 0..2 {
 				if let Ok(action) = protocols[i].poke() {
 					match action {
-						Action::SendMany(data) => {
+						Action::SendMany(data) =>
 							for j in 0..2 {
 								if i != j {
 									let _ = protocols[j].message(i as u32, data.clone());
 								}
-							}
-						},
+							},
 						Action::Return(sig) => {
 							signature = Some(sig);
 							break;
@@ -1918,10 +1916,7 @@ mod tests {
 		let valid_sig = signature.expect("Should have produced a valid signature");
 
 		// Verify the signature is actually valid
-		assert!(
-			verify_signature(&pk, &message, &context, &valid_sig),
-			"Signature should be valid"
-		);
+		assert!(verify_signature(&pk, &message, &context, &valid_sig), "Signature should be valid");
 
 		// Now test that a new follower would accept this valid signature
 		let signer = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();

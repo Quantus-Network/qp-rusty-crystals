@@ -497,17 +497,20 @@ pub(crate) fn unpack_polyveck_w(buf: &[u8]) -> polyvec::Polyveck {
 // ============================================================================
 
 /// Pack a threshold signature into the standard ML-DSA-87 format.
+///
+/// This function always succeeds - all validation (hint bounds, z-norm checks)
+/// is performed before calling this function.
 pub(crate) fn pack_signature(
 	c_tilde: &[u8],
 	z: &polyvec::Polyvecl,
 	hint: &polyvec::Polyveck,
-) -> Result<Vec<u8>, &'static str> {
+) -> Vec<u8> {
 	let mut sig = vec![0u8; dilithium_params::SIGNBYTES];
 
 	// Use dilithium's pack_sig function
 	packing::pack_sig(&mut sig, Some(c_tilde), z, hint);
 
-	Ok(sig)
+	sig
 }
 
 #[cfg(test)]

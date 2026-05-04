@@ -11,7 +11,8 @@
 //! This protocol does not provide its own encryption layer.
 //!
 //! - `Action::SendMany` (Rounds 1, 3): Requires authenticated broadcast (integrity)
-//! - `Action::SendPrivate` (Round 2): **Requires authenticated encryption** (confidentiality + integrity)
+//! - `Action::SendPrivate` (Round 2): **Requires authenticated encryption** (confidentiality +
+//!   integrity)
 //!
 //! If `SendPrivate` messages are sent unencrypted, an eavesdropper can recover sub-shares
 //! and potentially reconstruct secret key material.

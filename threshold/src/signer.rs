@@ -35,7 +35,7 @@
 //! let signature = signer.combine(&all_r2_broadcasts, &all_r3_broadcasts)?;
 //! ```
 
-use alloc::{format, string::ToString, vec::Vec};
+use alloc::{collections::BTreeSet, format, string::ToString, vec::Vec};
 use core::mem;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -469,6 +469,7 @@ impl ThresholdSigner {
 	/// - The signer is not in the `AfterRound3` state
 	/// - Not enough valid responses
 	/// - Signature constraint validation fails
+	/// - Duplicate Round 3 broadcast from same party (M3)
 	pub fn combine(
 		&self,
 		_all_round2: &[Round2Broadcast],
@@ -490,20 +491,31 @@ impl ThresholdSigner {
 		// (w values were aggregated when processing Round 2 broadcasts in round3_respond)
 		let w_aggregated = round2_data.w_aggregated.clone();
 
-		// Collect all responses including our own
+		// Collect all responses including our own, with duplicate detection (M3)
 		let mut all_responses: Vec<Vec<polyvec::Polyvecl>> = Vec::new();
+		let mut seen_parties: BTreeSet<u32> = BTreeSet::new();
+
+		// Add our own response first
 		all_responses.push(my_responses.clone());
+		seen_parties.insert(self.private_key.party_id());
 
 		for r3 in all_round3 {
-			if r3.party_id != self.private_key.party_id() {
-				let responses = unpack_responses(&r3.response, &self.config).map_err(|e| {
-					ThresholdError::InvalidSignatureShareData {
-						party_id: r3.party_id,
-						reason: format!("Failed to unpack Round 3 response: {}", e),
-					}
-				})?;
-				all_responses.push(responses);
+			if r3.party_id == self.private_key.party_id() {
+				continue; // Skip our own
 			}
+
+			// Check for duplicates (M3: duplicate Round 3 should error, not silently overwrite)
+			if !seen_parties.insert(r3.party_id) {
+				return Err(ThresholdError::DuplicateBroadcast { party_id: r3.party_id });
+			}
+
+			let responses = unpack_responses(&r3.response, &self.config).map_err(|e| {
+				ThresholdError::InvalidSignatureShareData {
+					party_id: r3.party_id,
+					reason: format!("Failed to unpack Round 3 response: {}", e),
+				}
+			})?;
+			all_responses.push(responses);
 		}
 
 		let signature_bytes = combine_signature(
@@ -522,6 +534,9 @@ impl ThresholdSigner {
 	///
 	/// Use this version when you need to provide the message and context
 	/// again for the combine step.
+	///
+	/// # Errors
+	/// - Duplicate Round 3 broadcast from same party (M3)
 	pub fn combine_with_message(
 		&self,
 		message: &[u8],
@@ -545,20 +560,31 @@ impl ThresholdSigner {
 		// (w values were aggregated when processing Round 2 broadcasts in round3_respond)
 		let w_aggregated = round2_data.w_aggregated.clone();
 
-		// Collect all responses including our own
+		// Collect all responses including our own, with duplicate detection (M3)
 		let mut all_responses: Vec<Vec<polyvec::Polyvecl>> = Vec::new();
+		let mut seen_parties: BTreeSet<u32> = BTreeSet::new();
+
+		// Add our own response first
 		all_responses.push(my_responses.clone());
+		seen_parties.insert(self.private_key.party_id());
 
 		for r3 in all_round3 {
-			if r3.party_id != self.private_key.party_id() {
-				let responses = unpack_responses(&r3.response, &self.config).map_err(|e| {
-					ThresholdError::InvalidSignatureShareData {
-						party_id: r3.party_id,
-						reason: format!("Failed to unpack Round 3 response: {}", e),
-					}
-				})?;
-				all_responses.push(responses);
+			if r3.party_id == self.private_key.party_id() {
+				continue; // Skip our own
 			}
+
+			// Check for duplicates (M3: duplicate Round 3 should error, not silently overwrite)
+			if !seen_parties.insert(r3.party_id) {
+				return Err(ThresholdError::DuplicateBroadcast { party_id: r3.party_id });
+			}
+
+			let responses = unpack_responses(&r3.response, &self.config).map_err(|e| {
+				ThresholdError::InvalidSignatureShareData {
+					party_id: r3.party_id,
+					reason: format!("Failed to unpack Round 3 response: {}", e),
+				}
+			})?;
+			all_responses.push(responses);
 		}
 
 		let signature_bytes = combine_signature(
