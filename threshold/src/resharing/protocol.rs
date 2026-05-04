@@ -72,8 +72,21 @@ pub enum Action<T> {
 	/// Do nothing, waiting for more messages from other participants.
 	Wait,
 	/// Send a message to all other participants (broadcast).
+	/// Requires authenticated delivery (integrity).
 	SendMany(Vec<u8>),
 	/// Send a private message to a specific participant.
+	///
+	/// # ⚠️ Security Requirement
+	///
+	/// This message contains **secret share material** and **MUST** be transmitted
+	/// over an authenticated-encrypted channel. The protocol does not encrypt
+	/// this data; the transport layer must provide:
+	/// - **Confidentiality**: Only the recipient can read the message
+	/// - **Authenticity**: Recipient can verify the sender's identity
+	/// - **Integrity**: Message cannot be modified in transit
+	///
+	/// Sending this message over an unencrypted channel exposes secret shares
+	/// to eavesdroppers and compromises the security of the threshold scheme.
 	SendPrivate(ParticipantId, Vec<u8>),
 	/// The protocol has completed, returning the output.
 	Return(T),

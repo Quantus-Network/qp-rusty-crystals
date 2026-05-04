@@ -369,6 +369,18 @@ pub type SubsetPair = (SubsetMask, SubsetMask);
 ///
 /// New shares are then computed (privately, by each new committee member) as
 /// `s_J^new = Σ_I r_{I→J}`.
+///
+/// # ⚠️ Security Warning
+///
+/// This message contains **secret share material in plaintext**. It **MUST** be
+/// transmitted via [`Action::SendPrivate`] over an authenticated-encrypted channel.
+/// The protocol does not provide encryption; the transport layer must ensure:
+/// - Confidentiality (only the recipient can read)
+/// - Authenticity (recipient verifies sender identity)
+/// - Integrity (cannot be modified in transit)
+///
+/// Transmitting this message over an unencrypted channel exposes sub-shares to
+/// eavesdroppers and compromises the threshold scheme's security.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ResharingRound2Message {

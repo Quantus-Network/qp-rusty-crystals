@@ -117,6 +117,27 @@ loop {
 }
 ```
 
+## ⚠️ Transport Security Requirements
+
+**CRITICAL**: Round 2 messages (`Action::SendPrivate`) contain secret share material in plaintext
+and **MUST** be transmitted over an authenticated-encrypted channel. The protocol does not
+provide its own encryption layer.
+
+| Message Type | Transport Requirement |
+|--------------|----------------------|
+| `Action::SendMany` (Round 1, 3) | Authenticated broadcast (integrity only) |
+| `Action::SendPrivate` (Round 2) | **Authenticated encryption required** (confidentiality + integrity) |
+
+If `SendPrivate` messages are sent over an unencrypted channel, an eavesdropper can recover
+the sub-shares `r_{I→J}` and potentially reconstruct secret key material.
+
+**For NEAR MPC**: The existing authenticated-encryption transport satisfies this requirement.
+
+**For other integrations**: Ensure your transport layer provides:
+- Confidentiality (e.g., TLS, Noise Protocol, or application-layer encryption)
+- Authentication (recipient can verify the sender's identity)
+- Integrity (messages cannot be modified in transit)
+
 ## Roles
 
 Each party has a role determined by committee membership:
@@ -130,7 +151,7 @@ Each party has a role determined by committee membership:
 ## Message Types
 
 - `Round1Broadcast`: per-subset commitment hashes  `H(r_{I→J})`  (no plaintext shares)
-- `Round2Message`: private sub-share reveal — one message per (dealer, recipient) carrying every `r_{I→J}` the dealer owes that recipient. Dealers handle self-deals locally and never emit `SendPrivate(self, _)`.
+- `Round2Message`: private sub-share reveal (**requires secure channel** — see Transport Security above) — one message per (dealer, recipient) carrying every `r_{I→J}` the dealer owes that recipient. Dealers handle self-deals locally and never emit `SendPrivate(self, _)`.
 - `Round3Broadcast`: commitments to computed `s_J^new`, partial public-key contributions `t_J^new`, and any `DealerAccusation`s
 
 ## Limitations
@@ -138,4 +159,4 @@ Each party has a role determined by committee membership:
 - Maximum 16 parties (due to u16 subset masks)
 - Requires every designated dealer to be online; if a dealer is offline or
   cheats, the protocol aborts (no recovery / re-deal in this implementation)
-- Secure channels required for Round 2 private messages
+- **Secure channels required for Round 2 private messages** (see Transport Security section above)
