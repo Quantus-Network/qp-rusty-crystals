@@ -1077,7 +1077,7 @@ mod tests {
 				for (poly_idx, poly) in share.s1.iter().enumerate() {
 					for (coeff_idx, &coeff) in poly.iter().enumerate() {
 						assert!(
-							coeff >= -ETA && coeff <= ETA,
+							(-ETA..=ETA).contains(&coeff),
 							"Party {} subset {:b} s1[{}][{}] = {} outside η bound",
 							party_id,
 							subset_mask,
@@ -1090,7 +1090,7 @@ mod tests {
 				for (poly_idx, poly) in share.s2.iter().enumerate() {
 					for (coeff_idx, &coeff) in poly.iter().enumerate() {
 						assert!(
-							coeff >= -ETA && coeff <= ETA,
+							(-ETA..=ETA).contains(&coeff),
 							"Party {} subset {:b} s2[{}][{}] = {} outside η bound",
 							party_id,
 							subset_mask,
@@ -1185,15 +1185,15 @@ mod tests {
 
 		// Verify η-bounded shares
 		for output in &outputs {
-			for (_, share) in output.private_share.shares() {
+			for share in output.private_share.shares().values() {
 				for poly in &share.s1 {
 					for &coeff in poly {
-						assert!(coeff >= -ETA && coeff <= ETA);
+						assert!((-ETA..=ETA).contains(&coeff));
 					}
 				}
 				for poly in &share.s2 {
 					for &coeff in poly {
-						assert!(coeff >= -ETA && coeff <= ETA);
+						assert!((-ETA..=ETA).contains(&coeff));
 					}
 				}
 			}
@@ -1413,13 +1413,13 @@ mod tests {
 				for (from, mut data) in messages {
 					// Tamper with party 2's Round 2 message
 					if from == 2 {
-						if let Ok(msg) = bincode::deserialize::<MithrilDkgMessage>(&data) {
-							if let MithrilDkgMessage::Round2Broadcast(mut r2) = msg {
-								// Corrupt the randomness
-								r2.randomness[0] ^= 0xFF;
-								let tampered = MithrilDkgMessage::Round2Broadcast(r2);
-								data = bincode::serialize(&tampered).unwrap();
-							}
+						if let Ok(MithrilDkgMessage::Round2Broadcast(mut r2)) =
+							bincode::deserialize::<MithrilDkgMessage>(&data)
+						{
+							// Corrupt the randomness
+							r2.randomness[0] ^= 0xFF;
+							let tampered = MithrilDkgMessage::Round2Broadcast(r2);
+							data = bincode::serialize(&tampered).unwrap();
 						}
 					}
 					dkgs[party_id].message(from, data).unwrap();
@@ -1537,17 +1537,16 @@ mod tests {
 				for (from, mut data) in messages {
 					// Tamper with party 0's Round 3 message (PK commitments)
 					if from == 0 {
-						if let Ok(msg) = bincode::deserialize::<MithrilDkgMessage>(&data) {
-							if let MithrilDkgMessage::Round3Broadcast(mut r3) = msg {
-								// Corrupt a PK commitment for subset 0b101 where party 2 is a
-								// member
-								if let Some(commitment) = r3.partial_pk_commitments.get_mut(&0b101)
-								{
-									commitment[0] ^= 0xFF;
-								}
-								let tampered = MithrilDkgMessage::Round3Broadcast(r3);
-								data = bincode::serialize(&tampered).unwrap();
+						if let Ok(MithrilDkgMessage::Round3Broadcast(mut r3)) =
+							bincode::deserialize::<MithrilDkgMessage>(&data)
+						{
+							// Corrupt a PK commitment for subset 0b101 where party 2 is a
+							// member
+							if let Some(commitment) = r3.partial_pk_commitments.get_mut(&0b101) {
+								commitment[0] ^= 0xFF;
 							}
+							let tampered = MithrilDkgMessage::Round3Broadcast(r3);
+							data = bincode::serialize(&tampered).unwrap();
 						}
 					}
 					dkgs[party_id].message(from, data).unwrap();
@@ -1624,15 +1623,15 @@ mod tests {
 
 		// Verify η-bounded shares
 		for output in &outputs {
-			for (_, share) in output.private_share.shares() {
+			for share in output.private_share.shares().values() {
 				for poly in &share.s1 {
 					for &coeff in poly {
-						assert!(coeff >= -ETA && coeff <= ETA);
+						assert!((-ETA..=ETA).contains(&coeff));
 					}
 				}
 				for poly in &share.s2 {
 					for &coeff in poly {
-						assert!(coeff >= -ETA && coeff <= ETA);
+						assert!((-ETA..=ETA).contains(&coeff));
 					}
 				}
 			}

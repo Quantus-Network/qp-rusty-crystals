@@ -206,7 +206,7 @@ mod tests {
 				for (poly_idx, poly) in share.s1.iter().enumerate() {
 					for (coeff_idx, &coeff) in poly.iter().enumerate() {
 						assert!(
-							coeff >= -ETA && coeff <= ETA,
+							(-ETA..=ETA).contains(&coeff),
 							"Party {} subset {:b} s1[{}][{}] = {} outside η bound",
 							party_id,
 							subset_mask,
@@ -219,7 +219,7 @@ mod tests {
 				for (poly_idx, poly) in share.s2.iter().enumerate() {
 					for (coeff_idx, &coeff) in poly.iter().enumerate() {
 						assert!(
-							coeff >= -ETA && coeff <= ETA,
+							(-ETA..=ETA).contains(&coeff),
 							"Party {} subset {:b} s2[{}][{}] = {} outside η bound",
 							party_id,
 							subset_mask,

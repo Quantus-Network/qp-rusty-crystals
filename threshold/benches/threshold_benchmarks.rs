@@ -8,12 +8,50 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use std::time::Duration;
 
 use qp_rusty_crystals_threshold::{
-	generate_with_dealer, keygen::dkg::run_local_dkg, signing_protocol::run_local_signing,
+	generate_with_dealer,
+	keygen::dkg::{run_local_mithril_dkg, TranscriptSigner},
+	signing_protocol::run_local_signing,
 	verify_signature, ThresholdConfig, ThresholdSigner,
 };
 
+/// Simple test signer for DKG benchmarks.
+/// Uses a trivial signature scheme (just ID + hash) for benchmarking purposes.
+#[derive(Clone, Debug)]
+struct BenchSigner {
+	id: u32,
+}
+
+impl TranscriptSigner for BenchSigner {
+	type Signature = Vec<u8>;
+	type PublicKey = u32;
+
+	fn sign(&self, hash: &[u8; 32]) -> Self::Signature {
+		let mut sig = vec![0u8; 36];
+		sig[..4].copy_from_slice(&self.id.to_le_bytes());
+		sig[4..36].copy_from_slice(hash);
+		sig
+	}
+
+	fn verify(pk: &Self::PublicKey, hash: &[u8; 32], sig: &Self::Signature) -> bool {
+		Self::verify_bytes(pk, hash, sig)
+	}
+
+	fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
+		if sig.len() < 36 {
+			return false;
+		}
+		let sig_id = u32::from_le_bytes(sig[..4].try_into().unwrap());
+		sig_id == *pk && &sig[4..36] == hash
+	}
+
+	fn public_key(&self) -> Self::PublicKey {
+		self.id
+	}
+}
+
 /// All supported threshold configurations for benchmarking.
-const ALL_CONFIGS: [(u32, u32); 21] = [
+/// Note: n=7 is not supported (MAX_PARTIES = 6) due to impractical K values.
+const ALL_CONFIGS: [(u32, u32); 15] = [
 	// n = 2
 	(2, 2),
 	// n = 3
@@ -34,18 +72,11 @@ const ALL_CONFIGS: [(u32, u32); 21] = [
 	(4, 6),
 	(5, 6),
 	(6, 6),
-	// n = 7
-	(2, 7),
-	(3, 7),
-	(4, 7),
-	(5, 7),
-	(6, 7),
-	(7, 7),
 ];
 
 /// Subset of configurations for expensive benchmarks.
-const QUICK_CONFIGS: [(u32, u32); 10] =
-	[(2, 2), (2, 3), (3, 3), (3, 4), (4, 4), (3, 5), (5, 5), (3, 6), (6, 6), (7, 7)];
+const QUICK_CONFIGS: [(u32, u32); 8] =
+	[(2, 2), (2, 3), (3, 3), (3, 4), (4, 4), (3, 5), (5, 5), (6, 6)];
 
 /// Helper to create signers from shares for a given configuration.
 fn create_signers(
@@ -86,23 +117,29 @@ fn bench_dealer_keygen(c: &mut Criterion) {
 
 /// Benchmark distributed key generation (DKG) for quick configurations.
 fn bench_dkg(c: &mut Criterion) {
+	use rand::SeedableRng;
+
 	let mut group = c.benchmark_group("dkg");
 	group.sample_size(10); // DKG is slow, use fewer samples
 	group.measurement_time(Duration::from_secs(30));
 
-	let seed = [42u8; 32];
-
-	for (t, n) in QUICK_CONFIGS {
+	for &(t, n) in &QUICK_CONFIGS {
 		group.bench_with_input(
 			BenchmarkId::new("config", format!("{}_of_{}", t, n)),
 			&(t, n),
 			|b, &(t, n)| {
-				b.iter(|| run_local_dkg(t, n, seed).unwrap());
+				b.iter(|| {
+					let signers: Vec<BenchSigner> =
+						(0..n).map(|id| BenchSigner { id }).collect();
+					let public_keys: Vec<u32> = (0..n).collect();
+					let rng = rand::rngs::StdRng::seed_from_u64(42);
+					run_local_mithril_dkg(t, n, signers, public_keys, rng).unwrap()
+				});
 			},
 		);
 	}
 
-	group.finish();
+	group.finish()
 }
 
 /// Benchmark the complete 4-round signing protocol.

@@ -1789,12 +1789,14 @@ mod tests {
 			for i in 0..2 {
 				if let Ok(action) = protocols[i].poke() {
 					match action {
-						Action::SendMany(data) =>
-							for j in 0..2 {
+						Action::SendMany(data) => {
+							// Send to all other parties
+							for (j, protocol) in protocols.iter_mut().enumerate() {
 								if i != j {
-									let _ = protocols[j].message(i as u32, data.clone());
+									let _ = protocol.message(i as u32, data.clone());
 								}
-							},
+							}
+						},
 						Action::Return(sig) => {
 							signature = Some(sig);
 							break;
