@@ -61,13 +61,8 @@ pub(crate) fn compute_sharing_patterns(
 	let t = threshold as usize;
 	let n = parties as usize;
 
-	// Special case: t == n means all parties required
-	// Only one subset: all parties (2^n - 1)
-	if t == n {
-		return Ok(vec![vec![(1u16 << n) - 1]]);
-	}
-
 	// Generate all subsets of size (n - t + 1) using Gosper's hack
+	// For t=n, this gives subsets of size 1 (single-bit masks)
 	let subset_size = n - t + 1;
 	let subsets = generate_subsets_of_size(n, subset_size);
 
@@ -144,43 +139,6 @@ pub fn recover_share(
 	parties: u32,
 	dkg_participants: &ParticipantList,
 ) -> ThresholdResult<(polyvec::Polyvecl, polyvec::Polyveck)> {
-	// Base case: when threshold equals total parties
-	// In this case, each party uses their single share directly
-	// But we still need to convert to NTT domain like Go does
-	if threshold == parties {
-		// For t=n case, use the share that corresponds to all active parties
-		// The share key is a bitmask of which parties are involved (using DKG indices)
-		// For 2-of-2 with parties at indices 0,1 active, the key is 0b11 = 3
-		let active_key: u16 = active_parties.iter().fold(0u16, |acc, &p| {
-			if let Some(idx) = dkg_participants.index_of(p) {
-				acc | (1 << idx)
-			} else {
-				acc
-			}
-		});
-
-		// Try to find the share with the active key first
-		let share = shares.get(&active_key).or_else(|| {
-			// Fallback: use any available share (like Go does with map iteration)
-			shares.values().next()
-		});
-
-		if let Some(share) = share {
-			// Convert to NTT domain for share recovery
-			let mut s1_ntt = share.s1_share.clone();
-			let mut s2_ntt = share.s2_share.clone();
-
-			for s1_poly in s1_ntt.vec.iter_mut().take(dilithium_params::L) {
-				crate::circl_ntt::ntt(s1_poly);
-			}
-			for s2_poly in s2_ntt.vec.iter_mut().take(dilithium_params::K) {
-				crate::circl_ntt::ntt(s2_poly);
-			}
-
-			return Ok((s1_ntt, s2_ntt));
-		}
-	}
-
 	// Compute the sharing patterns dynamically
 	let sharing_patterns = compute_sharing_patterns(threshold, parties)
 		.map_err(|e| ThresholdError::InvalidConfiguration(e.to_string()))?;
@@ -325,95 +283,121 @@ mod tests {
 
 	#[test]
 	fn test_compute_sharing_patterns_t_equals_n() {
-		// When t = n, there should be exactly one pattern with all bits set
-		let test_cases = [
-			(2, 2, 0b11u16),
-			(3, 3, 0b111u16),
-			(6, 6, 0b111111u16),
-			(8, 8, 0b11111111u16),
-			(12, 12, 0b111111111111u16),
-		];
+		// When t = n, each party gets their single-party subset
+		// For n parties, there are n positions, each with one pattern (single bit set)
+		let test_cases = [(2, 2), (3, 3), (6, 6), (8, 8), (12, 12)];
 
-		for (t, n, expected_mask) in test_cases {
+		for (t, n) in test_cases {
 			let patterns = compute_sharing_patterns(t as u32, n as u32).unwrap();
-			assert_eq!(patterns.len(), 1, "t=n should have 1 position for ({}, {})", t, n);
-			assert_eq!(patterns[0].len(), 1, "t=n should have 1 pattern for ({}, {})", t, n);
-			assert_eq!(
-				patterns[0][0], expected_mask,
-				"Pattern mask mismatch for ({}, {}): expected {}, got {}",
-				t, n, expected_mask, patterns[0][0]
-			);
+			assert_eq!(patterns.len(), n, "t=n should have {} positions for ({}, {})", n, t, n);
+
+			// Each position i should have exactly one pattern: (1 << i)
+			for (i, pattern) in patterns.iter().enumerate() {
+				assert_eq!(
+					pattern.len(),
+					1,
+					"Position {} should have 1 pattern for ({}, {})",
+					i,
+					t,
+					n
+				);
+				let expected_mask = 1u16 << i;
+				assert_eq!(
+					pattern[0], expected_mask,
+					"Position {} pattern mismatch for ({}, {}): expected {}, got {}",
+					i, t, n, expected_mask, pattern[0]
+				);
+			}
 		}
 	}
 
 	#[test]
 	fn test_compute_sharing_patterns_coverage() {
-		// Test that all subsets are covered exactly once
-		let test_cases = [(2, 3), (2, 4), (3, 5), (4, 6), (6, 12)];
+		// Test all valid configurations up to n=15
+		// Verifies correctness properties for each (t, n) pair
+		for n in 2..=15usize {
+			for t in 2..=n {
+				let patterns = compute_sharing_patterns(t as u32, n as u32).unwrap();
 
-		for (t, n) in test_cases {
-			let patterns = compute_sharing_patterns(t as u32, n as u32).unwrap();
+				// Should have t positions
+				assert_eq!(
+					patterns.len(),
+					t,
+					"Should have {} positions for ({}, {})",
+					t,
+					t,
+					n
+				);
 
-			// Should have t positions
-			assert_eq!(
-				patterns.len(),
-				t as usize,
-				"Should have {} positions for ({}, {})",
-				t,
-				t,
-				n
-			);
+				// Collect all subsets from all positions
+				let mut all_subsets: Vec<u16> = patterns.iter().flatten().copied().collect();
+				let total_subsets = all_subsets.len();
 
-			// Collect all subsets from all positions
-			let mut all_subsets: Vec<u16> = patterns.iter().flatten().copied().collect();
-			let total_subsets = all_subsets.len();
+				// Verify total count matches C(n, n-t+1)
+				let subset_size = n - t + 1;
+				let expected_count = binomial(n, subset_size);
+				assert_eq!(
+					total_subsets, expected_count,
+					"Total subsets {} != C({}, {}) = {} for ({}, {})",
+					total_subsets, n, subset_size, expected_count, t, n
+				);
 
-			// Check no duplicates
-			all_subsets.sort();
-			all_subsets.dedup();
-			assert_eq!(
-				all_subsets.len(),
-				total_subsets,
-				"Duplicate subsets found for ({}, {})",
-				t,
-				n
-			);
+				// Check no duplicates
+				all_subsets.sort();
+				all_subsets.dedup();
+				assert_eq!(
+					all_subsets.len(),
+					total_subsets,
+					"Duplicate subsets found for ({}, {})",
+					t,
+					n
+				);
 
-			// Each position i should only have subsets containing bit i
-			for (pos, pos_patterns) in patterns.iter().enumerate() {
-				for &subset in pos_patterns {
-					assert!(
-						(subset & (1 << pos)) != 0,
-						"Position {} has subset {} which doesn't contain bit {} for ({}, {})",
-						pos,
+				// Each subset should have exactly (n - t + 1) bits set
+				for &subset in &all_subsets {
+					assert_eq!(
+						(subset as u32).count_ones() as usize,
+						subset_size,
+						"Subset {} has wrong number of bits for ({}, {})",
 						subset,
-						pos,
 						t,
 						n
 					);
+				}
+
+				// Each position i should only have subsets containing bit i
+				for (pos, pos_patterns) in patterns.iter().enumerate() {
+					for &subset in pos_patterns {
+						assert!(
+							(subset & (1 << pos)) != 0,
+							"Position {} has subset {} which doesn't contain bit {} for ({}, {})",
+							pos,
+							subset,
+							pos,
+							t,
+							n
+						);
+					}
 				}
 			}
 		}
 	}
 
-	#[test]
-	fn test_compute_sharing_patterns_all_configs() {
-		// Test that patterns can be computed for all valid configurations up to n=15
-		// (n=16 would overflow u16 in the subset mask calculation)
-		// Note: MAX_PARTIES is 7 for the public API, but secret sharing supports up to 15
-		// internally
-		for n in 2..=15u8 {
-			for t in 2..=n {
-				let result = compute_sharing_patterns(t as u32, n as u32);
-				assert!(
-					result.is_ok(),
-					"Failed to compute pattern for ({}, {}): {:?}",
-					t,
-					n,
-					result.err()
-				);
-			}
+	/// Compute binomial coefficient C(n, k)
+	fn binomial(n: usize, k: usize) -> usize {
+		if k > n {
+			return 0;
 		}
+		if k == 0 || k == n {
+			return 1;
+		}
+		// Use the multiplicative formula to avoid overflow
+		let k = k.min(n - k); // Take advantage of symmetry
+		let mut result = 1;
+		for i in 0..k {
+			result = result * (n - i) / (i + 1);
+		}
+		result
 	}
 
 	#[test]
