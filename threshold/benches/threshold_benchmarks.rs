@@ -129,8 +129,7 @@ fn bench_dkg(c: &mut Criterion) {
 			&(t, n),
 			|b, &(t, n)| {
 				b.iter(|| {
-					let signers: Vec<BenchSigner> =
-						(0..n).map(|id| BenchSigner { id }).collect();
+					let signers: Vec<BenchSigner> = (0..n).map(|id| BenchSigner { id }).collect();
 					let public_keys: Vec<u32> = (0..n).collect();
 					let rng = rand::rngs::StdRng::seed_from_u64(42);
 					run_local_mithril_dkg(t, n, signers, public_keys, rng).unwrap()
