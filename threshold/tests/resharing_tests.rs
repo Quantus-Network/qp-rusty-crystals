@@ -22,7 +22,6 @@ fn run_resharing_protocol(
 	new_participants: Vec<u32>,
 	old_shares: &HashMap<u32, PrivateKeyShare>,
 	public_key: &PublicKey,
-	seed: [u8; 32],
 ) -> Result<HashMap<u32, PrivateKeyShare>, String> {
 	run_resharing_protocol_with_tamper(
 		old_threshold,
@@ -31,7 +30,6 @@ fn run_resharing_protocol(
 		new_participants,
 		old_shares,
 		public_key,
-		seed,
 		None,
 	)
 }
@@ -46,7 +44,6 @@ fn run_resharing_protocol_with_tamper(
 	new_participants: Vec<u32>,
 	old_shares: &HashMap<u32, PrivateKeyShare>,
 	public_key: &PublicKey,
-	seed: [u8; 32],
 	mut tamper: Option<TamperFn>,
 ) -> Result<HashMap<u32, PrivateKeyShare>, String> {
 	// Determine all parties involved (union of old and new)
@@ -944,7 +941,6 @@ fn test_resharing_end_to_end_same_committee() {
 		vec![0, 1, 2],
 		&old_shares,
 		&public_key,
-		[99u8; 32],
 	);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
@@ -986,7 +982,6 @@ fn test_resharing_end_to_end_add_party() {
 		vec![0, 1, 2, 3],
 		&old_shares,
 		&public_key,
-		[99u8; 32],
 	);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
@@ -1031,7 +1026,6 @@ fn test_resharing_end_to_end_remove_party() {
 		vec![0, 1],
 		&old_shares,
 		&public_key,
-		[99u8; 32],
 	);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
@@ -1075,7 +1069,6 @@ fn test_resharing_end_to_end_replace_party() {
 		vec![0, 1, 3],
 		&old_shares,
 		&public_key,
-		[99u8; 32],
 	);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
@@ -1120,7 +1113,6 @@ fn test_resharing_end_to_end_disjoint_committees() {
 		vec![3, 4, 5],
 		&old_shares,
 		&public_key,
-		[123u8; 32],
 	);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
@@ -1188,6 +1180,128 @@ fn forge_consistent_commitment(i_mask: u16, j_mask: u16, r: &NewShareData) -> [u
 }
 
 #[test]
+fn test_resharing_detects_dealer_accusation_when_commitment_tampered() {
+	// In a (2,3) resharing, old subsets have size 2 (n - t + 1 = 3 - 2 + 1 = 2).
+	// Each old subset has a designated dealer and another verifier. If the dealer
+	// broadcasts a bad commitment, the verifier will detect it in `collect_accusations`.
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [77u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	// Tamper only the Round 1 commitment (not the Round 2 payload). The recipient
+	// will accept the sub-share (commitment mismatch with our tampered value), but
+	// another member of the same old subset will independently recompute the
+	// *correct* commitment and file an accusation.
+	let target_pair = (0b011u16, 0b011u16); // old subset {0,1}, new subset {0,1}
+	let bad_commit = [0xAAu8; 32];
+
+	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
+		if sender != 0 {
+			return data;
+		}
+		let msg: ResharingMessage = match bincode::deserialize(&data) {
+			Ok(m) => m,
+			Err(_) => return data,
+		};
+		let modified = match msg {
+			ResharingMessage::Round1(mut b) => {
+				if let Some(c) = b.commitments.get_mut(&target_pair) {
+					*c = bad_commit;
+				}
+				ResharingMessage::Round1(b)
+			},
+			other => other,
+		};
+		bincode::serialize(&modified).expect("re-serialize tampered msg")
+	});
+
+	let result = run_resharing_protocol_with_tamper(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		Some(tamper),
+	);
+
+	let err = result.expect_err("tampered commitment must be detected via accusation");
+	// The protocol detects dealer misbehavior - either via accusation or party failure
+	assert!(
+		err.contains("accused") || err.contains("misbehavior") || err.contains("Party failure") || err.contains("PartyFailure"),
+		"expected dealer accusation or party failure, got: {}",
+		err
+	);
+}
+
+#[test]
+fn test_resharing_detects_round2_payload_mismatch() {
+	// Tamper only the Round 2 payload (not the commitment). The recipient will
+	// detect that the received `r` doesn't match the broadcast commitment and
+	// fail with ShareVerificationFailed.
+	const N: usize = 256;
+	const L: usize = 7;
+	const K: usize = 8;
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [55u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let target_pair = (0b011u16, 0b011u16);
+	let bogus_r = NewShareData { s1: vec![[99i32; N]; L], s2: vec![[13i32; N]; K] };
+
+	let bogus_r_capt = bogus_r.clone();
+	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
+		if sender != 0 {
+			return data;
+		}
+		let msg: ResharingMessage = match bincode::deserialize(&data) {
+			Ok(m) => m,
+			Err(_) => return data,
+		};
+		let modified = match msg {
+			ResharingMessage::Round2(mut m) => {
+				if m.from_party_id == 0 && m.contributions.contains_key(&target_pair) {
+					m.contributions.insert(target_pair, bogus_r_capt.clone());
+				}
+				ResharingMessage::Round2(m)
+			},
+			other => other,
+		};
+		bincode::serialize(&modified).expect("re-serialize tampered msg")
+	});
+
+	let result = run_resharing_protocol_with_tamper(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		Some(tamper),
+	);
+
+	let err = result.expect_err("tampered Round 2 payload must be detected");
+	// The protocol detects the mismatch - either via commitment check or party failure
+	assert!(
+		err.contains("commitment") || err.contains("ShareVerificationFailed") || err.contains("Party failure"),
+		"expected commitment mismatch or party failure, got: {}",
+		err
+	);
+}
+
+#[test]
 fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 	// In a (2,2) -> (2,2) resharing every old subset has size 1, so the dealer is
 	// the sole member of their old subset and `collect_accusations` cannot catch a
@@ -1250,7 +1364,6 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 		vec![0, 1],
 		&old_shares,
 		&public_key,
-		[99u8; 32],
 		Some(tamper),
 	);
 
