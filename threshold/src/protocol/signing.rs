@@ -386,7 +386,8 @@ fn get_threshold_params(config: &ThresholdConfig) -> ThresholdResult<(f64, f64, 
 		(6, 6) => Ok((424124.0, 424197.0, 7.0)),
 		(t, n) => Err(ThresholdError::InvalidConfiguration(alloc::format!(
 			"No hyperball parameters for ({}, {}) configuration. Supported: n ≤ 6",
-			t, n
+			t,
+			n
 		))),
 	}
 }

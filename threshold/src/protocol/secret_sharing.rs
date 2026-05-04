@@ -320,14 +320,7 @@ mod tests {
 				let patterns = compute_sharing_patterns(t as u32, n as u32).unwrap();
 
 				// Should have t positions
-				assert_eq!(
-					patterns.len(),
-					t,
-					"Should have {} positions for ({}, {})",
-					t,
-					t,
-					n
-				);
+				assert_eq!(patterns.len(), t, "Should have {} positions for ({}, {})", t, t, n);
 
 				// Collect all subsets from all positions
 				let mut all_subsets: Vec<u16> = patterns.iter().flatten().copied().collect();
