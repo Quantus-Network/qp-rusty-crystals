@@ -934,14 +934,8 @@ fn test_resharing_end_to_end_same_committee() {
 	}
 
 	// Run resharing to the same committee
-	let result = run_resharing_protocol(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 2],
-		&old_shares,
-		&public_key,
-	);
+	let result =
+		run_resharing_protocol(2, vec![0, 1, 2], 2, vec![0, 1, 2], &old_shares, &public_key);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
 	let new_shares = result.unwrap();
@@ -975,14 +969,8 @@ fn test_resharing_end_to_end_add_party() {
 	}
 
 	// Run resharing to add party 3
-	let result = run_resharing_protocol(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 2, 3],
-		&old_shares,
-		&public_key,
-	);
+	let result =
+		run_resharing_protocol(2, vec![0, 1, 2], 2, vec![0, 1, 2, 3], &old_shares, &public_key);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
 	let new_shares = result.unwrap();
@@ -1019,14 +1007,7 @@ fn test_resharing_end_to_end_remove_party() {
 	}
 
 	// Run resharing to remove party 2
-	let result = run_resharing_protocol(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1],
-		&old_shares,
-		&public_key,
-	);
+	let result = run_resharing_protocol(2, vec![0, 1, 2], 2, vec![0, 1], &old_shares, &public_key);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
 	let new_shares = result.unwrap();
@@ -1062,14 +1043,8 @@ fn test_resharing_end_to_end_replace_party() {
 	}
 
 	// Run resharing to replace party 2 with party 3
-	let result = run_resharing_protocol(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 3],
-		&old_shares,
-		&public_key,
-	);
+	let result =
+		run_resharing_protocol(2, vec![0, 1, 2], 2, vec![0, 1, 3], &old_shares, &public_key);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
 	let new_shares = result.unwrap();
@@ -1106,14 +1081,8 @@ fn test_resharing_end_to_end_disjoint_committees() {
 		old_shares.insert(share.party_id(), share.clone());
 	}
 
-	let result = run_resharing_protocol(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![3, 4, 5],
-		&old_shares,
-		&public_key,
-	);
+	let result =
+		run_resharing_protocol(2, vec![0, 1, 2], 2, vec![3, 4, 5], &old_shares, &public_key);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
 	let new_shares = result.unwrap();
@@ -1234,7 +1203,10 @@ fn test_resharing_detects_dealer_accusation_when_commitment_tampered() {
 	let err = result.expect_err("tampered commitment must be detected via accusation");
 	// The protocol detects dealer misbehavior - either via accusation or party failure
 	assert!(
-		err.contains("accused") || err.contains("misbehavior") || err.contains("Party failure") || err.contains("PartyFailure"),
+		err.contains("accused") ||
+			err.contains("misbehavior") ||
+			err.contains("Party failure") ||
+			err.contains("PartyFailure"),
 		"expected dealer accusation or party failure, got: {}",
 		err
 	);
@@ -1295,7 +1267,9 @@ fn test_resharing_detects_round2_payload_mismatch() {
 	let err = result.expect_err("tampered Round 2 payload must be detected");
 	// The protocol detects the mismatch - either via commitment check or party failure
 	assert!(
-		err.contains("commitment") || err.contains("ShareVerificationFailed") || err.contains("Party failure"),
+		err.contains("commitment") ||
+			err.contains("ShareVerificationFailed") ||
+			err.contains("Party failure"),
 		"expected commitment mismatch or party failure, got: {}",
 		err
 	);
