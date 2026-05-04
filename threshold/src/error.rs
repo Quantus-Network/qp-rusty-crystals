@@ -278,7 +278,13 @@ impl fmt::Display for ThresholdError {
 }
 
 /// Maximum number of parties supported by the threshold scheme.
-pub const MAX_PARTIES: u32 = 7;
+///
+/// This is limited to 6 because the hyperball sampling parameters (r, r')
+/// required for secure threshold signing have only been computed for n ≤ 6
+/// in the reference Threshold-ML-DSA implementation. For n=7, the required
+/// number of parallel signing attempts (K) becomes impractically large
+/// (K > 3000 for middle thresholds).
+pub const MAX_PARTIES: u32 = 6;
 
 /// Minimum threshold value (at least 2 parties required).
 pub const MIN_THRESHOLD: u32 = 2;
@@ -297,7 +303,7 @@ pub fn validate_threshold_params(t: u32, n: u32) -> ThresholdResult<()> {
 		return Err(ThresholdError::InvalidParameters {
 			threshold: t,
 			parties: n,
-			reason: "too many parties (max 7)",
+			reason: "too many parties (max 6)",
 		});
 	}
 

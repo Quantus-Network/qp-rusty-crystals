@@ -42,24 +42,21 @@ impl ThresholdConfig {
 	///
 	/// Returns an error if:
 	/// - `t < 2` (threshold must be at least 2)
-	/// - `n > 7` (maximum 7 parties supported)
+	/// - `n > 6` (maximum 6 parties supported)
 	/// - `t > n` (threshold cannot exceed total parties)
 	/// - The (t, n) combination is not supported
 	///
 	/// # Note on k_iterations
 	///
 	/// The K parameter determines how many parallel signing attempts are made.
-	/// Values for n ≤ 6 come from the reference Threshold-ML-DSA implementation
+	/// Values come from the reference Threshold-ML-DSA implementation
 	/// and are derived from security analysis of rejection sampling probability.
-	///
-	/// **Note**: Values for n = 7 are EXPERIMENTAL and not from the
-	/// reference implementation. They may need adjustment based on testing.
 	pub fn new(t: u32, n: u32) -> ThresholdResult<Self> {
 		validate_threshold_params(t, n)?;
 
 		// K iterations determine parallel signing attempts. Values are tuned to
-		// achieve low retry rates (~0.3-0.5 average). Values for n <= 6 are based
-		// on the reference implementation; n = 7 values are experimental.
+		// achieve low retry rates (~0.3-0.5 average retries per signing).
+		// Values are from the reference Threshold-ML-DSA implementation.
 		let k_iterations = match (t, n) {
 			(2, 2) => 4,
 			(2, 3) => 5,
@@ -76,13 +73,6 @@ impl ThresholdConfig {
 			(4, 6) => 350,
 			(5, 6) => 380,
 			(6, 6) => 180,
-			// n = 7 (EXPERIMENTAL - not from reference implementation)
-			(2, 7) => 7,
-			(3, 7) => 55,
-			(4, 7) => 160,
-			(5, 7) => 320,
-			(6, 7) => 270,
-			(7, 7) => 650,
 			_ =>
 				return Err(ThresholdError::InvalidParameters {
 					threshold: t,
@@ -178,19 +168,20 @@ mod tests {
 			(4, 6),
 			(5, 6),
 			(6, 6),
-			// n = 7 (EXPERIMENTAL)
-			(2, 7),
-			(3, 7),
-			(4, 7),
-			(5, 7),
-			(6, 7),
-			(7, 7),
 		];
 
 		for (t, n) in valid_configs {
 			let config = ThresholdConfig::new(t, n);
 			assert!(config.is_ok(), "Config ({}, {}) should be valid", t, n);
 		}
+	}
+
+	#[test]
+	fn test_n7_not_supported() {
+		// n=7 is not supported because hyperball parameters have not been computed
+		// and the required K values would be impractically large (K > 3000)
+		let result = ThresholdConfig::new(2, 7);
+		assert!(result.is_err(), "Config (2, 7) should be rejected");
 	}
 
 	#[test]

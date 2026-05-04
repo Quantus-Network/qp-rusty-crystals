@@ -266,7 +266,7 @@ pub(crate) fn generate_round1(
 		fips202::shake256_squeeze(&mut iter_rho_prime, 64, &mut state);
 
 		// Sample from hyperball using threshold parameters
-		let (_, r_prime, nu) = get_threshold_params(config);
+		let (_, r_prime, nu) = get_threshold_params(config)?;
 		hyperball_sample.sample_hyperball(r_prime, nu, &iter_rho_prime, k_iter as u16);
 
 		// Store hyperball sample for reuse in Round 3
@@ -360,26 +360,34 @@ fn pack_w_dilithium(w: &polyvec::Polyveck, buf: &mut [u8]) {
 /// - ML-DSA-87: nu = 7
 ///
 /// This implementation targets ML-DSA-87, so nu = 7.
-fn get_threshold_params(config: &ThresholdConfig) -> (f64, f64, f64) {
+///
+/// # Errors
+///
+/// Returns an error if the (threshold, parties) configuration does not have
+/// pre-computed hyperball parameters. Currently supports n ≤ 6.
+fn get_threshold_params(config: &ThresholdConfig) -> ThresholdResult<(f64, f64, f64)> {
 	// Threshold parameters (r, r', nu) from the reference implementation
 	// nu = 7 for ML-DSA-87 (was incorrectly set to 3.0)
 	match (config.threshold(), config.total_parties()) {
-		(2, 2) => (503119.0, 503192.0, 7.0),
-		(2, 3) => (631601.0, 631703.0, 7.0),
-		(3, 3) => (483107.0, 483180.0, 7.0),
-		(2, 4) => (632903.0, 633006.0, 7.0),
-		(3, 4) => (551752.0, 551854.0, 7.0),
-		(4, 4) => (487958.0, 488031.0, 7.0),
-		(2, 5) => (607694.0, 607820.0, 7.0),
-		(3, 5) => (577400.0, 577546.0, 7.0),
-		(4, 5) => (518384.0, 518510.0, 7.0),
-		(5, 5) => (468214.0, 468287.0, 7.0),
-		(2, 6) => (665106.0, 665232.0, 7.0),
-		(3, 6) => (577541.0, 577704.0, 7.0),
-		(4, 6) => (517689.0, 517853.0, 7.0),
-		(5, 6) => (479692.0, 479819.0, 7.0),
-		(6, 6) => (424124.0, 424197.0, 7.0),
-		_ => (503119.0, 503192.0, 7.0), // Default to 2-of-2 values
+		(2, 2) => Ok((503119.0, 503192.0, 7.0)),
+		(2, 3) => Ok((631601.0, 631703.0, 7.0)),
+		(3, 3) => Ok((483107.0, 483180.0, 7.0)),
+		(2, 4) => Ok((632903.0, 633006.0, 7.0)),
+		(3, 4) => Ok((551752.0, 551854.0, 7.0)),
+		(4, 4) => Ok((487958.0, 488031.0, 7.0)),
+		(2, 5) => Ok((607694.0, 607820.0, 7.0)),
+		(3, 5) => Ok((577400.0, 577546.0, 7.0)),
+		(4, 5) => Ok((518384.0, 518510.0, 7.0)),
+		(5, 5) => Ok((468214.0, 468287.0, 7.0)),
+		(2, 6) => Ok((665106.0, 665232.0, 7.0)),
+		(3, 6) => Ok((577541.0, 577704.0, 7.0)),
+		(4, 6) => Ok((517689.0, 517853.0, 7.0)),
+		(5, 6) => Ok((479692.0, 479819.0, 7.0)),
+		(6, 6) => Ok((424124.0, 424197.0, 7.0)),
+		(t, n) => Err(ThresholdError::InvalidConfiguration(alloc::format!(
+			"No hyperball parameters for ({}, {}) configuration. Supported: n ≤ 6",
+			t, n
+		))),
 	}
 }
 
@@ -510,7 +518,7 @@ pub(crate) fn generate_round3_response(
 
 	let mut zs: Vec<polyvec::Polyvecl> = vec![polyvec::Polyvecl::default(); k];
 
-	let (r, _, nu) = get_threshold_params(config);
+	let (r, _, nu) = get_threshold_params(config)?;
 
 	// For each commitment iteration (lengths already validated above)
 	for (i, z_out_slot) in zs.iter_mut().enumerate().take(k) {

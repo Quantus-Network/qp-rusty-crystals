@@ -389,7 +389,7 @@ fn test_threshold_matrix() {
 	// Test configurations: (threshold, total_parties)
 	// The 4-round protocol with leader-based retry handles rejection sampling internally,
 	// so we no longer need external max_attempts loops.
-	let configs: [(u32, u32); 21] = [
+	let configs: [(u32, u32); 15] = [
 		// n = 2
 		(2, 2),
 		// n = 3
@@ -410,13 +410,6 @@ fn test_threshold_matrix() {
 		(4, 6),
 		(5, 6),
 		(6, 6),
-		// n = 7 (EXPERIMENTAL - k_iterations are estimates)
-		(2, 7),
-		(3, 7),
-		(4, 7),
-		(5, 7),
-		(6, 7),
-		(7, 7),
 	];
 
 	let mut passed = 0;
@@ -571,7 +564,7 @@ fn test_threshold_matrix_dkg() {
 
 	// Test configurations: (threshold, total_parties)
 	// The 4-round protocol with leader-based retry handles rejection sampling internally.
-	let configs: [(u32, u32); 21] = [
+	let configs: [(u32, u32); 15] = [
 		// n = 2
 		(2, 2),
 		// n = 3
@@ -592,13 +585,6 @@ fn test_threshold_matrix_dkg() {
 		(4, 6),
 		(5, 6),
 		(6, 6),
-		// n = 7 (EXPERIMENTAL - k_iterations are estimates)
-		(2, 7),
-		(3, 7),
-		(4, 7),
-		(5, 7),
-		(6, 7),
-		(7, 7),
 	];
 
 	let mut passed = 0;
@@ -721,13 +707,13 @@ fn test_threshold_matrix_dkg() {
 	assert_eq!(failed, 0, "Some DKG threshold configurations failed");
 }
 
-/// Test that configuration validation works for n up to 7
+/// Test that configuration validation works correctly
 #[test]
 fn test_config_validation_extended() {
 	use qp_rusty_crystals_threshold::ThresholdConfig;
 
-	// All these should succeed (n <= 7)
-	let valid_configs = [(2, 7), (7, 7)];
+	// All these should succeed (n <= 6)
+	let valid_configs = [(2, 6), (6, 6)];
 
 	for (t, n) in valid_configs {
 		let result = ThresholdConfig::new(t, n);
@@ -740,20 +726,24 @@ fn test_config_validation_extended() {
 		);
 	}
 
+	// n = 7 should fail (hyperball parameters not computed, K would be impractical)
+	let result = ThresholdConfig::new(2, 7);
+	assert!(result.is_err(), "Config (2, 7) should be invalid");
+
 	// n = 8 should fail
 	let result = ThresholdConfig::new(2, 8);
 	assert!(result.is_err(), "Config (2, 8) should be invalid");
 }
 
-/// Test key generation with extended party counts
+/// Test key generation with max supported party count (n=6)
 #[test]
 fn test_keygen_extended() {
 	use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig};
 
 	let seed = [42u8; 32];
 
-	// Test extended configurations (n = 7)
-	let configs = [(2, 7), (4, 7), (7, 7)];
+	// Test max supported configurations (n = 6)
+	let configs = [(2, 6), (4, 6), (6, 6)];
 
 	for (t, n) in configs {
 		let config = ThresholdConfig::new(t, n).expect("Config should be valid");
