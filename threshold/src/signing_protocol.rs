@@ -21,18 +21,14 @@
 //!
 //! - The **leader** (party with lowest ID among participants) combines signature shares and decides
 //!   whether to broadcast `Round4Complete(signature)` or `Round4Retry`.
-//! - **Followers** accept the leader's decision without independently running `combine_signature`.
-//! - Signature verification happens outside the protocol (callers should verify).
+//! - **Followers** verify the leader's signature before accepting it. This removes the leader
+//!   trust assumption for signature validity (a malicious leader cannot send a forged signature).
 //!
-//! **Security assumptions:**
+//! **Security properties:**
 //! - A malicious leader cannot forge signatures (requires threshold parties to collude).
+//! - A malicious leader cannot send invalid signatures (followers verify before accepting).
 //! - A malicious leader CAN cause denial-of-signature by falsely claiming combination failed,
 //!   triggering unnecessary retries.
-//! - For NEAR MPC with a trusted committee, this is acceptable.
-//!
-//! **Mitigation (recommended for untrusted settings):**
-//! - Callers should verify signatures via `verify_signature(pk, msg, ctx, sig)` before accepting
-//!   them. This is cheap and defends against a byzantine leader.
 //!
 //! ## Message Buffering
 //!
@@ -959,8 +955,20 @@ impl DilithiumSignProtocol {
 			SignProtocolState::WaitingForLeaderDecision => {
 				// Follower: check if we received leader's decision
 				if let Some(signature) = self.received_signature.take() {
-					self.state = SignProtocolState::Done;
-					return Ok(Action::Return(signature));
+					// Verify the signature before accepting it (H4: don't trust the leader blindly)
+					let public_key = self.signer.public_key();
+					if crate::verify_signature(public_key, &self.message, &self.context, &signature) {
+						self.state = SignProtocolState::Done;
+						return Ok(Action::Return(signature));
+					} else {
+						// Leader sent an invalid signature - this is a protocol failure
+						self.state = SignProtocolState::Failed(
+							"Leader sent invalid signature".to_string(),
+						);
+						return Err(SignProtocolError::ProtocolFailed(
+							"Leader sent invalid signature".to_string(),
+						));
+					}
 				}
 				// Still waiting
 				Ok(Action::Wait)
@@ -1811,5 +1819,133 @@ mod tests {
 		// Reset should clear the buffer
 		protocol.reset();
 		assert!(protocol.message_buffer.is_empty());
+	}
+
+	#[test]
+	fn test_follower_rejects_invalid_signature_from_leader() {
+		// H4: Followers must verify signatures before accepting them
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		// Create a follower (party 1, with party 0 as leader)
+		let signer = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
+		let mut follower = DilithiumSignProtocol::new(
+			signer,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1, 2],
+			1, // follower
+			0, // leader is party 0
+		);
+
+		// Manually set follower to WaitingForLeaderDecision state
+		follower.state = SignProtocolState::WaitingForLeaderDecision;
+
+		// Create an invalid signature (all zeros)
+		let invalid_sig = Signature::from_bytes(&[0u8; 4627]).unwrap();
+		follower.received_signature = Some(invalid_sig);
+
+		// Follower should reject the invalid signature
+		let result = follower.poke();
+		assert!(result.is_err(), "Follower should reject invalid signature");
+		match result {
+			Err(SignProtocolError::ProtocolFailed(msg)) => {
+				assert!(
+					msg.contains("invalid signature"),
+					"Error should mention invalid signature, got: {}",
+					msg
+				);
+			},
+			other => panic!("Expected ProtocolFailed, got: {:?}", other),
+		}
+		assert!(matches!(follower.state, SignProtocolState::Failed(_)));
+	}
+
+	#[test]
+	fn test_follower_accepts_valid_signature_from_leader() {
+		// H4: Followers should accept valid signatures
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let message = b"test message".to_vec();
+		let context = b"context".to_vec();
+
+		// Run a full signing protocol to get a valid signature
+		let mut protocols: Vec<DilithiumSignProtocol> = shares
+			.iter()
+			.take(2)
+			.enumerate()
+			.map(|(i, share)| {
+				let signer =
+					ThresholdSigner::new(share.clone(), pk.clone(), config).unwrap();
+				DilithiumSignProtocol::new(
+					signer,
+					message.clone(),
+					context.clone(),
+					vec![0, 1],
+					i as u32,
+					0, // party 0 is leader
+				)
+			})
+			.collect();
+
+		// Run until we get a signature
+		let mut signature = None;
+		for _ in 0..100 {
+			for i in 0..2 {
+				if let Ok(action) = protocols[i].poke() {
+					match action {
+						Action::SendMany(data) => {
+							for j in 0..2 {
+								if i != j {
+									let _ = protocols[j].message(i as u32, data.clone());
+								}
+							}
+						},
+						Action::Return(sig) => {
+							signature = Some(sig);
+							break;
+						},
+						Action::Wait => {},
+					}
+				}
+			}
+			if signature.is_some() {
+				break;
+			}
+		}
+
+		let valid_sig = signature.expect("Should have produced a valid signature");
+
+		// Verify the signature is actually valid
+		assert!(
+			verify_signature(&pk, &message, &context, &valid_sig),
+			"Signature should be valid"
+		);
+
+		// Now test that a new follower would accept this valid signature
+		let signer = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
+		let mut follower = DilithiumSignProtocol::new(
+			signer,
+			message.clone(),
+			context.clone(),
+			vec![0, 1, 2],
+			1, // follower
+			0, // leader is party 0
+		);
+
+		// Manually set follower to WaitingForLeaderDecision state
+		follower.state = SignProtocolState::WaitingForLeaderDecision;
+		follower.received_signature = Some(valid_sig.clone());
+
+		// Follower should accept the valid signature
+		let result = follower.poke();
+		match result {
+			Ok(Action::Return(sig)) => {
+				assert_eq!(sig.as_bytes(), valid_sig.as_bytes());
+			},
+			other => panic!("Expected Action::Return with valid signature, got: {:?}", other),
+		}
+		assert!(matches!(follower.state, SignProtocolState::Done));
 	}
 }
