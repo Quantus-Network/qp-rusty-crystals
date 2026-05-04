@@ -187,12 +187,11 @@ mod serde_tests {
 	}
 }
 
-/// Tests for DilithiumSignProtocol party management (HQ7).
+/// Tests for DilithiumSignProtocol party management.
 mod party_management_tests {
 	use qp_rusty_crystals_threshold::{
-		generate_with_dealer,
-		signing_protocol::{DilithiumSignProtocol, SignProtocolError},
-		ThresholdConfig, ThresholdSigner,
+		generate_with_dealer, signing_protocol::DilithiumSignProtocol, ThresholdConfig,
+		ThresholdSigner,
 	};
 
 	/// Test that waiting_for() returns correct parties in Round1Waiting state.
@@ -222,133 +221,5 @@ mod party_management_tests {
 		assert_eq!(waiting.len(), 2);
 		assert!(waiting.contains(&1));
 		assert!(waiting.contains(&2));
-	}
-
-	/// Test that drop_party() works and continues with remaining parties.
-	#[test]
-	fn test_drop_party_continues() {
-		let config = ThresholdConfig::new(2, 3).expect("valid config");
-		let seed = [42u8; 32];
-		let (public_key, shares) = generate_with_dealer(&seed, config).expect("key generation");
-
-		let signer =
-			ThresholdSigner::new(shares[0].clone(), public_key.clone(), config).expect("signer");
-
-		let mut protocol = DilithiumSignProtocol::new(
-			signer,
-			b"test message".to_vec(),
-			b"context".to_vec(),
-			vec![0, 1, 2],
-			0, // my_id
-			0, // leader_id
-		);
-
-		// Generate our Round 1
-		let _ = protocol.poke().expect("poke");
-
-		// Simulate receiving Round 1 from party 1
-		// We need to create a valid Round 1 message
-		let signer1 =
-			ThresholdSigner::new(shares[1].clone(), public_key.clone(), config).expect("signer1");
-		let mut protocol1 = DilithiumSignProtocol::new(
-			signer1,
-			b"test message".to_vec(),
-			b"context".to_vec(),
-			vec![0, 1, 2],
-			1,
-			0,
-		);
-		// Get party 1's Round 1 message
-		if let Ok(qp_rusty_crystals_threshold::signing_protocol::Action::SendMany(data)) =
-			protocol1.poke()
-		{
-			// Feed it to protocol 0
-			protocol.message(1, data).unwrap();
-		}
-
-		// Now drop party 2 (who hasn't responded)
-		let result = protocol.drop_party(2);
-		assert!(result.is_ok(), "Should be able to drop party 2");
-
-		// Should no longer be waiting for party 2
-		let waiting = protocol.waiting_for();
-		assert!(!waiting.contains(&2));
-	}
-
-	/// Test that drop_party() fails when it would drop below threshold.
-	#[test]
-	fn test_drop_party_below_threshold() {
-		let config = ThresholdConfig::new(2, 3).expect("valid config");
-		let seed = [42u8; 32];
-		let (public_key, shares) = generate_with_dealer(&seed, config).expect("key generation");
-
-		let signer =
-			ThresholdSigner::new(shares[0].clone(), public_key.clone(), config).expect("signer");
-
-		let mut protocol = DilithiumSignProtocol::new(
-			signer,
-			b"test message".to_vec(),
-			b"context".to_vec(),
-			vec![0, 1, 2],
-			0, // my_id
-			0, // leader_id
-		);
-
-		// Generate our Round 1
-		let _ = protocol.poke().expect("poke");
-
-		// Try to drop both other parties - second drop should fail
-		protocol.drop_party(1).expect("first drop ok");
-
-		let result = protocol.drop_party(2);
-		assert!(matches!(result, Err(SignProtocolError::BelowThreshold { .. })));
-	}
-
-	/// Test that drop_party() fails for unknown party.
-	#[test]
-	fn test_drop_party_not_found() {
-		let config = ThresholdConfig::new(2, 3).expect("valid config");
-		let seed = [42u8; 32];
-		let (public_key, shares) = generate_with_dealer(&seed, config).expect("key generation");
-
-		let signer =
-			ThresholdSigner::new(shares[0].clone(), public_key.clone(), config).expect("signer");
-
-		let mut protocol = DilithiumSignProtocol::new(
-			signer,
-			b"test message".to_vec(),
-			b"context".to_vec(),
-			vec![0, 1, 2],
-			0,
-			0,
-		);
-
-		// Try to drop a party that doesn't exist
-		let result = protocol.drop_party(99);
-		assert!(matches!(result, Err(SignProtocolError::PartyNotFound(99))));
-	}
-
-	/// Test that drop_party() fails when trying to drop self.
-	#[test]
-	fn test_drop_party_self() {
-		let config = ThresholdConfig::new(2, 3).expect("valid config");
-		let seed = [42u8; 32];
-		let (public_key, shares) = generate_with_dealer(&seed, config).expect("key generation");
-
-		let signer =
-			ThresholdSigner::new(shares[0].clone(), public_key.clone(), config).expect("signer");
-
-		let mut protocol = DilithiumSignProtocol::new(
-			signer,
-			b"test message".to_vec(),
-			b"context".to_vec(),
-			vec![0, 1, 2],
-			0,
-			0,
-		);
-
-		// Try to drop ourselves
-		let result = protocol.drop_party(0);
-		assert!(matches!(result, Err(SignProtocolError::PartyNotFound(0))));
 	}
 }

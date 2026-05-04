@@ -73,7 +73,7 @@
 //! The `Action` enum matches the pattern expected by cait-sith based protocols.
 
 use alloc::{
-	collections::{BTreeMap, BTreeSet},
+	collections::BTreeMap,
 	format,
 	string::{String, ToString},
 	vec,
@@ -132,15 +132,6 @@ pub enum SignProtocolError {
 	InvalidMessage(String),
 	/// Missing required data.
 	MissingData(String),
-	/// Dropped below threshold after removing unresponsive parties (HQ7).
-	BelowThreshold {
-		/// Number of remaining responsive parties.
-		remaining: usize,
-		/// Required threshold.
-		threshold: usize,
-	},
-	/// Party not found when trying to drop.
-	PartyNotFound(u32),
 	/// Malformed message received from a party.
 	///
 	/// This indicates a participant sent data that could not be deserialized.
@@ -162,12 +153,6 @@ impl fmt::Display for SignProtocolError {
 			SignProtocolError::ProtocolFailed(s) => write!(f, "Protocol failed: {}", s),
 			SignProtocolError::InvalidMessage(s) => write!(f, "Invalid message: {}", s),
 			SignProtocolError::MissingData(s) => write!(f, "Missing data: {}", s),
-			SignProtocolError::BelowThreshold { remaining, threshold } => write!(
-				f,
-				"Dropped below threshold: {} parties remaining, {} required",
-				remaining, threshold
-			),
-			SignProtocolError::PartyNotFound(id) => write!(f, "Party not found: {}", id),
 			SignProtocolError::MalformedMessage { from, reason } => {
 				write!(f, "Malformed message from party {}: {}", from, reason)
 			},
@@ -382,9 +367,6 @@ pub struct DilithiumSignProtocol {
 	retry_count: u32,
 	/// Signature received from leader (for followers).
 	received_signature: Option<Signature>,
-
-	/// Parties that have been dropped due to unresponsiveness (HQ7).
-	dropped_parties: BTreeSet<ParticipantId>,
 }
 
 impl DilithiumSignProtocol {
@@ -450,7 +432,6 @@ impl DilithiumSignProtocol {
 			message_buffer: SignMessageBuffer::new(),
 			retry_count: 0,
 			received_signature: None,
-			dropped_parties: BTreeSet::new(),
 		}
 	}
 
@@ -505,42 +486,27 @@ impl DilithiumSignProtocol {
 	}
 
 	// ========================================================================
-	// HQ7: Party management for timeout handling
+	// Party status helpers
 	// ========================================================================
 
-	/// Get the number of currently active (non-dropped) parties.
-	pub fn active_party_count(&self) -> usize {
-		self.participants
-			.iter()
-			.filter(|&id| !self.dropped_parties.contains(&id))
-			.count()
-	}
-
-	/// Get the list of dropped parties.
-	pub fn dropped_parties(&self) -> Vec<ParticipantId> {
-		self.dropped_parties.iter().copied().collect()
-	}
-
-	/// Get the list of parties we are currently waiting for (HQ7).
+	/// Get the list of parties we are currently waiting for.
 	///
 	/// Returns the party IDs that have not yet sent their message for the
-	/// current round (excluding dropped parties). Applications can use this
-	/// to implement timeout logic:
+	/// current round. Applications can use this for monitoring/debugging.
 	///
-	/// ```ignore
-	/// // Application timeout logic
-	/// if elapsed > timeout {
-	///     for party in protocol.waiting_for() {
-	///         protocol.drop_party(party)?;
-	///     }
-	/// }
-	/// ```
+	/// # Note on Participant Set
+	///
+	/// The Mithril threshold signing protocol assumes a **fixed participant set**
+	/// that is agreed upon before the protocol starts. The recommended approach
+	/// (used by NEAR MPC) is for the leader to pre-select exactly `threshold`
+	/// currently-alive participants and broadcast this list to all parties.
+	/// All parties then use this pre-agreed list.
+	///
+	/// This avoids consensus issues that would arise from mid-protocol party
+	/// removal (different parties might have different views of who is active).
 	pub fn waiting_for(&self) -> Vec<ParticipantId> {
-		let all_others: Vec<ParticipantId> = self
-			.participants
-			.iter()
-			.filter(|&id| id != self.my_participant_id && !self.dropped_parties.contains(&id))
-			.collect();
+		let all_others: Vec<ParticipantId> =
+			self.participants.iter().filter(|&id| id != self.my_participant_id).collect();
 
 		match &self.state {
 			SignProtocolState::Round1Waiting => all_others
@@ -556,10 +522,8 @@ impl DilithiumSignProtocol {
 				.filter(|id| !self.r3_broadcasts.contains_key(id))
 				.collect(),
 			SignProtocolState::WaitingForLeaderDecision => {
-				// Waiting for leader only (unless leader was dropped)
-				if self.received_signature.is_none() &&
-					!self.dropped_parties.contains(&self.leader_id)
-				{
+				// Waiting for leader only
+				if self.received_signature.is_none() {
 					vec![self.leader_id]
 				} else {
 					vec![]
@@ -567,75 +531,6 @@ impl DilithiumSignProtocol {
 			},
 			_ => vec![], // Not in a waiting state
 		}
-	}
-
-	/// Drop an unresponsive party from the protocol (HQ7).
-	///
-	/// If enough parties remain (≥ threshold), the protocol continues.
-	/// Otherwise, returns `BelowThreshold` error.
-	///
-	/// # Arguments
-	///
-	/// * `party_id` - The ID of the unresponsive party to drop
-	///
-	/// # Errors
-	///
-	/// * `PartyNotFound` - The party is not a participant or is this party
-	/// * `BelowThreshold` - Dropping this party would leave fewer than threshold parties
-	///
-	/// # Example
-	///
-	/// ```ignore
-	/// // Application detects party 2 is unresponsive
-	/// match protocol.drop_party(2) {
-	///     Ok(()) => println!("Dropped party 2, continuing with remaining parties"),
-	///     Err(SignProtocolError::BelowThreshold { .. }) => {
-	///         println!("Cannot continue - not enough parties");
-	///         return Err(...);
-	///     }
-	///     Err(e) => return Err(e),
-	/// }
-	/// ```
-	pub fn drop_party(&mut self, party_id: ParticipantId) -> Result<(), SignProtocolError> {
-		// Can't drop ourselves
-		if party_id == self.my_participant_id {
-			return Err(SignProtocolError::PartyNotFound(party_id));
-		}
-
-		// Check party is a participant and not already dropped
-		if !self.participants.contains(party_id) || self.dropped_parties.contains(&party_id) {
-			return Err(SignProtocolError::PartyNotFound(party_id));
-		}
-
-		// Calculate remaining active parties after drop
-		// Active = all participants - dropped - the one being dropped now
-		let remaining_count = self
-			.participants
-			.iter()
-			.filter(|&id| id != party_id && !self.dropped_parties.contains(&id))
-			.count();
-
-		// Check if we'd drop below threshold
-		if remaining_count < self.threshold() {
-			return Err(SignProtocolError::BelowThreshold {
-				remaining: remaining_count,
-				threshold: self.threshold(),
-			});
-		}
-
-		// Mark party as dropped
-		self.dropped_parties.insert(party_id);
-
-		// Remove the party's data from all rounds
-		self.r1_broadcasts.remove(&party_id);
-		self.r2_broadcasts.remove(&party_id);
-		self.r3_broadcasts.remove(&party_id);
-
-		// Remove from buffered messages
-		self.message_buffer.round2.retain(|r| r.party_id != party_id);
-		self.message_buffer.round3.retain(|r| r.party_id != party_id);
-
-		Ok(())
 	}
 
 	/// Serialize a message for network transmission.
