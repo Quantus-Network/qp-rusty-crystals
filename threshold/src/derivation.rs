@@ -21,16 +21,20 @@
 //!
 //! # Security
 //!
-//! The DKG contribution uses secret material from the master share, ensuring
-//! that outsiders cannot compute the derived shares even though the tweak
-//! is public.
+//! The contribution input is bound to the share's actual secret polynomials
+//! (`s1`, `s2`), which are the only true secret material in a `PrivateKeyShare`.
+//! The legacy `key` byte string is *not* used here, because in the DKG path it is
+//! derived deterministically from public values (`rho`, `party_id`) and therefore
+//! provides no secrecy.
+
+use alloc::vec::Vec;
 
 use qp_rusty_crystals_dilithium::fips202;
 
 use crate::keys::PrivateKeyShare;
 
 /// Domain separator for DKG contribution derivation.
-const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v1";
+const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v2";
 
 /// Derive a DKG contribution from a master share and tweak.
 ///
@@ -52,43 +56,60 @@ const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v1"
 ///
 /// # Security
 ///
-/// The contribution uses SHAKE256 with domain separation. The input includes
-/// the master share's secret key material, ensuring that even though the tweak
-/// is public, only parties holding valid master shares can compute their DKG
-/// contributions.
-///
-/// # Example
-/// ```ignore
-/// use qp_rusty_crystals_threshold::derivation::derive_dkg_contribution;
-///
-/// // Tweak is computed by the caller (e.g., from NEAR MPC contract's derive_dilithium_tweak)
-/// let tweak: [u8; 32] = compute_tweak("alice.near", "ethereum");
-/// let contribution = derive_dkg_contribution(&my_master_share, &tweak);
-///
-/// // Use contribution as seed for DKG randomness
-/// ```
+/// The contribution is computed as
+/// `SHAKE256(domain || party_id || tweak || H(secret_shares))`,
+/// where `secret_shares` is the canonical serialization of every `(subset_mask, s1, s2)`
+/// triple in the share. The shares are the actual cryptographic secret of the threshold
+/// scheme, so an attacker who does not hold a valid `PrivateKeyShare` cannot compute
+/// `derive_dkg_contribution` for any party — even though `party_id`, `tweak`, and
+/// `rho` are public.
 pub fn derive_dkg_contribution(master_share: &PrivateKeyShare, tweak: &[u8; 32]) -> [u8; 32] {
-	// Get secret material from the master share
-	// We use the key field which contains the private key seed
-	let secret_material = master_share.key();
-
-	// Include party_id to ensure different parties get different contributions
-	// even if they somehow had the same key material
 	let party_id_bytes = master_share.party_id().to_le_bytes();
+	let shares_digest = hash_secret_shares(master_share);
 
-	// Use SHAKE256 for key derivation with domain separation
-	// Input: domain || secret || party_id || tweak
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, DKG_CONTRIBUTION_DOMAIN, DKG_CONTRIBUTION_DOMAIN.len());
-	fips202::shake256_absorb(&mut state, secret_material, secret_material.len());
 	fips202::shake256_absorb(&mut state, &party_id_bytes, party_id_bytes.len());
 	fips202::shake256_absorb(&mut state, tweak, tweak.len());
+	fips202::shake256_absorb(&mut state, &shares_digest, shares_digest.len());
 	fips202::shake256_finalize(&mut state);
 
 	let mut contribution = [0u8; 32];
 	fips202::shake256_squeeze(&mut contribution, 32, &mut state);
 
 	contribution
+}
+
+/// Hash all secret share polynomials into a 64-byte digest for use as keying material.
+///
+/// `BTreeMap` iteration is deterministic by key, so the digest is stable across calls
+/// and across machines holding the same share data.
+pub(crate) fn hash_secret_shares(master_share: &PrivateKeyShare) -> [u8; 64] {
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, b"threshold-share-digest-v1", 25);
+	fips202::shake256_absorb(&mut state, &master_share.party_id().to_le_bytes(), 4);
+
+	let mut buf: Vec<u8> = Vec::new();
+	for (subset_mask, share_data) in master_share.shares() {
+		buf.clear();
+		buf.extend_from_slice(&subset_mask.to_le_bytes());
+		for poly in &share_data.s1 {
+			for coeff in poly {
+				buf.extend_from_slice(&coeff.to_le_bytes());
+			}
+		}
+		for poly in &share_data.s2 {
+			for coeff in poly {
+				buf.extend_from_slice(&coeff.to_le_bytes());
+			}
+		}
+		fips202::shake256_absorb(&mut state, &buf, buf.len());
+	}
+
+	fips202::shake256_finalize(&mut state);
+	let mut digest = [0u8; 64];
+	fips202::shake256_squeeze(&mut digest, 64, &mut state);
+	digest
 }
 
 /// Identifier for a derived key, used for storage lookup.
@@ -114,19 +135,32 @@ impl DerivedKeyId {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::participants::ParticipantList;
+	use crate::{keys::SecretShareData, participants::ParticipantList};
 
-	/// Helper to create a test PrivateKeyShare
-	fn create_test_share(party_id: u32, key: [u8; 32]) -> PrivateKeyShare {
+	/// Helper to create a test PrivateKeyShare with synthetic share data.
+	///
+	/// The `key_byte` value is fanned out into both the legacy `key` field and the
+	/// (now security-relevant) `s1`/`s2` polynomial coefficients, so callers that
+	/// previously distinguished shares by their `key` parameter still get distinct
+	/// derivation outputs under the new contribution function.
+	fn create_test_share(party_id: u32, key_byte: u8) -> PrivateKeyShare {
 		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
+		let mut shares = std::collections::BTreeMap::new();
+		shares.insert(
+			0b011,
+			SecretShareData {
+				s1: vec![[key_byte as i32; 256]; 7],
+				s2: vec![[key_byte as i32; 256]; 8],
+			},
+		);
 		PrivateKeyShare::new(
 			party_id,
-			3, // total_parties
-			2, // threshold
-			key,
-			[0u8; 32],                         // rho
-			[0u8; 64],                         // tr
-			std::collections::BTreeMap::new(), // shares
+			3,
+			2,
+			[key_byte; 32],
+			[0u8; 32],
+			[0u8; 64],
+			shares,
 			dkg_participants,
 		)
 	}
@@ -147,7 +181,7 @@ mod tests {
 
 	#[test]
 	fn test_derive_dkg_contribution_deterministic() {
-		let share = create_test_share(0, [42u8; 32]);
+		let share = create_test_share(0, 42);
 		let tweak = test_tweak("alice.near", "ethereum");
 
 		let contribution1 = derive_dkg_contribution(&share, &tweak);
@@ -159,9 +193,8 @@ mod tests {
 	fn test_derive_dkg_contribution_different_parties() {
 		let tweak = test_tweak("alice.near", "ethereum");
 
-		// Different party IDs with same key should produce different contributions
-		let share0 = create_test_share(0, [42u8; 32]);
-		let share1 = create_test_share(1, [42u8; 32]);
+		let share0 = create_test_share(0, 42);
+		let share1 = create_test_share(1, 42);
 
 		let contribution0 = derive_dkg_contribution(&share0, &tweak);
 		let contribution1 = derive_dkg_contribution(&share1, &tweak);
@@ -172,9 +205,8 @@ mod tests {
 	fn test_derive_dkg_contribution_different_keys() {
 		let tweak = test_tweak("alice.near", "ethereum");
 
-		// Different key material should produce different contributions
-		let share_a = create_test_share(0, [1u8; 32]);
-		let share_b = create_test_share(0, [2u8; 32]);
+		let share_a = create_test_share(0, 1);
+		let share_b = create_test_share(0, 2);
 
 		let contribution_a = derive_dkg_contribution(&share_a, &tweak);
 		let contribution_b = derive_dkg_contribution(&share_b, &tweak);
@@ -183,7 +215,7 @@ mod tests {
 
 	#[test]
 	fn test_derive_dkg_contribution_different_tweaks() {
-		let share = create_test_share(0, [42u8; 32]);
+		let share = create_test_share(0, 42);
 
 		let tweak_eth = test_tweak("alice.near", "ethereum");
 		let tweak_btc = test_tweak("alice.near", "bitcoin");
@@ -191,6 +223,44 @@ mod tests {
 		let contribution_eth = derive_dkg_contribution(&share, &tweak_eth);
 		let contribution_btc = derive_dkg_contribution(&share, &tweak_btc);
 		assert_ne!(contribution_eth, contribution_btc);
+	}
+
+	#[test]
+	fn test_contribution_independent_of_legacy_key_field() {
+		// Two shares that differ ONLY in the publicly-derivable `key` byte string
+		// must still produce the same contribution, because security comes from the
+		// secret polynomial shares, not from `key`.
+		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
+		let mut shares = std::collections::BTreeMap::new();
+		shares
+			.insert(0b011, SecretShareData { s1: vec![[7i32; 256]; 7], s2: vec![[7i32; 256]; 8] });
+		let share_a = PrivateKeyShare::new(
+			0,
+			3,
+			2,
+			[1u8; 32],
+			[0u8; 32],
+			[0u8; 64],
+			shares.clone(),
+			dkg_participants.clone(),
+		);
+		let share_b = PrivateKeyShare::new(
+			0,
+			3,
+			2,
+			[2u8; 32], // different `key`, same shares
+			[0u8; 32],
+			[0u8; 64],
+			shares,
+			dkg_participants,
+		);
+
+		let tweak = test_tweak("alice.near", "ethereum");
+		assert_eq!(
+			derive_dkg_contribution(&share_a, &tweak),
+			derive_dkg_contribution(&share_b, &tweak),
+			"contribution must depend on secret share polynomials, not on `key` field"
+		);
 	}
 
 	#[test]

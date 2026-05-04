@@ -17,7 +17,7 @@ use crate::{
 };
 
 #[cfg(feature = "serde")]
-use crate::serde_helpers::{serde_participant_list, serde_poly_vec};
+use crate::serde_helpers::{serde_partial_pks, serde_participant_list, serde_poly_vec};
 
 // ML-DSA-87 parameters (same as DKG)
 /// Number of polynomials in s1 vector.
@@ -294,7 +294,7 @@ impl fmt::Display for ResharingConfigError {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ResharingMessage {
-	/// Round 1: Blinded share contributions from old committee.
+	/// Round 1: Hash commitments to per-subset sub-shares from old committee.
 	Round1(ResharingRound1Broadcast),
 	/// Round 2: New share distributions to new committee.
 	Round2(ResharingRound2Message),
@@ -323,76 +323,52 @@ impl ResharingMessage {
 }
 
 // ============================================================================
-// Round 1: Blinded Share Contributions
+// Round 1: Per-Subset Commitment Broadcast
 // ============================================================================
 
 /// Round 1 broadcast from old committee members.
 ///
-/// Each old committee member broadcasts their blinded share contribution
-/// along with the blinding values used. The blinding values are needed
-/// by dealers to correctly remove the total blinding when generating
-/// new shares.
+/// Each old committee member broadcasts hash commitments to the per-subset
+/// "sub-share" contributions they will privately deliver in Round 2. A party
+/// only commits to subsets where they are the *designated dealer* (the
+/// lowest-ID old participant in the subset). Other members of the same old
+/// subset independently recompute the same contributions and verify the
+/// commitment in Round 3.
 ///
-/// **Security note:** Broadcasting the blinding values is safe because:
-/// - The blinding alone doesn't reveal the secret
-/// - The blinded contribution hides the actual share values
-/// - Only the combination of all participants' shares (which requires threshold cooperation) can
-///   recover the secret
+/// # Security
+///
+/// Unlike the previous design, **no share values, blindings, or aggregations
+/// are revealed in clear**. The only public data is the hash commitment to
+/// each `r_{I→J}`, which is hiding because each `r_{I→J}` has at least
+/// `5^256 ≈ 2^594` bits of entropy (the η-bounded sample space) or is itself
+/// a function of secret share material.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ResharingRound1Broadcast {
 	/// Party ID of the sender.
 	pub party_id: ParticipantId,
-	/// Blinded contribution to s1 reconstruction.
-	/// This is: recovered_s1_share + blinding_s1
-	pub blinded_s1_contribution: BlindedContribution,
-	/// Blinded contribution to s2 reconstruction.
-	/// This is: recovered_s2_share + blinding_s2
-	pub blinded_s2_contribution: BlindedContribution,
-	/// The blinding values used for s1 (needed by dealers to remove total blinding).
-	pub blinding_s1: BlindedContribution,
-	/// The blinding values used for s2 (needed by dealers to remove total blinding).
-	pub blinding_s2: BlindedContribution,
-	/// Commitment to the blinding values (for verification that blinding matches).
-	pub blinding_commitment: [u8; COMMITMENT_HASH_SIZE],
+	/// Commitments keyed by `(old_subset_mask, new_subset_mask)`.
+	///
+	/// The sender is the designated dealer for `old_subset_mask`. Each commitment is
+	/// `SHAKE256("resharing-commit-v2" || old_subset || new_subset || pack(r))`.
+	pub commitments: BTreeMap<SubsetPair, [u8; COMMITMENT_HASH_SIZE]>,
 }
 
-/// A blinded polynomial vector contribution.
-///
-/// Contains the sum of a party's recovered share and their random blinding value.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct BlindedContribution {
-	/// Polynomial coefficients (L or K polynomials, each with N coefficients).
-	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
-	pub coefficients: Vec<[i32; N]>,
-}
-
-impl BlindedContribution {
-	/// Create a new blinded contribution with the given number of polynomials.
-	pub fn new(num_polynomials: usize) -> Self {
-		Self { coefficients: vec![[0i32; N]; num_polynomials] }
-	}
-
-	/// Create a blinded contribution for s1 (L polynomials).
-	pub fn new_s1() -> Self {
-		Self::new(L)
-	}
-
-	/// Create a blinded contribution for s2 (K polynomials).
-	pub fn new_s2() -> Self {
-		Self::new(K)
-	}
-}
+/// Composite key identifying a contribution from one old subset to one new subset.
+pub type SubsetPair = (SubsetMask, SubsetMask);
 
 // ============================================================================
-// Round 2: New Share Distribution
+// Round 2: Private Sub-Share Reveal
 // ============================================================================
 
-/// Round 2 message containing new shares for a specific party.
+/// Round 2 private message from a designated dealer to a new committee member.
 ///
-/// This is a private message from the dealing parties to new committee members.
-/// Each new party receives their subset shares from the dealers.
+/// For each pair `(I, J)` where the sender is the designated dealer of old subset
+/// `I` and the recipient is a member of new subset `J`, the message carries the
+/// deterministic sub-share `r_{I→J}` such that `Σ_J r_{I→J} = s_I^old`.
+///
+/// New shares are then computed (privately, by each new committee member) as
+/// `s_J^new = Σ_I r_{I→J}`.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ResharingRound2Message {
@@ -400,8 +376,8 @@ pub struct ResharingRound2Message {
 	pub from_party_id: ParticipantId,
 	/// Party ID of the recipient.
 	pub to_party_id: ParticipantId,
-	/// The new shares for the recipient, keyed by subset mask.
-	pub shares: BTreeMap<SubsetMask, NewShareData>,
+	/// Per-`(old_subset, new_subset)` contributions destined for the recipient.
+	pub contributions: BTreeMap<SubsetPair, NewShareData>,
 }
 
 /// New share data for a specific subset.
@@ -433,21 +409,58 @@ impl Default for NewShareData {
 // Round 3: Verification
 // ============================================================================
 
-/// Round 3 broadcast for share verification.
+/// Round 3 broadcast.
 ///
-/// Each new committee member broadcasts commitments to their received shares
-/// so that consistency can be verified.
+/// Round 3 has three purposes:
+///
+/// 1. **New committee verification.** Each new committee member broadcasts a commitment to each
+///    `s_J^new` they computed for new subsets `J` containing them. Other members of the same `J`
+///    should produce identical commitments; any mismatch indicates inconsistent dealing (e.g., a
+///    malicious dealer who sent different `r_{I→J}` to different recipients).
+///
+/// 2. **Old committee cross-verification.** Old committee members that share an old subset `I` with
+///    the dealer `D_I` independently recompute the deterministic `r_{I→J}` values from their own
+///    copy of `s_I^old` and compare them against `D_I`'s broadcast commitments. Any mismatch is
+///    reported as a `DealerAccusation`. If the accusation is correct (the accuser's recomputation
+///    matches their own private knowledge of `s_I`), the resharing fails.
+///
+/// 3. **Public-key invariant verification.** Each new committee member additionally publishes
+///    `t_J^new = A·s1_J^new + s2_J^new mod Q` for every new subset `J` it belongs to. Anyone can
+///    sum these `t_J` and check that the result reconstructs the original public key. This catches
+///    a malicious dealer that lies about the residual `r_{I→J}` in a *size-1* old subset (`t = n`
+///    configurations), where there is no other old-subset member to cross-verify in purpose 2.
+///    Publishing `t_J^new` is safe: recovering `s_J^new` from `t_J^new` is the LWE problem.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ResharingRound3Broadcast {
 	/// Party ID of the sender.
 	pub party_id: ParticipantId,
-	/// Commitments to each subset share, keyed by subset mask.
+	/// Commitments to each computed new subset share (only populated by new committee members).
 	pub share_commitments: BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>,
-	/// Indicates success or failure of share reception.
+	/// Partial public-key contributions `t_J^new = A·s1_J^new + s2_J^new mod Q`,
+	/// one entry per new subset `J` this party belongs to. Empty for old-only parties.
+	#[cfg_attr(feature = "serde", serde(with = "serde_partial_pks"))]
+	pub partial_pks: BTreeMap<SubsetMask, Vec<[i32; N]>>,
+	/// Accusations against dealers whose broadcast commitments did not match
+	/// the sender's independent recomputation.
+	pub accusations: Vec<DealerAccusation>,
+	/// Indicates whether this party processed Round 1/2 successfully.
 	pub success: bool,
-	/// Optional error message if success is false.
+	/// Optional error message if `success` is false.
 	pub error_message: Option<String>,
+}
+
+/// An accusation that a dealer published a commitment that does not match
+/// the independent recomputation by another member of the same old subset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct DealerAccusation {
+	/// The party being accused (the broadcaster of the bad commitment).
+	pub dealer: ParticipantId,
+	/// The old subset for which the dealer's commitment was wrong.
+	pub old_subset: SubsetMask,
+	/// The new subset whose `r_{I→J}` commitment was wrong.
+	pub new_subset: SubsetMask,
 }
 
 // ============================================================================
@@ -575,25 +588,10 @@ mod tests {
 	}
 
 	#[test]
-	fn test_blinded_contribution_sizes() {
-		let s1 = BlindedContribution::new_s1();
-		assert_eq!(s1.coefficients.len(), L);
-		assert_eq!(s1.coefficients[0].len(), N);
-
-		let s2 = BlindedContribution::new_s2();
-		assert_eq!(s2.coefficients.len(), K);
-		assert_eq!(s2.coefficients[0].len(), N);
-	}
-
-	#[test]
 	fn test_message_round_numbers() {
 		let r1 = ResharingMessage::Round1(ResharingRound1Broadcast {
 			party_id: 0,
-			blinded_s1_contribution: BlindedContribution::new_s1(),
-			blinded_s2_contribution: BlindedContribution::new_s2(),
-			blinding_s1: BlindedContribution::new_s1(),
-			blinding_s2: BlindedContribution::new_s2(),
-			blinding_commitment: [0u8; COMMITMENT_HASH_SIZE],
+			commitments: BTreeMap::new(),
 		});
 		assert_eq!(r1.round(), 1);
 		assert_eq!(r1.party_id(), 0);
@@ -601,7 +599,7 @@ mod tests {
 		let r2 = ResharingMessage::Round2(ResharingRound2Message {
 			from_party_id: 1,
 			to_party_id: 2,
-			shares: BTreeMap::new(),
+			contributions: BTreeMap::new(),
 		});
 		assert_eq!(r2.round(), 2);
 		assert_eq!(r2.party_id(), 1);
@@ -609,6 +607,8 @@ mod tests {
 		let r3 = ResharingMessage::Round3(ResharingRound3Broadcast {
 			party_id: 2,
 			share_commitments: BTreeMap::new(),
+			partial_pks: BTreeMap::new(),
+			accusations: Vec::new(),
 			success: true,
 			error_message: None,
 		});
@@ -723,22 +723,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_blinded_contribution_new() {
-		// Test creating contributions of various sizes
-		for size in 1..10 {
-			let contrib = BlindedContribution::new(size);
-			assert_eq!(contrib.coefficients.len(), size);
-			for poly in &contrib.coefficients {
-				assert_eq!(poly.len(), N);
-				// All coefficients should be initialized to zero
-				for &coeff in poly {
-					assert_eq!(coeff, 0);
-				}
-			}
-		}
-	}
-
-	#[test]
 	fn test_new_share_data_initialization() {
 		let share = NewShareData::new();
 
@@ -785,29 +769,24 @@ mod tests {
 
 	#[test]
 	fn test_resharing_message_party_id_extraction() {
-		// Test Round1
 		let r1 = ResharingMessage::Round1(ResharingRound1Broadcast {
 			party_id: 42,
-			blinded_s1_contribution: BlindedContribution::new_s1(),
-			blinded_s2_contribution: BlindedContribution::new_s2(),
-			blinding_s1: BlindedContribution::new_s1(),
-			blinding_s2: BlindedContribution::new_s2(),
-			blinding_commitment: [0u8; COMMITMENT_HASH_SIZE],
+			commitments: BTreeMap::new(),
 		});
 		assert_eq!(r1.party_id(), 42);
 
-		// Test Round2
 		let r2 = ResharingMessage::Round2(ResharingRound2Message {
 			from_party_id: 99,
 			to_party_id: 100,
-			shares: BTreeMap::new(),
+			contributions: BTreeMap::new(),
 		});
-		assert_eq!(r2.party_id(), 99); // Should return from_party_id
+		assert_eq!(r2.party_id(), 99);
 
-		// Test Round3
 		let r3 = ResharingMessage::Round3(ResharingRound3Broadcast {
 			party_id: 77,
 			share_commitments: BTreeMap::new(),
+			partial_pks: BTreeMap::new(),
+			accusations: Vec::new(),
 			success: true,
 			error_message: None,
 		});
@@ -816,20 +795,22 @@ mod tests {
 
 	#[test]
 	fn test_resharing_round3_broadcast_error_handling() {
-		// Test successful broadcast
 		let success = ResharingRound3Broadcast {
 			party_id: 0,
 			share_commitments: BTreeMap::new(),
+			partial_pks: BTreeMap::new(),
+			accusations: Vec::new(),
 			success: true,
 			error_message: None,
 		};
 		assert!(success.success);
 		assert!(success.error_message.is_none());
 
-		// Test failed broadcast with error message
 		let failure = ResharingRound3Broadcast {
 			party_id: 1,
 			share_commitments: BTreeMap::new(),
+			partial_pks: BTreeMap::new(),
+			accusations: Vec::new(),
 			success: false,
 			error_message: Some("Share verification failed".to_string()),
 		};

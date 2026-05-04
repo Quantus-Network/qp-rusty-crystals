@@ -199,11 +199,6 @@ impl PrivateKeyShare {
 		&self.tr
 	}
 
-	/// Get the private key seed (for internal use).
-	pub(crate) fn key(&self) -> &[u8; 32] {
-		&self.key
-	}
-
 	/// Get the secret shares (for internal use).
 	pub(crate) fn shares(&self) -> &BTreeMap<u16, SecretShareData> {
 		&self.shares

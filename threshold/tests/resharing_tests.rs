@@ -11,7 +11,7 @@ use qp_rusty_crystals_threshold::{
 };
 
 use qp_rusty_crystals_threshold::resharing::{
-	Action, ResharingConfig, ResharingMessage, ResharingProtocol, ResharingState,
+	Action, NewShareData, ResharingConfig, ResharingMessage, ResharingProtocol, ResharingState,
 };
 
 /// Helper to run the resharing protocol locally with simulated message passing.
@@ -22,7 +22,29 @@ fn run_resharing_protocol(
 	new_participants: Vec<u32>,
 	old_shares: &HashMap<u32, PrivateKeyShare>,
 	public_key: &PublicKey,
-	seed: [u8; 32],
+) -> Result<HashMap<u32, PrivateKeyShare>, String> {
+	run_resharing_protocol_with_tamper(
+		old_threshold,
+		old_participants,
+		new_threshold,
+		new_participants,
+		old_shares,
+		public_key,
+		None,
+	)
+}
+
+/// Optional message tamper hook: `tamper(sender, recipient, raw_bytes) -> raw_bytes`.
+type TamperFn = Box<dyn FnMut(u32, Option<u32>, Vec<u8>) -> Vec<u8>>;
+
+fn run_resharing_protocol_with_tamper(
+	old_threshold: u32,
+	old_participants: Vec<u32>,
+	new_threshold: u32,
+	new_participants: Vec<u32>,
+	old_shares: &HashMap<u32, PrivateKeyShare>,
+	public_key: &PublicKey,
+	mut tamper: Option<TamperFn>,
 ) -> Result<HashMap<u32, PrivateKeyShare>, String> {
 	// Determine all parties involved (union of old and new)
 	let mut all_parties: Vec<u32> =
@@ -47,11 +69,7 @@ fn run_resharing_protocol(
 		)
 		.map_err(|e| format!("Config error for party {}: {}", party_id, e))?;
 
-		// Each party gets a unique seed derived from the base seed
-		let mut party_seed = seed;
-		party_seed[0] ^= party_id as u8;
-
-		let protocol = ResharingProtocol::new(config, party_seed);
+		let protocol = ResharingProtocol::new(config);
 		protocols.insert(party_id, protocol);
 	}
 
@@ -101,19 +119,34 @@ fn run_resharing_protocol(
 					// Nothing to do
 				},
 				Ok(Action::SendMany(data)) => {
-					// Broadcast to all other parties
+					let payload = match tamper.as_mut() {
+						Some(f) => f(party_id, None, data),
+						None => data,
+					};
 					for &other_id in &all_parties {
 						if other_id != party_id {
 							message_queues
 								.get_mut(&other_id)
 								.unwrap()
-								.push((party_id, data.clone()));
+								.push((party_id, payload.clone()));
 						}
 					}
 				},
 				Ok(Action::SendPrivate(to, data)) => {
-					// Send to specific party
-					message_queues.get_mut(&to).unwrap().push((party_id, data));
+					// Send to specific party. We deliberately do NOT loop self-private
+					// messages back: the protocol must handle self-deals locally and
+					// never emit SendPrivate(self, _).
+					assert_ne!(
+						to, party_id,
+						"protocol emitted SendPrivate to self (party {}), \
+						 self-deals must be handled locally",
+						party_id
+					);
+					let payload = match tamper.as_mut() {
+						Some(f) => f(party_id, Some(to), data),
+						None => data,
+					};
+					message_queues.get_mut(&to).unwrap().push((party_id, payload));
 				},
 				Ok(Action::Return(_)) => {
 					// Protocol complete for this party
@@ -361,7 +394,7 @@ fn test_resharing_protocol_creation() {
 	)
 	.expect("valid config");
 
-	let protocol = ResharingProtocol::new(resharing_config, [0u8; 32]);
+	let protocol = ResharingProtocol::new(resharing_config);
 	assert_eq!(*protocol.state(), ResharingState::Round1Generate);
 }
 
@@ -382,7 +415,7 @@ fn test_resharing_protocol_round1_generation() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [0u8; 32]);
+	let mut protocol = ResharingProtocol::new(resharing_config);
 
 	// First poke should generate Round 1 message
 	let action = protocol.poke().expect("poke should succeed");
@@ -419,7 +452,7 @@ fn test_resharing_new_party_skips_round1() {
 		ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 3], 3, None, public_key)
 			.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [0u8; 32]);
+	let mut protocol = ResharingProtocol::new(resharing_config);
 
 	// New party should skip Round 1 and wait for Round 2
 	let action = protocol.poke().expect("poke should succeed");
@@ -723,7 +756,7 @@ fn test_resharing_round1_message_from_non_member_ignored() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [0u8; 32]);
+	let mut protocol = ResharingProtocol::new(resharing_config);
 
 	// Generate Round 1 message
 	let _ = protocol.poke().expect("poke should succeed");
@@ -769,8 +802,8 @@ fn test_resharing_duplicate_message_ignored() {
 	)
 	.expect("valid config");
 
-	let mut protocol0 = ResharingProtocol::new(config0, [0u8; 32]);
-	let mut protocol1 = ResharingProtocol::new(config1, [1u8; 32]);
+	let mut protocol0 = ResharingProtocol::new(config0);
+	let mut protocol1 = ResharingProtocol::new(config1);
 
 	// Generate Round 1 messages
 	let msg0 = match protocol0.poke().expect("poke should succeed") {
@@ -834,7 +867,7 @@ fn test_old_only_party_behavior() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [0u8; 32]);
+	let mut protocol = ResharingProtocol::new(resharing_config);
 
 	// Party should participate in Round 1
 	let action = protocol.poke().expect("poke should succeed");
@@ -864,7 +897,7 @@ fn test_new_only_party_behavior() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [0u8; 32]);
+	let mut protocol = ResharingProtocol::new(resharing_config);
 
 	// New party should skip Round 1 and wait for Round 2
 	let action = protocol.poke().expect("poke should succeed");
@@ -901,15 +934,8 @@ fn test_resharing_end_to_end_same_committee() {
 	}
 
 	// Run resharing to the same committee
-	let result = run_resharing_protocol(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 2],
-		&old_shares,
-		&public_key,
-		[99u8; 32],
-	);
+	let result =
+		run_resharing_protocol(2, vec![0, 1, 2], 2, vec![0, 1, 2], &old_shares, &public_key);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
 	let new_shares = result.unwrap();
@@ -943,15 +969,8 @@ fn test_resharing_end_to_end_add_party() {
 	}
 
 	// Run resharing to add party 3
-	let result = run_resharing_protocol(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 2, 3],
-		&old_shares,
-		&public_key,
-		[99u8; 32],
-	);
+	let result =
+		run_resharing_protocol(2, vec![0, 1, 2], 2, vec![0, 1, 2, 3], &old_shares, &public_key);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
 	let new_shares = result.unwrap();
@@ -988,15 +1007,7 @@ fn test_resharing_end_to_end_remove_party() {
 	}
 
 	// Run resharing to remove party 2
-	let result = run_resharing_protocol(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1],
-		&old_shares,
-		&public_key,
-		[99u8; 32],
-	);
+	let result = run_resharing_protocol(2, vec![0, 1, 2], 2, vec![0, 1], &old_shares, &public_key);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
 	let new_shares = result.unwrap();
@@ -1032,15 +1043,8 @@ fn test_resharing_end_to_end_replace_party() {
 	}
 
 	// Run resharing to replace party 2 with party 3
-	let result = run_resharing_protocol(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 3],
-		&old_shares,
-		&public_key,
-		[99u8; 32],
-	);
+	let result =
+		run_resharing_protocol(2, vec![0, 1, 2], 2, vec![0, 1, 3], &old_shares, &public_key);
 
 	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
 	let new_shares = result.unwrap();
@@ -1060,4 +1064,287 @@ fn test_resharing_end_to_end_replace_party() {
 		run_signing_and_verify(&signing_shares, &public_key, config, b"test message", b"");
 
 	assert!(is_valid, "Signature with new shares should verify");
+}
+
+#[test]
+fn test_resharing_end_to_end_disjoint_committees() {
+	// Test full committee handoff with NO overlap: (2,3) with {0,1,2} -> (2,3) with {3,4,5}.
+	// Verifies that completely-new parties (no existing shares) can derive working
+	// shares solely from old-committee dealing, and that signatures using ONLY new
+	// parties verify against the original public key.
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [7u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result =
+		run_resharing_protocol(2, vec![0, 1, 2], 2, vec![3, 4, 5], &old_shares, &public_key);
+
+	assert!(result.is_ok(), "Resharing failed: {:?}", result.err());
+	let new_shares = result.unwrap();
+
+	assert_eq!(new_shares.len(), 3);
+	assert!(new_shares.contains_key(&3));
+	assert!(new_shares.contains_key(&4));
+	assert!(new_shares.contains_key(&5));
+	assert!(!new_shares.contains_key(&0));
+	assert!(!new_shares.contains_key(&1));
+	assert!(!new_shares.contains_key(&2));
+
+	// Sign with two of the brand-new parties; verify against original PK.
+	let signing_shares: Vec<_> =
+		vec![new_shares.get(&3).unwrap().clone(), new_shares.get(&4).unwrap().clone()];
+	let is_valid =
+		run_signing_and_verify(&signing_shares, &public_key, config, b"disjoint committee", b"");
+	assert!(is_valid, "Signature from disjoint new committee should verify");
+
+	// Also try a different threshold subset to confirm any t parties can sign.
+	let signing_shares_alt: Vec<_> =
+		vec![new_shares.get(&4).unwrap().clone(), new_shares.get(&5).unwrap().clone()];
+	let is_valid_alt = run_signing_and_verify(
+		&signing_shares_alt,
+		&public_key,
+		config,
+		b"disjoint committee alt",
+		b"",
+	);
+	assert!(is_valid_alt, "Alternate threshold subset should also produce valid signatures");
+}
+
+/// Recompute the SHAKE256 commitment over `(i_mask, j_mask, r)` exactly the way the
+/// dealer does internally. Used by the malicious-dealer test below to forge a
+/// commitment that is *consistent* with a tampered `r` so the recipient's
+/// commitment-vs-r check passes — making the attack only catchable via the
+/// public-key invariant (M2).
+fn forge_consistent_commitment(i_mask: u16, j_mask: u16, r: &NewShareData) -> [u8; 32] {
+	use qp_rusty_crystals_dilithium::fips202;
+	const COMMIT_DOMAIN: &[u8] = b"resharing-commit-v2";
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, COMMIT_DOMAIN, COMMIT_DOMAIN.len());
+	fips202::shake256_absorb(&mut state, &i_mask.to_le_bytes(), 2);
+	fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes(), 2);
+	let mut buf: Vec<u8> = Vec::new();
+	for poly in &r.s1 {
+		buf.clear();
+		for c in poly {
+			buf.extend_from_slice(&c.to_le_bytes());
+		}
+		fips202::shake256_absorb(&mut state, &buf, buf.len());
+	}
+	for poly in &r.s2 {
+		buf.clear();
+		for c in poly {
+			buf.extend_from_slice(&c.to_le_bytes());
+		}
+		fips202::shake256_absorb(&mut state, &buf, buf.len());
+	}
+	fips202::shake256_finalize(&mut state);
+	let mut out = [0u8; 32];
+	fips202::shake256_squeeze(&mut out, 32, &mut state);
+	out
+}
+
+#[test]
+fn test_resharing_detects_dealer_accusation_when_commitment_tampered() {
+	// In a (2,3) resharing, old subsets have size 2 (n - t + 1 = 3 - 2 + 1 = 2).
+	// Each old subset has a designated dealer and another verifier. If the dealer
+	// broadcasts a bad commitment, the verifier will detect it in `collect_accusations`.
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [77u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	// Tamper only the Round 1 commitment (not the Round 2 payload). The recipient
+	// will accept the sub-share (commitment mismatch with our tampered value), but
+	// another member of the same old subset will independently recompute the
+	// *correct* commitment and file an accusation.
+	let target_pair = (0b011u16, 0b011u16); // old subset {0,1}, new subset {0,1}
+	let bad_commit = [0xAAu8; 32];
+
+	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
+		if sender != 0 {
+			return data;
+		}
+		let msg: ResharingMessage = match bincode::deserialize(&data) {
+			Ok(m) => m,
+			Err(_) => return data,
+		};
+		let modified = match msg {
+			ResharingMessage::Round1(mut b) => {
+				if let Some(c) = b.commitments.get_mut(&target_pair) {
+					*c = bad_commit;
+				}
+				ResharingMessage::Round1(b)
+			},
+			other => other,
+		};
+		bincode::serialize(&modified).expect("re-serialize tampered msg")
+	});
+
+	let result = run_resharing_protocol_with_tamper(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		Some(tamper),
+	);
+
+	let err = result.expect_err("tampered commitment must be detected via accusation");
+	// The protocol detects dealer misbehavior - either via accusation or party failure
+	assert!(
+		err.contains("accused") ||
+			err.contains("misbehavior") ||
+			err.contains("Party failure") ||
+			err.contains("PartyFailure"),
+		"expected dealer accusation or party failure, got: {}",
+		err
+	);
+}
+
+#[test]
+fn test_resharing_detects_round2_payload_mismatch() {
+	// Tamper only the Round 2 payload (not the commitment). The recipient will
+	// detect that the received `r` doesn't match the broadcast commitment and
+	// fail with ShareVerificationFailed.
+	const N: usize = 256;
+	const L: usize = 7;
+	const K: usize = 8;
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [55u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let target_pair = (0b011u16, 0b011u16);
+	let bogus_r = NewShareData { s1: vec![[99i32; N]; L], s2: vec![[13i32; N]; K] };
+
+	let bogus_r_capt = bogus_r.clone();
+	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
+		if sender != 0 {
+			return data;
+		}
+		let msg: ResharingMessage = match bincode::deserialize(&data) {
+			Ok(m) => m,
+			Err(_) => return data,
+		};
+		let modified = match msg {
+			ResharingMessage::Round2(mut m) => {
+				if m.from_party_id == 0 && m.contributions.contains_key(&target_pair) {
+					m.contributions.insert(target_pair, bogus_r_capt.clone());
+				}
+				ResharingMessage::Round2(m)
+			},
+			other => other,
+		};
+		bincode::serialize(&modified).expect("re-serialize tampered msg")
+	});
+
+	let result = run_resharing_protocol_with_tamper(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		Some(tamper),
+	);
+
+	let err = result.expect_err("tampered Round 2 payload must be detected");
+	// The protocol detects the mismatch - either via commitment check or party failure
+	assert!(
+		err.contains("commitment") ||
+			err.contains("ShareVerificationFailed") ||
+			err.contains("Party failure"),
+		"expected commitment mismatch or party failure, got: {}",
+		err
+	);
+}
+
+#[test]
+fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
+	// In a (2,2) -> (2,2) resharing every old subset has size 1, so the dealer is
+	// the sole member of their old subset and `collect_accusations` cannot catch a
+	// dealer that lies about their residual `r`. To prove that lying about `r` is
+	// nonetheless caught, we tamper *both* the Round 1 commitment and the Round 2
+	// payload so that they remain mutually consistent (passing the recipient's
+	// commit-vs-r check). The resulting `s_J^new` for the recipient is corrupted,
+	// the partial public-key sum no longer reconstructs the original public key,
+	// and `verify_public_key_preservation` fails.
+	const N: usize = 256;
+	const L: usize = 7;
+	const K: usize = 8;
+
+	let config = ThresholdConfig::new(2, 2).expect("valid config");
+	let seed = [11u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let bogus_r = NewShareData { s1: vec![[42i32; N]; L], s2: vec![[7i32; N]; K] };
+	let target_pair = (0b01u16, 0b10u16);
+	let bogus_commit = forge_consistent_commitment(target_pair.0, target_pair.1, &bogus_r);
+
+	let bogus_r_capt = bogus_r.clone();
+	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
+		if sender != 0 {
+			return data;
+		}
+		let msg: ResharingMessage = match bincode::deserialize(&data) {
+			Ok(m) => m,
+			Err(_) => return data,
+		};
+		let modified = match msg {
+			ResharingMessage::Round1(mut b) =>
+				if let Some(c) = b.commitments.get_mut(&target_pair) {
+					*c = bogus_commit;
+					ResharingMessage::Round1(b)
+				} else {
+					ResharingMessage::Round1(b)
+				},
+			ResharingMessage::Round2(mut m) =>
+				if m.from_party_id == 0 && m.contributions.contains_key(&target_pair) {
+					m.contributions.insert(target_pair, bogus_r_capt.clone());
+					ResharingMessage::Round2(m)
+				} else {
+					ResharingMessage::Round2(m)
+				},
+			other => other,
+		};
+		bincode::serialize(&modified).expect("re-serialize tampered msg")
+	});
+
+	let result = run_resharing_protocol_with_tamper(
+		2,
+		vec![0, 1],
+		2,
+		vec![0, 1],
+		&old_shares,
+		&public_key,
+		Some(tamper),
+	);
+
+	let err = result.expect_err("malicious dealer must be detected");
+	assert!(
+		err.contains("public key") || err.contains("ShareVerificationFailed"),
+		"expected public-key invariant failure, got: {}",
+		err
+	);
 }

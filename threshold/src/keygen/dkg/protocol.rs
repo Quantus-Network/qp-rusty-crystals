@@ -27,17 +27,13 @@ use super::{
 		derive_subset_contribution, h_commit, h_commit_pk, h_keygen, h_seed, MithrilDkgConfig,
 		MithrilDkgMessage, MithrilRound1Broadcast, MithrilRound1Private, MithrilRound2Broadcast,
 		MithrilRound3Broadcast, MithrilRound4Broadcast, PartialPublicKey, ParticipantId,
-		SubsetContribution, SubsetMask, TranscriptSigner, K, N, RANDOMNESS_SIZE,
-		SHARED_SECRET_SIZE,
+		SubsetContribution, SubsetMask, TranscriptSigner, RANDOMNESS_SIZE, SHARED_SECRET_SIZE,
 	},
 };
 
-use qp_rusty_crystals_dilithium::{fips202, packing, polyvec};
+use qp_rusty_crystals_dilithium::fips202;
 
 const ETA: i32 = 2; // ML-DSA-87 eta parameter
-const Q: i32 = 8380417;
-const PUBLIC_KEY_SIZE: usize = 2592; // ML-DSA-87
-const TR_SIZE: usize = 64;
 
 // ============================================================================
 // Error Types
@@ -127,6 +123,10 @@ impl fmt::Display for MithrilDkgError {
 /// - `SendMany`: Broadcast the data to all other participants
 /// - `SendPrivate`: Send the data to a specific participant via secure channel
 /// - `Return`: The DKG is complete, the output contains the keys
+///
+/// `Return` carries a boxed [`MithrilDkgOutput`] because the output is ~2.8 KB
+/// (full Dilithium key material) and inlining it would balloon every other
+/// variant. See `clippy::large_enum_variant`.
 #[derive(Debug)]
 pub enum MithrilAction {
 	/// Wait for more messages before proceeding.
@@ -136,7 +136,7 @@ pub enum MithrilAction {
 	/// Send data privately to a specific participant.
 	SendPrivate(ParticipantId, Vec<u8>),
 	/// DKG is complete, return the output.
-	Return(MithrilDkgOutput),
+	Return(Box<MithrilDkgOutput>),
 }
 
 // ============================================================================
@@ -779,7 +779,8 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 		// Build private key share
 		let private_share = build_private_share(&state, &public_key)?;
 
-		self.state = MithrilDkgState::Complete(MithrilDkgOutput { public_key, private_share });
+		self.state =
+			MithrilDkgState::Complete(Box::new(MithrilDkgOutput { public_key, private_share }));
 
 		Ok(())
 	}
@@ -794,75 +795,16 @@ fn compute_partial_pk(
 	contribution: &SubsetContribution,
 	subset_mask: SubsetMask,
 ) -> PartialPublicKey {
-	// Create and expand matrix A row by row to avoid Copy requirement
-	let mut mat: Vec<polyvec::Polyvecl> = (0..K).map(|_| polyvec::Polyvecl::default()).collect();
-	polyvec::matrix_expand(&mut mat, rho);
-
-	let mut s1 = polyvec::Polyvecl::default();
-	for (i, poly_coeffs) in contribution.s1.iter().enumerate() {
-		for (j, &coeff) in poly_coeffs.iter().enumerate() {
-			s1.vec[i].coeffs[j] = coeff;
-		}
-	}
-
-	let mut s2 = polyvec::Polyveck::default();
-	for (i, poly_coeffs) in contribution.s2.iter().enumerate() {
-		for (j, &coeff) in poly_coeffs.iter().enumerate() {
-			s2.vec[i].coeffs[j] = coeff;
-		}
-	}
-
-	let mut s1_hat = s1.clone();
-	polyvec::l_ntt(&mut s1_hat);
-
-	let mut t = polyvec::Polyveck::default();
-	polyvec::matrix_pointwise_montgomery(&mut t, &mat, &s1_hat);
-	polyvec::k_invntt_tomont(&mut t);
-	polyvec::k_add(&mut t, &s2);
-	polyvec::k_reduce(&mut t);
-	polyvec::k_caddq(&mut t);
-
-	let mut t_coeffs = vec![[0i32; N]; K];
-	for (i, poly) in t.vec.iter().enumerate() {
-		for (j, &coeff) in poly.coeffs.iter().enumerate() {
-			t_coeffs[i][j] = coeff;
-		}
-	}
-
-	PartialPublicKey { subset_mask, t: t_coeffs }
+	let t =
+		crate::protocol::partial_pk::compute_partial_pk_t(rho, &contribution.s1, &contribution.s2);
+	PartialPublicKey { subset_mask, t }
 }
 
 fn combine_partial_pks(
 	rho: &[u8; 32],
 	partial_pks: &BTreeMap<SubsetMask, PartialPublicKey>,
 ) -> Result<PublicKey, MithrilDkgError> {
-	let mut t = polyvec::Polyveck::default();
-
-	for pk in partial_pks.values() {
-		for (i, poly_coeffs) in pk.t.iter().enumerate() {
-			for (j, &coeff) in poly_coeffs.iter().enumerate() {
-				t.vec[i].coeffs[j] = (t.vec[i].coeffs[j] + coeff) % Q;
-			}
-		}
-	}
-
-	polyvec::k_reduce(&mut t);
-	polyvec::k_caddq(&mut t);
-
-	let mut t0 = polyvec::Polyveck::default();
-	let mut t1 = t.clone();
-	polyvec::k_power2round(&mut t1, &mut t0);
-
-	let mut pk_packed = [0u8; PUBLIC_KEY_SIZE];
-	packing::pack_pk(&mut pk_packed, rho, &t1);
-
-	let mut tr = [0u8; TR_SIZE];
-	let mut h_tr = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut h_tr, &pk_packed, pk_packed.len());
-	fips202::shake256_finalize(&mut h_tr);
-	fips202::shake256_squeeze(&mut tr, TR_SIZE, &mut h_tr);
-
-	Ok(PublicKey::new(pk_packed, tr))
+	Ok(crate::protocol::partial_pk::pack_combined_pk(rho, partial_pks.values().map(|pk| &pk.t)))
 }
 
 fn build_private_share<S: TranscriptSigner>(
@@ -880,12 +822,32 @@ fn build_private_share<S: TranscriptSigner>(
 		);
 	}
 
-	// Generate a deterministic key for this party
+	// Derive `party_key` from the actual secret share polynomials so that this byte
+	// string carries real entropy, not just a hash of the public `rho` and `party_id`.
+	// We still mix in `rho` and `party_id` for domain separation, but the security of
+	// `party_key` now depends on knowing the secret subset shares.
 	let mut party_key = [0u8; 32];
 	{
 		let mut h = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut h, b"dkg-party-key-v2", 16);
 		fips202::shake256_absorb(&mut h, &state.rho, 32);
 		fips202::shake256_absorb(&mut h, &state.config.my_party_id.to_le_bytes(), 4);
+		let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+		for (subset_mask, contribution) in &state.my_contributions {
+			buf.clear();
+			buf.extend_from_slice(&subset_mask.to_le_bytes());
+			for poly in &contribution.s1 {
+				for coeff in poly {
+					buf.extend_from_slice(&coeff.to_le_bytes());
+				}
+			}
+			for poly in &contribution.s2 {
+				for coeff in poly {
+					buf.extend_from_slice(&coeff.to_le_bytes());
+				}
+			}
+			fips202::shake256_absorb(&mut h, &buf, buf.len());
+		}
 		fips202::shake256_finalize(&mut h);
 		fips202::shake256_squeeze(&mut party_key, 32, &mut h);
 	}
@@ -1023,7 +985,7 @@ where
 					},
 					MithrilAction::Return(output) => {
 						made_progress = true;
-						outputs[party_id] = Some(output);
+						outputs[party_id] = Some(*output);
 					},
 				}
 			}
@@ -1360,7 +1322,7 @@ mod tests {
 						},
 						Ok(MithrilAction::Return(output)) => {
 							made_progress = true;
-							outputs[party_id] = Some(output);
+							outputs[party_id] = Some(*output);
 						},
 						Err(e) => {
 							errors[party_id] = Some(e);
@@ -1487,7 +1449,7 @@ mod tests {
 						},
 						Ok(MithrilAction::Return(output)) => {
 							made_progress = true;
-							outputs[party_id] = Some(output);
+							outputs[party_id] = Some(*output);
 						},
 						Err(e) => {
 							errors[party_id] = Some(e);
@@ -1615,7 +1577,7 @@ mod tests {
 						},
 						Ok(MithrilAction::Return(output)) => {
 							made_progress = true;
-							outputs[party_id] = Some(output);
+							outputs[party_id] = Some(*output);
 						},
 						Err(e) => {
 							errors[party_id] = Some(e);
