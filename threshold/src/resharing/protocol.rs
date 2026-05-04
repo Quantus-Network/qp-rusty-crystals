@@ -185,8 +185,6 @@ pub enum ResharingState {
 pub struct ResharingProtocol {
 	config: ResharingConfig,
 	state: ResharingState,
-	#[allow(dead_code)] // reserved for future per-session nonce mixing
-	seed: [u8; 32],
 
 	/// Old subset masks (from the existing share's stored shares), in canonical
 	/// (BTreeMap) order. Indexed by `old_subset_index`.
@@ -222,13 +220,12 @@ pub struct ResharingProtocol {
 
 impl ResharingProtocol {
 	/// Create a new resharing protocol instance.
-	pub fn new(config: ResharingConfig, seed: [u8; 32]) -> Self {
+	pub fn new(config: ResharingConfig) -> Self {
 		let old_subset_order = compute_old_subset_order(&config);
 		let new_subset_order = compute_new_subset_order(&config);
 		Self {
 			config,
 			state: ResharingState::Round1Generate,
-			seed,
 			old_subset_order,
 			new_subset_order,
 			my_subshares: BTreeMap::new(),

@@ -95,7 +95,7 @@ let config = ResharingConfig::new(
     my_existing_share,  // Some(share) if in old committee, None if joining
 )?;
 
-let mut protocol = ResharingProtocol::new(config, random_seed)?;
+let mut protocol = ResharingProtocol::new(config);
 
 // Run protocol loop
 loop {

@@ -294,7 +294,7 @@ impl fmt::Display for ResharingConfigError {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ResharingMessage {
-	/// Round 1: Blinded share contributions from old committee.
+	/// Round 1: Hash commitments to per-subset sub-shares from old committee.
 	Round1(ResharingRound1Broadcast),
 	/// Round 2: New share distributions to new committee.
 	Round2(ResharingRound2Message),

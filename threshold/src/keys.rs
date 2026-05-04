@@ -199,17 +199,6 @@ impl PrivateKeyShare {
 		&self.tr
 	}
 
-	/// Get the private key seed (for internal use).
-	///
-	/// This field is no longer used for key derivation (see `derivation.rs`); secret
-	/// material is now sourced from the secret share polynomials directly. The field
-	/// is retained for serialization compatibility and may be removed in a future
-	/// breaking release.
-	#[allow(dead_code)]
-	pub(crate) fn key(&self) -> &[u8; 32] {
-		&self.key
-	}
-
 	/// Get the secret shares (for internal use).
 	pub(crate) fn shares(&self) -> &BTreeMap<u16, SecretShareData> {
 		&self.shares

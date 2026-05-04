@@ -60,7 +60,7 @@
 //! )?;
 //!
 //! // Create and run the protocol
-//! let mut protocol = ResharingProtocol::new(config, seed)?;
+//! let mut protocol = ResharingProtocol::new(config);
 //!
 //! loop {
 //!     match protocol.poke()? {

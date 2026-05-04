@@ -72,11 +72,7 @@ fn run_resharing_protocol_with_tamper(
 		)
 		.map_err(|e| format!("Config error for party {}: {}", party_id, e))?;
 
-		// Each party gets a unique seed derived from the base seed
-		let mut party_seed = seed;
-		party_seed[0] ^= party_id as u8;
-
-		let protocol = ResharingProtocol::new(config, party_seed);
+		let protocol = ResharingProtocol::new(config);
 		protocols.insert(party_id, protocol);
 	}
 
@@ -401,7 +397,7 @@ fn test_resharing_protocol_creation() {
 	)
 	.expect("valid config");
 
-	let protocol = ResharingProtocol::new(resharing_config, [0u8; 32]);
+	let protocol = ResharingProtocol::new(resharing_config);
 	assert_eq!(*protocol.state(), ResharingState::Round1Generate);
 }
 
@@ -422,7 +418,7 @@ fn test_resharing_protocol_round1_generation() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [0u8; 32]);
+	let mut protocol = ResharingProtocol::new(resharing_config);
 
 	// First poke should generate Round 1 message
 	let action = protocol.poke().expect("poke should succeed");
@@ -459,7 +455,7 @@ fn test_resharing_new_party_skips_round1() {
 		ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 3], 3, None, public_key)
 			.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [0u8; 32]);
+	let mut protocol = ResharingProtocol::new(resharing_config);
 
 	// New party should skip Round 1 and wait for Round 2
 	let action = protocol.poke().expect("poke should succeed");
@@ -763,7 +759,7 @@ fn test_resharing_round1_message_from_non_member_ignored() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [0u8; 32]);
+	let mut protocol = ResharingProtocol::new(resharing_config);
 
 	// Generate Round 1 message
 	let _ = protocol.poke().expect("poke should succeed");
@@ -809,8 +805,8 @@ fn test_resharing_duplicate_message_ignored() {
 	)
 	.expect("valid config");
 
-	let mut protocol0 = ResharingProtocol::new(config0, [0u8; 32]);
-	let mut protocol1 = ResharingProtocol::new(config1, [1u8; 32]);
+	let mut protocol0 = ResharingProtocol::new(config0);
+	let mut protocol1 = ResharingProtocol::new(config1);
 
 	// Generate Round 1 messages
 	let msg0 = match protocol0.poke().expect("poke should succeed") {
@@ -874,7 +870,7 @@ fn test_old_only_party_behavior() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [0u8; 32]);
+	let mut protocol = ResharingProtocol::new(resharing_config);
 
 	// Party should participate in Round 1
 	let action = protocol.poke().expect("poke should succeed");
@@ -904,7 +900,7 @@ fn test_new_only_party_behavior() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [0u8; 32]);
+	let mut protocol = ResharingProtocol::new(resharing_config);
 
 	// New party should skip Round 1 and wait for Round 2
 	let action = protocol.poke().expect("poke should succeed");
