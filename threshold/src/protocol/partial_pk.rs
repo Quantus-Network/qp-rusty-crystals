@@ -7,20 +7,24 @@
 
 use alloc::{vec, vec::Vec};
 
-use qp_rusty_crystals_dilithium::{fips202, packing, polyvec};
+use qp_rusty_crystals_dilithium::{
+	fips202, packing,
+	params::{K, N, Q},
+	polyvec,
+};
 
 use crate::keys::{PublicKey, PUBLIC_KEY_SIZE, TR_SIZE};
-
-const Q: i32 = 8_380_417;
-pub const N: usize = 256;
-pub const K: usize = 8;
 
 /// Compute the unrounded partial PK polynomial vector `t = A·s1 + s2 mod Q`.
 ///
 /// `s1` must contain `L` polynomials and `s2` must contain `K` polynomials, each
 /// of length `N`. Coefficients of `s1` and `s2` need not be `eta`-bounded; they
 /// only need to live in `i32` and the final result is reduced into `[0, Q)`.
-pub fn compute_partial_pk_t(rho: &[u8; 32], s1: &[[i32; N]], s2: &[[i32; N]]) -> Vec<[i32; N]> {
+pub fn compute_partial_pk_t(
+	rho: &[u8; 32],
+	s1: &[[i32; N as usize]],
+	s2: &[[i32; N as usize]],
+) -> Vec<[i32; N as usize]> {
 	let mut mat: Vec<polyvec::Polyvecl> = (0..K).map(|_| polyvec::Polyvecl::default()).collect();
 	polyvec::matrix_expand(&mut mat, rho);
 
@@ -44,7 +48,7 @@ pub fn compute_partial_pk_t(rho: &[u8; 32], s1: &[[i32; N]], s2: &[[i32; N]]) ->
 	polyvec::k_reduce(&mut t);
 	polyvec::k_caddq(&mut t);
 
-	let mut t_coeffs = vec![[0i32; N]; K];
+	let mut t_coeffs = vec![[0i32; N as usize]; K];
 	for (i, poly) in t.vec.iter().enumerate() {
 		t_coeffs[i].copy_from_slice(&poly.coeffs);
 	}
@@ -55,7 +59,7 @@ pub fn compute_partial_pk_t(rho: &[u8; 32], s1: &[[i32; N]], s2: &[[i32; N]]) ->
 /// ML-DSA-87 public-key encoding (`rho || t1`).
 pub fn pack_combined_pk<'a, I>(rho: &[u8; 32], partial_ts: I) -> PublicKey
 where
-	I: IntoIterator<Item = &'a Vec<[i32; N]>>,
+	I: IntoIterator<Item = &'a Vec<[i32; N as usize]>>,
 {
 	let mut t = polyvec::Polyveck::default();
 	for partial in partial_ts {
@@ -94,20 +98,20 @@ mod tests {
 	#[test]
 	fn pack_combined_pk_is_additive() {
 		let rho = [3u8; 32];
-		let s1_a: Vec<[i32; N]> = vec![[1i32; N]; L];
-		let s2_a: Vec<[i32; N]> = vec![[2i32; N]; K];
-		let s1_b: Vec<[i32; N]> = vec![[5i32; N]; L];
-		let s2_b: Vec<[i32; N]> = vec![[7i32; N]; K];
+		let s1_a: Vec<[i32; N as usize]> = vec![[1i32; N as usize]; L];
+		let s2_a: Vec<[i32; N as usize]> = vec![[2i32; N as usize]; K];
+		let s1_b: Vec<[i32; N as usize]> = vec![[5i32; N as usize]; L];
+		let s2_b: Vec<[i32; N as usize]> = vec![[7i32; N as usize]; K];
 
-		let mut s1_sum: Vec<[i32; N]> = vec![[0i32; N]; L];
-		let mut s2_sum: Vec<[i32; N]> = vec![[0i32; N]; K];
+		let mut s1_sum: Vec<[i32; N as usize]> = vec![[0i32; N as usize]; L];
+		let mut s2_sum: Vec<[i32; N as usize]> = vec![[0i32; N as usize]; K];
 		for i in 0..L {
-			for j in 0..N {
+			for j in 0..N as usize {
 				s1_sum[i][j] = s1_a[i][j] + s1_b[i][j];
 			}
 		}
 		for i in 0..K {
-			for j in 0..N {
+			for j in 0..N as usize {
 				s2_sum[i][j] = s2_a[i][j] + s2_b[i][j];
 			}
 		}
@@ -132,8 +136,8 @@ mod tests {
 		// by `power2round`, so we shift by `1 << 13` to guarantee the packed PK
 		// differs).
 		let rho = [9u8; 32];
-		let s1: Vec<[i32; N]> = vec![[1i32; N]; L];
-		let s2: Vec<[i32; N]> = vec![[2i32; N]; K];
+		let s1: Vec<[i32; N as usize]> = vec![[1i32; N as usize]; L];
+		let s2: Vec<[i32; N as usize]> = vec![[2i32; N as usize]; K];
 		let mut t = compute_partial_pk_t(&rho, &s1, &s2);
 		let honest = pack_combined_pk(&rho, [&t]);
 		t[0][0] = (t[0][0] + (1 << 13)) % Q;

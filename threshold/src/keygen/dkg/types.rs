@@ -107,8 +107,7 @@ impl TranscriptSigner for NoOpSigner {
 // Type Aliases and Constants
 // ============================================================================
 
-/// Participant identifier.
-pub type ParticipantId = u32;
+use crate::participants::ParticipantId;
 
 /// Subset mask - a bitmask indicating which parties are in a subset.
 pub type SubsetMask = u16;
@@ -141,13 +140,7 @@ pub const DOMAIN_PK_COMMIT: &[u8] = b"MITHRIL_DKG_PK_COMMIT_V1";
 /// Domain separator for transcript hash.
 pub const DOMAIN_TRANSCRIPT: &[u8] = b"MITHRIL_DKG_TRANSCRIPT_V1";
 
-// ML-DSA-87 parameters
-/// Number of polynomials in s1 vector.
-pub const L: usize = 7;
-/// Number of polynomials in s2 vector.
-pub const K: usize = 8;
-/// Polynomial degree.
-pub const N: usize = 256;
+use qp_rusty_crystals_dilithium::params::{K, L, N};
 
 // ============================================================================
 // Configuration
@@ -303,16 +296,16 @@ where
 pub struct SubsetContribution {
 	/// Share of s1 polynomial vector.
 	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
-	pub s1: Vec<[i32; N]>,
+	pub s1: Vec<[i32; N as usize]>,
 	/// Share of s2 polynomial vector.
 	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
-	pub s2: Vec<[i32; N]>,
+	pub s2: Vec<[i32; N as usize]>,
 }
 
 impl SubsetContribution {
 	/// Create a new empty subset contribution.
 	pub fn new() -> Self {
-		Self { s1: vec![[0i32; N]; L], s2: vec![[0i32; N]; K] }
+		Self { s1: vec![[0i32; N as usize]; L], s2: vec![[0i32; N as usize]; K] }
 	}
 
 	/// Check if all coefficients are within the η bound.
@@ -349,13 +342,13 @@ pub struct PartialPublicKey {
 	pub subset_mask: SubsetMask,
 	/// The partial public key t = A·s1 + s2.
 	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
-	pub t: Vec<[i32; N]>,
+	pub t: Vec<[i32; N as usize]>,
 }
 
 impl PartialPublicKey {
 	/// Create a new partial public key with zero coefficients.
 	pub fn new(subset_mask: SubsetMask) -> Self {
-		Self { subset_mask, t: vec![[0i32; N]; K] }
+		Self { subset_mask, t: vec![[0i32; N as usize]; K] }
 	}
 }
 
@@ -596,7 +589,12 @@ pub fn derive_subset_contribution(
 	contribution
 }
 
-fn sample_poly_leq_eta(poly: &mut [i32; N], seed: &[u8; SUBSET_SEED_SIZE], nonce: u16, eta: i32) {
+fn sample_poly_leq_eta(
+	poly: &mut [i32; N as usize],
+	seed: &[u8; SUBSET_SEED_SIZE],
+	nonce: u16,
+	eta: i32,
+) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, seed, SUBSET_SEED_SIZE);
 	fips202::shake256_absorb(&mut state, &nonce.to_le_bytes(), 2);

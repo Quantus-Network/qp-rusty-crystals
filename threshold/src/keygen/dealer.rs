@@ -6,15 +6,18 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use crate::participants::{ParticipantId, ParticipantList};
-
-use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec};
+use qp_rusty_crystals_dilithium::{
+	fips202, packing,
+	params::{K, L, N, Q},
+	poly, polyvec,
+};
 
 use crate::{
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey, SecretShareData, PUBLIC_KEY_SIZE, TR_SIZE},
-	protocol::primitives::{mod_q, K, L, N, Q},
+	participants::{ParticipantId, ParticipantList},
+	protocol::primitives::mod_q,
 };
 
 /// Generate threshold keys using a trusted dealer.
@@ -353,7 +356,7 @@ fn sample_poly_leq_eta(p: &mut poly::Poly, seed: &[u8; 64], nonce: u16, eta: i32
 	fips202::shake256_squeeze(&mut buf, 512, &mut state);
 
 	let mut idx = 0;
-	for i in 0..N {
+	for i in 0..N as usize {
 		loop {
 			if idx >= buf.len() {
 				// Need more random bytes

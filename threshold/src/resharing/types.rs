@@ -10,6 +10,8 @@ use core::fmt;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+use qp_rusty_crystals_dilithium::params::{K, L, N};
+
 use crate::{
 	keys::{PrivateKeyShare, PublicKey},
 	participants::{ParticipantId, ParticipantList},
@@ -18,14 +20,6 @@ use crate::{
 
 #[cfg(feature = "serde")]
 use crate::serde_helpers::{serde_partial_pks, serde_participant_list, serde_poly_vec};
-
-// ML-DSA-87 parameters (same as DKG)
-/// Number of polynomials in s1 vector.
-pub const L: usize = 7;
-/// Number of polynomials in s2 vector.
-pub const K: usize = 8;
-/// Polynomial degree.
-pub const N: usize = 256;
 
 /// Size of commitment hash in bytes.
 pub const COMMITMENT_HASH_SIZE: usize = 32;
@@ -398,16 +392,16 @@ pub struct ResharingRound2Message {
 pub struct NewShareData {
 	/// Share of s1 polynomial vector (L polynomials).
 	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
-	pub s1: Vec<[i32; N]>,
+	pub s1: Vec<[i32; N as usize]>,
 	/// Share of s2 polynomial vector (K polynomials).
 	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
-	pub s2: Vec<[i32; N]>,
+	pub s2: Vec<[i32; N as usize]>,
 }
 
 impl NewShareData {
 	/// Create a new empty share data.
 	pub fn new() -> Self {
-		Self { s1: vec![[0i32; N]; L], s2: vec![[0i32; N]; K] }
+		Self { s1: vec![[0i32; N as usize]; L], s2: vec![[0i32; N as usize]; K] }
 	}
 }
 
@@ -452,7 +446,7 @@ pub struct ResharingRound3Broadcast {
 	/// Partial public-key contributions `t_J^new = A·s1_J^new + s2_J^new mod Q`,
 	/// one entry per new subset `J` this party belongs to. Empty for old-only parties.
 	#[cfg_attr(feature = "serde", serde(with = "serde_partial_pks"))]
-	pub partial_pks: BTreeMap<SubsetMask, Vec<[i32; N]>>,
+	pub partial_pks: BTreeMap<SubsetMask, Vec<[i32; N as usize]>>,
 	/// Accusations against dealers whose broadcast commitments did not match
 	/// the sender's independent recomputation.
 	pub accusations: Vec<DealerAccusation>,
@@ -744,13 +738,13 @@ mod tests {
 
 		// Verify all initialized to zero
 		for poly in &share.s1 {
-			assert_eq!(poly.len(), N);
+			assert_eq!(poly.len(), N as usize);
 			for &coeff in poly {
 				assert_eq!(coeff, 0);
 			}
 		}
 		for poly in &share.s2 {
-			assert_eq!(poly.len(), N);
+			assert_eq!(poly.len(), N as usize);
 			for &coeff in poly {
 				assert_eq!(coeff, 0);
 			}

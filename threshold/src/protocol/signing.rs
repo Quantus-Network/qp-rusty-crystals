@@ -6,20 +6,26 @@
 
 use alloc::{collections::BTreeMap, string::ToString, vec, vec::Vec};
 
-use crate::participants::{ParticipantId, ParticipantList};
-
-use qp_rusty_crystals_dilithium::{fips202, params as dilithium_params, poly, polyvec};
+use qp_rusty_crystals_dilithium::{
+	fips202,
+	params::{
+		BETA, C_DASH_BYTES, D, GAMMA1, GAMMA2, K, L, N, OMEGA, POLYW1_PACKEDBYTES,
+		POLYZ_PACKEDBYTES, Q,
+	},
+	poly, polyvec,
+};
 use zeroize::Zeroize;
 
 use crate::{
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey},
+	participants::{ParticipantId, ParticipantList},
 	protocol::{
 		primitives::{
 			compute_dilithium_hint, compute_ntt_dot_product, decompose_polyveck, mod_q,
 			normalize_assuming_le2q, pack_signature, poly_pack_w, reduce_le2q, unpack_polyveck_w,
-			HyperballSampleVector, K, L, N, Q,
+			HyperballSampleVector,
 		},
 		secret_sharing::{recover_share, SecretShare},
 	},
@@ -157,13 +163,13 @@ fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
 		let mut s2_share = polyvec::Polyveck::default();
 
 		for i in 0..L.min(share_data.s1.len()) {
-			for j in 0..N {
+			for j in 0..N as usize {
 				s1_share.vec[i].coeffs[j] = share_data.s1[i][j];
 			}
 		}
 
 		for i in 0..K.min(share_data.s2.len()) {
-			for j in 0..N {
+			for j in 0..N as usize {
 				s2_share.vec[i].coeffs[j] = share_data.s2[i][j];
 			}
 		}
@@ -176,7 +182,7 @@ fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
 
 /// Unpack a commitment from 23-bit packed format.
 pub(crate) fn unpack_commitment_dilithium(commitment: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
-	let poly_q_size = (N * 23).div_ceil(8); // 736 bytes per poly
+	let poly_q_size = ((N as usize) * 23 + 7) / 8; // 736 bytes per poly
 	let expected_len = K * poly_q_size;
 
 	if commitment.len() != expected_len {
@@ -229,7 +235,7 @@ pub(crate) fn generate_round1(
 
 	// Generate K different (w, y) pairs using different seeds
 	for k_iter in 0..k_iterations {
-		let sample_size = N * (L + K);
+		let sample_size = (N as usize) * (L + K);
 		let mut hyperball_sample = HyperballSampleVector::new(sample_size);
 
 		// Create unique seed for this iteration
@@ -269,7 +275,7 @@ pub(crate) fn generate_round1(
 			compute_ntt_dot_product(&mut w_k.vec[i], a_row, &y_k_ntt);
 
 			// Apply ReduceLe2Q in NTT domain BEFORE InvNTT
-			for j in 0..N {
+			for j in 0..N as usize {
 				let coeff = w_k.vec[i].coeffs[j];
 				let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
 				w_k.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
@@ -281,7 +287,7 @@ pub(crate) fn generate_round1(
 			poly::add_ip(&mut w_k.vec[i], &e_k.vec[i]);
 
 			// Apply ReduceLe2Q after Add
-			for j in 0..N {
+			for j in 0..N as usize {
 				let coeff = w_k.vec[i].coeffs[j];
 				let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
 				w_k.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
@@ -297,7 +303,7 @@ pub(crate) fn generate_round1(
 	}
 
 	// Pack w for commitment hash using 23-bit packing
-	const POLY_Q_SIZE: usize = (N * 23) / 8; // 736 bytes
+	const POLY_Q_SIZE: usize = ((N as usize) * 23) / 8; // 736 bytes
 	let single_commitment_size = K * POLY_Q_SIZE;
 	let w_packed_size = k_iterations * single_commitment_size;
 	let mut w_packed = vec![0u8; w_packed_size];
@@ -322,7 +328,7 @@ pub(crate) fn generate_round1(
 
 /// Pack w using 23-bit encoding.
 fn pack_w_dilithium(w: &polyvec::Polyveck, buf: &mut [u8]) {
-	const POLY_Q_SIZE: usize = (N * 23) / 8; // 736 bytes
+	const POLY_Q_SIZE: usize = ((N as usize) * 23) / 8; // 736 bytes
 	for i in 0..K {
 		let offset = i * POLY_Q_SIZE;
 		poly_pack_w(&w.vec[i], &mut buf[offset..offset + POLY_Q_SIZE]);
@@ -376,7 +382,7 @@ fn get_threshold_params(config: &ThresholdConfig) -> ThresholdResult<(f64, f64, 
 /// Pack Round 1 commitment data for broadcast.
 pub(crate) fn pack_round1_commitment(round1: &Round1Data, config: &ThresholdConfig) -> Vec<u8> {
 	let k = config.k_iterations() as usize;
-	const POLY_Q_SIZE: usize = (N * 23) / 8;
+	const POLY_Q_SIZE: usize = ((N as usize) * 23) / 8;
 	let single_commitment_size = K * POLY_Q_SIZE;
 	let total_size = k * single_commitment_size;
 	let mut buf = vec![0u8; total_size];
@@ -510,19 +516,15 @@ pub(crate) fn generate_round3_response(
 		decompose_polyveck(&round2.w_aggregated[i], &mut w0, &mut w1);
 
 		// Compute challenge: c~ = H(μ || w1)
-		let mut w1_packed = vec![0u8; K * dilithium_params::POLYW1_PACKEDBYTES];
+		let mut w1_packed = vec![0u8; K * POLYW1_PACKEDBYTES];
 		polyvec::k_pack_w1(&mut w1_packed, &w1);
 
-		let mut challenge_bytes = [0u8; dilithium_params::C_DASH_BYTES];
+		let mut challenge_bytes = [0u8; C_DASH_BYTES];
 		let mut keccak_state = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut keccak_state, &round2.mu, 64);
 		fips202::shake256_absorb(&mut keccak_state, &w1_packed, w1_packed.len());
 		fips202::shake256_finalize(&mut keccak_state);
-		fips202::shake256_squeeze(
-			&mut challenge_bytes,
-			dilithium_params::C_DASH_BYTES,
-			&mut keccak_state,
-		);
+		fips202::shake256_squeeze(&mut challenge_bytes, C_DASH_BYTES, &mut keccak_state);
 
 		// Derive challenge polynomial and convert to NTT domain
 		let mut challenge_ntt = poly::Poly::default();
@@ -589,7 +591,7 @@ pub(crate) fn generate_round3_response(
 
 /// Pack responses for broadcast.
 pub(crate) fn pack_responses(responses: &[polyvec::Polyvecl]) -> Vec<u8> {
-	let single_response_size = L * dilithium_params::POLYZ_PACKEDBYTES;
+	let single_response_size = L * POLYZ_PACKEDBYTES;
 	let mut buf = vec![0u8; responses.len() * single_response_size];
 
 	for (i, z) in responses.iter().enumerate() {
@@ -605,9 +607,9 @@ pub(crate) fn pack_responses(responses: &[polyvec::Polyvecl]) -> Vec<u8> {
 		}
 		// Pack each polynomial
 		for j in 0..L {
-			let poly_offset = offset + j * dilithium_params::POLYZ_PACKEDBYTES;
+			let poly_offset = offset + j * POLYZ_PACKEDBYTES;
 			poly::z_pack(
-				&mut buf[poly_offset..poly_offset + dilithium_params::POLYZ_PACKEDBYTES],
+				&mut buf[poly_offset..poly_offset + POLYZ_PACKEDBYTES],
 				&z_centered.vec[j],
 			);
 		}
@@ -696,7 +698,7 @@ pub(crate) fn combine_signature(
 	let threshold = config.threshold() as usize;
 
 	// Per-party z-norm bound: γ1 - β (same as individual Dilithium bound)
-	let gamma1_minus_beta = (dilithium_params::GAMMA1 - dilithium_params::BETA) as i32;
+	let gamma1_minus_beta = (GAMMA1 - BETA) as i32;
 
 	// Compute μ
 	let mut tr = [0u8; 64];
@@ -782,19 +784,15 @@ pub(crate) fn combine_signature(
 		}
 
 		// Compute challenge: c~ = H(μ || w1)
-		let mut w1_packed = vec![0u8; K * dilithium_params::POLYW1_PACKEDBYTES];
+		let mut w1_packed = vec![0u8; K * POLYW1_PACKEDBYTES];
 		polyvec::k_pack_w1(&mut w1_packed, &w1);
 
-		let mut challenge_bytes = [0u8; dilithium_params::C_DASH_BYTES];
+		let mut challenge_bytes = [0u8; C_DASH_BYTES];
 		let mut keccak_state = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut keccak_state, &mu, 64);
 		fips202::shake256_absorb(&mut keccak_state, &w1_packed, w1_packed.len());
 		fips202::shake256_finalize(&mut keccak_state);
-		fips202::shake256_squeeze(
-			&mut challenge_bytes,
-			dilithium_params::C_DASH_BYTES,
-			&mut keccak_state,
-		);
+		fips202::shake256_squeeze(&mut challenge_bytes, C_DASH_BYTES, &mut keccak_state);
 
 		// Derive challenge polynomial and convert to NTT domain
 		let mut challenge_ntt = poly::Poly::default();
@@ -807,7 +805,7 @@ pub(crate) fn combine_signature(
 		{
 			for (scaled_coeff, t1_coeff) in scaled_poly.coeffs.iter_mut().zip(t1_poly.coeffs.iter())
 			{
-				*scaled_coeff = *t1_coeff << dilithium_params::D;
+				*scaled_coeff = *t1_coeff << D;
 			}
 			crate::circl_ntt::ntt(scaled_poly);
 			let tmp = scaled_poly.clone();
@@ -849,7 +847,7 @@ pub(crate) fn combine_signature(
 		}
 
 		// Ensure ||difference||_∞ < γ2
-		let gamma2 = dilithium_params::GAMMA2 as i32;
+		let gamma2 = GAMMA2 as i32;
 		let mut difference_exceeds = false;
 		'diff_check: for diff_poly in difference.vec.iter().take(K) {
 			for coeff in diff_poly.coeffs.iter() {
@@ -890,7 +888,7 @@ pub(crate) fn combine_signature(
 		let mut hint = polyvec::Polyveck::default();
 		let hint_pop = compute_dilithium_hint(&mut hint, &w0_plus_diff, &w1);
 
-		if hint_pop <= dilithium_params::OMEGA {
+		if hint_pop <= OMEGA {
 			// Convert z to centered form for packing
 			let mut z_centered = z_aggregated.clone();
 			for z_poly in z_centered.vec.iter_mut().take(L) {
@@ -903,7 +901,7 @@ pub(crate) fn combine_signature(
 
 			// Pack signature with challenge and hint
 			let mut challenge_full = [0u8; 64];
-			challenge_full[..dilithium_params::C_DASH_BYTES].copy_from_slice(&challenge_bytes);
+			challenge_full[..C_DASH_BYTES].copy_from_slice(&challenge_bytes);
 			let sig = pack_signature(&challenge_full, &z_centered, &hint);
 			return Ok(sig);
 		}
@@ -933,7 +931,7 @@ fn unpack_t1(pk_bytes: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
 	// Unpack t1 (320 bytes per polynomial = 256 * 10 / 8)
 	for poly_idx in 0..K {
 		let poly_start = poly_idx * 320;
-		for i in (0..N).step_by(4) {
+		for i in (0..(N as usize)).step_by(4) {
 			let byte_idx = poly_start + (i * 10) / 8;
 			let b0 = t1_bytes[byte_idx] as i32;
 			let b1 = t1_bytes[byte_idx + 1] as i32;

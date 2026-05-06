@@ -36,7 +36,10 @@ use core::fmt;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use qp_rusty_crystals_dilithium::fips202;
+use qp_rusty_crystals_dilithium::{
+	fips202,
+	params::{ETA, K, L, N, Q},
+};
 
 use crate::{
 	keys::{PrivateKeyShare, SecretShareData},
@@ -46,14 +49,8 @@ use crate::{
 use super::types::{
 	DealerAccusation, NewShareData, ResharingConfig, ResharingMessage, ResharingOutput,
 	ResharingRound1Broadcast, ResharingRound2Message, ResharingRound3Broadcast, SubsetMask,
-	SubsetPair, COMMITMENT_HASH_SIZE, K, L, N,
+	SubsetPair, COMMITMENT_HASH_SIZE,
 };
-
-/// ML-DSA-87 prime modulus.
-const Q: i32 = 8380417;
-
-/// Eta bound for ML-DSA-87 share sampling.
-const ETA: i32 = 2;
 
 /// Domain separator for the per-subset PRF seed.
 const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v2";
@@ -907,7 +904,7 @@ impl ResharingProtocol {
 	}
 
 	/// Compute `t_J = A·s1_J^new + s2_J^new mod Q` for every new subset we hold.
-	fn compute_my_partial_pks(&self) -> BTreeMap<SubsetMask, Vec<[i32; N]>> {
+	fn compute_my_partial_pks(&self) -> BTreeMap<SubsetMask, Vec<[i32; N as usize]>> {
 		let rho = self.derive_rho();
 		self.new_shares
 			.iter()
@@ -922,7 +919,7 @@ impl ResharingProtocol {
 	/// Cross-check the broadcast partial PKs and sum them to confirm the
 	/// resharing reconstructs the original public key.
 	fn verify_public_key_preservation(&self) -> Result<(), ResharingProtocolError> {
-		let mut canonical: BTreeMap<SubsetMask, Vec<[i32; N]>> = BTreeMap::new();
+		let mut canonical: BTreeMap<SubsetMask, Vec<[i32; N as usize]>> = BTreeMap::new();
 		for broadcast in self.round3_broadcasts.values() {
 			for (j_mask, t_partial) in &broadcast.partial_pks {
 				match canonical.get(j_mask) {
@@ -1088,8 +1085,8 @@ fn derive_subshares(
 	let prf_seed = build_subset_seed(i_mask, s_i);
 
 	// Track running sums to compute the residual.
-	let mut sum_s1: Vec<[i32; N]> = vec![[0i32; N]; L];
-	let mut sum_s2: Vec<[i32; N]> = vec![[0i32; N]; K];
+	let mut sum_s1: Vec<[i32; N as usize]> = vec![[0i32; N as usize]; L];
+	let mut sum_s2: Vec<[i32; N as usize]> = vec![[0i32; N as usize]; K];
 
 	for (j_idx, &j_mask) in new_subsets.iter().enumerate() {
 		if j_idx == residual_idx {
@@ -1153,8 +1150,9 @@ fn build_subset_seed(i_mask: SubsetMask, s_i: &SecretShareData) -> [u8; 64] {
 	out
 }
 
-fn sample_eta_poly(state: &mut fips202::KeccakState, poly: &mut [i32; N]) {
-	let bound: i32 = 2 * ETA + 1;
+fn sample_eta_poly(state: &mut fips202::KeccakState, poly: &mut [i32; N as usize]) {
+	let eta_i32 = ETA as i32;
+	let bound: i32 = 2 * eta_i32 + 1;
 	let cutoff: i32 = (256 / bound) * bound;
 	for c in poly.iter_mut() {
 		let mut buf = [0u8; 1];
@@ -1162,7 +1160,7 @@ fn sample_eta_poly(state: &mut fips202::KeccakState, poly: &mut [i32; N]) {
 			fips202::shake256_squeeze(&mut buf, 1, state);
 			let b = buf[0] as i32;
 			if b < cutoff {
-				*c = (b % bound) - ETA;
+				*c = (b % bound) - eta_i32;
 				break;
 			}
 		}
@@ -1237,7 +1235,11 @@ fn add_share_into(acc: &mut NewShareData, r: &NewShareData) {
 	}
 }
 
-fn add_share_into_sum(sum_s1: &mut [[i32; N]], sum_s2: &mut [[i32; N]], r: &NewShareData) {
+fn add_share_into_sum(
+	sum_s1: &mut [[i32; N as usize]],
+	sum_s2: &mut [[i32; N as usize]],
+	r: &NewShareData,
+) {
 	for (a, b) in sum_s1.iter_mut().zip(r.s1.iter()) {
 		for (ac, bc) in a.iter_mut().zip(b.iter()) {
 			*ac = ac.wrapping_add(*bc);
@@ -1310,18 +1312,20 @@ mod tests {
 
 	#[test]
 	fn test_subset_seed_is_deterministic_for_same_share() {
-		let s = SecretShareData { s1: vec![[3i32; N]; L], s2: vec![[5i32; N]; K] };
+		let s =
+			SecretShareData { s1: vec![[3i32; N as usize]; L], s2: vec![[5i32; N as usize]; K] };
 		assert_eq!(build_subset_seed(0b011, &s), build_subset_seed(0b011, &s));
 	}
 
 	#[test]
 	fn test_derive_subshares_sums_to_original_share() {
-		let s = SecretShareData { s1: vec![[1i32; N]; L], s2: vec![[2i32; N]; K] };
+		let s =
+			SecretShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		for residual_idx in 0..new_subsets.len() {
 			let subshares = derive_subshares(0b011, &s, &new_subsets, residual_idx);
-			let mut sum_s1 = vec![[0i64; N]; L];
-			let mut sum_s2 = vec![[0i64; N]; K];
+			let mut sum_s1 = vec![[0i64; N as usize]; L];
+			let mut sum_s2 = vec![[0i64; N as usize]; K];
 			for sub in &subshares {
 				for (a, b) in sum_s1.iter_mut().zip(sub.s1.iter()) {
 					for (ac, bc) in a.iter_mut().zip(b.iter()) {
@@ -1353,7 +1357,8 @@ mod tests {
 
 	#[test]
 	fn test_derive_subshares_is_deterministic() {
-		let s = SecretShareData { s1: vec![[1i32; N]; L], s2: vec![[2i32; N]; K] };
+		let s =
+			SecretShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let a = derive_subshares(0b011, &s, &new_subsets, 0);
 		let b = derive_subshares(0b011, &s, &new_subsets, 0);
@@ -1365,8 +1370,8 @@ mod tests {
 
 	#[test]
 	fn test_commit_subshare_distinguishes_inputs() {
-		let r1 = NewShareData { s1: vec![[1i32; N]; L], s2: vec![[2i32; N]; K] };
-		let r2 = NewShareData { s1: vec![[1i32; N]; L], s2: vec![[3i32; N]; K] };
+		let r1 = NewShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
+		let r2 = NewShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[3i32; N as usize]; K] };
 		let c1 = commit_subshare(0b011, 0b101, &r1);
 		let c2 = commit_subshare(0b011, 0b101, &r2);
 		assert_ne!(c1, c2);
@@ -1427,8 +1432,10 @@ mod tests {
 	fn test_subshares_for_disjoint_share_data_diverge() {
 		// Two different `s_I^old` values must produce different sub-share splits
 		// (otherwise an attacker who saw them couldn't distinguish secrets).
-		let s_a = SecretShareData { s1: vec![[1i32; N]; L], s2: vec![[2i32; N]; K] };
-		let s_b = SecretShareData { s1: vec![[3i32; N]; L], s2: vec![[5i32; N]; K] };
+		let s_a =
+			SecretShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
+		let s_b =
+			SecretShareData { s1: vec![[3i32; N as usize]; L], s2: vec![[5i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let a = derive_subshares(0b011, &s_a, &new_subsets, 0);
 		let b = derive_subshares(0b011, &s_b, &new_subsets, 0);
@@ -1441,7 +1448,8 @@ mod tests {
 	fn test_subshares_independent_per_old_subset() {
 		// Different old subsets sharing the same `s_I^old` value must still produce
 		// different sub-shares, because the PRF seed mixes `i_mask`.
-		let s = SecretShareData { s1: vec![[1i32; N]; L], s2: vec![[2i32; N]; K] };
+		let s =
+			SecretShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let a = derive_subshares(0b011, &s, &new_subsets, 0);
 		let b = derive_subshares(0b101, &s, &new_subsets, 0);

@@ -108,7 +108,6 @@ pub use types::{
 	NoOpSigner,
 	PartialPublicKey,
 	// Core types
-	ParticipantId,
 	SubsetContribution,
 	SubsetMask,
 	// Transcript signing
@@ -120,9 +119,6 @@ pub use types::{
 	DOMAIN_PK_COMMIT,
 	DOMAIN_SEED,
 	DOMAIN_TRANSCRIPT,
-	K,
-	L,
-	N,
 	RANDOMNESS_SIZE,
 	SHARED_SECRET_SIZE,
 	SUBSET_SEED_SIZE,
@@ -193,20 +189,21 @@ mod tests {
 
 	#[test]
 	fn test_dkg_eta_bounded() {
+		use qp_rusty_crystals_dilithium::params::ETA;
+
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
 		let rng = rand::rngs::StdRng::seed_from_u64(123);
 
 		let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
 
-		const ETA: i32 = 2;
 		for (party_id, output) in outputs.iter().enumerate() {
 			let shares = output.private_share.shares();
 			for (subset_mask, share) in shares {
 				for (poly_idx, poly) in share.s1.iter().enumerate() {
 					for (coeff_idx, &coeff) in poly.iter().enumerate() {
 						assert!(
-							(-ETA..=ETA).contains(&coeff),
+							(-(ETA as i32)..=(ETA as i32)).contains(&coeff),
 							"Party {} subset {:b} s1[{}][{}] = {} outside η bound",
 							party_id,
 							subset_mask,
@@ -219,7 +216,7 @@ mod tests {
 				for (poly_idx, poly) in share.s2.iter().enumerate() {
 					for (coeff_idx, &coeff) in poly.iter().enumerate() {
 						assert!(
-							(-ETA..=ETA).contains(&coeff),
+							(-(ETA as i32)..=(ETA as i32)).contains(&coeff),
 							"Party {} subset {:b} s2[{}][{}] = {} outside η bound",
 							party_id,
 							subset_mask,

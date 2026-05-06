@@ -47,16 +47,15 @@ use crate::{
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey},
-	protocol::{
-		primitives::L,
-		signing::{
-			aggregate_commitments_dilithium, combine_signature, generate_round1,
-			generate_round3_response, pack_responses, pack_round1_commitment, process_round2,
-			unpack_commitment_dilithium, unpack_responses, verify_commitment_hash, Round1Data,
-			Round2Data,
-		},
+	protocol::signing::{
+		aggregate_commitments_dilithium, combine_signature, generate_round1,
+		generate_round3_response, pack_responses, pack_round1_commitment, process_round2,
+		unpack_commitment_dilithium, unpack_responses, verify_commitment_hash, Round1Data,
+		Round2Data,
 	},
 };
+
+use qp_rusty_crystals_dilithium::params::L;
 
 /// A threshold signer for a single party.
 ///

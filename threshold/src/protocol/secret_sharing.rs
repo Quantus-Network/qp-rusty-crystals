@@ -14,7 +14,10 @@ use alloc::{
 	vec::Vec,
 };
 
-use qp_rusty_crystals_dilithium::{params as dilithium_params, polyvec};
+use qp_rusty_crystals_dilithium::{
+	params::{K, L, Q},
+	polyvec,
+};
 
 use crate::{
 	error::{ThresholdError, ThresholdResult},
@@ -210,17 +213,17 @@ pub fn recover_share(
 			let mut s1_ntt = share.s1_share.clone();
 			let mut s2_ntt = share.s2_share.clone();
 
-			for s1_poly in s1_ntt.vec.iter_mut().take(dilithium_params::L) {
+			for s1_poly in s1_ntt.vec.iter_mut().take(L) {
 				crate::circl_ntt::ntt(s1_poly);
 			}
-			for s2_poly in s2_ntt.vec.iter_mut().take(dilithium_params::K) {
+			for s2_poly in s2_ntt.vec.iter_mut().take(K) {
 				crate::circl_ntt::ntt(s2_poly);
 			}
 
 			// Add in NTT domain (pointwise addition)
 			// Use wrapping_add to handle overflow for large configurations
 			for (combined_poly, ntt_poly) in
-				s1_combined.vec.iter_mut().zip(s1_ntt.vec.iter()).take(dilithium_params::L)
+				s1_combined.vec.iter_mut().zip(s1_ntt.vec.iter()).take(L)
 			{
 				for (combined_coeff, ntt_coeff) in
 					combined_poly.coeffs.iter_mut().zip(ntt_poly.coeffs.iter())
@@ -230,7 +233,7 @@ pub fn recover_share(
 			}
 
 			for (combined_poly, ntt_poly) in
-				s2_combined.vec.iter_mut().zip(s2_ntt.vec.iter()).take(dilithium_params::K)
+				s2_combined.vec.iter_mut().zip(s2_ntt.vec.iter()).take(K)
 			{
 				for (combined_coeff, ntt_coeff) in
 					combined_poly.coeffs.iter_mut().zip(ntt_poly.coeffs.iter())
@@ -242,18 +245,16 @@ pub fn recover_share(
 	}
 
 	// Normalize accumulated NTT values (can exceed 2Q after addition)
-	for combined_poly in s1_combined.vec.iter_mut().take(dilithium_params::L) {
+	for combined_poly in s1_combined.vec.iter_mut().take(L) {
 		for coeff in combined_poly.coeffs.iter_mut() {
-			let coeff_u32 =
-				if *coeff < 0 { (*coeff + dilithium_params::Q) as u32 } else { *coeff as u32 };
+			let coeff_u32 = if *coeff < 0 { (*coeff + Q) as u32 } else { *coeff as u32 };
 			*coeff = mod_q(coeff_u32) as i32;
 		}
 	}
 
-	for combined_poly in s2_combined.vec.iter_mut().take(dilithium_params::K) {
+	for combined_poly in s2_combined.vec.iter_mut().take(K) {
 		for coeff in combined_poly.coeffs.iter_mut() {
-			let coeff_u32 =
-				if *coeff < 0 { (*coeff + dilithium_params::Q) as u32 } else { *coeff as u32 };
+			let coeff_u32 = if *coeff < 0 { (*coeff + Q) as u32 } else { *coeff as u32 };
 			*coeff = mod_q(coeff_u32) as i32;
 		}
 	}

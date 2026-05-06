@@ -185,7 +185,7 @@ pub use verification::verify_signature;
 /// Signature verification.
 mod verification {
 	use crate::{broadcast::Signature, keys::PublicKey};
-	use qp_rusty_crystals_dilithium::params as dilithium_params;
+	use qp_rusty_crystals_dilithium::params::SIGNBYTES;
 
 	/// Verify a threshold signature.
 	///
@@ -226,7 +226,7 @@ mod verification {
 		}
 
 		// Check signature length
-		if signature.as_bytes().len() != dilithium_params::SIGNBYTES {
+		if signature.as_bytes().len() != SIGNBYTES {
 			return false;
 		}
 

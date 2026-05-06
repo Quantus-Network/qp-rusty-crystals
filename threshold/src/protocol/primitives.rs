@@ -2,26 +2,29 @@
 //!
 //! This module provides the basic types and functions needed by the threshold protocol,
 //! including hyperball sampling, matrix operations, and modular arithmetic helpers.
+//!
+//! # ML-DSA-87 Parameters
+//!
+//! This module uses ML-DSA-87 parameters directly from `dilithium_params`:
+//! - `N = 256`: coefficients per polynomial
+//! - `K = 8`: rows in public matrix A
+//! - `L = 7`: columns in public matrix A
+//! - `Q = 8380417`: the modulus
+//! - `ETA = 2`: secret key coefficient bound
 
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::f64::consts::PI;
-use qp_rusty_crystals_dilithium::{fips202, packing, params as dilithium_params, poly, polyvec};
+use qp_rusty_crystals_dilithium::{
+	fips202, packing,
+	params::{GAMMA2, K, L, N, Q, SIGNBYTES},
+	poly, polyvec,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop};
-
-// ============================================================================
-// Constants for ML-DSA-87
-// ============================================================================
-// Import from dilithium crate to avoid parameter re-definition (HQ15)
-
-pub(crate) const N: usize = dilithium_params::N as usize;
-pub(crate) const K: usize = dilithium_params::K;
-pub(crate) const L: usize = dilithium_params::L;
-pub(crate) const Q: i32 = dilithium_params::Q;
 
 // Constants for decompose (ML-DSA-87)
 // ALPHA = 2 * GAMMA2 = 2 * ((Q-1)/32) = 523776
-const ALPHA: u32 = 2 * dilithium_params::GAMMA2 as u32;
-const Q_U32: u32 = dilithium_params::Q as u32;
+const ALPHA: u32 = 2 * GAMMA2 as u32;
+const Q_U32: u32 = Q as u32;
 
 // ============================================================================
 // Modular Arithmetic Helpers
@@ -53,7 +56,7 @@ pub(crate) fn mod_q(x: u32) -> u32 {
 /// Normalize polynomial coefficients assuming they are ≤ 2Q.
 /// Converts to [0, Q) range. Matches reference implementation behavior.
 pub(crate) fn normalize_assuming_le2q(poly: &mut poly::Poly) {
-	for j in 0..dilithium_params::N as usize {
+	for j in 0..N as usize as usize {
 		let coeff = poly.coeffs[j];
 		// First ensure value is positive and in reasonable range
 		let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
@@ -106,8 +109,8 @@ pub(crate) fn decompose_polyveck(
 	w0: &mut polyvec::Polyveck,
 	w1: &mut polyvec::Polyveck,
 ) {
-	for i in 0..dilithium_params::K {
-		for j in 0..dilithium_params::N as usize {
+	for i in 0..K {
+		for j in 0..N as usize as usize {
 			let a = input.vec[i].coeffs[j] as u32;
 			let (a0, a1) = decompose_coefficient(a);
 			w0.vec[i].coeffs[j] = a0 as i32;
@@ -130,15 +133,15 @@ pub(crate) fn compute_ntt_dot_product(
 	b: &polyvec::Polyvecl,
 ) {
 	// Zero out result
-	for i in 0..dilithium_params::N as usize {
+	for i in 0..N as usize as usize {
 		result.coeffs[i] = 0;
 	}
 
 	// Compute dot product
-	for i in 0..dilithium_params::L {
+	for i in 0..L {
 		let mut tmp = poly::Poly::default();
 		crate::circl_ntt::mul_hat(&mut tmp, &a.vec[i], &b.vec[i]);
-		for j in 0..dilithium_params::N as usize {
+		for j in 0..N as usize as usize {
 			result.coeffs[j] += tmp.coeffs[j];
 		}
 	}
@@ -215,7 +218,7 @@ impl HyperballSampleVector {
 			sq += z2 * z2;
 
 			// Apply nu scaling to first N*L components AFTER adding to sq
-			if i < dilithium_params::N as usize * dilithium_params::L {
+			if i < N as usize * L {
 				samples[i] *= nu;
 				samples[i + 1] *= nu;
 			}
@@ -231,9 +234,9 @@ impl HyperballSampleVector {
 	/// Used in signing when only the z response is needed.
 	/// Keeps values in centered representation [-(Q-1)/2, (Q-1)/2].
 	pub fn round_z_response(&self, z: &mut polyvec::Polyvecl) {
-		for i in 0..dilithium_params::L {
-			for j in 0..dilithium_params::N as usize {
-				let idx = i * dilithium_params::N as usize + j;
+		for i in 0..L {
+			for j in 0..N as usize as usize {
+				let idx = i * N as usize + j;
 				let u = libm::round(self.data[idx]) as i32;
 				let mut reduced = u % Q;
 				if reduced > Q / 2 {
@@ -250,9 +253,9 @@ impl HyperballSampleVector {
 	/// Keeps values in centered representation [-(Q-1)/2, (Q-1)/2].
 	pub fn round(&self, s1: &mut polyvec::Polyvecl, s2: &mut polyvec::Polyveck) {
 		// Round s1 components - keep in centered range
-		for i in 0..dilithium_params::L {
-			for j in 0..dilithium_params::N as usize {
-				let idx = i * dilithium_params::N as usize + j;
+		for i in 0..L {
+			for j in 0..N as usize as usize {
+				let idx = i * N as usize + j;
 				let u = libm::round(self.data[idx]) as i32;
 				// Keep values centered: if outside [-Q/2, Q/2], reduce modulo Q
 				let mut reduced = u % Q;
@@ -266,9 +269,9 @@ impl HyperballSampleVector {
 		}
 
 		// Round s2 components - keep in centered range
-		for i in 0..dilithium_params::K {
-			for j in 0..dilithium_params::N as usize {
-				let idx = (dilithium_params::L + i) * dilithium_params::N as usize + j;
+		for i in 0..K {
+			for j in 0..N as usize as usize {
+				let idx = (L + i) * N as usize + j;
 				let u = libm::round(self.data[idx]) as i32;
 				// Keep values centered: if outside [-Q/2, Q/2], reduce modulo Q
 				let mut reduced = u % Q;
@@ -286,11 +289,11 @@ impl HyperballSampleVector {
 	pub fn excess(&self, r: f64, nu: f64) -> bool {
 		let mut sq = 0.0;
 
-		for i in 0..(dilithium_params::L + dilithium_params::K) {
-			for j in 0..dilithium_params::N as usize {
-				let idx = i * dilithium_params::N as usize + j;
+		for i in 0..(L + K) {
+			for j in 0..N as usize as usize {
+				let idx = i * N as usize + j;
 				let val = self.data[idx];
-				if i < dilithium_params::L {
+				if i < L {
 					// For s1 components, divide by nu^2
 					sq += val * val / (nu * nu);
 				} else {
@@ -312,12 +315,12 @@ impl HyperballSampleVector {
 
 	/// Create a vector from polynomial vectors (s1, s2).
 	pub fn from_polyvecs(s1: &polyvec::Polyvecl, s2: &polyvec::Polyveck) -> Self {
-		let size = dilithium_params::N as usize * (dilithium_params::L + dilithium_params::K);
+		let size = N as usize * (L + K);
 		let mut data = vec![0.0f64; size];
 
 		// Copy s1 polynomials (first L polynomials)
-		for i in 0..dilithium_params::L {
-			for j in 0..dilithium_params::N as usize {
+		for i in 0..L {
+			for j in 0..N as usize as usize {
 				let mut u = s1.vec[i].coeffs[j];
 				// Center modulo Q
 				u += Q / 2;
@@ -325,13 +328,13 @@ impl HyperballSampleVector {
 				u = t + ((t >> 31) & Q);
 				u -= Q / 2;
 
-				data[i * dilithium_params::N as usize + j] = u as f64;
+				data[i * N as usize + j] = u as f64;
 			}
 		}
 
 		// Copy s2 polynomials (next K polynomials)
-		for i in 0..dilithium_params::K {
-			for j in 0..dilithium_params::N as usize {
+		for i in 0..K {
+			for j in 0..N as usize as usize {
 				let mut u = s2.vec[i].coeffs[j];
 				// Center modulo Q
 				u += Q / 2;
@@ -339,7 +342,7 @@ impl HyperballSampleVector {
 				u = t + ((t >> 31) & Q);
 				u -= Q / 2;
 
-				data[(dilithium_params::L + i) * dilithium_params::N as usize + j] = u as f64;
+				data[(L + i) * N as usize + j] = u as f64;
 			}
 		}
 
@@ -376,8 +379,8 @@ pub(crate) fn compute_dilithium_hint(
 	w1: &polyvec::Polyveck,
 ) -> usize {
 	let mut pop = 0;
-	for i in 0..dilithium_params::K {
-		for j in 0..dilithium_params::N as usize {
+	for i in 0..K {
+		for j in 0..N as usize as usize {
 			let h = make_hint_single(w0pf.vec[i].coeffs[j], w1.vec[i].coeffs[j]);
 			hint.vec[i].coeffs[j] = h;
 			pop += h as usize;
@@ -413,7 +416,7 @@ pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8]) {
 	assert!(buf.len() >= 736);
 
 	let mut bit_pos = 0usize;
-	for i in 0..dilithium_params::N as usize {
+	for i in 0..N as usize as usize {
 		let coeff = p.coeffs[i] as u32;
 
 		// Write 23 bits starting at bit_pos
@@ -449,7 +452,7 @@ pub(crate) fn poly_unpack_w(buf: &[u8]) -> poly::Poly {
 	let mut p = poly::Poly::default();
 
 	let mut bit_pos = 0usize;
-	for i in 0..dilithium_params::N as usize {
+	for i in 0..N as usize as usize {
 		let byte_pos = bit_pos / 8;
 		let bit_offset = bit_pos % 8;
 
@@ -485,7 +488,7 @@ pub(crate) fn poly_unpack_w(buf: &[u8]) -> poly::Poly {
 pub(crate) fn unpack_polyveck_w(buf: &[u8]) -> polyvec::Polyveck {
 	const POLY_W_SIZE: usize = 736;
 	let mut w = polyvec::Polyveck::default();
-	for i in 0..dilithium_params::K {
+	for i in 0..K {
 		let offset = i * POLY_W_SIZE;
 		w.vec[i] = poly_unpack_w(&buf[offset..offset + POLY_W_SIZE]);
 	}
@@ -505,7 +508,7 @@ pub(crate) fn pack_signature(
 	z: &polyvec::Polyvecl,
 	hint: &polyvec::Polyveck,
 ) -> Vec<u8> {
-	let mut sig = vec![0u8; dilithium_params::SIGNBYTES];
+	let mut sig = vec![0u8; SIGNBYTES];
 
 	// Use dilithium's pack_sig function
 	packing::pack_sig(&mut sig, Some(c_tilde), z, hint);
@@ -571,7 +574,7 @@ mod tests {
 	#[test]
 	fn test_poly_pack_unpack_w() {
 		let mut p = poly::Poly::default();
-		for i in 0..N {
+		for i in 0..N as usize {
 			p.coeffs[i] = (i * 12345) as i32 % Q;
 		}
 
@@ -580,7 +583,7 @@ mod tests {
 
 		let p2 = poly_unpack_w(&buf);
 
-		for i in 0..N {
+		for i in 0..N as usize {
 			assert_eq!(p.coeffs[i], p2.coeffs[i], "Mismatch at index {}", i);
 		}
 	}
