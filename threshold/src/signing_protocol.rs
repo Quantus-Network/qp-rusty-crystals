@@ -81,6 +81,8 @@ use alloc::{
 };
 use core::{fmt, mem};
 
+use log::warn;
+
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -915,6 +917,11 @@ impl DilithiumSignProtocol {
 
 		// Ignore messages from non-participants
 		if !self.participants.contains(from) {
+			warn!(
+				"Signing: Ignoring message from non-participant {} (not in {:?})",
+				from,
+				self.participants.iter().collect::<Vec<_>>()
+			);
 			return Ok(());
 		}
 
@@ -929,12 +936,20 @@ impl DilithiumSignProtocol {
 		// For Round 1-3 messages, verify the claimed sender matches
 		if let Some(party_id) = msg.party_id() {
 			if party_id != from {
+				warn!(
+					"Signing: Sender mismatch: envelope from {} but message claims party {}",
+					from, party_id
+				);
 				return Ok(()); // Sender mismatch, ignore (not an error, just a bad actor)
 			}
 		}
 
 		// Round 4 messages must come from leader
 		if msg.is_round4() && from != self.leader_id {
+			warn!(
+				"Signing: Round 4 message from non-leader {} (leader is {})",
+				from, self.leader_id
+			);
 			return Ok(()); // Only leader can send Round 4 messages
 		}
 

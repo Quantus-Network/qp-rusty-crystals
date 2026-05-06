@@ -15,6 +15,9 @@ rand = { workspace = true }
 rand_core = { workspace = true }
 zeroize = { workspace = true }
 
+# Logging (no_std compatible)
+log = { workspace = true }
+
 # Serialization
 serde = { workspace = true, optional = true }
 bincode = { workspace = true, optional = true }

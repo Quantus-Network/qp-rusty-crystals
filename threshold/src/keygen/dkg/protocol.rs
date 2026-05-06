@@ -319,6 +319,10 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			MithrilDkgMessage::Round1Broadcast(broadcast) => {
 				// Round 1 broadcasts: accept during Round 1 or early Round 2
 				if broadcast.party_id != from {
+					warn!(
+						"DKG: Round1Broadcast sender mismatch: envelope from {} but message claims party {}",
+						from, broadcast.party_id
+					);
 					return Ok(()); // Sender mismatch, ignore
 				}
 				match &mut self.state {
@@ -329,13 +333,22 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 						// Late Round 1 message, still accept it
 						state.round1_broadcasts.entry(from).or_insert(broadcast);
 					},
-					_ => {}, // Too late or too early, ignore
+					_ => {
+						warn!(
+							"DKG: Ignoring late Round1Broadcast from party {} (already past Round 2)",
+							from
+						);
+					},
 				}
 			},
 			MithrilDkgMessage::Round1Private(private) => {
 				// Round 1 private messages: only accept during Round 1
 				// M2: Validate sender is the legitimate leader for this subset
 				if private.from_party_id != from {
+					warn!(
+						"DKG: Round1Private sender mismatch: envelope from {} but message claims party {}",
+						from, private.from_party_id
+					);
 					return Ok(()); // Sender mismatch, ignore
 				}
 				if let MithrilDkgState::Round1(state) = &mut self.state {
@@ -345,13 +358,21 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 							.received_shared_secrets
 							.entry(private.subset_mask)
 							.or_insert(private.shared_secret);
+					} else {
+						warn!(
+							"DKG: Round1Private from non-leader: party {} sent for subset {:b} but leader is {:?}",
+							from, private.subset_mask, expected_leader
+						);
 					}
-					// Silently ignore messages from non-leaders (could be malicious)
 				}
 				// Private messages don't need buffering - they're only relevant in Round 1
 			},
 			MithrilDkgMessage::Round2Broadcast(broadcast) => {
 				if broadcast.party_id != from {
+					warn!(
+						"DKG: Round2Broadcast sender mismatch: envelope from {} but message claims party {}",
+						from, broadcast.party_id
+					);
 					return Ok(()); // Sender mismatch, ignore
 				}
 				match &mut self.state {
@@ -366,11 +387,20 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 						// Future message, buffer it
 						self.message_buffer.buffer_round2(broadcast);
 					},
-					_ => {}, // Too late, ignore
+					_ => {
+						warn!(
+							"DKG: Ignoring late Round2Broadcast from party {} (already past Round 3)",
+							from
+						);
+					},
 				}
 			},
 			MithrilDkgMessage::Round3Broadcast(broadcast) => {
 				if broadcast.party_id != from {
+					warn!(
+						"DKG: Round3Broadcast sender mismatch: envelope from {} but message claims party {}",
+						from, broadcast.party_id
+					);
 					return Ok(()); // Sender mismatch, ignore
 				}
 				match &mut self.state {
@@ -387,11 +417,20 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 						// Future message, buffer it
 						self.message_buffer.buffer_round3(broadcast);
 					},
-					_ => {}, // Too late, ignore
+					_ => {
+						warn!(
+							"DKG: Ignoring late Round3Broadcast from party {} (already past Round 4)",
+							from
+						);
+					},
 				}
 			},
 			MithrilDkgMessage::Round4Broadcast(broadcast) => {
 				if broadcast.party_id != from {
+					warn!(
+						"DKG: Round4Broadcast sender mismatch: envelope from {} but message claims party {}",
+						from, broadcast.party_id
+					);
 					return Ok(()); // Sender mismatch, ignore
 				}
 				match &mut self.state {
@@ -405,7 +444,12 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 						// Future message, buffer it
 						self.message_buffer.buffer_round4(broadcast);
 					},
-					_ => {}, // Too late or complete, ignore
+					_ => {
+						warn!(
+							"DKG: Ignoring late Round4Broadcast from party {} (protocol complete)",
+							from
+						);
+					},
 				}
 			},
 		}
