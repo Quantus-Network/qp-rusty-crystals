@@ -49,11 +49,7 @@ pub const MAX_DKG_MESSAGE_SIZE: usize = 256 * 1024;
 /// Deserialize a DKG message with size limits to prevent resource exhaustion.
 fn deserialize_message(data: &[u8]) -> Result<MithrilDkgMessage, String> {
 	if data.len() > MAX_DKG_MESSAGE_SIZE {
-		return Err(format!(
-			"Message size {} exceeds maximum {}",
-			data.len(),
-			MAX_DKG_MESSAGE_SIZE
-		));
+		return Err(format!("Message size {} exceeds maximum {}", data.len(), MAX_DKG_MESSAGE_SIZE));
 	}
 	borsh::from_slice(data).map_err(|e| e.to_string())
 }
@@ -584,8 +580,8 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 				commitment: state.my_commitment,
 			};
 			let msg = MithrilDkgMessage::Round1Broadcast(broadcast);
-			let data = borsh::to_vec(&msg)
-				.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+			let data =
+				borsh::to_vec(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
 			state.broadcast_sent = true;
 			return Ok(MithrilAction::SendMany(data));
 		}
@@ -694,8 +690,8 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 				randomness: state.my_randomness,
 			};
 			let msg = MithrilDkgMessage::Round2Broadcast(broadcast);
-			let data = borsh::to_vec(&msg)
-				.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+			let data =
+				borsh::to_vec(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
 			state.broadcast_sent = true;
 			return Ok(MithrilAction::SendMany(data));
 		}
@@ -740,8 +736,11 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 		};
 
 		// Compute global randomness from all parties' contributions
-		let (global_randomness, mut my_broadcast) =
-			compute_global_randomness(&state.config, &state.received_broadcasts, state.my_randomness);
+		let (global_randomness, mut my_broadcast) = compute_global_randomness(
+			&state.config,
+			&state.received_broadcasts,
+			state.my_randomness,
+		);
 
 		let rho = h_seed(&global_randomness);
 
@@ -802,8 +801,8 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 				partial_pk_commitments: state.my_pk_commitments.clone(),
 			};
 			let msg = MithrilDkgMessage::Round3Broadcast(broadcast);
-			let data = borsh::to_vec(&msg)
-				.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+			let data =
+				borsh::to_vec(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
 			state.broadcast_sent = true;
 			return Ok(MithrilAction::SendMany(data));
 		}
@@ -891,8 +890,8 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			// Sign and broadcast our partial PKs
 			let broadcast = create_round4_broadcast(state);
 			let msg = MithrilDkgMessage::Round4Broadcast(broadcast);
-			let data = borsh::to_vec(&msg)
-				.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+			let data =
+				borsh::to_vec(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
 			state.broadcast_sent = true;
 			return Ok(MithrilAction::SendMany(data));
 		}
@@ -967,10 +966,8 @@ fn compute_global_randomness<S: TranscriptSigner>(
 	received_broadcasts: &BTreeMap<ParticipantId, MithrilRound2Broadcast>,
 	my_randomness: [u8; RANDOMNESS_SIZE],
 ) -> (Vec<u8>, MithrilRound2Broadcast) {
-	let my_broadcast = MithrilRound2Broadcast {
-		party_id: config.my_party_id,
-		randomness: my_randomness,
-	};
+	let my_broadcast =
+		MithrilRound2Broadcast { party_id: config.my_party_id, randomness: my_randomness };
 
 	let mut all_randomness: Vec<_> = received_broadcasts.iter().collect();
 	all_randomness.push((&config.my_party_id, &my_broadcast));
@@ -1070,18 +1067,16 @@ fn verify_leader_commitments_before_signing<S: TranscriptSigner>(
 				))
 			})?;
 
-			let leader_commitment = round3.partial_pk_commitments.get(&subset).ok_or_else(|| {
-				MithrilDkgError::MissingData(format!(
-					"missing PK commitment from leader {} for subset {:b}",
-					leader_id, subset
-				))
-			})?;
+			let leader_commitment =
+				round3.partial_pk_commitments.get(&subset).ok_or_else(|| {
+					MithrilDkgError::MissingData(format!(
+						"missing PK commitment from leader {} for subset {:b}",
+						leader_id, subset
+					))
+				})?;
 
 			if *leader_commitment != expected_commitment {
-				return Err(MithrilDkgError::PkCommitmentMismatch {
-					party_id: leader_id,
-					subset,
-				});
+				return Err(MithrilDkgError::PkCommitmentMismatch { party_id: leader_id, subset });
 			}
 		}
 	}
@@ -2363,13 +2358,12 @@ mod tests {
 		for (from, dkg) in dkgs.iter_mut().enumerate() {
 			loop {
 				match dkg.poke().unwrap() {
-					MithrilAction::SendMany(data) => {
+					MithrilAction::SendMany(data) =>
 						for to in 0..3 {
 							if to != from {
 								pending[to].push((from as ParticipantId, data.clone()));
 							}
-						}
-					},
+						},
 					MithrilAction::SendPrivate(to, data) => {
 						pending[to as usize].push((from as ParticipantId, data));
 					},
@@ -2422,14 +2416,19 @@ mod tests {
 
 		// Check that party 0 has buffered some Round 2 messages
 		let buffered_r2 = dkgs[0].message_buffer.round2.len();
-		assert!(buffered_r2 > 0, "Party 0 should have buffered Round 2 messages, got {}", buffered_r2);
+		assert!(
+			buffered_r2 > 0,
+			"Party 0 should have buffered Round 2 messages, got {}",
+			buffered_r2
+		);
 
 		// Now deliver the delayed Round 1 messages to party 0
 		for (from, data) in party0_pending {
 			dkgs[0].message(from, data).unwrap();
 		}
 
-		// Advance party 0 - it should process Round 1, transition to Round 2, and process buffered messages
+		// Advance party 0 - it should process Round 1, transition to Round 2, and process buffered
+		// messages
 		loop {
 			match dkgs[0].poke().unwrap() {
 				MithrilAction::SendMany(_) | MithrilAction::SendPrivate(_, _) => {},
@@ -2451,12 +2450,11 @@ mod tests {
 				// Check that messages from parties 1 and 2 were processed
 				let has_p1 = state.received_broadcasts.contains_key(&1);
 				let has_p2 = state.received_broadcasts.contains_key(&2);
-				assert!(
-					has_p1 || has_p2,
-					"Buffered Round 2 messages should have been processed"
-				);
+				assert!(has_p1 || has_p2, "Buffered Round 2 messages should have been processed");
 			},
-			MithrilDkgState::Round3(_) | MithrilDkgState::Round4(_) | MithrilDkgState::Complete(_) => {
+			MithrilDkgState::Round3(_) |
+			MithrilDkgState::Round4(_) |
+			MithrilDkgState::Complete(_) => {
 				// Even better - protocol progressed further
 			},
 			other => {
@@ -2476,14 +2474,9 @@ mod tests {
 			pk_map.insert(p, p);
 		}
 
-		let config = MithrilDkgConfig::new(
-			threshold_config,
-			0,
-			participants,
-			TestSigner { id: 0 },
-			pk_map,
-		)
-		.unwrap();
+		let config =
+			MithrilDkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
+				.unwrap();
 
 		let rng = rand::rngs::StdRng::seed_from_u64(100);
 		let mut dkg = MithrilDkg::new(config, rng);
@@ -2503,11 +2496,7 @@ mod tests {
 		// Buffer should only contain one message (duplicates from same party overwrite)
 		// or contain two if we allow duplicates - let's verify actual behavior
 		let buffer_count = dkg.message_buffer.round2.len();
-		assert!(
-			buffer_count >= 1,
-			"At least one message should be buffered, got {}",
-			buffer_count
-		);
+		assert!(buffer_count >= 1, "At least one message should be buffered, got {}", buffer_count);
 
 		// Create a different Round 2 broadcast from party 2
 		let round2_broadcast2 = MithrilRound2Broadcast { party_id: 2, randomness: [99u8; 32] };
@@ -2588,7 +2577,10 @@ mod tests {
 		}
 
 		// Verify party 0 is in Round 2
-		assert!(matches!(dkgs[0].state, MithrilDkgState::Round2(_)), "Party 0 should be in Round 2");
+		assert!(
+			matches!(dkgs[0].state, MithrilDkgState::Round2(_)),
+			"Party 0 should be in Round 2"
+		);
 
 		// Now try to send a Round 1 message to party 0 (it's already past Round 1)
 		let late_round1 = MithrilRound1Broadcast { party_id: 1, commitment: [77u8; 32] };
@@ -2669,7 +2661,10 @@ mod tests {
 			}
 		}
 
-		assert!(matches!(dkgs[0].state, MithrilDkgState::Round2(_)), "Party 0 should be in Round 2");
+		assert!(
+			matches!(dkgs[0].state, MithrilDkgState::Round2(_)),
+			"Party 0 should be in Round 2"
+		);
 
 		// Create a Round 4 message and send it to party 0 while in Round 2
 		let round4_broadcast = MithrilRound4Broadcast {
@@ -2716,14 +2711,9 @@ mod tests {
 			pk_map.insert(p, p);
 		}
 
-		let config = MithrilDkgConfig::new(
-			threshold_config,
-			0,
-			participants,
-			TestSigner { id: 0 },
-			pk_map,
-		)
-		.unwrap();
+		let config =
+			MithrilDkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
+				.unwrap();
 
 		let rng = rand::rngs::StdRng::seed_from_u64(400);
 		let mut dkg = MithrilDkg::new(config, rng);
@@ -2749,10 +2739,8 @@ mod tests {
 		// Note: These will be from invalid parties but should still be buffered
 		// (validation happens when processing, not when buffering)
 		for party_id in 0..10u32 {
-			let round3_broadcast = MithrilRound3Broadcast {
-				party_id,
-				partial_pk_commitments: BTreeMap::new(),
-			};
+			let round3_broadcast =
+				MithrilRound3Broadcast { party_id, partial_pk_commitments: BTreeMap::new() };
 			let round3_msg = MithrilDkgMessage::Round3Broadcast(round3_broadcast);
 			let round3_data = borsh::to_vec(&round3_msg).unwrap();
 			// Use party_id as sender to avoid sender mismatch
@@ -2811,8 +2799,9 @@ mod tests {
 			}
 		}
 
-		// Buffer a Round 2 message with invalid data (empty partial_pk_commitments is technically valid
-		// but will fail verification later - that's fine, we just want to test graceful handling)
+		// Buffer a Round 2 message with invalid data (empty partial_pk_commitments is technically
+		// valid but will fail verification later - that's fine, we just want to test graceful
+		// handling)
 		let round2_broadcast = MithrilRound2Broadcast {
 			party_id: 1,
 			randomness: [0u8; 32], // All zeros - may or may not be valid depending on protocol
@@ -2909,12 +2898,12 @@ mod tests {
 								pending.push((party_id as ParticipantId, data.clone()));
 							}
 						}
-					}
+					},
 					MithrilAction::SendPrivate(to, data) => {
 						pending_messages[to as usize].push((party_id as ParticipantId, data));
-					}
-					MithrilAction::Wait => {}
-					MithrilAction::Return(_) => {}
+					},
+					MithrilAction::Wait => {},
+					MithrilAction::Return(_) => {},
 				}
 			}
 
@@ -2936,7 +2925,10 @@ mod tests {
 			};
 			assert!(state.broadcast_sent, "Party 0 should have sent broadcast");
 			// Party 0 should have received party 2's broadcast but not party 1's
-			assert!(!state.received_broadcasts.contains_key(&1), "Should not have party 1's broadcast yet");
+			assert!(
+				!state.received_broadcasts.contains_key(&1),
+				"Should not have party 1's broadcast yet"
+			);
 		}
 
 		// Create a sabotaged broadcast from party 1 with empty partial PKs
@@ -2972,18 +2964,23 @@ mod tests {
 		if let MithrilDkgState::Round4(state) = &mut dkgs[0].state {
 			state.received_broadcasts.insert(1, sabotaged_broadcast);
 
-			// Make sure we also have party 2's broadcast (they have no leader subsets, so empty PKs is fine)
+			// Make sure we also have party 2's broadcast (they have no leader subsets, so empty PKs
+			// is fine)
 			if !state.received_broadcasts.contains_key(&2) {
 				let empty_pks: BTreeMap<SubsetMask, PartialPublicKey> = BTreeMap::new();
 				let partial_output_hash = compute_partial_output_hash(&empty_pks);
-				let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
+				let signing_message =
+					compute_signing_message(&transcript_hash, &partial_output_hash);
 				let signer = TestSigner { id: 2 };
 				let sig = signer.sign(&signing_message);
-				state.received_broadcasts.insert(2, MithrilRound4Broadcast {
-					party_id: 2,
-					partial_public_keys: empty_pks,
-					transcript_signature: sig,
-				});
+				state.received_broadcasts.insert(
+					2,
+					MithrilRound4Broadcast {
+						party_id: 2,
+						partial_public_keys: empty_pks,
+						transcript_signature: sig,
+					},
+				);
 			}
 		}
 
@@ -3063,14 +3060,14 @@ mod tests {
 								pending.push((party_id as ParticipantId, data.clone()));
 							}
 						}
-					}
+					},
 					MithrilAction::SendPrivate(to, data) => {
 						pending_messages[to as usize].push((party_id as ParticipantId, data));
-					}
-					MithrilAction::Wait => {}
+					},
+					MithrilAction::Wait => {},
 					MithrilAction::Return(output) => {
 						outputs[party_id] = Some(*output);
-					}
+					},
 				}
 			}
 
@@ -3080,7 +3077,8 @@ mod tests {
 		}
 
 		// All should complete with same key
-		let outputs: Vec<_> = outputs.into_iter().map(|o| o.expect("DKG should complete")).collect();
+		let outputs: Vec<_> =
+			outputs.into_iter().map(|o| o.expect("DKG should complete")).collect();
 		assert_eq!(outputs[0].public_key.as_bytes(), outputs[1].public_key.as_bytes());
 		assert_eq!(outputs[1].public_key.as_bytes(), outputs[2].public_key.as_bytes());
 
@@ -3091,7 +3089,8 @@ mod tests {
 			participants.clone(),
 			TestSigner { id: 0 },
 			pk_map.clone(),
-		).unwrap();
+		)
+		.unwrap();
 
 		// Verify leadership assignments
 		assert!(config.is_leader(3), "Party 0 should be leader for subset 3");
@@ -3134,7 +3133,8 @@ mod tests {
 			participants.clone(),
 			signers[0].clone(),
 			pk_map.clone(),
-		).unwrap();
+		)
+		.unwrap();
 
 		let mut dkg: MithrilDkg<TestSigner, _> = MithrilDkg::new(config, rng);
 
@@ -3143,10 +3143,7 @@ mod tests {
 		assert!(matches!(action, MithrilAction::SendMany(_)));
 
 		// Now we're in Round 1. Try to inject a message from a non-participant (party 99)
-		let fake_broadcast = MithrilRound1Broadcast {
-			party_id: 99,
-			commitment: [0u8; 32],
-		};
+		let fake_broadcast = MithrilRound1Broadcast { party_id: 99, commitment: [0u8; 32] };
 		let fake_msg = MithrilDkgMessage::Round1Broadcast(fake_broadcast);
 		let fake_data = borsh::to_vec(&fake_msg).unwrap();
 
@@ -3218,7 +3215,8 @@ mod tests {
 			participants.clone(),
 			signers[0].clone(),
 			pk_map.clone(),
-		).unwrap();
+		)
+		.unwrap();
 
 		let mut dkg: MithrilDkg<TestSigner, _> = MithrilDkg::new(config, rng);
 
@@ -3227,10 +3225,7 @@ mod tests {
 		assert!(matches!(action, MithrilAction::SendMany(_)));
 
 		// Try to send a message "from" ourselves (party 0)
-		let self_broadcast = MithrilRound1Broadcast {
-			party_id: 0,
-			commitment: [42u8; 32],
-		};
+		let self_broadcast = MithrilRound1Broadcast { party_id: 0, commitment: [42u8; 32] };
 		let self_msg = MithrilDkgMessage::Round1Broadcast(self_broadcast);
 		let self_data = borsh::to_vec(&self_msg).unwrap();
 
@@ -3270,7 +3265,8 @@ mod tests {
 			participants.clone(),
 			signers[0].clone(),
 			pk_map.clone(),
-		).unwrap();
+		)
+		.unwrap();
 
 		let mut dkg: MithrilDkg<TestSigner, _> = MithrilDkg::new(config, rng);
 

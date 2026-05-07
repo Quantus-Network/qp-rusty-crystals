@@ -1465,7 +1465,7 @@ mod tests {
 
 		let taken = buffer.take_round2();
 		assert_eq!(taken.len(), 2); // Only 2 unique parties
-		// First message from party 1 should be kept (not the duplicate)
+							  // First message from party 1 should be kept (not the duplicate)
 		let party1_msg = taken.iter().find(|m| m.party_id == 1).unwrap();
 		assert_eq!(party1_msg.commitment_data, vec![1, 2, 3, 4]);
 	}

@@ -237,9 +237,7 @@ pub fn recover_share(
 
 		// Add in NTT domain (pointwise addition)
 		// Use wrapping_add to handle overflow for large configurations
-		for (combined_poly, ntt_poly) in
-			s1_combined.vec.iter_mut().zip(s1_ntt.vec.iter()).take(L)
-		{
+		for (combined_poly, ntt_poly) in s1_combined.vec.iter_mut().zip(s1_ntt.vec.iter()).take(L) {
 			for (combined_coeff, ntt_coeff) in
 				combined_poly.coeffs.iter_mut().zip(ntt_poly.coeffs.iter())
 			{
@@ -247,9 +245,7 @@ pub fn recover_share(
 			}
 		}
 
-		for (combined_poly, ntt_poly) in
-			s2_combined.vec.iter_mut().zip(s2_ntt.vec.iter()).take(K)
-		{
+		for (combined_poly, ntt_poly) in s2_combined.vec.iter_mut().zip(s2_ntt.vec.iter()).take(K) {
 			for (combined_coeff, ntt_coeff) in
 				combined_poly.coeffs.iter_mut().zip(ntt_poly.coeffs.iter())
 			{

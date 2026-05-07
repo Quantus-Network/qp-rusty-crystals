@@ -32,8 +32,7 @@ use core::fmt;
 use borsh::{BorshDeserialize, BorshSerialize};
 use zeroize::Zeroize;
 
-use crate::config::ThresholdConfig;
-use crate::error::MAX_PARTIES;
+use crate::{config::ThresholdConfig, error::MAX_PARTIES};
 
 use qp_rusty_crystals_dilithium::fips202;
 

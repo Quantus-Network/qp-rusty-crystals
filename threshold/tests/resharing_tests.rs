@@ -423,8 +423,7 @@ fn test_resharing_protocol_round1_generation() {
 		Action::SendMany(data) => {
 			assert!(!data.is_empty());
 			// Verify it's a valid Round 1 message
-			let msg: ResharingMessage =
-				borsh::from_slice(&data).expect("should deserialize");
+			let msg: ResharingMessage = borsh::from_slice(&data).expect("should deserialize");
 			match msg {
 				ResharingMessage::Round1(broadcast) => {
 					assert_eq!(broadcast.party_id, 0);
