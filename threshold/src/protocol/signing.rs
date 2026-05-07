@@ -664,6 +664,13 @@ pub(crate) fn unpack_responses(
 
 /// Check if a single party's z response for one iteration satisfies the norm bound.
 /// Returns true if the response is valid (within bounds).
+///
+/// Note: This only checks the norm bound, not whether the response is "meaningful".
+/// A party could submit zeros or near-zeros that pass this check but contribute
+/// nothing useful. This is fine because:
+/// 1. We assume up to t-1 malicious parties in threshold signing
+/// 2. The final signature verification catches invalid aggregated signatures
+/// 3. A malicious party gains nothing by submitting zeros vs garbage
 fn check_party_z_norm(z_i: &polyvec::Polyvecl, gamma1_minus_beta: i32) -> bool {
 	for z_poly in z_i.vec.iter().take(L) {
 		for coeff in z_poly.coeffs.iter() {
