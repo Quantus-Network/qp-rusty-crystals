@@ -32,6 +32,8 @@ use core::fmt;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+use zeroize::Zeroize;
+
 #[cfg(feature = "serde")]
 use crate::serde_helpers::serde_poly_vec;
 
@@ -331,6 +333,17 @@ impl SubsetContribution {
 impl Default for SubsetContribution {
 	fn default() -> Self {
 		Self::new()
+	}
+}
+
+impl Zeroize for SubsetContribution {
+	fn zeroize(&mut self) {
+		for poly in &mut self.s1 {
+			poly.zeroize();
+		}
+		for poly in &mut self.s2 {
+			poly.zeroize();
+		}
 	}
 }
 

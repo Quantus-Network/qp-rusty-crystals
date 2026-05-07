@@ -27,9 +27,21 @@
 //!     |            |         |         |         |
 //!     +------------+---------+---------+---------+-----> Failed
 //! ```
+//!
+//! # Security: Zeroization
+//!
+//! All state structs implement `Zeroize` and `ZeroizeOnDrop` to ensure that sensitive
+//! cryptographic material (randomness, shared secrets, secret key contributions) is
+//! securely erased from memory when no longer needed. This includes:
+//!
+//! - `my_randomness` - the party's random contribution
+//! - `my_shared_secrets` / `shared_secrets` - shared secrets for subset derivation
+//! - `my_contributions` - secret key shares (s1, s2 polynomials)
 
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::fmt;
+
+use zeroize::Zeroize;
 
 use crate::{
 	keys::{PrivateKeyShare, PublicKey},
@@ -79,6 +91,18 @@ impl<S: TranscriptSigner> fmt::Debug for MithrilRound1State<S> {
 	}
 }
 
+impl<S: TranscriptSigner> Zeroize for MithrilRound1State<S> {
+	fn zeroize(&mut self) {
+		self.my_randomness.zeroize();
+		for secret in self.my_shared_secrets.values_mut() {
+			secret.zeroize();
+		}
+		for secret in self.received_shared_secrets.values_mut() {
+			secret.zeroize();
+		}
+	}
+}
+
 /// State for Round 2 (Reveal phase).
 ///
 /// In this round, each party:
@@ -106,6 +130,15 @@ impl<S: TranscriptSigner> fmt::Debug for MithrilRound2State<S> {
 			.field("received_broadcasts", &self.received_broadcasts.len())
 			.field("broadcast_sent", &self.broadcast_sent)
 			.finish()
+	}
+}
+
+impl<S: TranscriptSigner> Zeroize for MithrilRound2State<S> {
+	fn zeroize(&mut self) {
+		self.my_randomness.zeroize();
+		for secret in self.shared_secrets.values_mut() {
+			secret.zeroize();
+		}
 	}
 }
 
@@ -151,6 +184,18 @@ impl<S: TranscriptSigner> fmt::Debug for MithrilRound3State<S> {
 	}
 }
 
+impl<S: TranscriptSigner> Zeroize for MithrilRound3State<S> {
+	fn zeroize(&mut self) {
+		for secret in self.shared_secrets.values_mut() {
+			secret.zeroize();
+		}
+		self.global_randomness.zeroize();
+		for contribution in self.my_contributions.values_mut() {
+			contribution.zeroize();
+		}
+	}
+}
+
 /// State for Round 4 (Partial PK Reveal phase).
 ///
 /// In this round, each party:
@@ -190,6 +235,18 @@ impl<S: TranscriptSigner> fmt::Debug for MithrilRound4State<S> {
 			.field("received_broadcasts", &self.received_broadcasts.len())
 			.field("broadcast_sent", &self.broadcast_sent)
 			.finish()
+	}
+}
+
+impl<S: TranscriptSigner> Zeroize for MithrilRound4State<S> {
+	fn zeroize(&mut self) {
+		for secret in self.shared_secrets.values_mut() {
+			secret.zeroize();
+		}
+		self.global_randomness.zeroize();
+		for contribution in self.my_contributions.values_mut() {
+			contribution.zeroize();
+		}
 	}
 }
 
@@ -264,6 +321,20 @@ impl<S: TranscriptSigner> fmt::Debug for MithrilDkgState<S> {
 			Self::Round4(s) => write!(f, "Round4({:?})", s),
 			Self::Complete(_) => write!(f, "Complete"),
 			Self::Failed(msg) => write!(f, "Failed({})", msg),
+		}
+	}
+}
+
+impl<S: TranscriptSigner> Zeroize for MithrilDkgState<S> {
+	fn zeroize(&mut self) {
+		match self {
+			Self::Initialized(_) => {},
+			Self::Round1(state) => state.zeroize(),
+			Self::Round2(state) => state.zeroize(),
+			Self::Round3(state) => state.zeroize(),
+			Self::Round4(state) => state.zeroize(),
+			Self::Complete(_) => {},
+			Self::Failed(_) => {},
 		}
 	}
 }

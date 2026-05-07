@@ -12,6 +12,7 @@ use core::{fmt, mem};
 use log::warn;
 use qp_rusty_crystals_dilithium::params::ETA;
 use rand::{CryptoRng, RngCore};
+use zeroize::Zeroize;
 
 use crate::{
 	config::ThresholdConfig,
@@ -242,6 +243,13 @@ pub struct MithrilDkg<S: TranscriptSigner, R: RngCore + CryptoRng> {
 	pending_privates: Vec<(ParticipantId, Vec<u8>)>,
 	/// Buffer for messages that arrive before we're ready to process them.
 	message_buffer: DkgMessageBuffer,
+}
+
+impl<S: TranscriptSigner, R: RngCore + CryptoRng> Drop for MithrilDkg<S, R> {
+	fn drop(&mut self) {
+		// Zeroize sensitive data in the state when the DKG is dropped
+		self.state.zeroize();
+	}
 }
 
 impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
