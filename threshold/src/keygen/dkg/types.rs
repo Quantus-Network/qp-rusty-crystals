@@ -38,6 +38,7 @@ use zeroize::Zeroize;
 use crate::serde_helpers::serde_poly_vec;
 
 use crate::config::ThresholdConfig;
+use crate::error::MAX_PARTIES;
 
 use qp_rusty_crystals_dilithium::fips202;
 
@@ -259,15 +260,23 @@ impl<S: TranscriptSigner> MithrilDkgConfig<S> {
 	}
 
 	/// Get all valid subsets for this threshold configuration.
+	///
+	/// # Panics
+	/// Panics if `n > MAX_PARTIES`. This should never happen since
+	/// `ThresholdConfig::new()` enforces this constraint.
 	pub fn all_subsets(&self) -> Vec<SubsetMask> {
-		let n = self.total_parties() as usize;
-		let t = self.threshold() as usize;
-		let k = n - t + 1;
+		let n = self.total_parties();
+		let t = self.threshold();
 
+		// This is a programmer error if violated - ThresholdConfig enforces n <= MAX_PARTIES.
+		assert!(n <= MAX_PARTIES, "all_subsets: n={} exceeds MAX_PARTIES ({})", n, MAX_PARTIES);
+
+		let k = n - t + 1;
+		let max_mask: u32 = 1u32 << n;
 		let mut subsets = Vec::new();
-		for mask in 0u16..(1 << n) {
-			if (mask as u32).count_ones() as usize == k {
-				subsets.push(mask);
+		for mask in 0..max_mask {
+			if mask.count_ones() == k {
+				subsets.push(mask as SubsetMask);
 			}
 		}
 		subsets.sort();
