@@ -185,6 +185,13 @@ impl<S: TranscriptSigner> MithrilDkgConfig<S> {
 		let mut sorted_participants = all_participants;
 		sorted_participants.sort();
 
+		// Check for duplicate participant IDs after sorting (duplicates will be adjacent)
+		for i in 1..sorted_participants.len() {
+			if sorted_participants[i] == sorted_participants[i - 1] {
+				return Err("duplicate participant ID in all_participants");
+			}
+		}
+
 		Ok(Self {
 			threshold_config,
 			my_party_id,
@@ -685,6 +692,54 @@ mod tests {
 		assert!(config.is_leader(0b011));
 		assert!(config.is_leader(0b101));
 		assert!(!config.is_leader(0b110));
+	}
+
+	#[test]
+	fn test_config_rejects_duplicate_participants() {
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let mut public_keys = BTreeMap::new();
+		public_keys.insert(0, 0u32);
+		public_keys.insert(1, 1u32);
+		public_keys.insert(2, 2u32);
+		// 3 unique public keys, but participant list has duplicate
+
+		// Duplicate participant ID (1 appears twice) - will fail participant count check first
+		// since 3 participants but vec has [0,1,1] which after dedup would be 2 unique
+		// Actually the check is on vec length vs config, so [0,1,1].len() == 3 passes that.
+		// The public_keys check passes since all 3 IDs (0,1,2) have keys but vec is [0,1,1].
+		// Wait - the for loop checks each p in all_participants has a key. [0,1,1] all have keys.
+		// So we should hit the duplicate check!
+		let result: Result<MithrilDkgConfig<TestSigner>, _> = MithrilDkgConfig::new(
+			threshold_config,
+			0,
+			vec![0, 1, 1], // duplicate!
+			TestSigner { id: 0 },
+			public_keys,
+		);
+
+		assert!(result.is_err());
+		assert_eq!(result.unwrap_err(), "duplicate participant ID in all_participants");
+	}
+
+	#[test]
+	fn test_config_rejects_duplicate_participants_unsorted() {
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let mut public_keys = BTreeMap::new();
+		public_keys.insert(0, 0u32);
+		public_keys.insert(1, 1u32);
+		public_keys.insert(2, 2u32);
+
+		// Duplicate at non-adjacent positions before sorting
+		let result: Result<MithrilDkgConfig<TestSigner>, _> = MithrilDkgConfig::new(
+			threshold_config,
+			0,
+			vec![0, 2, 0], // duplicate 0, not adjacent before sort
+			TestSigner { id: 0 },
+			public_keys,
+		);
+
+		assert!(result.is_err());
+		assert_eq!(result.unwrap_err(), "duplicate participant ID in all_participants");
 	}
 
 	#[test]
