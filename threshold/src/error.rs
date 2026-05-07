@@ -329,6 +329,7 @@ pub fn validate_context(ctx: &[u8]) -> ThresholdResult<()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use alloc::vec;
 
 	#[test]
 	fn test_valid_threshold_params() {

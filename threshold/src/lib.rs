@@ -21,7 +21,6 @@
 //!     ThresholdConfig, ThresholdSigner, generate_with_dealer,
 //!     Round1Broadcast, Round2Broadcast, Round3Broadcast, verify_signature,
 //! };
-//! use rand::thread_rng;
 //!
 //! // 1. Setup: Generate keys with a trusted dealer
 //! let config = ThresholdConfig::new(2, 3)?;  // 2-of-3 threshold
@@ -33,11 +32,16 @@
 //!     .map(|share| ThresholdSigner::new(share, public_key.clone(), config))
 //!     .collect::<Result<_, _>>()?;
 //!
-//! // 3. Round 1: Generate commitments
-//! let mut rng = thread_rng();
+//! // 3. Round 1: Generate commitments (each party needs unique random seed)
 //! let r1_broadcasts: Vec<_> = signers.iter_mut()
 //!     .take(2)  // Only need t=2 parties
-//!     .map(|s| s.round1_commit(&mut rng))
+//!     .enumerate()
+//!     .map(|(i, s)| {
+//!         let mut round1_seed = [0u8; 32];
+//!         // In production, use cryptographically secure randomness!
+//!         round1_seed[0] = i as u8;
+//!         s.round1_commit_with_seed(&round1_seed)
+//!     })
 //!     .collect::<Result<_, _>>()?;
 //!
 //! // 4. Round 2: Reveal commitments (exchange r1 broadcasts first)

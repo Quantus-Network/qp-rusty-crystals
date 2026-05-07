@@ -45,12 +45,15 @@
 //!
 //! // Create the protocol instance
 //! let signer = ThresholdSigner::new(my_share, public_key, config)?;
+//! let round1_seed: [u8; 32] = get_random_seed(); // Must be cryptographically random
 //! let mut protocol = DilithiumSignProtocol::new(
 //!     signer,
 //!     message.to_vec(),
 //!     context.to_vec(),
 //!     vec![0, 1, 2],  // participating parties
 //!     my_party_id,
+//!     leader_id,
+//!     round1_seed,
 //! );
 //!
 //! // Run the protocol
@@ -83,6 +86,7 @@ use core::{fmt, mem};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use log::warn;
+use qp_rusty_crystals_dilithium::fips202;
 
 use crate::{
 	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature},
@@ -325,12 +329,15 @@ impl SignMessageBuffer {
 /// # Example
 ///
 /// ```ignore
+/// let round1_seed: [u8; 32] = get_random_seed(); // Must be cryptographically random
 /// let mut protocol = DilithiumSignProtocol::new(
 ///     signer,
 ///     b"message to sign".to_vec(),
 ///     b"context".to_vec(),
 ///     vec![0, 1, 2],
 ///     1,  // my party id
+///     0,  // leader id
+///     round1_seed,
 /// );
 ///
 /// loop {
@@ -357,6 +364,8 @@ pub struct DilithiumSignProtocol {
 	message: Vec<u8>,
 	/// The context string for signing.
 	context: Vec<u8>,
+	/// Random seed for Round 1 commitment (32 bytes, cryptographically random).
+	round1_seed: [u8; 32],
 
 	/// Collected Round 1 broadcasts from other parties.
 	r1_broadcasts: BTreeMap<ParticipantId, Round1Broadcast>,
@@ -392,6 +401,7 @@ impl DilithiumSignProtocol {
 	/// * `participants` - All participant IDs in this signing session (can be arbitrary u32 values)
 	/// * `my_participant_id` - This party's identifier
 	/// * `leader_id` - The leader's identifier (responsible for combine/retry decisions)
+	/// * `round1_seed` - A 32-byte cryptographically random seed for Round 1
 	///
 	/// # Panics
 	///
@@ -401,6 +411,11 @@ impl DilithiumSignProtocol {
 	/// - `leader_id` is not in `participants`
 	/// - Any participant is not in the original DKG participant set (HQ3: act ⊆ [N])
 	/// - `my_participant_id` is not in the original DKG participant set (HQ3: i ∈ act)
+	///
+	/// # Security Warning
+	///
+	/// The `round1_seed` MUST be generated from a cryptographically secure source
+	/// and MUST be unique for each signing session. Reusing seeds compromises security.
 	pub fn new(
 		signer: ThresholdSigner,
 		message: Vec<u8>,
@@ -408,6 +423,7 @@ impl DilithiumSignProtocol {
 		participants: Vec<ParticipantId>,
 		my_participant_id: ParticipantId,
 		leader_id: ParticipantId,
+		round1_seed: [u8; 32],
 	) -> Self {
 		let participant_list =
 			ParticipantList::new(&participants).expect("participants must not contain duplicates");
@@ -435,6 +451,7 @@ impl DilithiumSignProtocol {
 			leader_id,
 			message,
 			context,
+			round1_seed,
 			r1_broadcasts: BTreeMap::new(),
 			r2_broadcasts: BTreeMap::new(),
 			r3_broadcasts: BTreeMap::new(),
@@ -475,6 +492,24 @@ impl DilithiumSignProtocol {
 	/// Get the current retry count.
 	pub fn retry_count(&self) -> u32 {
 		self.retry_count
+	}
+
+	/// Derive a unique seed for the current retry attempt.
+	///
+	/// This ensures each retry uses different randomness, which is critical for
+	/// the rejection sampling to eventually succeed.
+	///
+	/// Formula: `derived_seed = SHAKE256(round1_seed || retry_count)`
+	fn derive_current_seed(&self) -> [u8; 32] {
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, &self.round1_seed, 32);
+		let retry_bytes = self.retry_count.to_le_bytes();
+		fips202::shake256_absorb(&mut state, &retry_bytes, 4);
+		fips202::shake256_finalize(&mut state);
+
+		let mut derived = [0u8; 32];
+		fips202::shake256_squeeze(&mut derived, 32, &mut state);
+		derived
 	}
 
 	/// Get the number of participants required (threshold).
@@ -585,11 +620,14 @@ impl DilithiumSignProtocol {
 	pub fn poke(&mut self) -> Result<Action<Signature>, SignProtocolError> {
 		match &self.state {
 			SignProtocolState::Round1Generate => {
-				// Generate Round 1 commitment using OsRng for cryptographic randomness
-				let mut rng = rand::rngs::OsRng;
+				// Derive a unique seed for this retry attempt
+				// This ensures each retry uses different randomness
+				let current_seed = self.derive_current_seed();
+
+				// Generate Round 1 commitment using the derived seed
 				let r1 = self
 					.signer
-					.round1_commit(&mut rng)
+					.round1_commit_with_seed(&current_seed)
 					.map_err(|e| SignProtocolError::SigningError(e.to_string()))?;
 
 				// Store our broadcast
@@ -1097,10 +1135,17 @@ pub fn run_local_signing_with_stats(
 	let leader_id = *participants.iter().min().unwrap();
 
 	// Create protocol instances
+	// Note: In production, each party must generate their own cryptographically random seed.
+	// For this local test helper, we use deterministic seeds derived from party IDs.
 	let mut protocols: Vec<DilithiumSignProtocol> = signers
 		.into_iter()
-		.map(|signer| {
+		.enumerate()
+		.map(|(idx, signer)| {
 			let my_id = signer.party_id();
+			// Deterministic seed for testing - each party gets a different seed
+			let mut round1_seed = [0u8; 32];
+			round1_seed[0] = idx as u8;
+			round1_seed[1] = 0xAB; // marker byte
 			DilithiumSignProtocol::new(
 				signer,
 				message.to_vec(),
@@ -1108,6 +1153,7 @@ pub fn run_local_signing_with_stats(
 				participants.clone(),
 				my_id,
 				leader_id,
+				round1_seed,
 			)
 		})
 		.collect();
@@ -1189,6 +1235,7 @@ mod tests {
 			vec![0, 1, 2],
 			0,
 			0, // leader_id
+			[0xAA; 32], // round1_seed
 		);
 
 		assert_eq!(protocol.my_participant_id(), 0);
@@ -1203,8 +1250,15 @@ mod tests {
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
-		let protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0, 0);
+		let protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+		);
 
 		let r1 = Round1Broadcast::new(1, [0x42u8; 32]);
 		let msg = SigningMessage::Round1(r1.clone());
@@ -1226,8 +1280,15 @@ mod tests {
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
-		let protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0, 0);
+		let protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+		);
 
 		let r2 = Round2Broadcast::new(2, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 		let msg = SigningMessage::Round2(r2.clone());
@@ -1249,8 +1310,15 @@ mod tests {
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
-		let protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0, 0);
+		let protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+		);
 
 		let r3 = Round3Broadcast::new(3, vec![10, 20, 30, 40, 50]);
 		let msg = SigningMessage::Round3(r3.clone());
@@ -1339,8 +1407,15 @@ mod tests {
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
-		let mut protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0, 0);
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+		);
 
 		// Initially in Round1Generate
 		assert_eq!(*protocol.state(), SignProtocolState::Round1Generate);
@@ -1361,8 +1436,15 @@ mod tests {
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
-		let mut protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0, 0);
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+		);
 
 		// Advance state
 		let _ = protocol.poke().unwrap();
@@ -1380,8 +1462,15 @@ mod tests {
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
-		let mut protocol =
-			DilithiumSignProtocol::new(signer, b"test".to_vec(), b"ctx".to_vec(), vec![0, 1], 0, 0);
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+		);
 
 		// Generate Round 1
 		let action = protocol.poke().unwrap();
@@ -1409,6 +1498,7 @@ mod tests {
 			vec![0, 1, 2],
 			0,
 			0, // leader_id
+			[0xAA; 32],
 		);
 
 		// Generate Round 1
@@ -1498,6 +1588,7 @@ mod tests {
 			vec![0, 1, 2],
 			0,
 			0, // leader_id
+			[0xAA; 32],
 		);
 
 		// Start Round 1 - generates and sends our Round 1 message
@@ -1533,6 +1624,7 @@ mod tests {
 			vec![0, 1, 2],
 			0,
 			0, // leader_id
+			[0xAA; 32],
 		);
 
 		// Start Round 1
@@ -1568,6 +1660,7 @@ mod tests {
 			vec![0, 1, 2],
 			0,
 			0, // leader_id
+			[0xAA; 32],
 		);
 
 		// Create protocol for party 1 (to generate valid messages)
@@ -1579,6 +1672,7 @@ mod tests {
 			vec![0, 1, 2],
 			1,
 			0, // leader_id
+			[0xBB; 32], // Different seed for party 1
 		);
 
 		// Start both protocols - generate Round 1
@@ -1638,6 +1732,7 @@ mod tests {
 			vec![0, 1, 2],
 			0,
 			0,
+			[0xAA; 32],
 		);
 
 		// Start Round 1
@@ -1671,6 +1766,7 @@ mod tests {
 			vec![0, 1, 2],
 			1, // follower
 			0, // leader is party 0
+			[0xAA; 32],
 		);
 
 		// Manually set follower to WaitingForLeaderDecision state
@@ -1712,6 +1808,9 @@ mod tests {
 			.enumerate()
 			.map(|(i, share)| {
 				let signer = ThresholdSigner::new(share.clone(), pk.clone(), config).unwrap();
+				// Each party gets a unique seed
+				let mut round1_seed = [0u8; 32];
+				round1_seed[0] = i as u8;
 				DilithiumSignProtocol::new(
 					signer,
 					message.clone(),
@@ -1719,6 +1818,7 @@ mod tests {
 					vec![0, 1],
 					i as u32,
 					0, // party 0 is leader
+					round1_seed,
 				)
 			})
 			.collect();
@@ -1764,6 +1864,7 @@ mod tests {
 			vec![0, 1, 2],
 			1, // follower
 			0, // leader is party 0
+			[0xCC; 32],
 		);
 
 		// Manually set follower to WaitingForLeaderDecision state

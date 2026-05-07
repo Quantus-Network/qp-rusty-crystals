@@ -218,12 +218,12 @@ fn bench_round1(c: &mut Criterion) {
 			BenchmarkId::new("config", format!("{}_of_{}", t, n)),
 			&(public_key, shares, config),
 			|b, (public_key, shares, config)| {
-				let mut rng = rand::thread_rng();
+				let round1_seed = [0xBEu8; 32];
 				b.iter(|| {
 					let mut signer =
 						ThresholdSigner::new(shares[0].clone(), public_key.clone(), *config)
 							.unwrap();
-					signer.round1_commit(&mut rng).unwrap()
+					signer.round1_commit_with_seed(&round1_seed).unwrap()
 				});
 			},
 		);

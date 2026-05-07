@@ -134,6 +134,7 @@ impl DerivedKeyId {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use alloc::{collections::BTreeMap, vec};
 	use crate::{keys::SecretShareData, participants::ParticipantList};
 
 	/// Helper to create a test PrivateKeyShare with synthetic share data.
@@ -144,7 +145,7 @@ mod tests {
 	/// derivation outputs under the new contribution function.
 	fn create_test_share(party_id: u32, key_byte: u8) -> PrivateKeyShare {
 		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
-		let mut shares = std::collections::BTreeMap::new();
+		let mut shares = BTreeMap::new();
 		shares.insert(
 			0b011,
 			SecretShareData {
@@ -230,7 +231,7 @@ mod tests {
 		// must still produce the same contribution, because security comes from the
 		// secret polynomial shares, not from `key`.
 		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
-		let mut shares = std::collections::BTreeMap::new();
+		let mut shares = BTreeMap::new();
 		shares
 			.insert(0b011, SecretShareData { s1: vec![[7i32; 256]; 7], s2: vec![[7i32; 256]; 8] });
 		let share_a = PrivateKeyShare::new(

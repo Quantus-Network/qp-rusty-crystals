@@ -1547,7 +1547,7 @@ mod tests {
 			pk: PublicKey,
 		}
 
-		impl std::fmt::Debug for DilithiumSigner {
+		impl core::fmt::Debug for DilithiumSigner {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 				f.debug_struct("DilithiumSigner")
 					.field("pk", &hex::encode(&self.pk.bytes[..8]))
@@ -1770,18 +1770,6 @@ mod tests {
 		let has_sig_error = errors.iter().any(|e| {
 			matches!(e, Some(MithrilDkgError::SignatureVerificationFailed { party_id: 2 }))
 		});
-
-		// Print debug info
-		for (party_id, error) in errors.iter().enumerate() {
-			if let Some(e) = error {
-				println!("Party {} got error: {:?}", party_id, e);
-			}
-		}
-		for (party_id, output) in outputs.iter().enumerate() {
-			if output.is_some() {
-				println!("Party {} completed successfully", party_id);
-			}
-		}
 
 		assert!(has_sig_error, "At least one honest party should reject party 2's bad signature");
 	}

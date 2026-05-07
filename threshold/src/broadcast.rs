@@ -164,6 +164,7 @@ impl AsRef<[u8]> for Signature {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use alloc::vec;
 
 	#[test]
 	fn test_round1_broadcast() {

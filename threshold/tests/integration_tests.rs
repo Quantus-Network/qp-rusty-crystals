@@ -143,10 +143,8 @@ fn test_3_of_5_deterministic() {
 fn test_2_of_2_random() {
 	println!("\n=== 2-of-2 RANDOM TEST (4-Round Protocol) ===\n");
 
-	use rand::RngCore;
-
-	let mut seed = [0u8; 32];
-	rand::thread_rng().fill_bytes(&mut seed);
+	// Deterministic "random" seed for reproducibility
+	let seed = [0x22u8; 32];
 
 	let message = b"random test message";
 	let context: &[u8] = b"";
@@ -169,10 +167,8 @@ fn test_2_of_2_random() {
 fn test_2_of_3_random() {
 	println!("\n=== 2-of-3 RANDOM TEST (4-Round Protocol) ===\n");
 
-	use rand::RngCore;
-
-	let mut seed = [0u8; 32];
-	rand::thread_rng().fill_bytes(&mut seed);
+	// Deterministic "random" seed for reproducibility
+	let seed = [0x23u8; 32];
 
 	let message = b"random test message for 2-of-3";
 	let context: &[u8] = b"";
@@ -195,10 +191,8 @@ fn test_2_of_3_random() {
 fn test_3_of_5_random() {
 	println!("\n=== 3-of-5 RANDOM TEST (4-Round Protocol) ===\n");
 
-	use rand::RngCore;
-
-	let mut seed = [0u8; 32];
-	rand::thread_rng().fill_bytes(&mut seed);
+	// Deterministic "random" seed for reproducibility
+	let seed = [0x35u8; 32];
 
 	let message = b"random test message for 3-of-5";
 	let context: &[u8] = b"";

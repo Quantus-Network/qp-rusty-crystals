@@ -19,8 +19,9 @@
 //! // Each party creates their signer
 //! let mut signer = ThresholdSigner::new(shares[0].clone(), public_key.clone(), config)?;
 //!
-//! // Round 1: Generate commitment
-//! let r1 = signer.round1_commit(&mut rng)?;
+//! // Round 1: Generate commitment (seed must be cryptographically random)
+//! let round1_seed: [u8; 32] = get_random_seed();
+//! let r1 = signer.round1_commit_with_seed(&round1_seed)?;
 //! // ... broadcast r1 to other parties, receive their broadcasts ...
 //!
 //! // Round 2: Reveal commitment
@@ -37,7 +38,6 @@
 
 use alloc::{collections::BTreeSet, format, string::ToString, vec::Vec};
 use core::mem;
-use rand_core::{CryptoRng, RngCore};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use qp_rusty_crystals_dilithium::polyvec;
@@ -198,28 +198,29 @@ impl ThresholdSigner {
 		self.private_key.dkg_participants()
 	}
 
-	/// Round 1: Generate commitment and return broadcast message.
+	/// Round 1: Generate our commitment from a provided seed.
 	///
-	/// This is the first step in the signing protocol. The returned
-	/// `Round1Broadcast` should be sent to all other participating parties.
+	/// This is a no_std compatible version that takes a pre-generated random seed
+	/// instead of an RNG. The seed MUST be cryptographically random and unique
+	/// for each signing session.
 	///
 	/// # Arguments
 	///
-	/// * `rng` - A cryptographically secure random number generator
+	/// * `seed` - A 32-byte cryptographically random seed
 	///
 	/// # Errors
 	///
-	/// Returns an error if:
-	/// - The signer is not in the `Fresh` state
-	/// - Random number generation fails
+	/// Returns an error if the signer is not in the `Fresh` state.
 	///
 	/// # State Transition
 	///
 	/// `Fresh` → `AfterRound1`
-	pub fn round1_commit<R: RngCore + CryptoRng>(
-		&mut self,
-		rng: &mut R,
-	) -> ThresholdResult<Round1Broadcast> {
+	///
+	/// # Security Warning
+	///
+	/// The seed MUST be generated from a cryptographically secure source.
+	/// Reusing seeds across signing sessions will compromise security.
+	pub fn round1_commit_with_seed(&mut self, seed: &[u8; 32]) -> ThresholdResult<Round1Broadcast> {
 		// Check state
 		if !matches!(self.state, SignerState::Fresh) {
 			return Err(ThresholdError::InvalidState {
@@ -228,18 +229,8 @@ impl ThresholdSigner {
 			});
 		}
 
-		// Generate random seed
-		let mut seed = [0u8; 32];
-		rng.fill_bytes(&mut seed);
-
 		// Generate Round 1 data
-		let round1_data = generate_round1(&self.private_key, &self.config, &seed);
-
-		// Zeroize the seed immediately after use to prevent leakage (HQ5)
-		seed.zeroize();
-
-		// Propagate any error after zeroizing
-		let round1_data = round1_data?;
+		let round1_data = generate_round1(&self.private_key, &self.config, seed)?;
 
 		let broadcast =
 			Round1Broadcast::new(self.private_key.party_id(), round1_data.commitment_hash);

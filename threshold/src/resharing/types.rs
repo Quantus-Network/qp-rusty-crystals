@@ -475,6 +475,8 @@ pub struct ResharingOutput {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use alloc::format;
+	use alloc::string::ToString;
 
 	fn make_test_public_key() -> PublicKey {
 		// Create a dummy public key for testing

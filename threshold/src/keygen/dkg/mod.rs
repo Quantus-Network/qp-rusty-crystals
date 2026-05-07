@@ -127,6 +127,7 @@ pub use types::{
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use alloc::{vec, vec::Vec};
 	use rand::SeedableRng;
 
 	#[derive(Clone, Debug)]
@@ -253,7 +254,7 @@ mod tests {
 
 		// Retry signing up to 100 times (rejection sampling may fail)
 		let mut success = false;
-		for _ in 0..100 {
+		for attempt in 0u8..100 {
 			// Create fresh signers for each attempt
 			let mut signers: Vec<ThresholdSigner> = dkg_outputs
 				.iter()
@@ -264,11 +265,19 @@ mod tests {
 				})
 				.collect();
 
-			let mut rng = rand::thread_rng();
-
-			// Round 1: Generate commitments
-			let r1_broadcasts: Vec<_> =
-				signers.iter_mut().map(|s| s.round1_commit(&mut rng).unwrap()).collect();
+			// Round 1: Generate commitments using deterministic seeds
+			let r1_broadcasts: Vec<_> = signers
+				.iter_mut()
+				.enumerate()
+				.map(|(i, s)| {
+					// Deterministic seed: unique per party and attempt
+					let mut seed = [0u8; 32];
+					seed[0] = i as u8;
+					seed[1] = attempt;
+					seed[2] = 0xD1; // marker for dkg tests
+					s.round1_commit_with_seed(&seed).unwrap()
+				})
+				.collect();
 
 			// Round 2: Reveal commitments
 			let r2_broadcasts: Vec<_> = signers

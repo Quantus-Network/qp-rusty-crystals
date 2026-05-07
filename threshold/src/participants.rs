@@ -315,6 +315,7 @@ impl<'a> IntoIterator for &'a ParticipantList {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use alloc::vec;
 
 	#[test]
 	fn test_new_sorts_participants() {

@@ -34,7 +34,7 @@ hex-literal = { workspace = true }
 
 [features]
 default = ["std"]
-std = ["rand/std", "rand_core/std", "zeroize/std"]
+std = ["rand/std", "rand/getrandom", "rand_core/std", "zeroize/std"]
 
 [[bench]]
 name = "threshold_benchmarks"

@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use qp_rusty_crystals_threshold::{
-	generate_with_dealer, verify_signature, PrivateKeyShare, PublicKey, ThresholdConfig,
-	ThresholdSigner,
+	generate_with_dealer, verify_signature, PrivateKeyShare, PublicKey, Round1Broadcast,
+	Round2Broadcast, Round3Broadcast, ThresholdConfig, ThresholdSigner,
 };
 
 use qp_rusty_crystals_threshold::resharing::{
@@ -208,11 +208,7 @@ fn run_signing_and_verify_with_retries(
 	context: &[u8],
 	max_attempts: u32,
 ) -> bool {
-	use qp_rusty_crystals_threshold::{Round1Broadcast, Round2Broadcast, Round3Broadcast};
-
 	for attempt in 0..max_attempts {
-		let mut rng = rand::thread_rng();
-
 		// Create fresh signers for each attempt
 		let signers_result: Result<Vec<ThresholdSigner>, _> = shares
 			.iter()
@@ -224,9 +220,20 @@ fn run_signing_and_verify_with_retries(
 			Err(_) => continue,
 		};
 
-		// Round 1: Generate commitments (fresh randomness each attempt)
-		let r1_result: Result<Vec<Round1Broadcast>, _> =
-			signers.iter_mut().map(|s| s.round1_commit(&mut rng)).collect();
+		// Round 1: Generate commitments using deterministic seeds
+		let r1_result: Result<Vec<Round1Broadcast>, _> = signers
+			.iter_mut()
+			.enumerate()
+			.map(|(i, s)| {
+				// Deterministic seed: unique per party and attempt
+				let mut seed = [0u8; 32];
+				seed[0] = i as u8;
+				seed[1] = (attempt & 0xFF) as u8;
+				seed[2] = ((attempt >> 8) & 0xFF) as u8;
+				seed[3] = 0xAE; // marker for resharing tests
+				s.round1_commit_with_seed(&seed)
+			})
+			.collect();
 
 		let r1_broadcasts = match r1_result {
 			Ok(b) => b,

@@ -20,9 +20,9 @@ fn create_test_signer() -> ThresholdSigner {
 #[test]
 fn test_round1_commit() {
 	let mut signer = create_test_signer();
-	let mut rng = rand::thread_rng();
+	let seed = [0xAAu8; 32];
 
-	let r1 = signer.round1_commit(&mut rng).expect("round1");
+	let r1 = signer.round1_commit_with_seed(&seed).expect("round1");
 
 	assert_eq!(r1.party_id, 0);
 	assert_eq!(r1.commitment_hash.len(), 32);
@@ -41,11 +41,11 @@ fn test_state_machine_round2_before_round1() {
 #[test]
 fn test_state_machine_round1_twice() {
 	let mut signer = create_test_signer();
-	let mut rng = rand::thread_rng();
+	let seed = [0xAAu8; 32];
 
-	let _r1 = signer.round1_commit(&mut rng).expect("round1");
+	let _r1 = signer.round1_commit_with_seed(&seed).expect("round1");
 
-	let result = signer.round1_commit(&mut rng);
+	let result = signer.round1_commit_with_seed(&seed);
 	assert!(result.is_err(), "round1 should fail when called twice");
 }
 
@@ -65,13 +65,19 @@ fn test_commitment_tampering_detected() {
 		.map(|share| ThresholdSigner::new(share.clone(), public_key.clone(), config).unwrap())
 		.collect();
 
-	let mut rng = rand::thread_rng();
 	let message = b"test message";
 	let context = b"test context";
 
-	// Round 1: All parties generate commitments
-	let r1_broadcasts: Vec<Round1Broadcast> =
-		signers.iter_mut().map(|s| s.round1_commit(&mut rng).unwrap()).collect();
+	// Round 1: All parties generate commitments (each with unique seed)
+	let r1_broadcasts: Vec<Round1Broadcast> = signers
+		.iter_mut()
+		.enumerate()
+		.map(|(i, s)| {
+			let mut party_seed = [0u8; 32];
+			party_seed[0] = i as u8;
+			s.round1_commit_with_seed(&party_seed).unwrap()
+		})
+		.collect();
 
 	// Round 2: All parties reveal commitments
 	let mut r2_broadcasts: Vec<Round2Broadcast> = signers
@@ -115,22 +121,22 @@ fn test_commitment_tampering_detected() {
 #[test]
 fn test_signer_reset() {
 	let mut signer = create_test_signer();
-	let mut rng = rand::thread_rng();
+	let seed = [0xAAu8; 32];
 
-	let _r1 = signer.round1_commit(&mut rng).expect("round1");
+	let _r1 = signer.round1_commit_with_seed(&seed).expect("round1");
 	signer.reset();
 
 	// Should be able to call round1 again after reset
-	let _r1 = signer.round1_commit(&mut rng).expect("round1 after reset");
+	let _r1 = signer.round1_commit_with_seed(&seed).expect("round1 after reset");
 }
 
 /// Test state machine enforcement - can't call round3 before round2.
 #[test]
 fn test_state_machine_round3_before_round2() {
 	let mut signer = create_test_signer();
-	let mut rng = rand::thread_rng();
+	let seed = [0xAAu8; 32];
 
-	let _r1 = signer.round1_commit(&mut rng).expect("round1");
+	let _r1 = signer.round1_commit_with_seed(&seed).expect("round1");
 
 	let result = signer.round3_respond(&[], &[]);
 	assert!(result.is_err(), "round3 should fail without prior round2");
@@ -140,9 +146,9 @@ fn test_state_machine_round3_before_round2() {
 #[test]
 fn test_state_machine_combine_before_round3() {
 	let mut signer = create_test_signer();
-	let mut rng = rand::thread_rng();
+	let seed = [0xAAu8; 32];
 
-	let _r1 = signer.round1_commit(&mut rng).expect("round1");
+	let _r1 = signer.round1_commit_with_seed(&seed).expect("round1");
 
 	let result = signer.combine(&[], &[]);
 	assert!(result.is_err(), "combine should fail without completing round3");
@@ -210,6 +216,7 @@ mod party_management_tests {
 			vec![0, 1, 2],
 			0, // my_id
 			0, // leader_id
+			[0xAA; 32], // round1_seed
 		);
 
 		// Generate our Round 1

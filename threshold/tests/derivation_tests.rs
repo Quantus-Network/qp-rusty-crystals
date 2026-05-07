@@ -197,7 +197,7 @@ fn test_derived_key_generation_and_signing() {
 	let context = b"test-context";
 
 	let mut signature = None;
-	for attempt in 0..100 {
+	for attempt in 0..100u8 {
 		// Create signers for threshold subset (2 of 3)
 		let mut signers: Vec<ThresholdSigner> = derived_shares
 			.iter()
@@ -207,11 +207,19 @@ fn test_derived_key_generation_and_signing() {
 			})
 			.collect();
 
-		let mut rng = rand::thread_rng();
-
-		// Round 1: Generate commitments
-		let r1_broadcasts: Vec<_> =
-			signers.iter_mut().map(|s| s.round1_commit(&mut rng).unwrap()).collect();
+		// Round 1: Generate commitments using deterministic seeds
+		let r1_broadcasts: Vec<_> = signers
+			.iter_mut()
+			.enumerate()
+			.map(|(i, s)| {
+				// Deterministic seed: unique per party and attempt
+				let mut seed = [0u8; 32];
+				seed[0] = i as u8;
+				seed[1] = attempt;
+				seed[2] = 0xDE; // marker
+				s.round1_commit_with_seed(&seed).unwrap()
+			})
+			.collect();
 
 		// Round 2: Reveal commitments
 		let r2_broadcasts: Vec<_> = signers
