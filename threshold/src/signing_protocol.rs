@@ -113,9 +113,10 @@ pub enum Action<T> {
 /// to prevent infinite loops if something is fundamentally broken.
 pub const MAX_RETRY_ATTEMPTS: u32 = 100;
 
-/// Maximum signing message size in bytes (64 KB).
+/// Maximum signing message size in bytes (4 MB).
 /// This limits the size of serialized signing protocol messages.
-pub const MAX_SIGNING_MESSAGE_SIZE: usize = 64 * 1024;
+/// With high k_iterations (e.g., k=380 for 5-of-6), messages can exceed 2MB.
+pub const MAX_SIGNING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
 // ============================================================================
 // Error Types
