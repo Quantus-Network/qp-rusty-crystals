@@ -263,38 +263,46 @@ pub enum SignProtocolState {
 ///
 /// Instead of dropping these messages, we buffer them and process them
 /// when we transition to the appropriate state.
+///
+/// # Security
+///
+/// The buffer uses `BTreeMap` keyed by party_id to:
+/// 1. **Deduplicate**: Only one message per party is stored (later messages ignored)
+/// 2. **Bound memory**: At most MAX_PARTIES entries per round
 #[derive(Debug, Clone, Default)]
 pub struct SignMessageBuffer {
-	/// Buffered Round 2 messages (from parties that are ahead of us).
-	pub round2: Vec<Round2Broadcast>,
-	/// Buffered Round 3 messages.
-	pub round3: Vec<Round3Broadcast>,
+	/// Buffered Round 2 messages, keyed by party_id.
+	round2: BTreeMap<ParticipantId, Round2Broadcast>,
+	/// Buffered Round 3 messages, keyed by party_id.
+	round3: BTreeMap<ParticipantId, Round3Broadcast>,
 }
 
 impl SignMessageBuffer {
 	/// Create a new empty message buffer.
 	pub fn new() -> Self {
-		Self { round2: Vec::new(), round3: Vec::new() }
+		Self { round2: BTreeMap::new(), round3: BTreeMap::new() }
 	}
 
 	/// Buffer a Round 2 message for later processing.
+	/// Only the first message from each party is stored; duplicates are ignored.
 	pub fn buffer_round2(&mut self, msg: Round2Broadcast) {
-		self.round2.push(msg);
+		self.round2.entry(msg.party_id).or_insert(msg);
 	}
 
 	/// Buffer a Round 3 message for later processing.
+	/// Only the first message from each party is stored; duplicates are ignored.
 	pub fn buffer_round3(&mut self, msg: Round3Broadcast) {
-		self.round3.push(msg);
+		self.round3.entry(msg.party_id).or_insert(msg);
 	}
 
 	/// Take all buffered Round 2 messages.
 	pub fn take_round2(&mut self) -> Vec<Round2Broadcast> {
-		mem::take(&mut self.round2)
+		mem::take(&mut self.round2).into_values().collect()
 	}
 
 	/// Take all buffered Round 3 messages.
 	pub fn take_round3(&mut self) -> Vec<Round3Broadcast> {
-		mem::take(&mut self.round3)
+		mem::take(&mut self.round3).into_values().collect()
 	}
 
 	/// Check if the buffer is empty.
@@ -1421,8 +1429,6 @@ mod tests {
 	fn test_message_buffer_creation() {
 		let buffer = SignMessageBuffer::new();
 		assert!(buffer.is_empty());
-		assert!(buffer.round2.is_empty());
-		assert!(buffer.round3.is_empty());
 	}
 
 	#[test]
@@ -1434,12 +1440,34 @@ mod tests {
 		buffer.buffer_round2(msg);
 
 		assert!(!buffer.is_empty());
-		assert_eq!(buffer.round2.len(), 1);
 
 		let taken = buffer.take_round2();
 		assert_eq!(taken.len(), 1);
 		assert_eq!(taken[0].party_id, 1);
 		assert!(buffer.is_empty());
+	}
+
+	#[test]
+	fn test_message_buffer_deduplication() {
+		let mut buffer = SignMessageBuffer::new();
+
+		// Buffer first message from party 1
+		let msg1 = Round2Broadcast::new(1, vec![1, 2, 3, 4]);
+		buffer.buffer_round2(msg1);
+
+		// Try to buffer duplicate from party 1 - should be ignored
+		let msg1_dup = Round2Broadcast::new(1, vec![5, 6, 7, 8]);
+		buffer.buffer_round2(msg1_dup);
+
+		// Buffer message from party 2
+		let msg2 = Round2Broadcast::new(2, vec![9, 10, 11, 12]);
+		buffer.buffer_round2(msg2);
+
+		let taken = buffer.take_round2();
+		assert_eq!(taken.len(), 2); // Only 2 unique parties
+		// First message from party 1 should be kept (not the duplicate)
+		let party1_msg = taken.iter().find(|m| m.party_id == 1).unwrap();
+		assert_eq!(party1_msg.commitment_data, vec![1, 2, 3, 4]);
 	}
 
 	#[test]
@@ -1450,7 +1478,6 @@ mod tests {
 		buffer.buffer_round3(msg);
 
 		assert!(!buffer.is_empty());
-		assert_eq!(buffer.round3.len(), 1);
 
 		let taken = buffer.take_round3();
 		assert_eq!(taken.len(), 1);
@@ -1487,9 +1514,8 @@ mod tests {
 		protocol.message(1, data).unwrap();
 
 		// Verify the message was buffered (not in r2_broadcasts yet)
-		assert!(!protocol.message_buffer.round2.is_empty());
-		assert_eq!(protocol.message_buffer.round2.len(), 1);
-		assert_eq!(protocol.message_buffer.round2[0].party_id, 1);
+		assert!(!protocol.message_buffer.is_empty());
+		assert!(protocol.message_buffer.round2.contains_key(&1));
 		// Should NOT be in r2_broadcasts yet
 		assert!(!protocol.r2_broadcasts.contains_key(&1));
 	}
@@ -1522,9 +1548,8 @@ mod tests {
 		protocol.message(2, data).unwrap();
 
 		// Verify the message was buffered
-		assert!(!protocol.message_buffer.round3.is_empty());
-		assert_eq!(protocol.message_buffer.round3.len(), 1);
-		assert_eq!(protocol.message_buffer.round3[0].party_id, 2);
+		assert!(!protocol.message_buffer.is_empty());
+		assert!(protocol.message_buffer.round3.contains_key(&2));
 		// Should NOT be in r3_broadcasts yet
 		assert!(!protocol.r3_broadcasts.contains_key(&2));
 	}
