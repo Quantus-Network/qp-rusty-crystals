@@ -148,40 +148,39 @@ fn test_state_machine_combine_before_round3() {
 	assert!(result.is_err(), "combine should fail without completing round3");
 }
 
-#[cfg(feature = "serde")]
-mod serde_tests {
+mod borsh_tests {
 	use super::*;
 	use qp_rusty_crystals_threshold::{Round1Broadcast, Round2Broadcast, Round3Broadcast};
 
 	#[test]
 	fn test_round1_broadcast_serialization() {
 		let broadcast = Round1Broadcast::new(0, [42u8; 32]);
-		let json = serde_json::to_string(&broadcast).expect("serialize");
-		let recovered: Round1Broadcast = serde_json::from_str(&json).expect("deserialize");
+		let bytes = borsh::to_vec(&broadcast).expect("serialize");
+		let recovered: Round1Broadcast = borsh::from_slice(&bytes).expect("deserialize");
 		assert_eq!(broadcast, recovered);
 	}
 
 	#[test]
 	fn test_round2_broadcast_serialization() {
 		let broadcast = Round2Broadcast::new(1, vec![1, 2, 3, 4, 5]);
-		let json = serde_json::to_string(&broadcast).expect("serialize");
-		let recovered: Round2Broadcast = serde_json::from_str(&json).expect("deserialize");
+		let bytes = borsh::to_vec(&broadcast).expect("serialize");
+		let recovered: Round2Broadcast = borsh::from_slice(&bytes).expect("deserialize");
 		assert_eq!(broadcast, recovered);
 	}
 
 	#[test]
 	fn test_round3_broadcast_serialization() {
 		let broadcast = Round3Broadcast::new(2, vec![6, 7, 8, 9, 10]);
-		let json = serde_json::to_string(&broadcast).expect("serialize");
-		let recovered: Round3Broadcast = serde_json::from_str(&json).expect("deserialize");
+		let bytes = borsh::to_vec(&broadcast).expect("serialize");
+		let recovered: Round3Broadcast = borsh::from_slice(&bytes).expect("deserialize");
 		assert_eq!(broadcast, recovered);
 	}
 
 	#[test]
 	fn test_config_serialization() {
 		let config = ThresholdConfig::new(2, 3).expect("valid config");
-		let json = serde_json::to_string(&config).expect("serialize");
-		let recovered: ThresholdConfig = serde_json::from_str(&json).expect("deserialize");
+		let bytes = borsh::to_vec(&config).expect("serialize");
+		let recovered: ThresholdConfig = borsh::from_slice(&bytes).expect("deserialize");
 		assert_eq!(config.threshold(), recovered.threshold());
 		assert_eq!(config.total_parties(), recovered.total_parties());
 	}

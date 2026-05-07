@@ -38,6 +38,26 @@ use crate::participants::ParticipantId;
 
 use qp_rusty_crystals_dilithium::fips202;
 
+/// Maximum DKG message size in bytes (256 KB).
+/// This limits the size of serialized DKG protocol messages.
+pub const MAX_DKG_MESSAGE_SIZE: usize = 256 * 1024;
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Deserialize a DKG message with size limits to prevent resource exhaustion.
+fn deserialize_message(data: &[u8]) -> Result<MithrilDkgMessage, String> {
+	if data.len() > MAX_DKG_MESSAGE_SIZE {
+		return Err(format!(
+			"Message size {} exceeds maximum {}",
+			data.len(),
+			MAX_DKG_MESSAGE_SIZE
+		));
+	}
+	borsh::from_slice(data).map_err(|e| e.to_string())
+}
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -336,10 +356,10 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			return Ok(());
 		}
 
-		let msg: MithrilDkgMessage = match bincode::deserialize(&data) {
+		let msg: MithrilDkgMessage = match deserialize_message(&data) {
 			Ok(m) => m,
 			Err(e) => {
-				return Err(MithrilDkgError::MalformedMessage { from, reason: e.to_string() });
+				return Err(MithrilDkgError::MalformedMessage { from, reason: e });
 			},
 		};
 
@@ -564,7 +584,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 				commitment: state.my_commitment,
 			};
 			let msg = MithrilDkgMessage::Round1Broadcast(broadcast);
-			let data = bincode::serialize(&msg)
+			let data = borsh::to_vec(&msg)
 				.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
 			state.broadcast_sent = true;
 			return Ok(MithrilAction::SendMany(data));
@@ -581,7 +601,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 							shared_secret: secret,
 						};
 						let msg = MithrilDkgMessage::Round1Private(private);
-						let data = bincode::serialize(&msg)
+						let data = borsh::to_vec(&msg)
 							.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
 						self.pending_privates.push((party, data));
 					}
@@ -674,7 +694,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 				randomness: state.my_randomness,
 			};
 			let msg = MithrilDkgMessage::Round2Broadcast(broadcast);
-			let data = bincode::serialize(&msg)
+			let data = borsh::to_vec(&msg)
 				.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
 			state.broadcast_sent = true;
 			return Ok(MithrilAction::SendMany(data));
@@ -782,7 +802,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 				partial_pk_commitments: state.my_pk_commitments.clone(),
 			};
 			let msg = MithrilDkgMessage::Round3Broadcast(broadcast);
-			let data = bincode::serialize(&msg)
+			let data = borsh::to_vec(&msg)
 				.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
 			state.broadcast_sent = true;
 			return Ok(MithrilAction::SendMany(data));
@@ -871,7 +891,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			// Sign and broadcast our partial PKs
 			let broadcast = create_round4_broadcast(state);
 			let msg = MithrilDkgMessage::Round4Broadcast(broadcast);
-			let data = bincode::serialize(&msg)
+			let data = borsh::to_vec(&msg)
 				.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
 			state.broadcast_sent = true;
 			return Ok(MithrilAction::SendMany(data));
@@ -1821,12 +1841,12 @@ mod tests {
 					// Tamper with party 2's Round 2 message
 					if from == 2 {
 						if let Ok(MithrilDkgMessage::Round2Broadcast(mut r2)) =
-							bincode::deserialize::<MithrilDkgMessage>(&data)
+							borsh::from_slice::<MithrilDkgMessage>(&data)
 						{
 							// Corrupt the randomness
 							r2.randomness[0] ^= 0xFF;
 							let tampered = MithrilDkgMessage::Round2Broadcast(r2);
-							data = bincode::serialize(&tampered).unwrap();
+							data = borsh::to_vec(&tampered).unwrap();
 						}
 					}
 					dkgs[party_id].message(from, data).unwrap();
@@ -1945,7 +1965,7 @@ mod tests {
 					// Tamper with party 0's Round 3 message (PK commitments)
 					if from == 0 {
 						if let Ok(MithrilDkgMessage::Round3Broadcast(mut r3)) =
-							bincode::deserialize::<MithrilDkgMessage>(&data)
+							borsh::from_slice::<MithrilDkgMessage>(&data)
 						{
 							// Corrupt a PK commitment for subset 0b101 where party 2 is a
 							// member
@@ -1953,7 +1973,7 @@ mod tests {
 								commitment[0] ^= 0xFF;
 							}
 							let tampered = MithrilDkgMessage::Round3Broadcast(r3);
-							data = bincode::serialize(&tampered).unwrap();
+							data = borsh::to_vec(&tampered).unwrap();
 						}
 					}
 					dkgs[party_id].message(from, data).unwrap();
@@ -2222,7 +2242,7 @@ mod tests {
 		// Create a fake Round 2 broadcast from party 1
 		let round2_broadcast = MithrilRound2Broadcast { party_id: 1, randomness: [42u8; 32] };
 		let round2_msg = MithrilDkgMessage::Round2Broadcast(round2_broadcast);
-		let round2_data = bincode::serialize(&round2_msg).unwrap();
+		let round2_data = borsh::to_vec(&round2_msg).unwrap();
 
 		// Send it to DKG0 while it's still in Round 1
 		dkg0.message(1, round2_data).unwrap();
@@ -2235,7 +2255,7 @@ mod tests {
 		let round3_broadcast =
 			MithrilRound3Broadcast { party_id: 2, partial_pk_commitments: BTreeMap::new() };
 		let round3_msg = MithrilDkgMessage::Round3Broadcast(round3_broadcast);
-		let round3_data = bincode::serialize(&round3_msg).unwrap();
+		let round3_data = borsh::to_vec(&round3_msg).unwrap();
 
 		dkg0.message(2, round3_data).unwrap();
 		assert_eq!(dkg0.message_buffer.round3.len(), 1);
@@ -2248,7 +2268,7 @@ mod tests {
 			transcript_signature: vec![],
 		};
 		let round4_msg = MithrilDkgMessage::Round4Broadcast(round4_broadcast);
-		let round4_data = bincode::serialize(&round4_msg).unwrap();
+		let round4_data = borsh::to_vec(&round4_msg).unwrap();
 
 		dkg0.message(1, round4_data).unwrap();
 		assert_eq!(dkg0.message_buffer.round4.len(), 1);
@@ -2279,7 +2299,7 @@ mod tests {
 		// Create a Round 1 broadcast claiming to be from party 1
 		let broadcast = MithrilRound1Broadcast { party_id: 1, commitment: [0u8; 32] };
 		let msg = MithrilDkgMessage::Round1Broadcast(broadcast);
-		let data = bincode::serialize(&msg).unwrap();
+		let data = borsh::to_vec(&msg).unwrap();
 
 		// Send it claiming to be from party 2 (mismatch!)
 		dkg.message(2, data).unwrap();
@@ -2474,7 +2494,7 @@ mod tests {
 		// Create a Round 2 broadcast from party 1
 		let round2_broadcast = MithrilRound2Broadcast { party_id: 1, randomness: [42u8; 32] };
 		let round2_msg = MithrilDkgMessage::Round2Broadcast(round2_broadcast.clone());
-		let round2_data = bincode::serialize(&round2_msg).unwrap();
+		let round2_data = borsh::to_vec(&round2_msg).unwrap();
 
 		// Send same message twice
 		dkg.message(1, round2_data.clone()).unwrap();
@@ -2492,7 +2512,7 @@ mod tests {
 		// Create a different Round 2 broadcast from party 2
 		let round2_broadcast2 = MithrilRound2Broadcast { party_id: 2, randomness: [99u8; 32] };
 		let round2_msg2 = MithrilDkgMessage::Round2Broadcast(round2_broadcast2);
-		let round2_data2 = bincode::serialize(&round2_msg2).unwrap();
+		let round2_data2 = borsh::to_vec(&round2_msg2).unwrap();
 
 		dkg.message(2, round2_data2).unwrap();
 
@@ -2573,7 +2593,7 @@ mod tests {
 		// Now try to send a Round 1 message to party 0 (it's already past Round 1)
 		let late_round1 = MithrilRound1Broadcast { party_id: 1, commitment: [77u8; 32] };
 		let late_msg = MithrilDkgMessage::Round1Broadcast(late_round1);
-		let late_data = bincode::serialize(&late_msg).unwrap();
+		let late_data = borsh::to_vec(&late_msg).unwrap();
 
 		// This should not cause an error - just silently ignored
 		let result = dkgs[0].message(1, late_data);
@@ -2658,7 +2678,7 @@ mod tests {
 			transcript_signature: vec![1, 2, 3, 4],
 		};
 		let round4_msg = MithrilDkgMessage::Round4Broadcast(round4_broadcast);
-		let round4_data = bincode::serialize(&round4_msg).unwrap();
+		let round4_data = borsh::to_vec(&round4_msg).unwrap();
 
 		dkgs[0].message(1, round4_data).unwrap();
 
@@ -2674,7 +2694,7 @@ mod tests {
 		let round3_broadcast =
 			MithrilRound3Broadcast { party_id: 2, partial_pk_commitments: BTreeMap::new() };
 		let round3_msg = MithrilDkgMessage::Round3Broadcast(round3_broadcast);
-		let round3_data = bincode::serialize(&round3_msg).unwrap();
+		let round3_data = borsh::to_vec(&round3_msg).unwrap();
 
 		dkgs[0].message(2, round3_data).unwrap();
 
@@ -2716,7 +2736,7 @@ mod tests {
 			let round2_broadcast =
 				MithrilRound2Broadcast { party_id: 1, randomness: [i as u8; 32] };
 			let round2_msg = MithrilDkgMessage::Round2Broadcast(round2_broadcast);
-			let round2_data = bincode::serialize(&round2_msg).unwrap();
+			let round2_data = borsh::to_vec(&round2_msg).unwrap();
 			dkg.message(1, round2_data).unwrap();
 		}
 
@@ -2734,7 +2754,7 @@ mod tests {
 				partial_pk_commitments: BTreeMap::new(),
 			};
 			let round3_msg = MithrilDkgMessage::Round3Broadcast(round3_broadcast);
-			let round3_data = bincode::serialize(&round3_msg).unwrap();
+			let round3_data = borsh::to_vec(&round3_msg).unwrap();
 			// Use party_id as sender to avoid sender mismatch
 			let _ = dkg.message(party_id, round3_data);
 		}
@@ -2798,7 +2818,7 @@ mod tests {
 			randomness: [0u8; 32], // All zeros - may or may not be valid depending on protocol
 		};
 		let round2_msg = MithrilDkgMessage::Round2Broadcast(round2_broadcast);
-		let round2_data = bincode::serialize(&round2_msg).unwrap();
+		let round2_data = borsh::to_vec(&round2_msg).unwrap();
 
 		// Buffer it before delivering Round 1 messages
 		dkgs[0].message(1, round2_data).unwrap();
@@ -2868,7 +2888,7 @@ mod tests {
 				for (from, data) in messages {
 					// For party 0, hold back party 1's Round 4 broadcast
 					if party_id == 0 && from == 1 {
-						if let Ok(msg) = bincode::deserialize::<MithrilDkgMessage>(&data) {
+						if let Ok(msg) = borsh::from_slice::<MithrilDkgMessage>(&data) {
 							if matches!(msg, MithrilDkgMessage::Round4Broadcast(_)) {
 								// Don't deliver - we'll deliver a sabotaged version
 								party0_round4_from_party1_received = true;
@@ -3128,7 +3148,7 @@ mod tests {
 			commitment: [0u8; 32],
 		};
 		let fake_msg = MithrilDkgMessage::Round1Broadcast(fake_broadcast);
-		let fake_data = bincode::serialize(&fake_msg).unwrap();
+		let fake_data = borsh::to_vec(&fake_msg).unwrap();
 
 		// This should be silently ignored (not error, just ignored)
 		let result = dkg.message(99, fake_data);
@@ -3156,7 +3176,7 @@ mod tests {
 			commitment: [0u8; 32],
 		};
 		let spoofed_msg = MithrilDkgMessage::Round1Broadcast(spoofed_broadcast);
-		let spoofed_data = bincode::serialize(&spoofed_msg).unwrap();
+		let spoofed_data = borsh::to_vec(&spoofed_msg).unwrap();
 
 		// Send with envelope 'from' = 99 (non-participant)
 		let result = dkg.message(99, spoofed_data);
@@ -3212,7 +3232,7 @@ mod tests {
 			commitment: [42u8; 32],
 		};
 		let self_msg = MithrilDkgMessage::Round1Broadcast(self_broadcast);
-		let self_data = bincode::serialize(&self_msg).unwrap();
+		let self_data = borsh::to_vec(&self_msg).unwrap();
 
 		// This should be silently ignored
 		let result = dkg.message(0, self_data);
@@ -3227,5 +3247,50 @@ mod tests {
 		} else {
 			panic!("Expected Round1 state");
 		}
+	}
+
+	#[test]
+	fn test_oversized_message_rejected() {
+		// Test that messages exceeding MAX_MESSAGE_SIZE are rejected.
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let rng = rand::rngs::StdRng::seed_from_u64(333);
+
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = (0..3).collect();
+
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
+		for (i, pk) in public_keys.into_iter().enumerate() {
+			pk_map.insert(i as ParticipantId, pk);
+		}
+
+		let config = MithrilDkgConfig::new(
+			threshold_config,
+			0,
+			participants.clone(),
+			signers[0].clone(),
+			pk_map.clone(),
+		).unwrap();
+
+		let mut dkg: MithrilDkg<TestSigner, _> = MithrilDkg::new(config, rng);
+
+		// Start the DKG to get to Round 1
+		let action = dkg.poke().unwrap();
+		assert!(matches!(action, MithrilAction::SendMany(_)));
+
+		// Create an oversized message (larger than MAX_DKG_MESSAGE_SIZE)
+		let oversized_data = vec![0u8; MAX_DKG_MESSAGE_SIZE + 1];
+
+		// This should return an error about the message being too large
+		let result = dkg.message(1, oversized_data);
+		assert!(result.is_err(), "Oversized message should be rejected");
+
+		let err = result.unwrap_err();
+		let err_msg = format!("{:?}", err);
+		assert!(
+			err_msg.contains("too large") || err_msg.contains("Message"),
+			"Error should mention size limit, got: {}",
+			err_msg
+		);
 	}
 }

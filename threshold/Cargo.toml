@@ -19,8 +19,7 @@ zeroize = { workspace = true }
 log = { workspace = true }
 
 # Serialization
-serde = { workspace = true, optional = true }
-bincode = { workspace = true, optional = true }
+borsh = { workspace = true }
 
 # Local dependencies - reuse dilithium implementation
 qp-rusty-crystals-dilithium = { workspace = true }
@@ -32,13 +31,10 @@ libm = { workspace = true }
 criterion = { workspace = true }
 hex = { workspace = true }
 hex-literal = { workspace = true }
-serde_json = { workspace = true }
-bincode = { workspace = true }
 
 [features]
-default = ["serde", "std"]
-std = ["rand/std", "rand_core/std", "serde/std", "zeroize/std"]
-serde = ["dep:bincode", "dep:serde"]
+default = ["std"]
+std = ["rand/std", "rand_core/std", "zeroize/std"]
 
 [[bench]]
 name = "threshold_benchmarks"

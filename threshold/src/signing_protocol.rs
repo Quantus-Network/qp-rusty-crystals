@@ -81,10 +81,8 @@ use alloc::{
 };
 use core::{fmt, mem};
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use log::warn;
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
 
 use crate::{
 	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature},
@@ -114,6 +112,10 @@ pub enum Action<T> {
 /// With high k_iterations, retries should be rare, but we still need a limit
 /// to prevent infinite loops if something is fundamentally broken.
 pub const MAX_RETRY_ATTEMPTS: u32 = 100;
+
+/// Maximum signing message size in bytes (64 KB).
+/// This limits the size of serialized signing protocol messages.
+pub const MAX_SIGNING_MESSAGE_SIZE: usize = 64 * 1024;
 
 // ============================================================================
 // Error Types
@@ -170,8 +172,7 @@ impl fmt::Display for SignProtocolError {
 /// Message types for the signing protocol.
 ///
 /// These are serialized and sent over the network between parties.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum SigningMessage {
 	/// Round 1: Commitment hash.
 	Round1(Round1Broadcast),
@@ -537,46 +538,7 @@ impl DilithiumSignProtocol {
 
 	/// Serialize a message for network transmission.
 	fn serialize_message(&self, msg: &SigningMessage) -> Result<Vec<u8>, SignProtocolError> {
-		// Use a simple format: 1-byte tag + serialized content
-		// Tag: 1 = Round1, 2 = Round2, 3 = Round3
-		let mut result = Vec::new();
-
-		match msg {
-			SigningMessage::Round1(r1) => {
-				result.push(1u8);
-				result.extend_from_slice(&r1.party_id.to_le_bytes());
-				result.extend_from_slice(&r1.commitment_hash);
-			},
-			SigningMessage::Round2(r2) => {
-				result.push(2u8);
-				result.extend_from_slice(&r2.party_id.to_le_bytes());
-				// Length-prefix the commitment data
-				let len = r2.commitment_data.len() as u32;
-				result.extend_from_slice(&len.to_le_bytes());
-				result.extend_from_slice(&r2.commitment_data);
-			},
-			SigningMessage::Round3(r3) => {
-				result.push(3u8);
-				result.extend_from_slice(&r3.party_id.to_le_bytes());
-				// Length-prefix the response data
-				let len = r3.response.len() as u32;
-				result.extend_from_slice(&len.to_le_bytes());
-				result.extend_from_slice(&r3.response);
-			},
-			SigningMessage::Round4Complete(sig_bytes) => {
-				result.push(4u8);
-				// Length-prefix the signature bytes
-				let len = sig_bytes.len() as u32;
-				result.extend_from_slice(&len.to_le_bytes());
-				result.extend_from_slice(sig_bytes);
-			},
-			SigningMessage::Round4Retry => {
-				result.push(5u8);
-				// No additional data needed
-			},
-		}
-
-		Ok(result)
+		borsh::to_vec(msg).map_err(|e| SignProtocolError::SerializationError(e.to_string()))
 	}
 
 	/// Deserialize a message from network bytes.
@@ -585,79 +547,16 @@ impl DilithiumSignProtocol {
 			return Err(SignProtocolError::SerializationError("Empty message".to_string()));
 		}
 
-		let tag = data[0];
-		let rest = &data[1..];
-
-		match tag {
-			1 => {
-				// Round 1: party_id (4 bytes) + commitment_hash (32 bytes)
-				if rest.len() < 36 {
-					return Err(SignProtocolError::SerializationError(
-						"Round 1 message too short".to_string(),
-					));
-				}
-				let party_id = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
-				let mut commitment_hash = [0u8; 32];
-				commitment_hash.copy_from_slice(&rest[4..36]);
-				Ok(SigningMessage::Round1(Round1Broadcast { party_id, commitment_hash }))
-			},
-			2 => {
-				// Round 2: party_id (4 bytes) + len (4 bytes) + data
-				if rest.len() < 8 {
-					return Err(SignProtocolError::SerializationError(
-						"Round 2 message too short".to_string(),
-					));
-				}
-				let party_id = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
-				let len = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]) as usize;
-				if rest.len() < 8 + len {
-					return Err(SignProtocolError::SerializationError(
-						"Round 2 message data truncated".to_string(),
-					));
-				}
-				let commitment_data = rest[8..8 + len].to_vec();
-				Ok(SigningMessage::Round2(Round2Broadcast { party_id, commitment_data }))
-			},
-			3 => {
-				// Round 3: party_id (4 bytes) + len (4 bytes) + data
-				if rest.len() < 8 {
-					return Err(SignProtocolError::SerializationError(
-						"Round 3 message too short".to_string(),
-					));
-				}
-				let party_id = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
-				let len = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]) as usize;
-				if rest.len() < 8 + len {
-					return Err(SignProtocolError::SerializationError(
-						"Round 3 message data truncated".to_string(),
-					));
-				}
-				let response = rest[8..8 + len].to_vec();
-				Ok(SigningMessage::Round3(Round3Broadcast { party_id, response }))
-			},
-			4 => {
-				// Round 4 Complete: len (4 bytes) + signature bytes
-				if rest.len() < 4 {
-					return Err(SignProtocolError::SerializationError(
-						"Round 4 Complete message too short".to_string(),
-					));
-				}
-				let len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
-				if rest.len() < 4 + len {
-					return Err(SignProtocolError::SerializationError(
-						"Round 4 Complete message data truncated".to_string(),
-					));
-				}
-				let sig_bytes = rest[4..4 + len].to_vec();
-				Ok(SigningMessage::Round4Complete(sig_bytes))
-			},
-			5 => {
-				// Round 4 Retry: no additional data
-				Ok(SigningMessage::Round4Retry)
-			},
-			_ =>
-				Err(SignProtocolError::SerializationError(format!("Unknown message tag: {}", tag))),
+		// Reject oversized messages before any parsing to prevent resource exhaustion
+		if data.len() > MAX_SIGNING_MESSAGE_SIZE {
+			return Err(SignProtocolError::SerializationError(format!(
+				"Message size {} exceeds maximum {}",
+				data.len(),
+				MAX_SIGNING_MESSAGE_SIZE
+			)));
 		}
+
+		borsh::from_slice(data).map_err(|e| SignProtocolError::SerializationError(e.to_string()))
 	}
 
 	/// Advance the protocol state machine.

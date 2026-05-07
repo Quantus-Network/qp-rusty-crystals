@@ -8,15 +8,9 @@ use alloc::{collections::BTreeMap, format, vec::Vec};
 use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use borsh::{BorshDeserialize, BorshSerialize};
+
 use crate::participants::{ParticipantId, ParticipantList};
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "serde")]
-use crate::serde_helpers::{
-	serde_byte_array, serde_participant_list, serde_poly_vec, serde_u16_btreemap,
-};
 
 /// Size of the packed ML-DSA-87 public key in bytes.
 pub const PUBLIC_KEY_SIZE: usize = 2592;
@@ -30,14 +24,11 @@ pub const TR_SIZE: usize = 64;
 /// It can be freely distributed - there is no secret material here.
 ///
 /// The public key is compatible with standard ML-DSA-87 verification.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct PublicKey {
 	/// Packed public key bytes (standard ML-DSA-87 format).
-	#[cfg_attr(feature = "serde", serde(with = "serde_byte_array"))]
 	bytes: [u8; PUBLIC_KEY_SIZE],
 	/// Public key hash (TR), used in signing.
-	#[cfg_attr(feature = "serde", serde(with = "serde_byte_array"))]
 	tr: [u8; TR_SIZE],
 }
 
@@ -96,8 +87,7 @@ impl PublicKey {
 /// - Never log or print this value
 /// - Store securely (encrypted at rest)
 /// - The `Zeroize` trait ensures memory is cleared on drop
-#[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct PrivateKeyShare {
 	/// Party identifier (can be arbitrary u32, e.g., NEAR participant ID).
 	party_id: ParticipantId,
@@ -107,32 +97,26 @@ pub struct PrivateKeyShare {
 	threshold: u32,
 	/// DKG participants list - maps arbitrary party IDs to sequential indices.
 	/// The sequential indices (0, 1, 2, ...) are used for share subset masks.
-	#[cfg_attr(feature = "serde", serde(with = "serde_participant_list"))]
 	dkg_participants: ParticipantList,
 	/// Private key seed.
 	key: [u8; 32],
 	/// Random seed rho (same as public key).
 	rho: [u8; 32],
 	/// Hash of public key for signing.
-	#[cfg_attr(feature = "serde", serde(with = "serde_byte_array"))]
 	tr: [u8; TR_SIZE],
 	/// Secret shares for this party, keyed by signer subset ID.
 	/// Each share contains (s1_share, s2_share) polynomial vectors.
 	/// Uses u16 as subset mask to support up to 16 parties.
 	/// BTreeMap ensures deterministic serialization order.
-	#[cfg_attr(feature = "serde", serde(with = "serde_u16_btreemap"))]
 	shares: BTreeMap<u16, SecretShareData>,
 }
 
 /// Internal secret share data for a specific signer subset.
-#[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub(crate) struct SecretShareData {
 	/// Share of s1 polynomial vector (L polynomials).
-	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
 	pub(crate) s1: Vec<[i32; 256]>,
 	/// Share of s2 polynomial vector (K polynomials).
-	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
 	pub(crate) s2: Vec<[i32; 256]>,
 }
 

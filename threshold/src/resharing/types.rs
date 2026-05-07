@@ -7,8 +7,7 @@
 use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
 use core::fmt;
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 use qp_rusty_crystals_dilithium::params::{K, L, N};
 
@@ -17,9 +16,6 @@ use crate::{
 	participants::{ParticipantId, ParticipantList},
 	ThresholdConfig,
 };
-
-#[cfg(feature = "serde")]
-use crate::serde_helpers::{serde_partial_pks, serde_participant_list, serde_poly_vec};
 
 /// Size of commitment hash in bytes.
 pub const COMMITMENT_HASH_SIZE: usize = 32;
@@ -36,8 +32,7 @@ pub type SubsetMask = u16;
 ///
 /// During resharing, parties can have different roles depending on whether
 /// they are in the old committee, new committee, or both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum ResharingRole {
 	/// Party is only in the old committee (leaving after resharing).
 	OldOnly,
@@ -76,18 +71,15 @@ impl ResharingRole {
 /// Configuration for the resharing protocol.
 ///
 /// Specifies the old and new committee structures, and this party's role.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingConfig {
 	/// Threshold configuration for the old committee.
 	pub old_threshold: u32,
 	/// Participants in the old committee (sorted).
-	#[cfg_attr(feature = "serde", serde(with = "serde_participant_list"))]
 	pub old_participants: ParticipantList,
 	/// Threshold configuration for the new committee.
 	pub new_threshold: u32,
 	/// Participants in the new committee (sorted).
-	#[cfg_attr(feature = "serde", serde(with = "serde_participant_list"))]
 	pub new_participants: ParticipantList,
 	/// This party's identifier.
 	pub my_party_id: ParticipantId,
@@ -285,8 +277,7 @@ impl fmt::Display for ResharingConfigError {
 ///
 /// This allows messages to be serialized/deserialized without knowing
 /// the specific round at deserialization time.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum ResharingMessage {
 	/// Round 1: Hash commitments to per-subset sub-shares from old committee.
 	Round1(ResharingRound1Broadcast),
@@ -336,8 +327,7 @@ impl ResharingMessage {
 /// each `r_{I→J}`, which is hiding because each `r_{I→J}` has at least
 /// `5^256 ≈ 2^594` bits of entropy (the η-bounded sample space) or is itself
 /// a function of secret share material.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound1Broadcast {
 	/// Party ID of the sender.
 	pub party_id: ParticipantId,
@@ -375,8 +365,7 @@ pub type SubsetPair = (SubsetMask, SubsetMask);
 ///
 /// Transmitting this message over an unencrypted channel exposes sub-shares to
 /// eavesdroppers and compromises the threshold scheme's security.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound2Message {
 	/// Party ID of the sender (dealer).
 	pub from_party_id: ParticipantId,
@@ -387,14 +376,11 @@ pub struct ResharingRound2Message {
 }
 
 /// New share data for a specific subset.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct NewShareData {
 	/// Share of s1 polynomial vector (L polynomials).
-	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
 	pub s1: Vec<[i32; N as usize]>,
 	/// Share of s2 polynomial vector (K polynomials).
-	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
 	pub s2: Vec<[i32; N as usize]>,
 }
 
@@ -436,8 +422,7 @@ impl Default for NewShareData {
 ///    a malicious dealer that lies about the residual `r_{I→J}` in a *size-1* old subset (`t = n`
 ///    configurations), where there is no other old-subset member to cross-verify in purpose 2.
 ///    Publishing `t_J^new` is safe: recovering `s_J^new` from `t_J^new` is the LWE problem.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound3Broadcast {
 	/// Party ID of the sender.
 	pub party_id: ParticipantId,
@@ -445,7 +430,6 @@ pub struct ResharingRound3Broadcast {
 	pub share_commitments: BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>,
 	/// Partial public-key contributions `t_J^new = A·s1_J^new + s2_J^new mod Q`,
 	/// one entry per new subset `J` this party belongs to. Empty for old-only parties.
-	#[cfg_attr(feature = "serde", serde(with = "serde_partial_pks"))]
 	pub partial_pks: BTreeMap<SubsetMask, Vec<[i32; N as usize]>>,
 	/// Accusations against dealers whose broadcast commitments did not match
 	/// the sender's independent recomputation.
@@ -458,8 +442,7 @@ pub struct ResharingRound3Broadcast {
 
 /// An accusation that a dealer published a commitment that does not match
 /// the independent recomputation by another member of the same old subset.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DealerAccusation {
 	/// The party being accused (the broadcaster of the bad commitment).
 	pub dealer: ParticipantId,
@@ -474,8 +457,7 @@ pub struct DealerAccusation {
 // ============================================================================
 
 /// Output of a successful resharing protocol.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingOutput {
 	/// The new private key share for this party.
 	/// None if this party was OldOnly (leaving the committee).

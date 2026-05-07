@@ -29,13 +29,8 @@
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::fmt;
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
+use borsh::{BorshDeserialize, BorshSerialize};
 use zeroize::Zeroize;
-
-#[cfg(feature = "serde")]
-use crate::serde_helpers::serde_poly_vec;
 
 use crate::config::ThresholdConfig;
 use crate::error::MAX_PARTIES;
@@ -302,14 +297,11 @@ where
 // ============================================================================
 
 /// Contribution for a single subset (η-bounded secret polynomials).
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct SubsetContribution {
 	/// Share of s1 polynomial vector.
-	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
 	pub s1: Vec<[i32; N as usize]>,
 	/// Share of s2 polynomial vector.
-	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
 	pub s2: Vec<[i32; N as usize]>,
 }
 
@@ -357,13 +349,11 @@ impl Zeroize for SubsetContribution {
 }
 
 /// Partial public key for a single subset.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct PartialPublicKey {
 	/// The subset this partial public key corresponds to.
 	pub subset_mask: SubsetMask,
 	/// The partial public key t = A·s1 + s2.
-	#[cfg_attr(feature = "serde", serde(with = "serde_poly_vec"))]
 	pub t: Vec<[i32; N as usize]>,
 }
 
@@ -379,8 +369,7 @@ impl PartialPublicKey {
 // ============================================================================
 
 /// Round 1 broadcast: Commitment to randomness.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct MithrilRound1Broadcast {
 	/// The party sending this message.
 	pub party_id: ParticipantId,
@@ -389,8 +378,7 @@ pub struct MithrilRound1Broadcast {
 }
 
 /// Round 1 private: Shared secret K_S (leader to subset members).
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct MithrilRound1Private {
 	/// The party sending this message.
 	pub from_party_id: ParticipantId,
@@ -401,8 +389,7 @@ pub struct MithrilRound1Private {
 }
 
 /// Round 2 broadcast: Reveal randomness.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct MithrilRound2Broadcast {
 	/// The party sending this message.
 	pub party_id: ParticipantId,
@@ -411,8 +398,7 @@ pub struct MithrilRound2Broadcast {
 }
 
 /// Round 3 broadcast: Commitment to partial PKs (leaders only).
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct MithrilRound3Broadcast {
 	/// The party sending this message.
 	pub party_id: ParticipantId,
@@ -421,8 +407,7 @@ pub struct MithrilRound3Broadcast {
 }
 
 /// Round 4 broadcast: Reveal partial PKs + transcript signature.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct MithrilRound4Broadcast {
 	/// The party sending this message.
 	pub party_id: ParticipantId,
@@ -433,8 +418,7 @@ pub struct MithrilRound4Broadcast {
 }
 
 /// Message wrapper enum.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum MithrilDkgMessage {
 	/// Round 1 broadcast.
 	Round1Broadcast(MithrilRound1Broadcast),

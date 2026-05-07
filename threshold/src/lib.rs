@@ -103,13 +103,12 @@
 //!
 //! 5. **Combine**: Any party can combine the broadcasts into a final signature.
 //!
-//! All broadcast types implement `serde::Serialize` and `serde::Deserialize`
-//! (when the `serde` feature is enabled) for easy network transmission.
+//! All broadcast types implement `BorshSerialize` and `BorshDeserialize`
+//! for efficient network transmission.
 //!
 //! ## Features
 //!
 //! - `std` (default): Enable standard library support
-//! - `serde`: Enable serialization/deserialization of broadcast types
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
@@ -125,26 +124,19 @@ pub mod keys;
 pub mod participants;
 mod signer;
 
-// Serde helpers for large arrays
-#[cfg(feature = "serde")]
-pub(crate) mod serde_helpers;
-
-// Key generation (requires serde for DKG protocol message serialization)
-#[cfg(feature = "serde")]
+// Key generation
 pub mod keygen;
 
 // Internal protocol implementation
 pub(crate) mod protocol;
 
-// Resharing (committee handoff) protocol (requires serde for message serialization)
-#[cfg(feature = "serde")]
+// Resharing (committee handoff) protocol
 pub mod resharing;
 
 // Key derivation for HD wallets
 pub mod derivation;
 
-// Signing protocol adapter for NEAR MPC integration (requires serde for message serialization)
-#[cfg(feature = "serde")]
+// Signing protocol adapter for NEAR MPC integration
 pub mod signing_protocol;
 
 // circl_ntt is public for cross-language NTT testing with Go reference
@@ -172,8 +164,7 @@ pub use broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature
 // The main signer
 pub use signer::ThresholdSigner;
 
-// Key generation (requires serde feature)
-#[cfg(feature = "serde")]
+// Key generation
 pub use keygen::generate_with_dealer;
 
 // Key derivation

@@ -422,17 +422,14 @@ fn test_resharing_protocol_round1_generation() {
 	match action {
 		Action::SendMany(data) => {
 			assert!(!data.is_empty());
-			// Verify it's a valid Round 1 message (only when serde is enabled)
-			#[cfg(feature = "serde")]
-			{
-				let msg: ResharingMessage =
-					bincode::deserialize(&data).expect("should deserialize");
-				match msg {
-					ResharingMessage::Round1(broadcast) => {
-						assert_eq!(broadcast.party_id, 0);
-					},
-					_ => panic!("Expected Round1 message"),
-				}
+			// Verify it's a valid Round 1 message
+			let msg: ResharingMessage =
+				borsh::from_slice(&data).expect("should deserialize");
+			match msg {
+				ResharingMessage::Round1(broadcast) => {
+					assert_eq!(broadcast.party_id, 0);
+				},
+				_ => panic!("Expected Round1 message"),
 			}
 		},
 		_ => panic!("Expected SendMany action"),
@@ -761,10 +758,11 @@ fn test_resharing_round1_message_from_non_member_ignored() {
 	// Generate Round 1 message
 	let _ = protocol.poke().expect("poke should succeed");
 
-	// Try to deliver a truly malformed message (single byte can't be valid bincode for our types)
+	// Try to deliver a truly malformed message from a valid participant
+	// (single byte can't be valid borsh for our types)
 	// This should return an error since it can't be deserialized
 	let malformed_message = vec![0xFF]; // Single byte - definitely can't deserialize to ResharingMessage
-	let result = protocol.message(10, malformed_message);
+	let result = protocol.message(1, malformed_message); // From party 1 (valid participant)
 
 	// Should return MalformedMessage error
 	assert!(result.is_err(), "Malformed message should return an error, got: {:?}", result);
@@ -1174,7 +1172,7 @@ fn test_resharing_detects_dealer_accusation_when_commitment_tampered() {
 		if sender != 0 {
 			return data;
 		}
-		let msg: ResharingMessage = match bincode::deserialize(&data) {
+		let msg: ResharingMessage = match borsh::from_slice(&data) {
 			Ok(m) => m,
 			Err(_) => return data,
 		};
@@ -1187,7 +1185,7 @@ fn test_resharing_detects_dealer_accusation_when_commitment_tampered() {
 			},
 			other => other,
 		};
-		bincode::serialize(&modified).expect("re-serialize tampered msg")
+		borsh::to_vec(&modified).expect("re-serialize tampered msg")
 	});
 
 	let result = run_resharing_protocol_with_tamper(
@@ -1238,7 +1236,7 @@ fn test_resharing_detects_round2_payload_mismatch() {
 		if sender != 0 {
 			return data;
 		}
-		let msg: ResharingMessage = match bincode::deserialize(&data) {
+		let msg: ResharingMessage = match borsh::from_slice(&data) {
 			Ok(m) => m,
 			Err(_) => return data,
 		};
@@ -1251,7 +1249,7 @@ fn test_resharing_detects_round2_payload_mismatch() {
 			},
 			other => other,
 		};
-		bincode::serialize(&modified).expect("re-serialize tampered msg")
+		borsh::to_vec(&modified).expect("re-serialize tampered msg")
 	});
 
 	let result = run_resharing_protocol_with_tamper(
@@ -1307,7 +1305,7 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 		if sender != 0 {
 			return data;
 		}
-		let msg: ResharingMessage = match bincode::deserialize(&data) {
+		let msg: ResharingMessage = match borsh::from_slice(&data) {
 			Ok(m) => m,
 			Err(_) => return data,
 		};
@@ -1328,7 +1326,7 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 				},
 			other => other,
 		};
-		bincode::serialize(&modified).expect("re-serialize tampered msg")
+		borsh::to_vec(&modified).expect("re-serialize tampered msg")
 	});
 
 	let result = run_resharing_protocol_with_tamper(

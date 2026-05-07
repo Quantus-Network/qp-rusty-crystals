@@ -33,9 +33,6 @@ use alloc::{
 };
 use core::fmt;
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
 use qp_rusty_crystals_dilithium::{
 	fips202,
 	params::{ETA, K, L, N, Q},
@@ -54,10 +51,14 @@ use super::types::{
 
 /// Domain separator for the per-subset PRF seed.
 const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v2";
-/// Domain separator for sub-share commitments.
+
 const COMMIT_DOMAIN: &[u8] = b"resharing-commit-v2";
-/// Domain separator for new share commitments (Round 3).
+
 const NEW_SHARE_COMMIT_DOMAIN: &[u8] = b"resharing-new-share-commit-v2";
+
+/// Maximum resharing message size in bytes (256 KB).
+/// This limits the size of serialized resharing protocol messages.
+pub const MAX_RESHARING_MESSAGE_SIZE: usize = 256 * 1024;
 
 // ============================================================================
 // Action Enum
@@ -165,7 +166,6 @@ impl fmt::Display for ResharingProtocolError {
 
 /// Current state of the resharing protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ResharingState {
 	/// Generating Round 1 message (commitments to per-subset sub-shares).
 	Round1Generate,
@@ -285,13 +285,20 @@ impl ResharingProtocol {
 	}
 
 	fn serialize_message(msg: &ResharingMessage) -> Result<Vec<u8>, ResharingProtocolError> {
-		bincode::serialize(msg).map_err(|e| {
+		borsh::to_vec(msg).map_err(|e| {
 			ResharingProtocolError::SerializationError(format!("Failed to serialize: {}", e))
 		})
 	}
 
 	fn deserialize_message(data: &[u8]) -> Result<ResharingMessage, ResharingProtocolError> {
-		bincode::deserialize(data).map_err(|e| {
+		if data.len() > MAX_RESHARING_MESSAGE_SIZE {
+			return Err(ResharingProtocolError::SerializationError(format!(
+				"Message size {} exceeds maximum {}",
+				data.len(),
+				MAX_RESHARING_MESSAGE_SIZE
+			)));
+		}
+		borsh::from_slice(data).map_err(|e| {
 			ResharingProtocolError::SerializationError(format!("Failed to deserialize: {}", e))
 		})
 	}

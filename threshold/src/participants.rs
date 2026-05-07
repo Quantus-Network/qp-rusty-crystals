@@ -32,6 +32,8 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::iter;
 
+use borsh::{BorshDeserialize, BorshSerialize};
+
 /// Type alias for participant identifiers.
 ///
 /// This is a u32 to match NEAR's `ParticipantId` type directly.
@@ -51,7 +53,7 @@ pub type ParticipantId = u32;
 /// - Participants are always stored in sorted order
 /// - No duplicate participant IDs
 /// - Index mapping is consistent: `index_of(get(i)) == Some(i)`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ParticipantList {
 	/// Sorted list of participant IDs
 	participants: Vec<ParticipantId>,

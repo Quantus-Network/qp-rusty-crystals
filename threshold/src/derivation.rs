@@ -117,7 +117,6 @@ pub(crate) fn hash_secret_shares(master_share: &PrivateKeyShare) -> [u8; 64] {
 /// This uniquely identifies a derived key by the domain and tweak.
 /// MPC nodes use this to look up stored derived shares.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DerivedKeyId {
 	/// The domain ID (identifies the master key)
 	pub domain_id: u64,

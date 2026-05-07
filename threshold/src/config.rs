@@ -3,6 +3,8 @@
 //! This module contains the configuration parameters for threshold signing,
 //! including the threshold value (t) and total parties (n).
 
+use borsh::{BorshDeserialize, BorshSerialize};
+
 use crate::error::{validate_threshold_params, ThresholdError, ThresholdResult};
 
 /// Configuration for a threshold signing scheme.
@@ -103,38 +105,25 @@ impl ThresholdConfig {
 	}
 }
 
-#[cfg(feature = "serde")]
-impl serde::Serialize for ThresholdConfig {
-	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-	where
-		S: serde::Serializer,
-	{
-		use serde::ser::SerializeStruct;
-		let mut state = serializer.serialize_struct("ThresholdConfig", 2)?;
-		state.serialize_field("threshold", &self.t)?;
-		state.serialize_field("total_parties", &self.n)?;
-		state.end()
+impl BorshSerialize for ThresholdConfig {
+	fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+		// Only serialize t and n; k_iterations is derived
+		self.t.serialize(writer)?;
+		self.n.serialize(writer)?;
+		Ok(())
 	}
 }
 
-#[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for ThresholdConfig {
-	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-	where
-		D: serde::Deserializer<'de>,
-	{
-		// Wire format only contains threshold and total_parties.
-		// k_iterations is re-derived via ThresholdConfig::new() to ensure
-		// it matches the current algorithm. If fields are added to ThresholdConfig
-		// in the future, update both Serialize and this struct to match.
-		#[derive(serde::Deserialize)]
-		struct ConfigData {
-			threshold: u32,
-			total_parties: u32,
-		}
-
-		let data = ConfigData::deserialize(deserializer)?;
-		ThresholdConfig::new(data.threshold, data.total_parties).map_err(serde::de::Error::custom)
+impl BorshDeserialize for ThresholdConfig {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let t = u32::deserialize_reader(reader)?;
+		let n = u32::deserialize_reader(reader)?;
+		ThresholdConfig::new(t, n).map_err(|e| {
+			borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				alloc::string::ToString::to_string(&e),
+			)
+		})
 	}
 }
 

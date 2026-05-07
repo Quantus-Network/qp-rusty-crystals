@@ -6,7 +6,7 @@
 //! # Network Usage
 //!
 //! In a distributed setting, each party serializes these messages
-//! (using serde if the feature is enabled) and sends them over the network.
+//! using borsh and sends them over the network.
 //!
 //! ```text
 //! Round 1: Each party broadcasts Round1Broadcast (commitment hash)
@@ -18,8 +18,7 @@
 
 use alloc::vec::Vec;
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 /// Size of the ML-DSA-87 signature in bytes.
 pub const SIGNATURE_SIZE: usize = 4627;
@@ -34,8 +33,7 @@ pub const SIGNATURE_SIZE: usize = 4627;
 ///
 /// The commitment hash prevents parties from changing their random values
 /// after seeing other parties' values (which would enable certain attacks).
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Round1Broadcast {
 	/// The party ID that generated this broadcast.
 	pub party_id: u32,
@@ -59,8 +57,7 @@ impl Round1Broadcast {
 ///
 /// The `commitment_data` contains K iterations of packed polynomial vectors,
 /// where K depends on the threshold configuration.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Round2Broadcast {
 	/// The party ID that generated this broadcast.
 	pub party_id: u32,
@@ -85,8 +82,7 @@ impl Round2Broadcast {
 /// # Contents
 ///
 /// The `response` contains K iterations of packed response polynomials.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Round3Broadcast {
 	/// The party ID that generated this broadcast.
 	pub party_id: u32,
@@ -118,8 +114,7 @@ impl Round3Broadcast {
 ///
 /// let is_valid = verify_signature(&public_key, message, context, &signature);
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Signature {
 	/// The signature bytes in standard ML-DSA-87 format.
 	bytes: Vec<u8>,
@@ -213,42 +208,5 @@ mod tests {
 		let sig = Signature::from_bytes(&bytes).unwrap();
 		let recovered = sig.into_bytes();
 		assert_eq!(recovered, bytes);
-	}
-
-	#[cfg(feature = "serde")]
-	mod serde_tests {
-		use super::*;
-
-		#[test]
-		fn test_round1_broadcast_serde() {
-			let broadcast = Round1Broadcast::new(0, [0x42u8; 32]);
-			let json = serde_json::to_string(&broadcast).unwrap();
-			let recovered: Round1Broadcast = serde_json::from_str(&json).unwrap();
-			assert_eq!(broadcast, recovered);
-		}
-
-		#[test]
-		fn test_round2_broadcast_serde() {
-			let broadcast = Round2Broadcast::new(1, vec![1, 2, 3]);
-			let json = serde_json::to_string(&broadcast).unwrap();
-			let recovered: Round2Broadcast = serde_json::from_str(&json).unwrap();
-			assert_eq!(broadcast, recovered);
-		}
-
-		#[test]
-		fn test_round3_broadcast_serde() {
-			let broadcast = Round3Broadcast::new(2, vec![4, 5, 6]);
-			let json = serde_json::to_string(&broadcast).unwrap();
-			let recovered: Round3Broadcast = serde_json::from_str(&json).unwrap();
-			assert_eq!(broadcast, recovered);
-		}
-
-		#[test]
-		fn test_signature_serde() {
-			let sig = Signature::from_bytes(&vec![0u8; SIGNATURE_SIZE]).unwrap();
-			let json = serde_json::to_string(&sig).unwrap();
-			let recovered: Signature = serde_json::from_str(&json).unwrap();
-			assert_eq!(sig, recovered);
-		}
 	}
 }
