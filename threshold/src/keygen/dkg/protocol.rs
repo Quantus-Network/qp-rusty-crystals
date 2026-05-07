@@ -12,7 +12,6 @@ use core::{fmt, mem};
 
 use log::warn;
 use qp_rusty_crystals_dilithium::params::ETA;
-use rand::{CryptoRng, RngCore};
 use zeroize::Zeroize;
 
 use crate::{
@@ -219,6 +218,54 @@ impl DkgMessageBuffer {
 }
 
 // ============================================================================
+// Seed-based Randomness Derivation
+// ============================================================================
+
+/// Derive randomness for DKG Round 1 from a master seed.
+///
+/// This uses SHAKE256 to derive all random values needed for Round 1:
+/// - `my_randomness`: The party's commitment randomness
+/// - `shared_secrets`: One secret per subset where this party is leader
+///
+/// Formula:
+/// - `my_randomness = SHAKE256("dkg-r1-rand" || seed || party_id)[0..32]`
+/// - `shared_secret[i] = SHAKE256("dkg-r1-ss" || seed || party_id || subset_mask)[0..32]`
+fn derive_round1_randomness(
+	seed: &[u8; 32],
+	party_id: ParticipantId,
+	leader_subsets: &[SubsetMask],
+) -> ([u8; RANDOMNESS_SIZE], BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>) {
+	// Derive my_randomness
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, b"dkg-r1-rand", 11);
+	fips202::shake256_absorb(&mut state, seed, 32);
+	let party_bytes = party_id.to_le_bytes();
+	fips202::shake256_absorb(&mut state, &party_bytes, 4);
+	fips202::shake256_finalize(&mut state);
+
+	let mut my_randomness = [0u8; RANDOMNESS_SIZE];
+	fips202::shake256_squeeze(&mut my_randomness, RANDOMNESS_SIZE, &mut state);
+
+	// Derive shared secrets for each subset
+	let mut my_shared_secrets = BTreeMap::new();
+	for &subset in leader_subsets {
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, b"dkg-r1-ss", 9);
+		fips202::shake256_absorb(&mut state, seed, 32);
+		fips202::shake256_absorb(&mut state, &party_bytes, 4);
+		let subset_bytes = subset.to_le_bytes();
+		fips202::shake256_absorb(&mut state, &subset_bytes, 2); // SubsetMask is u16 = 2 bytes
+		fips202::shake256_finalize(&mut state);
+
+		let mut secret = [0u8; SHARED_SECRET_SIZE];
+		fips202::shake256_squeeze(&mut secret, SHARED_SECRET_SIZE, &mut state);
+		my_shared_secrets.insert(subset, secret);
+	}
+
+	(my_randomness, my_shared_secrets)
+}
+
+// ============================================================================
 // Protocol Implementation
 // ============================================================================
 
@@ -239,7 +286,8 @@ impl DkgMessageBuffer {
 ///
 /// ```ignore
 /// let config = MithrilDkgConfig::new(...)?;
-/// let mut dkg = MithrilDkg::new(config, rng);
+/// let seed: [u8; 32] = get_random_seed(); // Must be cryptographically random
+/// let mut dkg = MithrilDkg::new(config, seed);
 ///
 /// loop {
 ///     match dkg.poke()? {
@@ -254,31 +302,38 @@ impl DkgMessageBuffer {
 ///     // When messages arrive: dkg.message(from, data);
 /// }
 /// ```
-pub struct MithrilDkg<S: TranscriptSigner, R: RngCore + CryptoRng> {
+pub struct MithrilDkg<S: TranscriptSigner> {
 	state: MithrilDkgState<S>,
-	rng: R,
+	/// Master seed for deriving all randomness (32 bytes, cryptographically random).
+	seed: [u8; 32],
 	pending_privates: Vec<(ParticipantId, Vec<u8>)>,
 	/// Buffer for messages that arrive before we're ready to process them.
 	message_buffer: DkgMessageBuffer,
 }
 
-impl<S: TranscriptSigner, R: RngCore + CryptoRng> Drop for MithrilDkg<S, R> {
+impl<S: TranscriptSigner> Drop for MithrilDkg<S> {
 	fn drop(&mut self) {
-		// Zeroize sensitive data in the state when the DKG is dropped
+		// Zeroize sensitive data when the DKG is dropped
 		self.state.zeroize();
+		self.seed.zeroize();
 	}
 }
 
-impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
+impl<S: TranscriptSigner> MithrilDkg<S> {
 	/// Create a new DKG instance.
 	///
 	/// # Arguments
 	/// * `config` - The DKG configuration including threshold, participants, and signing keys
-	/// * `rng` - A cryptographically secure random number generator
-	pub fn new(config: MithrilDkgConfig<S>, rng: R) -> Self {
+	/// * `seed` - A 32-byte cryptographically random seed for generating all randomness
+	///
+	/// # Security Warning
+	///
+	/// The `seed` MUST be generated from a cryptographically secure source and
+	/// MUST be unique for each DKG session. Reusing seeds compromises security.
+	pub fn new(config: MithrilDkgConfig<S>, seed: [u8; 32]) -> Self {
 		Self {
 			state: MithrilDkgState::new(config),
-			rng,
+			seed,
 			pending_privates: Vec::new(),
 			message_buffer: DkgMessageBuffer::new(),
 		}
@@ -543,17 +598,12 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 				_ => return Err(MithrilDkgError::InvalidState("expected Initialized".into())),
 			};
 
-		let mut my_randomness = [0u8; RANDOMNESS_SIZE];
-		self.rng.fill_bytes(&mut my_randomness);
+		// Derive all randomness from the master seed
+		let leader_subsets = config.my_leader_subsets();
+		let (my_randomness, my_shared_secrets) =
+			derive_round1_randomness(&self.seed, config.my_party_id, &leader_subsets);
 
 		let my_commitment = h_commit(config.my_party_id, &my_randomness);
-
-		let mut my_shared_secrets = BTreeMap::new();
-		for subset in config.my_leader_subsets() {
-			let mut secret = [0u8; SHARED_SECRET_SIZE];
-			self.rng.fill_bytes(&mut secret);
-			my_shared_secrets.insert(subset, secret);
-		}
 
 		self.state = MithrilDkgState::Round1(MithrilRound1State {
 			config,
@@ -1312,7 +1362,7 @@ fn build_private_share<S: TranscriptSigner>(
 /// * `total_parties` - Total number of parties (n)
 /// * `signers` - Transcript signers for each party
 /// * `public_keys` - Public keys for transcript signature verification
-/// * `rng` - Random number generator (will be cloned for each party)
+/// * `master_seed` - A 32-byte seed used to derive unique seeds for each party
 ///
 /// # Returns
 /// A vector of `MithrilDkgOutput` structs, one for each party, containing
@@ -1323,22 +1373,21 @@ fn build_private_share<S: TranscriptSigner>(
 /// ```ignore
 /// let signers: Vec<MySigner> = (0..3).map(|id| MySigner::new(id)).collect();
 /// let public_keys: Vec<_> = signers.iter().map(|s| s.public_key()).collect();
-/// let rng = rand::rngs::StdRng::seed_from_u64(42);
+/// let master_seed = [42u8; 32];
 ///
-/// let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng)?;
+/// let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, master_seed)?;
 /// // All parties have the same public key
 /// assert_eq!(outputs[0].public_key, outputs[1].public_key);
 /// ```
-pub fn run_local_mithril_dkg<S, R>(
+pub fn run_local_mithril_dkg<S>(
 	threshold: u32,
 	total_parties: u32,
 	signers: Vec<S>,
 	public_keys: Vec<S::PublicKey>,
-	rng: R,
+	master_seed: [u8; 32],
 ) -> Result<Vec<MithrilDkgOutput>, MithrilDkgError>
 where
 	S: TranscriptSigner + Clone,
-	R: RngCore + CryptoRng + Clone,
 {
 	let threshold_config = ThresholdConfig::new(threshold, total_parties)
 		.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
@@ -1350,7 +1399,8 @@ where
 		pk_map.insert(i as ParticipantId, pk);
 	}
 
-	let mut dkgs: Vec<MithrilDkg<S, R>> = signers
+	// Derive unique seed for each party from master_seed
+	let mut dkgs: Vec<MithrilDkg<S>> = signers
 		.into_iter()
 		.enumerate()
 		.map(|(i, signer)| {
@@ -1362,7 +1412,19 @@ where
 				pk_map.clone(),
 			)
 			.unwrap();
-			MithrilDkg::new(config, rng.clone())
+
+			// Derive party-specific seed: SHAKE256(master_seed || "dkg-party" || party_id)
+			let mut state = fips202::KeccakState::default();
+			fips202::shake256_absorb(&mut state, &master_seed, 32);
+			fips202::shake256_absorb(&mut state, b"dkg-party", 9);
+			let party_bytes = (i as u32).to_le_bytes();
+			fips202::shake256_absorb(&mut state, &party_bytes, 4);
+			fips202::shake256_finalize(&mut state);
+
+			let mut party_seed = [0u8; 32];
+			fips202::shake256_squeeze(&mut party_seed, 32, &mut state);
+
+			MithrilDkg::new(config, party_seed)
 		})
 		.collect();
 
@@ -1429,7 +1491,6 @@ where
 mod tests {
 	use super::*;
 	use qp_rusty_crystals_dilithium::params::ETA;
-	use rand::SeedableRng;
 
 	#[derive(Clone, Debug)]
 	struct TestSigner {
@@ -1468,9 +1529,9 @@ mod tests {
 	fn test_mithril_dkg_2_of_3() {
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(42);
+		let seed = [42u8; 32];
 
-		let result = run_local_mithril_dkg(2, 3, signers, public_keys, rng);
+		let result = run_local_mithril_dkg(2, 3, signers, public_keys, seed);
 
 		match &result {
 			Ok(outputs) => {
@@ -1493,9 +1554,9 @@ mod tests {
 	fn test_mithril_dkg_eta_bounded() {
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(123);
+		let seed = [123u8; 32];
 
-		let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
+		let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, seed).unwrap();
 
 		for (party_id, output) in outputs.iter().enumerate() {
 			let shares = output.private_share.shares();
@@ -1597,8 +1658,8 @@ mod tests {
 			signers.push(DilithiumSigner { sk: keypair.secret.clone(), pk: keypair.public });
 		}
 
-		let rng = rand::rngs::StdRng::seed_from_u64(456);
-		let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
+		let seed = [56u8; 32];
+		let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, seed).unwrap();
 
 		// Verify DKG succeeded
 		assert_eq!(outputs.len(), 3);
@@ -1685,9 +1746,9 @@ mod tests {
 			pk_map.insert(i as ParticipantId, pk);
 		}
 
-		let rng = rand::rngs::StdRng::seed_from_u64(789);
+		let seed = [89u8; 32];
 
-		let mut dkgs: Vec<MithrilDkg<BadSigner, _>> = signers
+		let mut dkgs: Vec<MithrilDkg<BadSigner>> = signers
 			.into_iter()
 			.enumerate()
 			.map(|(i, signer)| {
@@ -1699,7 +1760,7 @@ mod tests {
 					pk_map.clone(),
 				)
 				.unwrap();
-				MithrilDkg::new(config, rng.clone())
+				MithrilDkg::new(config, seed)
 			})
 			.collect();
 
@@ -1790,9 +1851,9 @@ mod tests {
 			pk_map.insert(i as ParticipantId, pk);
 		}
 
-		let rng = rand::rngs::StdRng::seed_from_u64(555);
+		let seed = [55u8; 32];
 
-		let mut dkgs: Vec<MithrilDkg<TestSigner, _>> = signers
+		let mut dkgs: Vec<MithrilDkg<TestSigner>> = signers
 			.into_iter()
 			.enumerate()
 			.map(|(i, signer)| {
@@ -1804,7 +1865,7 @@ mod tests {
 					pk_map.clone(),
 				)
 				.unwrap();
-				MithrilDkg::new(config, rng.clone())
+				MithrilDkg::new(config, seed)
 			})
 			.collect();
 
@@ -1914,9 +1975,9 @@ mod tests {
 			pk_map.insert(i as ParticipantId, pk);
 		}
 
-		let rng = rand::rngs::StdRng::seed_from_u64(888);
+		let seed = [88u8; 32];
 
-		let mut dkgs: Vec<MithrilDkg<TestSigner, _>> = signers
+		let mut dkgs: Vec<MithrilDkg<TestSigner>> = signers
 			.into_iter()
 			.enumerate()
 			.map(|(i, signer)| {
@@ -1928,7 +1989,7 @@ mod tests {
 					pk_map.clone(),
 				)
 				.unwrap();
-				MithrilDkg::new(config, rng.clone())
+				MithrilDkg::new(config, seed)
 			})
 			.collect();
 
@@ -2023,9 +2084,9 @@ mod tests {
 	fn test_mithril_dkg_3_of_5() {
 		let signers: Vec<TestSigner> = (0..5).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..5).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(12345);
+		let seed = [45u8; 32];
 
-		let outputs = run_local_mithril_dkg(3, 5, signers, public_keys, rng).unwrap();
+		let outputs = run_local_mithril_dkg(3, 5, signers, public_keys, seed).unwrap();
 
 		assert_eq!(outputs.len(), 5);
 
@@ -2070,9 +2131,9 @@ mod tests {
 	fn test_mithril_dkg_subset_share_consistency() {
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(777);
+		let seed = [77u8; 32];
 
-		let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
+		let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, seed).unwrap();
 
 		// For 2-of-3: subsets are {0,1}=0b011, {0,2}=0b101, {1,2}=0b110
 
@@ -2209,11 +2270,11 @@ mod tests {
 		)
 		.unwrap();
 
-		let rng0 = rand::rngs::StdRng::seed_from_u64(100);
-		let rng1 = rand::rngs::StdRng::seed_from_u64(101);
+		let seed0 = [100u8; 32];
+		let seed1 = [101u8; 32];
 
-		let mut dkg0 = MithrilDkg::new(config0, rng0);
-		let mut dkg1 = MithrilDkg::new(config1, rng1);
+		let mut dkg0 = MithrilDkg::new(config0, seed0);
+		let mut dkg1 = MithrilDkg::new(config1, seed1);
 
 		// Start DKG0 - it will be in Round 1 after first poke
 		let action0 = dkg0.poke().unwrap();
@@ -2277,8 +2338,8 @@ mod tests {
 			MithrilDkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
 				.unwrap();
 
-		let rng = rand::rngs::StdRng::seed_from_u64(100);
-		let mut dkg = MithrilDkg::new(config, rng);
+		let seed = [100u8; 32];
+		let mut dkg = MithrilDkg::new(config, seed);
 
 		// Start the DKG
 		let _ = dkg.poke().unwrap();
@@ -2335,8 +2396,10 @@ mod tests {
 			.into_iter()
 			.enumerate()
 			.map(|(i, config)| {
-				let rng = rand::rngs::StdRng::seed_from_u64(100 + i as u64);
-				MithrilDkg::new(config, rng)
+				// Derive unique seed per party
+				let mut party_seed = [0u8; 32];
+				party_seed[0] = (100 + i) as u8;
+				MithrilDkg::new(config, party_seed)
 			})
 			.collect();
 
@@ -2470,8 +2533,8 @@ mod tests {
 			MithrilDkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
 				.unwrap();
 
-		let rng = rand::rngs::StdRng::seed_from_u64(100);
-		let mut dkg = MithrilDkg::new(config, rng);
+		let seed = [100u8; 32];
+		let mut dkg = MithrilDkg::new(config, seed);
 
 		// Start DKG
 		let _ = dkg.poke().unwrap();
@@ -2535,8 +2598,10 @@ mod tests {
 			.into_iter()
 			.enumerate()
 			.map(|(i, config)| {
-				let rng = rand::rngs::StdRng::seed_from_u64(200 + i as u64);
-				MithrilDkg::new(config, rng)
+				// Derive unique seed per party
+				let mut party_seed = [0u8; 32];
+				party_seed[0] = (200 + i) as u8;
+				MithrilDkg::new(config, party_seed)
 			})
 			.collect();
 
@@ -2622,8 +2687,9 @@ mod tests {
 			.into_iter()
 			.enumerate()
 			.map(|(i, config)| {
-				let rng = rand::rngs::StdRng::seed_from_u64(300 + i as u64);
-				MithrilDkg::new(config, rng)
+				let mut party_seed = [0u8; 32];
+				party_seed[0] = (30 + i) as u8;
+				MithrilDkg::new(config, party_seed)
 			})
 			.collect();
 
@@ -2707,8 +2773,8 @@ mod tests {
 			MithrilDkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
 				.unwrap();
 
-		let rng = rand::rngs::StdRng::seed_from_u64(400);
-		let mut dkg = MithrilDkg::new(config, rng);
+		let seed = [40u8; 32];
+		let mut dkg = MithrilDkg::new(config, seed);
 
 		// Start DKG
 		let _ = dkg.poke().unwrap();
@@ -2778,8 +2844,9 @@ mod tests {
 			.into_iter()
 			.enumerate()
 			.map(|(i, config)| {
-				let rng = rand::rngs::StdRng::seed_from_u64(500 + i as u64);
-				MithrilDkg::new(config, rng)
+				let mut party_seed = [0u8; 32];
+				party_seed[0] = (50 + i) as u8;
+				MithrilDkg::new(config, party_seed)
 			})
 			.collect();
 
@@ -2829,7 +2896,7 @@ mod tests {
 		// We need to sabotage party 1's broadcast (remove subset 6's PK) to trigger the check.
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(999);
+		let seed = [99u8; 32];
 
 		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
 		let participants: Vec<ParticipantId> = (0..3).collect();
@@ -2839,7 +2906,7 @@ mod tests {
 			pk_map.insert(i as ParticipantId, pk);
 		}
 
-		let mut dkgs: Vec<MithrilDkg<TestSigner, _>> = signers
+		let mut dkgs: Vec<MithrilDkg<TestSigner>> = signers
 			.into_iter()
 			.enumerate()
 			.map(|(i, signer)| {
@@ -2851,7 +2918,7 @@ mod tests {
 					pk_map.clone(),
 				)
 				.unwrap();
-				MithrilDkg::new(config, rng.clone())
+				MithrilDkg::new(config, seed)
 			})
 			.collect();
 
@@ -3000,7 +3067,7 @@ mod tests {
 
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(888);
+		let seed = [88u8; 32];
 
 		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
 		let participants: Vec<ParticipantId> = (0..3).collect();
@@ -3010,7 +3077,7 @@ mod tests {
 			pk_map.insert(i as ParticipantId, pk);
 		}
 
-		let mut dkgs: Vec<MithrilDkg<TestSigner, _>> = signers
+		let mut dkgs: Vec<MithrilDkg<TestSigner>> = signers
 			.into_iter()
 			.enumerate()
 			.map(|(i, signer)| {
@@ -3022,7 +3089,7 @@ mod tests {
 					pk_map.clone(),
 				)
 				.unwrap();
-				MithrilDkg::new(config, rng.clone())
+				MithrilDkg::new(config, seed)
 			})
 			.collect();
 
@@ -3106,7 +3173,7 @@ mod tests {
 		// fake sender IDs to satisfy broadcast quorum checks prematurely.
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(555);
+		let seed = [55u8; 32];
 
 		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
 		let participants: Vec<ParticipantId> = (0..3).collect();
@@ -3125,7 +3192,7 @@ mod tests {
 		)
 		.unwrap();
 
-		let mut dkg: MithrilDkg<TestSigner, _> = MithrilDkg::new(config, rng);
+		let mut dkg: MithrilDkg<TestSigner> = MithrilDkg::new(config, seed);
 
 		// Start the DKG to get to Round 1
 		let action = dkg.poke().unwrap();
@@ -3188,7 +3255,7 @@ mod tests {
 		// Test that messages from self are ignored.
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(444);
+		let seed = [44u8; 32];
 
 		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
 		let participants: Vec<ParticipantId> = (0..3).collect();
@@ -3207,7 +3274,7 @@ mod tests {
 		)
 		.unwrap();
 
-		let mut dkg: MithrilDkg<TestSigner, _> = MithrilDkg::new(config, rng);
+		let mut dkg: MithrilDkg<TestSigner> = MithrilDkg::new(config, seed);
 
 		// Start the DKG to get to Round 1
 		let action = dkg.poke().unwrap();
@@ -3238,7 +3305,7 @@ mod tests {
 		// Test that messages exceeding MAX_MESSAGE_SIZE are rejected.
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(333);
+		let seed = [33u8; 32];
 
 		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
 		let participants: Vec<ParticipantId> = (0..3).collect();
@@ -3257,7 +3324,7 @@ mod tests {
 		)
 		.unwrap();
 
-		let mut dkg: MithrilDkg<TestSigner, _> = MithrilDkg::new(config, rng);
+		let mut dkg: MithrilDkg<TestSigner> = MithrilDkg::new(config, seed);
 
 		// Start the DKG to get to Round 1
 		let action = dkg.poke().unwrap();

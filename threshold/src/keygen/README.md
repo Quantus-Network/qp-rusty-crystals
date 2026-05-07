@@ -114,9 +114,9 @@ use qp_rusty_crystals_threshold::keygen::dkg::{
 // For testing/local use with a simple signer:
 let signers: Vec<MySigner> = (0..3).map(|id| MySigner::new(id)).collect();
 let public_keys: Vec<_> = signers.iter().map(|s| s.public_key()).collect();
-let rng = rand::rngs::StdRng::seed_from_u64(42);
+let seed = [42u8; 32]; // Caller provides randomness as 32-byte seed
 
-let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng)?;
+let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, seed)?;
 
 // For distributed use, create MithrilDkg instances and drive with poke()/message():
 let config = MithrilDkgConfig::new(
@@ -127,7 +127,7 @@ let config = MithrilDkgConfig::new(
     participant_public_keys,
 )?;
 
-let mut dkg = MithrilDkg::new(config, rng);
+let mut dkg = MithrilDkg::new(config, seed);
 
 loop {
     match dkg.poke()? {

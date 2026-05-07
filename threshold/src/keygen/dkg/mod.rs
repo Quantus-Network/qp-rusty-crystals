@@ -128,7 +128,6 @@ pub use types::{
 mod tests {
 	use super::*;
 	use alloc::{vec, vec::Vec};
-	use rand::SeedableRng;
 
 	#[derive(Clone, Debug)]
 	struct TestSigner {
@@ -167,9 +166,9 @@ mod tests {
 	fn test_dkg_2_of_3() {
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(42);
+		let seed = [42u8; 32];
 
-		let result = run_local_mithril_dkg(2, 3, signers, public_keys, rng);
+		let result = run_local_mithril_dkg(2, 3, signers, public_keys, seed);
 
 		match &result {
 			Ok(outputs) => {
@@ -194,9 +193,9 @@ mod tests {
 
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(123);
+		let seed = [123u8; 32];
 
-		let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
+		let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, seed).unwrap();
 
 		for (party_id, output) in outputs.iter().enumerate() {
 			let shares = output.private_share.shares();
@@ -238,9 +237,9 @@ mod tests {
 
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(99);
+		let seed = [99u8; 32];
 
-		let dkg_outputs = run_local_mithril_dkg(2, 3, signers, public_keys, rng).unwrap();
+		let dkg_outputs = run_local_mithril_dkg(2, 3, signers, public_keys, seed).unwrap();
 
 		// All parties should have the same public key
 		let public_key = dkg_outputs[0].public_key.clone();

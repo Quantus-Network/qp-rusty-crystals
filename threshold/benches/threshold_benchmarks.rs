@@ -117,8 +117,6 @@ fn bench_dealer_keygen(c: &mut Criterion) {
 
 /// Benchmark distributed key generation (DKG) for quick configurations.
 fn bench_dkg(c: &mut Criterion) {
-	use rand::SeedableRng;
-
 	let mut group = c.benchmark_group("dkg");
 	group.sample_size(10); // DKG is slow, use fewer samples
 	group.measurement_time(Duration::from_secs(30));
@@ -131,8 +129,8 @@ fn bench_dkg(c: &mut Criterion) {
 				b.iter(|| {
 					let signers: Vec<BenchSigner> = (0..n).map(|id| BenchSigner { id }).collect();
 					let public_keys: Vec<u32> = (0..n).collect();
-					let rng = rand::rngs::StdRng::seed_from_u64(42);
-					run_local_mithril_dkg(t, n, signers, public_keys, rng).unwrap()
+					let seed = [42u8; 32];
+					run_local_mithril_dkg(t, n, signers, public_keys, seed).unwrap()
 				});
 			},
 		);

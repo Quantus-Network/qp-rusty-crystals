@@ -513,8 +513,6 @@ fn test_threshold_matrix() {
 /// Test threshold signing with DKG-generated keys across multiple configurations.
 #[test]
 fn test_threshold_matrix_dkg() {
-	use rand::SeedableRng;
-
 	// Simple test signer for DKG transcript signing
 	#[derive(Clone, Debug)]
 	struct TestSigner {
@@ -597,9 +595,11 @@ fn test_threshold_matrix_dkg() {
 		let dkg_signers: Vec<TestSigner> =
 			(0..*total_parties).map(|id| TestSigner { id }).collect();
 		let dkg_public_keys: Vec<u32> = (0..*total_parties).collect();
-		let rng = rand::rngs::StdRng::seed_from_u64(
-			seed + *threshold as u64 * 100 + *total_parties as u64,
-		);
+		
+		// Derive unique seed for this config
+		let mut dkg_seed = [0u8; 32];
+		let config_id = seed + *threshold as u64 * 100 + *total_parties as u64;
+		dkg_seed[..8].copy_from_slice(&config_id.to_le_bytes());
 
 		// Run DKG to generate keys
 		let dkg_outputs = match run_local_mithril_dkg(
@@ -607,7 +607,7 @@ fn test_threshold_matrix_dkg() {
 			*total_parties,
 			dkg_signers,
 			dkg_public_keys,
-			rng,
+			dkg_seed,
 		) {
 			Ok(outputs) => outputs,
 			Err(e) => {
