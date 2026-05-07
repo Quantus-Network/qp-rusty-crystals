@@ -437,6 +437,43 @@ impl ThresholdSigner {
 
 	/// Combine all responses into a final signature.
 	///
+	/// Collect all Round 3 responses with duplicate detection.
+	///
+	/// This helper extracts the shared logic between `combine` and `combine_with_message`.
+	fn collect_responses(
+		&self,
+		my_responses: &[polyvec::Polyvecl],
+		all_round3: &[Round3Broadcast],
+	) -> ThresholdResult<Vec<Vec<polyvec::Polyvecl>>> {
+		let mut all_responses: Vec<Vec<polyvec::Polyvecl>> = Vec::new();
+		let mut seen_parties: BTreeSet<u32> = BTreeSet::new();
+
+		// Add our own response first
+		all_responses.push(my_responses.to_vec());
+		seen_parties.insert(self.private_key.party_id());
+
+		for r3 in all_round3 {
+			if r3.party_id == self.private_key.party_id() {
+				continue; // Skip our own
+			}
+
+			// Check for duplicates (M3: duplicate Round 3 should error, not silently overwrite)
+			if !seen_parties.insert(r3.party_id) {
+				return Err(ThresholdError::DuplicateBroadcast { party_id: r3.party_id });
+			}
+
+			let responses = unpack_responses(&r3.response, &self.config).map_err(|e| {
+				ThresholdError::InvalidSignatureShareData {
+					party_id: r3.party_id,
+					reason: format!("Failed to unpack Round 3 response: {}", e),
+				}
+			})?;
+			all_responses.push(responses);
+		}
+
+		Ok(all_responses)
+	}
+
 	/// After all parties have broadcast their Round 3 responses, any party
 	/// can call this method to combine them into a final signature.
 	///
@@ -469,43 +506,14 @@ impl ThresholdSigner {
 			},
 		};
 
-		// Use the already-aggregated w values from round3_respond
-		// (w values were aggregated when processing Round 2 broadcasts in round3_respond)
-		let w_aggregated = round2_data.w_aggregated.clone();
-
-		// Collect all responses including our own, with duplicate detection (M3)
-		let mut all_responses: Vec<Vec<polyvec::Polyvecl>> = Vec::new();
-		let mut seen_parties: BTreeSet<u32> = BTreeSet::new();
-
-		// Add our own response first
-		all_responses.push(my_responses.clone());
-		seen_parties.insert(self.private_key.party_id());
-
-		for r3 in all_round3 {
-			if r3.party_id == self.private_key.party_id() {
-				continue; // Skip our own
-			}
-
-			// Check for duplicates (M3: duplicate Round 3 should error, not silently overwrite)
-			if !seen_parties.insert(r3.party_id) {
-				return Err(ThresholdError::DuplicateBroadcast { party_id: r3.party_id });
-			}
-
-			let responses = unpack_responses(&r3.response, &self.config).map_err(|e| {
-				ThresholdError::InvalidSignatureShareData {
-					party_id: r3.party_id,
-					reason: format!("Failed to unpack Round 3 response: {}", e),
-				}
-			})?;
-			all_responses.push(responses);
-		}
+		let all_responses = self.collect_responses(my_responses, all_round3)?;
 
 		let signature_bytes = combine_signature(
 			&self.public_key,
 			&self.config,
 			message,
 			context,
-			&w_aggregated,
+			&round2_data.w_aggregated,
 			&all_responses,
 		)?;
 
@@ -538,43 +546,14 @@ impl ThresholdSigner {
 			},
 		};
 
-		// Use the already-aggregated w values from round3_respond
-		// (w values were aggregated when processing Round 2 broadcasts in round3_respond)
-		let w_aggregated = round2_data.w_aggregated.clone();
-
-		// Collect all responses including our own, with duplicate detection (M3)
-		let mut all_responses: Vec<Vec<polyvec::Polyvecl>> = Vec::new();
-		let mut seen_parties: BTreeSet<u32> = BTreeSet::new();
-
-		// Add our own response first
-		all_responses.push(my_responses.clone());
-		seen_parties.insert(self.private_key.party_id());
-
-		for r3 in all_round3 {
-			if r3.party_id == self.private_key.party_id() {
-				continue; // Skip our own
-			}
-
-			// Check for duplicates (M3: duplicate Round 3 should error, not silently overwrite)
-			if !seen_parties.insert(r3.party_id) {
-				return Err(ThresholdError::DuplicateBroadcast { party_id: r3.party_id });
-			}
-
-			let responses = unpack_responses(&r3.response, &self.config).map_err(|e| {
-				ThresholdError::InvalidSignatureShareData {
-					party_id: r3.party_id,
-					reason: format!("Failed to unpack Round 3 response: {}", e),
-				}
-			})?;
-			all_responses.push(responses);
-		}
+		let all_responses = self.collect_responses(my_responses, all_round3)?;
 
 		let signature_bytes = combine_signature(
 			&self.public_key,
 			&self.config,
 			message,
 			context,
-			&w_aggregated,
+			&round2_data.w_aggregated,
 			&all_responses,
 		)?;
 
