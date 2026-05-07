@@ -606,24 +606,31 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 		let old_state =
 			mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
 
-		let state = match old_state {
+		let mut state = match old_state {
 			MithrilDkgState::Round1(s) => s,
 			_ => return Err(MithrilDkgError::InvalidState("expected Round1".into())),
 		};
 
-		let mut shared_secrets = state.my_shared_secrets;
-		for (subset, secret) in state.received_shared_secrets {
+		// Move shared secrets, combining our own with received ones
+		let mut shared_secrets = mem::take(&mut state.my_shared_secrets);
+		for (subset, secret) in mem::take(&mut state.received_shared_secrets) {
 			shared_secrets.insert(subset, secret);
 		}
 
+		// Copy randomness (it's Copy, so we need to explicitly zeroize the original)
+		let my_randomness = state.my_randomness;
+
 		self.state = MithrilDkgState::Round2(MithrilRound2State {
 			config: state.config,
-			my_randomness: state.my_randomness,
+			my_randomness,
 			round1_broadcasts: state.received_broadcasts,
 			shared_secrets,
 			received_broadcasts: BTreeMap::new(),
 			broadcast_sent: false,
 		});
+
+		// Zeroize sensitive data remaining in the old state
+		state.my_randomness.zeroize();
 
 		// Process any buffered Round 2 messages
 		self.process_buffered_round2();
@@ -687,14 +694,14 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 		let old_state =
 			mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
 
-		let state = match old_state {
+		let mut state = match old_state {
 			MithrilDkgState::Round2(s) => s,
 			_ => return Err(MithrilDkgError::InvalidState("expected Round2".into())),
 		};
 
 		// Compute global randomness
 		let mut all_randomness: Vec<_> = state.received_broadcasts.iter().collect();
-		let my_broadcast = MithrilRound2Broadcast {
+		let mut my_broadcast = MithrilRound2Broadcast {
 			party_id: state.config.my_party_id,
 			randomness: state.my_randomness,
 		};
@@ -740,7 +747,7 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 		}
 
 		// Reconstruct broadcasts including our own
-		let mut round1_broadcasts = state.round1_broadcasts;
+		let mut round1_broadcasts = mem::take(&mut state.round1_broadcasts);
 		round1_broadcasts.insert(
 			state.config.my_party_id,
 			MithrilRound1Broadcast {
@@ -749,14 +756,17 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			},
 		);
 
-		let mut round2_broadcasts = state.received_broadcasts;
-		round2_broadcasts.insert(state.config.my_party_id, my_broadcast);
+		let mut round2_broadcasts = mem::take(&mut state.received_broadcasts);
+		round2_broadcasts.insert(state.config.my_party_id, my_broadcast.clone());
+
+		// Take shared_secrets to move them to Round3
+		let shared_secrets = mem::take(&mut state.shared_secrets);
 
 		self.state = MithrilDkgState::Round3(MithrilRound3State {
 			config: state.config,
 			round1_broadcasts,
 			round2_broadcasts,
-			shared_secrets: state.shared_secrets,
+			shared_secrets,
 			global_randomness,
 			rho,
 			my_partial_pks,
@@ -765,6 +775,10 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			received_broadcasts: BTreeMap::new(),
 			broadcast_sent: false,
 		});
+
+		// Zeroize sensitive data remaining in the old state
+		state.my_randomness.zeroize();
+		my_broadcast.randomness.zeroize();
 
 		// Process any buffered Round 3 messages
 		self.process_buffered_round3();
@@ -817,12 +831,17 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 		let old_state =
 			mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
 
-		let state = match old_state {
+		let mut state = match old_state {
 			MithrilDkgState::Round3(s) => s,
 			_ => return Err(MithrilDkgError::InvalidState("expected Round3".into())),
 		};
 
-		let mut round3_broadcasts = state.received_broadcasts;
+		// Take all fields that need to be moved to Round4
+		let shared_secrets = mem::take(&mut state.shared_secrets);
+		let global_randomness = mem::take(&mut state.global_randomness);
+		let my_contributions = mem::take(&mut state.my_contributions);
+
+		let mut round3_broadcasts = mem::take(&mut state.received_broadcasts);
 		round3_broadcasts.insert(
 			state.config.my_party_id,
 			MithrilRound3Broadcast {
@@ -833,17 +852,20 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 
 		self.state = MithrilDkgState::Round4(MithrilRound4State {
 			config: state.config,
-			round1_broadcasts: state.round1_broadcasts,
-			round2_broadcasts: state.round2_broadcasts,
+			round1_broadcasts: mem::take(&mut state.round1_broadcasts),
+			round2_broadcasts: mem::take(&mut state.round2_broadcasts),
 			round3_broadcasts,
-			shared_secrets: state.shared_secrets,
-			global_randomness: state.global_randomness,
+			shared_secrets,
+			global_randomness,
 			rho: state.rho,
-			my_partial_pks: state.my_partial_pks,
-			my_contributions: state.my_contributions,
+			my_partial_pks: mem::take(&mut state.my_partial_pks),
+			my_contributions,
 			received_broadcasts: BTreeMap::new(),
 			broadcast_sent: false,
 		});
+
+		// Note: sensitive data (shared_secrets, global_randomness, my_contributions)
+		// has been moved to the new state, so no explicit zeroization needed here.
 
 		// Process any buffered Round 4 messages
 		self.process_buffered_round4();
@@ -946,11 +968,20 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 		let old_state =
 			mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
 
-		let state = match old_state {
+		let mut state = match old_state {
 			MithrilDkgState::Round4(s) => s,
 			_ => return Err(MithrilDkgError::InvalidState("expected Round4".into())),
 		};
 
+		let result = self.complete_inner(&state);
+
+		// Always zeroize the old state, whether we succeeded or failed
+		state.zeroize();
+
+		result
+	}
+
+	fn complete_inner(&mut self, state: &MithrilRound4State<S>) -> Result<(), MithrilDkgError> {
 		let transcript_hash = compute_transcript_hash(
 			&state.round1_broadcasts,
 			&state.round2_broadcasts,
