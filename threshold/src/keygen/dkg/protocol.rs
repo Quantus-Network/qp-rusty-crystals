@@ -316,6 +316,21 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 	/// * `Ok(())` - Message was processed, buffered, or legitimately ignored
 	/// * `Err(_)` - Message was malformed and could not be deserialized
 	pub fn message(&mut self, from: ParticipantId, data: Vec<u8>) -> Result<(), MithrilDkgError> {
+		// Validate sender is a known participant to prevent quorum inflation attacks
+		if let Some(participants) = self.state.all_participants() {
+			if !participants.contains(&from) {
+				log::warn!(
+					"DKG: Ignoring message from non-participant {} (not in {:?})",
+					from,
+					participants
+				);
+				return Ok(());
+			}
+		} else {
+			// Protocol is in terminal state (Complete or Failed), ignore all messages
+			return Ok(());
+		}
+
 		let msg: MithrilDkgMessage = match bincode::deserialize(&data) {
 			Ok(m) => m,
 			Err(e) => {
@@ -3069,5 +3084,91 @@ mod tests {
 		// 2. All parties get the same public key
 		// 3. The leadership logic is correct
 		// The code now filters out non-leader PKs with a warning log.
+	}
+
+	#[test]
+	fn test_non_participant_messages_ignored() {
+		// Test that messages from non-participants are ignored to prevent
+		// quorum inflation attacks where an attacker injects messages with
+		// fake sender IDs to satisfy broadcast quorum checks prematurely.
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let rng = rand::rngs::StdRng::seed_from_u64(555);
+
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = (0..3).collect();
+
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
+		for (i, pk) in public_keys.into_iter().enumerate() {
+			pk_map.insert(i as ParticipantId, pk);
+		}
+
+		let config = MithrilDkgConfig::new(
+			threshold_config,
+			0,
+			participants.clone(),
+			signers[0].clone(),
+			pk_map.clone(),
+		).unwrap();
+
+		let mut dkg: MithrilDkg<TestSigner, _> = MithrilDkg::new(config, rng);
+
+		// Start the DKG to get to Round 1
+		let action = dkg.poke().unwrap();
+		assert!(matches!(action, MithrilAction::SendMany(_)));
+
+		// Now we're in Round 1. Try to inject a message from a non-participant (party 99)
+		let fake_broadcast = MithrilRound1Broadcast {
+			party_id: 99,
+			commitment: [0u8; 32],
+		};
+		let fake_msg = MithrilDkgMessage::Round1Broadcast(fake_broadcast);
+		let fake_data = bincode::serialize(&fake_msg).unwrap();
+
+		// This should be silently ignored (not error, just ignored)
+		let result = dkg.message(99, fake_data);
+		assert!(result.is_ok(), "Non-participant message should not cause error");
+
+		// Verify the fake message was NOT added to received_broadcasts
+		if let MithrilDkgState::Round1(state) = &dkg.state {
+			assert!(
+				!state.received_broadcasts.contains_key(&99),
+				"Non-participant's broadcast should not be stored"
+			);
+			assert_eq!(
+				state.received_broadcasts.len(),
+				0,
+				"Should have no received broadcasts yet"
+			);
+		} else {
+			panic!("Expected Round1 state");
+		}
+
+		// Also test that a message claiming to be from participant 1 but sent by non-participant 99
+		// is rejected (this tests the envelope 'from' vs message 'party_id' check)
+		let spoofed_broadcast = MithrilRound1Broadcast {
+			party_id: 1, // Claims to be from party 1
+			commitment: [0u8; 32],
+		};
+		let spoofed_msg = MithrilDkgMessage::Round1Broadcast(spoofed_broadcast);
+		let spoofed_data = bincode::serialize(&spoofed_msg).unwrap();
+
+		// Send with envelope 'from' = 99 (non-participant)
+		let result = dkg.message(99, spoofed_data);
+		assert!(result.is_ok(), "Spoofed message should not cause error");
+
+		// Verify the message was NOT added
+		if let MithrilDkgState::Round1(state) = &dkg.state {
+			assert!(
+				!state.received_broadcasts.contains_key(&1),
+				"Spoofed broadcast should not be stored under party 1"
+			);
+			assert!(
+				!state.received_broadcasts.contains_key(&99),
+				"Spoofed broadcast should not be stored under party 99"
+			);
+		} else {
+			panic!("Expected Round1 state");
+		}
 	}
 }

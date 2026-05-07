@@ -367,6 +367,20 @@ impl<S: TranscriptSigner> MithrilDkgState<S> {
 			_ => None,
 		}
 	}
+
+	/// Get the list of all participants from the current state's config.
+	///
+	/// Returns `None` if the protocol is in a terminal state (Complete or Failed).
+	pub fn all_participants(&self) -> Option<&[ParticipantId]> {
+		match self {
+			MithrilDkgState::Initialized(config) => Some(&config.all_participants),
+			MithrilDkgState::Round1(state) => Some(&state.config.all_participants),
+			MithrilDkgState::Round2(state) => Some(&state.config.all_participants),
+			MithrilDkgState::Round3(state) => Some(&state.config.all_participants),
+			MithrilDkgState::Round4(state) => Some(&state.config.all_participants),
+			MithrilDkgState::Complete(_) | MithrilDkgState::Failed(_) => None,
+		}
+	}
 }
 
 /// Check if all broadcasts received.
