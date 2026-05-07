@@ -116,16 +116,6 @@ pub fn poly_add(p: &mut Poly, a: &Poly, b: &Poly) {
 	}
 }
 
-/// ReduceLe2Q reduces x to a value ≤ 2q
-pub fn reduce_le2q(x: u32) -> u32 {
-	// Note 2²³ = 2¹³ - 1 mod q. So, writing  x = x₁ 2²³ + x₂ with x₂ < 2²³
-	// and x₁ < 2⁹, we have x = y (mod q) where
-	// y = x₂ + x₁ 2¹³ - x₁ ≤ 2²³ + 2¹³ < 2q.
-	let x1 = x >> 23;
-	let x2 = x & 0x7FFFFF; // 2²³-1
-	x2.wrapping_add(x1 << 13).wrapping_sub(x1)
-}
-
 /// Execute an in-place forward NTT on the polynomial.
 ///
 /// Assumes the coefficients are in Montgomery representation and bounded
