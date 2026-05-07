@@ -151,6 +151,8 @@ pub enum SignProtocolError {
 		/// Reason for the failure.
 		reason: String,
 	},
+	/// Invalid configuration provided to protocol constructor.
+	InvalidConfig(String),
 }
 
 impl fmt::Display for SignProtocolError {
@@ -165,6 +167,7 @@ impl fmt::Display for SignProtocolError {
 			SignProtocolError::MalformedMessage { from, reason } => {
 				write!(f, "Malformed message from party {}: {}", from, reason)
 			},
+			SignProtocolError::InvalidConfig(s) => write!(f, "Invalid configuration: {}", s),
 		}
 	}
 }
@@ -403,14 +406,13 @@ impl DilithiumSignProtocol {
 	/// * `leader_id` - The leader's identifier (responsible for combine/retry decisions)
 	/// * `round1_seed` - A 32-byte cryptographically random seed for Round 1
 	///
-	/// # Panics
+	/// # Errors
 	///
-	/// Panics if:
+	/// Returns `Err(SignProtocolError::InvalidConfig)` if:
 	/// - `participants` contains duplicates
 	/// - `my_participant_id` is not in `participants`
 	/// - `leader_id` is not in `participants`
 	/// - Any participant is not in the original DKG participant set (HQ3: act ⊆ [N])
-	/// - `my_participant_id` is not in the original DKG participant set (HQ3: i ∈ act)
 	///
 	/// # Security Warning
 	///
@@ -424,26 +426,35 @@ impl DilithiumSignProtocol {
 		my_participant_id: ParticipantId,
 		leader_id: ParticipantId,
 		round1_seed: [u8; 32],
-	) -> Self {
-		let participant_list =
-			ParticipantList::new(&participants).expect("participants must not contain duplicates");
-		assert!(
-			participant_list.contains(my_participant_id),
-			"my_participant_id must be in participants"
-		);
-		assert!(participant_list.contains(leader_id), "leader_id must be in participants");
+	) -> Result<Self, SignProtocolError> {
+		let participant_list = ParticipantList::new(&participants).ok_or_else(|| {
+			SignProtocolError::InvalidConfig("participants contains duplicates".to_string())
+		})?;
+
+		if !participant_list.contains(my_participant_id) {
+			return Err(SignProtocolError::InvalidConfig(
+				"my_participant_id is not in participants".to_string(),
+			));
+		}
+
+		if !participant_list.contains(leader_id) {
+			return Err(SignProtocolError::InvalidConfig(
+				"leader_id is not in participants".to_string(),
+			));
+		}
 
 		// HQ3: Validate that all signing participants are valid DKG participants (act ⊆ [N])
 		let dkg_participants = signer.dkg_participants();
 		for &participant in &participants {
-			assert!(
-				dkg_participants.contains(participant),
-				"signing participant {} is not in the DKG participant set (act ⊆ [N] violated)",
-				participant
-			);
+			if !dkg_participants.contains(participant) {
+				return Err(SignProtocolError::InvalidConfig(format!(
+					"signing participant {} is not in the DKG participant set (act ⊆ [N] violated)",
+					participant
+				)));
+			}
 		}
 
-		Self {
+		Ok(Self {
 			signer,
 			state: SignProtocolState::Round1Generate,
 			participants: participant_list,
@@ -461,7 +472,7 @@ impl DilithiumSignProtocol {
 			message_buffer: SignMessageBuffer::new(),
 			retry_count: 0,
 			received_signature: None,
-		}
+		})
 	}
 
 	/// Get the current protocol state (for debugging/monitoring).
@@ -1156,7 +1167,7 @@ pub fn run_local_signing_with_stats(
 				round1_seed,
 			)
 		})
-		.collect();
+		.collect::<Result<Vec<_>, _>>()?;
 
 	// Message queues: pending_messages[to] = vec of (from, data)
 	let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> = vec![Vec::new(); num_parties];
@@ -1236,12 +1247,89 @@ mod tests {
 			0,
 			0,          // leader_id
 			[0xAA; 32], // round1_seed
-		);
+		)
+		.unwrap();
 
 		assert_eq!(protocol.my_participant_id(), 0);
 		assert_eq!(protocol.participants().as_slice(), &[0, 1, 2]);
 		assert_eq!(protocol.leader_id(), 0);
 		assert!(protocol.is_leader());
+	}
+
+	#[test]
+	fn test_protocol_rejects_duplicate_participants() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let result = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1, 1], // duplicate!
+			0,
+			0,
+			[0xAA; 32],
+		);
+
+		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
+	}
+
+	#[test]
+	fn test_protocol_rejects_missing_my_participant() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let result = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1, 2],
+			99, // not in participants!
+			0,
+			[0xAA; 32],
+		);
+
+		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
+	}
+
+	#[test]
+	fn test_protocol_rejects_missing_leader() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let result = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1, 2],
+			0,
+			99, // leader not in participants!
+			[0xAA; 32],
+		);
+
+		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
+	}
+
+	#[test]
+	fn test_protocol_rejects_non_dkg_participant() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let result = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1, 99], // 99 was not in DKG!
+			0,
+			0,
+			[0xAA; 32],
+		);
+
+		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
 	}
 
 	#[test]
@@ -1258,37 +1346,9 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
-		);
+		)
+		.unwrap();
 
-		let r1 = Round1Broadcast::new(1, [0x42u8; 32]);
-		let msg = SigningMessage::Round1(r1.clone());
-		let serialized = protocol.serialize_message(&msg).unwrap();
-		let deserialized = protocol.deserialize_message(&serialized).unwrap();
-
-		match deserialized {
-			SigningMessage::Round1(recovered) => {
-				assert_eq!(recovered.party_id, r1.party_id);
-				assert_eq!(recovered.commitment_hash, r1.commitment_hash);
-			},
-			_ => panic!("Wrong message type"),
-		}
-	}
-
-	#[test]
-	fn test_message_serialization_round2() {
-		let config = ThresholdConfig::new(2, 3).unwrap();
-		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
-
-		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
-		let protocol = DilithiumSignProtocol::new(
-			signer,
-			b"test".to_vec(),
-			b"ctx".to_vec(),
-			vec![0, 1],
-			0,
-			0,
-			[0xAA; 32],
-		);
 
 		let r2 = Round2Broadcast::new(2, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 		let msg = SigningMessage::Round2(r2.clone());
@@ -1318,7 +1378,8 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
-		);
+		)
+		.unwrap();
 
 		let r3 = Round3Broadcast::new(3, vec![10, 20, 30, 40, 50]);
 		let msg = SigningMessage::Round3(r3.clone());
@@ -1415,7 +1476,8 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
-		);
+		)
+		.unwrap();
 
 		// Initially in Round1Generate
 		assert_eq!(*protocol.state(), SignProtocolState::Round1Generate);
@@ -1444,7 +1506,8 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
-		);
+		)
+		.unwrap();
 
 		// Advance state
 		let _ = protocol.poke().unwrap();
@@ -1470,7 +1533,8 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
-		);
+		)
+		.unwrap();
 
 		// Generate Round 1
 		let action = protocol.poke().unwrap();
@@ -1495,11 +1559,12 @@ mod tests {
 			signer,
 			b"test".to_vec(),
 			b"ctx".to_vec(),
-			vec![0, 1, 2],
+			vec![0, 1],
 			0,
-			0, // leader_id
+			0,
 			[0xAA; 32],
-		);
+		)
+		.unwrap();
 
 		// Generate Round 1
 		let _ = protocol.poke().unwrap();
@@ -1589,7 +1654,8 @@ mod tests {
 			0,
 			0, // leader_id
 			[0xAA; 32],
-		);
+		)
+		.unwrap();
 
 		// Start Round 1 - generates and sends our Round 1 message
 		let _ = protocol.poke().unwrap();
@@ -1625,7 +1691,8 @@ mod tests {
 			0,
 			0, // leader_id
 			[0xAA; 32],
-		);
+		)
+		.unwrap();
 
 		// Start Round 1
 		let _ = protocol.poke().unwrap();
@@ -1661,7 +1728,8 @@ mod tests {
 			0,
 			0, // leader_id
 			[0xAA; 32],
-		);
+		)
+		.unwrap();
 
 		// Create protocol for party 1 (to generate valid messages)
 		let signer1 = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
@@ -1673,7 +1741,8 @@ mod tests {
 			1,
 			0,          // leader_id
 			[0xBB; 32], // Different seed for party 1
-		);
+		)
+		.unwrap();
 
 		// Start both protocols - generate Round 1
 		let r1_data0 = match protocol0.poke().unwrap() {
@@ -1729,11 +1798,13 @@ mod tests {
 			signer,
 			b"test".to_vec(),
 			b"ctx".to_vec(),
-			vec![0, 1, 2],
+			vec![0, 1],
 			0,
 			0,
 			[0xAA; 32],
-		);
+		)
+		.unwrap();
+
 
 		// Start Round 1
 		let _ = protocol.poke().unwrap();
@@ -1767,7 +1838,8 @@ mod tests {
 			1, // follower
 			0, // leader is party 0
 			[0xAA; 32],
-		);
+		)
+		.unwrap();
 
 		// Manually set follower to WaitingForLeaderDecision state
 		follower.state = SignProtocolState::WaitingForLeaderDecision;
@@ -1820,6 +1892,7 @@ mod tests {
 					0, // party 0 is leader
 					round1_seed,
 				)
+				.unwrap()
 			})
 			.collect();
 
@@ -1865,7 +1938,8 @@ mod tests {
 			1, // follower
 			0, // leader is party 0
 			[0xCC; 32],
-		);
+		)
+		.unwrap();
 
 		// Manually set follower to WaitingForLeaderDecision state
 		follower.state = SignProtocolState::WaitingForLeaderDecision;

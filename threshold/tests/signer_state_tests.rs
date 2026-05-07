@@ -217,7 +217,8 @@ mod party_management_tests {
 			0,          // my_id
 			0,          // leader_id
 			[0xAA; 32], // round1_seed
-		);
+		)
+		.expect("protocol");
 
 		// Generate our Round 1
 		let _ = protocol.poke().expect("poke");
