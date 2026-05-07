@@ -56,7 +56,7 @@ pub(crate) fn mod_q(x: u32) -> u32 {
 /// Normalize polynomial coefficients assuming they are ≤ 2Q.
 /// Converts to [0, Q) range. Matches reference implementation behavior.
 pub(crate) fn normalize_assuming_le2q(poly: &mut poly::Poly) {
-	for j in 0..N as usize as usize {
+	for j in 0..N as usize {
 		let coeff = poly.coeffs[j];
 		// First ensure value is positive and in reasonable range
 		let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
@@ -110,7 +110,7 @@ pub(crate) fn decompose_polyveck(
 	w1: &mut polyvec::Polyveck,
 ) {
 	for i in 0..K {
-		for j in 0..N as usize as usize {
+		for j in 0..N as usize {
 			let a = input.vec[i].coeffs[j] as u32;
 			let (a0, a1) = decompose_coefficient(a);
 			w0.vec[i].coeffs[j] = a0 as i32;
@@ -133,7 +133,7 @@ pub(crate) fn compute_ntt_dot_product(
 	b: &polyvec::Polyvecl,
 ) {
 	// Zero out result
-	for i in 0..N as usize as usize {
+	for i in 0..N as usize {
 		result.coeffs[i] = 0;
 	}
 
@@ -141,7 +141,7 @@ pub(crate) fn compute_ntt_dot_product(
 	for i in 0..L {
 		let mut tmp = poly::Poly::default();
 		crate::circl_ntt::mul_hat(&mut tmp, &a.vec[i], &b.vec[i]);
-		for j in 0..N as usize as usize {
+		for j in 0..N as usize {
 			result.coeffs[j] += tmp.coeffs[j];
 		}
 	}
@@ -235,7 +235,7 @@ impl HyperballSampleVector {
 	/// Keeps values in centered representation [-(Q-1)/2, (Q-1)/2].
 	pub fn round_z_response(&self, z: &mut polyvec::Polyvecl) {
 		for i in 0..L {
-			for j in 0..N as usize as usize {
+			for j in 0..N as usize {
 				let idx = i * N as usize + j;
 				let u = libm::round(self.data[idx]) as i32;
 				let mut reduced = u % Q;
@@ -254,7 +254,7 @@ impl HyperballSampleVector {
 	pub fn round(&self, s1: &mut polyvec::Polyvecl, s2: &mut polyvec::Polyveck) {
 		// Round s1 components - keep in centered range
 		for i in 0..L {
-			for j in 0..N as usize as usize {
+			for j in 0..N as usize {
 				let idx = i * N as usize + j;
 				let u = libm::round(self.data[idx]) as i32;
 				// Keep values centered: if outside [-Q/2, Q/2], reduce modulo Q
@@ -270,7 +270,7 @@ impl HyperballSampleVector {
 
 		// Round s2 components - keep in centered range
 		for i in 0..K {
-			for j in 0..N as usize as usize {
+			for j in 0..N as usize {
 				let idx = (L + i) * N as usize + j;
 				let u = libm::round(self.data[idx]) as i32;
 				// Keep values centered: if outside [-Q/2, Q/2], reduce modulo Q
@@ -290,7 +290,7 @@ impl HyperballSampleVector {
 		let mut sq = 0.0;
 
 		for i in 0..(L + K) {
-			for j in 0..N as usize as usize {
+			for j in 0..N as usize {
 				let idx = i * N as usize + j;
 				let val = self.data[idx];
 				if i < L {
@@ -320,7 +320,7 @@ impl HyperballSampleVector {
 
 		// Copy s1 polynomials (first L polynomials)
 		for i in 0..L {
-			for j in 0..N as usize as usize {
+			for j in 0..N as usize {
 				let mut u = s1.vec[i].coeffs[j];
 				// Center modulo Q
 				u += Q / 2;
@@ -334,7 +334,7 @@ impl HyperballSampleVector {
 
 		// Copy s2 polynomials (next K polynomials)
 		for i in 0..K {
-			for j in 0..N as usize as usize {
+			for j in 0..N as usize {
 				let mut u = s2.vec[i].coeffs[j];
 				// Center modulo Q
 				u += Q / 2;
@@ -380,7 +380,7 @@ pub(crate) fn compute_dilithium_hint(
 ) -> usize {
 	let mut pop = 0;
 	for i in 0..K {
-		for j in 0..N as usize as usize {
+		for j in 0..N as usize {
 			let h = make_hint_single(w0pf.vec[i].coeffs[j], w1.vec[i].coeffs[j]);
 			hint.vec[i].coeffs[j] = h;
 			pop += h as usize;
@@ -416,7 +416,7 @@ pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8]) {
 	assert!(buf.len() >= 736);
 
 	let mut bit_pos = 0usize;
-	for i in 0..N as usize as usize {
+	for i in 0..N as usize {
 		let coeff = p.coeffs[i] as u32;
 
 		// Write 23 bits starting at bit_pos
@@ -452,7 +452,7 @@ pub(crate) fn poly_unpack_w(buf: &[u8]) -> poly::Poly {
 	let mut p = poly::Poly::default();
 
 	let mut bit_pos = 0usize;
-	for i in 0..N as usize as usize {
+	for i in 0..N as usize {
 		let byte_pos = bit_pos / 8;
 		let bit_offset = bit_pos % 8;
 

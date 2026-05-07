@@ -182,7 +182,7 @@ fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
 
 /// Unpack a commitment from 23-bit packed format.
 pub(crate) fn unpack_commitment_dilithium(commitment: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
-	let poly_q_size = ((N as usize) * 23 + 7) / 8; // 736 bytes per poly
+	let poly_q_size = ((N as usize) * 23).div_ceil(8); // 736 bytes per poly
 	let expected_len = K * poly_q_size;
 
 	if commitment.len() != expected_len {

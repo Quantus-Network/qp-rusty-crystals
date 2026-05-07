@@ -1,6 +1,7 @@
 //! Protocol implementation for the Mithril DKG.
 
 use alloc::{
+	boxed::Box,
 	collections::BTreeMap,
 	format,
 	string::{String, ToString},
@@ -981,17 +982,20 @@ fn compute_global_randomness<S: TranscriptSigner>(
 	(global_randomness, my_broadcast)
 }
 
+/// Return type for compute_my_contributions: (contributions, partial_pks, pk_commitments)
+type ContributionsResult = (
+	BTreeMap<SubsetMask, SubsetContribution>,
+	BTreeMap<SubsetMask, PartialPublicKey>,
+	BTreeMap<SubsetMask, [u8; 32]>,
+);
+
 /// Compute contributions and partial PKs for all subsets this party belongs to.
 fn compute_my_contributions<S: TranscriptSigner>(
 	config: &MithrilDkgConfig<S>,
 	shared_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	global_randomness: &[u8],
 	rho: &[u8; 32],
-) -> (
-	BTreeMap<SubsetMask, SubsetContribution>,
-	BTreeMap<SubsetMask, PartialPublicKey>,
-	BTreeMap<SubsetMask, [u8; 32]>,
-) {
+) -> ContributionsResult {
 	let mut my_contributions = BTreeMap::new();
 	let mut my_partial_pks = BTreeMap::new();
 	let mut my_pk_commitments = BTreeMap::new();
@@ -2359,9 +2363,9 @@ mod tests {
 			loop {
 				match dkg.poke().unwrap() {
 					MithrilAction::SendMany(data) =>
-						for to in 0..3 {
+						for (to, queue) in pending.iter_mut().enumerate() {
 							if to != from {
-								pending[to].push((from as ParticipantId, data.clone()));
+								queue.push((from as ParticipantId, data.clone()));
 							}
 						},
 					MithrilAction::SendPrivate(to, data) => {
@@ -2890,8 +2894,8 @@ mod tests {
 			}
 
 			// Poke all parties
-			for party_id in 0..3 {
-				match dkgs[party_id].poke().unwrap() {
+			for (party_id, dkg) in dkgs.iter_mut().enumerate() {
+				match dkg.poke().unwrap() {
 					MithrilAction::SendMany(data) => {
 						for (other, pending) in pending_messages.iter_mut().enumerate() {
 							if other != party_id {
@@ -2966,22 +2970,19 @@ mod tests {
 
 			// Make sure we also have party 2's broadcast (they have no leader subsets, so empty PKs
 			// is fine)
-			if !state.received_broadcasts.contains_key(&2) {
+			state.received_broadcasts.entry(2).or_insert_with(|| {
 				let empty_pks: BTreeMap<SubsetMask, PartialPublicKey> = BTreeMap::new();
 				let partial_output_hash = compute_partial_output_hash(&empty_pks);
 				let signing_message =
 					compute_signing_message(&transcript_hash, &partial_output_hash);
 				let signer = TestSigner { id: 2 };
 				let sig = signer.sign(&signing_message);
-				state.received_broadcasts.insert(
-					2,
-					MithrilRound4Broadcast {
-						party_id: 2,
-						partial_public_keys: empty_pks,
-						transcript_signature: sig,
-					},
-				);
-			}
+				MithrilRound4Broadcast {
+					party_id: 2,
+					partial_public_keys: empty_pks,
+					transcript_signature: sig,
+				}
+			});
 		}
 
 		// Now try to complete - should fail with missing partial PK error for subset 6
