@@ -1234,7 +1234,7 @@ mod tests {
 			b"context".to_vec(),
 			vec![0, 1, 2],
 			0,
-			0, // leader_id
+			0,          // leader_id
 			[0xAA; 32], // round1_seed
 		);
 
@@ -1671,7 +1671,7 @@ mod tests {
 			b"context".to_vec(),
 			vec![0, 1, 2],
 			1,
-			0, // leader_id
+			0,          // leader_id
 			[0xBB; 32], // Different seed for party 1
 		);
 

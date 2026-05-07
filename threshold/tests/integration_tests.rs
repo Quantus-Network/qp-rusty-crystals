@@ -595,7 +595,7 @@ fn test_threshold_matrix_dkg() {
 		let dkg_signers: Vec<TestSigner> =
 			(0..*total_parties).map(|id| TestSigner { id }).collect();
 		let dkg_public_keys: Vec<u32> = (0..*total_parties).collect();
-		
+
 		// Derive unique seed for this config
 		let mut dkg_seed = [0u8; 32];
 		let config_id = seed + *threshold as u64 * 100 + *total_parties as u64;

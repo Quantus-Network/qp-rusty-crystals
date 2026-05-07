@@ -134,8 +134,8 @@ impl DerivedKeyId {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use alloc::{collections::BTreeMap, vec};
 	use crate::{keys::SecretShareData, participants::ParticipantList};
+	use alloc::{collections::BTreeMap, vec};
 
 	/// Helper to create a test PrivateKeyShare with synthetic share data.
 	///

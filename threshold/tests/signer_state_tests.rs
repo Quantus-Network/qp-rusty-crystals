@@ -214,8 +214,8 @@ mod party_management_tests {
 			b"test message".to_vec(),
 			b"context".to_vec(),
 			vec![0, 1, 2],
-			0, // my_id
-			0, // leader_id
+			0,          // my_id
+			0,          // leader_id
 			[0xAA; 32], // round1_seed
 		);
 
