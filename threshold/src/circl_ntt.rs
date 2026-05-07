@@ -99,23 +99,6 @@ pub fn mul_hat(p: &mut Poly, a: &Poly, b: &Poly) {
 	}
 }
 
-/// Add two polynomials: p = a + b
-pub fn poly_add(p: &mut Poly, a: &Poly, b: &Poly) {
-	// Convert to u32 for wrapping addition
-	let mut a_u32 = [0u32; N];
-	let mut b_u32 = [0u32; N];
-
-	for (i, (a_coeff, b_coeff)) in a.coeffs.iter().zip(b.coeffs.iter()).enumerate() {
-		a_u32[i] = if *a_coeff < 0 { (*a_coeff + Q as i32) as u32 } else { *a_coeff as u32 };
-		b_u32[i] = if *b_coeff < 0 { (*b_coeff + Q as i32) as u32 } else { *b_coeff as u32 };
-	}
-
-	// Wrapping addition
-	for (p_coeff, (a_val, b_val)) in p.coeffs.iter_mut().zip(a_u32.iter().zip(b_u32.iter())) {
-		*p_coeff = a_val.wrapping_add(*b_val) as i32;
-	}
-}
-
 /// Execute an in-place forward NTT on the polynomial.
 ///
 /// Assumes the coefficients are in Montgomery representation and bounded
