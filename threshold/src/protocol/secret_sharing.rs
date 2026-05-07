@@ -154,9 +154,18 @@ pub fn recover_share(
 		))
 	})?;
 
-	// Get DKG indices for all active parties
-	let active_indices: Vec<usize> =
-		active_parties.iter().filter_map(|&p| dkg_participants.index_of(p)).collect();
+	// Get DKG indices for all active parties - fail if any party is unknown
+	let active_indices: Vec<usize> = active_parties
+		.iter()
+		.map(|&p| {
+			dkg_participants.index_of(p).ok_or_else(|| {
+				ThresholdError::InvalidConfiguration(format!(
+					"Active party {} not found in DKG participants",
+					p
+				))
+			})
+		})
+		.collect::<ThresholdResult<Vec<usize>>>()?;
 
 	// Create permutation to cover the signing set (using DKG indices)
 	let mut perm = vec![0usize; parties as usize];
@@ -407,5 +416,35 @@ mod tests {
 		// Too many parties
 		let result = compute_sharing_patterns(2u32, 17u32);
 		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_recover_share_rejects_unknown_active_party() {
+		use crate::participants::ParticipantList;
+		use alloc::collections::BTreeMap;
+
+		// Create DKG participants: [10, 20, 30]
+		let dkg_participants = ParticipantList::new(&[10, 20, 30]).unwrap();
+
+		// Empty shares map (we'll fail before needing shares)
+		let shares: BTreeMap<u16, SecretShare> = BTreeMap::new();
+
+		// Active parties include party 99 which is NOT in dkg_participants
+		let active_parties = vec![10, 20, 99];
+
+		let result = recover_share(&shares, 10, &active_parties, 2, 3, &dkg_participants);
+
+		assert!(result.is_err());
+		match result {
+			Err(err) => {
+				let err_msg = err.to_string();
+				assert!(
+					err_msg.contains("Active party 99 not found"),
+					"Expected error about unknown party 99, got: {}",
+					err_msg
+				);
+			},
+			Ok(_) => panic!("Expected error for unknown active party"),
+		}
 	}
 }
