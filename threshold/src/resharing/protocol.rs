@@ -323,6 +323,22 @@ impl ResharingProtocol {
 			return Ok(());
 		}
 
+		// Ignore messages from self
+		if from == self.config.my_party_id {
+			return Ok(());
+		}
+
+		// Ignore messages from non-participants (neither old nor new committee)
+		let all_participants = self.config.all_participants();
+		if !all_participants.contains(&from) {
+			log::warn!(
+				"Resharing: Ignoring message from non-participant {} (not in {:?})",
+				from,
+				all_participants
+			);
+			return Ok(());
+		}
+
 		let msg = match Self::deserialize_message(&data) {
 			Ok(m) => m,
 			Err(e) =>

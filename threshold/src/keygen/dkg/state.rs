@@ -381,6 +381,20 @@ impl<S: TranscriptSigner> MithrilDkgState<S> {
 			MithrilDkgState::Complete(_) | MithrilDkgState::Failed(_) => None,
 		}
 	}
+
+	/// Get this party's ID from the current state's config.
+	///
+	/// Returns `None` if the protocol is in a terminal state (Complete or Failed).
+	pub fn my_party_id(&self) -> Option<ParticipantId> {
+		match self {
+			MithrilDkgState::Initialized(config) => Some(config.my_party_id),
+			MithrilDkgState::Round1(state) => Some(state.config.my_party_id),
+			MithrilDkgState::Round2(state) => Some(state.config.my_party_id),
+			MithrilDkgState::Round3(state) => Some(state.config.my_party_id),
+			MithrilDkgState::Round4(state) => Some(state.config.my_party_id),
+			MithrilDkgState::Complete(_) | MithrilDkgState::Failed(_) => None,
+		}
+	}
 }
 
 /// Check if all broadcasts received.

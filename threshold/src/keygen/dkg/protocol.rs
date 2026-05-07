@@ -331,6 +331,11 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			return Ok(());
 		}
 
+		// Ignore messages from self
+		if self.state.my_party_id() == Some(from) {
+			return Ok(());
+		}
+
 		let msg: MithrilDkgMessage = match bincode::deserialize(&data) {
 			Ok(m) => m,
 			Err(e) => {
@@ -3166,6 +3171,58 @@ mod tests {
 			assert!(
 				!state.received_broadcasts.contains_key(&99),
 				"Spoofed broadcast should not be stored under party 99"
+			);
+		} else {
+			panic!("Expected Round1 state");
+		}
+	}
+
+	#[test]
+	fn test_self_messages_ignored() {
+		// Test that messages from self are ignored.
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let rng = rand::rngs::StdRng::seed_from_u64(444);
+
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = (0..3).collect();
+
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
+		for (i, pk) in public_keys.into_iter().enumerate() {
+			pk_map.insert(i as ParticipantId, pk);
+		}
+
+		let config = MithrilDkgConfig::new(
+			threshold_config,
+			0, // We are party 0
+			participants.clone(),
+			signers[0].clone(),
+			pk_map.clone(),
+		).unwrap();
+
+		let mut dkg: MithrilDkg<TestSigner, _> = MithrilDkg::new(config, rng);
+
+		// Start the DKG to get to Round 1
+		let action = dkg.poke().unwrap();
+		assert!(matches!(action, MithrilAction::SendMany(_)));
+
+		// Try to send a message "from" ourselves (party 0)
+		let self_broadcast = MithrilRound1Broadcast {
+			party_id: 0,
+			commitment: [42u8; 32],
+		};
+		let self_msg = MithrilDkgMessage::Round1Broadcast(self_broadcast);
+		let self_data = bincode::serialize(&self_msg).unwrap();
+
+		// This should be silently ignored
+		let result = dkg.message(0, self_data);
+		assert!(result.is_ok(), "Self message should not cause error");
+
+		// Verify the message was NOT added to received_broadcasts
+		if let MithrilDkgState::Round1(state) = &dkg.state {
+			assert!(
+				!state.received_broadcasts.contains_key(&0),
+				"Self broadcast should not be stored"
 			);
 		} else {
 			panic!("Expected Round1 state");
