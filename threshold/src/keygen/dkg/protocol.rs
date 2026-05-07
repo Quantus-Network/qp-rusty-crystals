@@ -699,74 +699,34 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			_ => return Err(MithrilDkgError::InvalidState("expected Round2".into())),
 		};
 
-		// Compute global randomness
-		let mut all_randomness: Vec<_> = state.received_broadcasts.iter().collect();
-		let mut my_broadcast = MithrilRound2Broadcast {
-			party_id: state.config.my_party_id,
-			randomness: state.my_randomness,
-		};
-		all_randomness.push((&state.config.my_party_id, &my_broadcast));
-		all_randomness.sort_by_key(|(id, _)| *id);
-
-		let mut global_randomness = Vec::with_capacity(all_randomness.len() * RANDOMNESS_SIZE);
-		for (_, broadcast) in &all_randomness {
-			global_randomness.extend_from_slice(&broadcast.randomness);
-		}
+		// Compute global randomness from all parties' contributions
+		let (global_randomness, mut my_broadcast) =
+			compute_global_randomness(&state.config, &state.received_broadcasts, state.my_randomness);
 
 		let rho = h_seed(&global_randomness);
 
-		// Compute contributions for leader subsets
-		let my_leader_subsets = state.config.my_leader_subsets();
-		let mut my_contributions = BTreeMap::new();
-		let mut my_partial_pks = BTreeMap::new();
-		let mut my_pk_commitments = BTreeMap::new();
-
-		for &subset in &my_leader_subsets {
-			if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
-				let seed = h_keygen(subset, &shared_secret, &global_randomness);
-				let contribution = derive_subset_contribution(&seed, ETA as i32);
-				let partial_pk = compute_partial_pk(&rho, &contribution, subset);
-				let pk_commitment = h_commit_pk(subset, &partial_pk);
-
-				my_contributions.insert(subset, contribution);
-				my_partial_pks.insert(subset, partial_pk);
-				my_pk_commitments.insert(subset, pk_commitment);
-			}
-		}
-
-		// Compute contributions for non-leader subsets
-		for &subset in &state.config.my_subsets() {
-			if let alloc::collections::btree_map::Entry::Vacant(e) = my_contributions.entry(subset)
-			{
-				if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
-					let seed = h_keygen(subset, &shared_secret, &global_randomness);
-					let contribution = derive_subset_contribution(&seed, ETA as i32);
-					e.insert(contribution);
-				}
-			}
-		}
-
-		// Reconstruct broadcasts including our own
-		let mut round1_broadcasts = mem::take(&mut state.round1_broadcasts);
-		round1_broadcasts.insert(
-			state.config.my_party_id,
-			MithrilRound1Broadcast {
-				party_id: state.config.my_party_id,
-				commitment: h_commit(state.config.my_party_id, &state.my_randomness),
-			},
+		// Compute contributions and partial PKs for all subsets we belong to
+		let (my_contributions, my_partial_pks, my_pk_commitments) = compute_my_contributions(
+			&state.config,
+			&state.shared_secrets,
+			&global_randomness,
+			&rho,
 		);
 
+		// Build the new Round3 state
+		let round1_broadcasts = build_round1_broadcasts_with_own(
+			mem::take(&mut state.round1_broadcasts),
+			&state.config,
+			&state.my_randomness,
+		);
 		let mut round2_broadcasts = mem::take(&mut state.received_broadcasts);
 		round2_broadcasts.insert(state.config.my_party_id, my_broadcast.clone());
-
-		// Take shared_secrets to move them to Round3
-		let shared_secrets = mem::take(&mut state.shared_secrets);
 
 		self.state = MithrilDkgState::Round3(MithrilRound3State {
 			config: state.config,
 			round1_broadcasts,
 			round2_broadcasts,
-			shared_secrets,
+			shared_secrets: mem::take(&mut state.shared_secrets),
 			global_randomness,
 			rho,
 			my_partial_pks,
@@ -885,59 +845,11 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 
 		if !state.broadcast_sent {
 			// Per Mithril paper DKGRound4 lines 11-16: Non-leaders MUST verify
-			// PK commitments BEFORE signing the transcript. This ensures we don't
-			// sign a transcript containing invalid commitments from malicious leaders.
-			for &subset in &state.config.my_subsets() {
-				let leader_id = state.config.get_leader(subset).ok_or_else(|| {
-					MithrilDkgError::InternalError(format!("no leader for subset {:b}", subset))
-				})?;
-				if leader_id != state.config.my_party_id {
-					// I'm not the leader for this subset - verify the leader's commitment
-					if let Some(contribution) = state.my_contributions.get(&subset) {
-						// Compute my expected partial PK
-						let expected_pk = compute_partial_pk(&state.rho, contribution, subset);
-						let expected_commitment = h_commit_pk(subset, &expected_pk);
+			// PK commitments BEFORE signing the transcript.
+			verify_leader_commitments_before_signing(state)?;
 
-						// Get the leader's commitment from Round 3
-						let round3 = state.round3_broadcasts.get(&leader_id).ok_or_else(|| {
-							MithrilDkgError::MissingData(format!(
-								"missing Round 3 from leader {} for subset {:b}",
-								leader_id, subset
-							))
-						})?;
-
-						let leader_commitment =
-							round3.partial_pk_commitments.get(&subset).ok_or_else(|| {
-								MithrilDkgError::MissingData(format!(
-									"missing PK commitment from leader {} for subset {:b}",
-									leader_id, subset
-								))
-							})?;
-
-						if *leader_commitment != expected_commitment {
-							return Err(MithrilDkgError::PkCommitmentMismatch {
-								party_id: leader_id,
-								subset,
-							});
-						}
-					}
-				}
-			}
-
-			let transcript_hash = compute_transcript_hash(
-				&state.round1_broadcasts,
-				&state.round2_broadcasts,
-				&state.round3_broadcasts,
-			);
-			let partial_output_hash = compute_partial_output_hash(&state.my_partial_pks);
-			let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
-			let signature = state.config.my_signer.sign(&signing_message);
-
-			let broadcast = MithrilRound4Broadcast {
-				party_id: state.config.my_party_id,
-				partial_public_keys: state.my_partial_pks.clone(),
-				transcript_signature: signature.as_ref().to_vec(),
-			};
+			// Sign and broadcast our partial PKs
+			let broadcast = create_round4_broadcast(state);
 			let msg = MithrilDkgMessage::Round4Broadcast(broadcast);
 			let data = bincode::serialize(&msg)
 				.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
@@ -988,67 +900,14 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 			&state.round3_broadcasts,
 		);
 
-		// Collect and verify partial PKs
-		let mut all_partial_pks: BTreeMap<SubsetMask, PartialPublicKey> = BTreeMap::new();
-
-		for (subset, pk) in &state.my_partial_pks {
-			all_partial_pks.insert(*subset, pk.clone());
-		}
-
-		for (&party_id, broadcast) in &state.received_broadcasts {
-			let partial_output_hash = compute_partial_output_hash(&broadcast.partial_public_keys);
-			let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
-
-			let public_key =
-				state.config.participant_public_keys.get(&party_id).ok_or_else(|| {
-					MithrilDkgError::MissingData(format!(
-						"missing public key for party {}",
-						party_id
-					))
-				})?;
-
-			// Verify transcript signature
-			if !S::verify_bytes(public_key, &signing_message, &broadcast.transcript_signature) {
-				return Err(MithrilDkgError::SignatureVerificationFailed { party_id });
-			}
-
-			// Verify PK commitments
-			let round3 = state.round3_broadcasts.get(&party_id).ok_or_else(|| {
-				MithrilDkgError::MissingData(format!("missing Round 3 from party {}", party_id))
-			})?;
-
-			for (&subset, pk) in &broadcast.partial_public_keys {
-				let expected = round3.partial_pk_commitments.get(&subset).ok_or_else(|| {
-					MithrilDkgError::MissingData(format!(
-						"missing PK commitment from party {} for subset {:b}",
-						party_id, subset
-					))
-				})?;
-				let actual = h_commit_pk(subset, pk);
-				if actual != *expected {
-					return Err(MithrilDkgError::PkCommitmentMismatch { party_id, subset });
-				}
-
-				// Verify PK if we have the shared secret
-				if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
-					let seed = h_keygen(subset, &shared_secret, &state.global_randomness);
-					let expected_contribution = derive_subset_contribution(&seed, ETA as i32);
-					let expected_pk =
-						compute_partial_pk(&state.rho, &expected_contribution, subset);
-					if pk.t != expected_pk.t {
-						return Err(MithrilDkgError::PkVerificationFailed { party_id, subset });
-					}
-				}
-
-				all_partial_pks.insert(subset, pk.clone());
-			}
-		}
+		// Collect our own partial PKs and verify+collect others'
+		let all_partial_pks = collect_and_verify_all_partial_pks(state, &transcript_hash)?;
 
 		// Combine partial PKs to get final public key
 		let public_key = combine_partial_pks(&state.rho, &all_partial_pks)?;
 
 		// Build private key share
-		let private_share = build_private_share(&state, &public_key)?;
+		let private_share = build_private_share(state, &public_key)?;
 
 		self.state =
 			MithrilDkgState::Complete(Box::new(MithrilDkgOutput { public_key, private_share }));
@@ -1060,6 +919,243 @@ impl<S: TranscriptSigner, R: RngCore + CryptoRng> MithrilDkg<S, R> {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Compute global randomness by concatenating all parties' randomness in sorted order.
+/// Returns the global randomness and a copy of this party's broadcast.
+fn compute_global_randomness<S: TranscriptSigner>(
+	config: &MithrilDkgConfig<S>,
+	received_broadcasts: &BTreeMap<ParticipantId, MithrilRound2Broadcast>,
+	my_randomness: [u8; RANDOMNESS_SIZE],
+) -> (Vec<u8>, MithrilRound2Broadcast) {
+	let my_broadcast = MithrilRound2Broadcast {
+		party_id: config.my_party_id,
+		randomness: my_randomness,
+	};
+
+	let mut all_randomness: Vec<_> = received_broadcasts.iter().collect();
+	all_randomness.push((&config.my_party_id, &my_broadcast));
+	all_randomness.sort_by_key(|(id, _)| *id);
+
+	let mut global_randomness = Vec::with_capacity(all_randomness.len() * RANDOMNESS_SIZE);
+	for (_, broadcast) in &all_randomness {
+		global_randomness.extend_from_slice(&broadcast.randomness);
+	}
+
+	(global_randomness, my_broadcast)
+}
+
+/// Compute contributions and partial PKs for all subsets this party belongs to.
+fn compute_my_contributions<S: TranscriptSigner>(
+	config: &MithrilDkgConfig<S>,
+	shared_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+	global_randomness: &[u8],
+	rho: &[u8; 32],
+) -> (
+	BTreeMap<SubsetMask, SubsetContribution>,
+	BTreeMap<SubsetMask, PartialPublicKey>,
+	BTreeMap<SubsetMask, [u8; 32]>,
+) {
+	let mut my_contributions = BTreeMap::new();
+	let mut my_partial_pks = BTreeMap::new();
+	let mut my_pk_commitments = BTreeMap::new();
+
+	// Compute contributions for leader subsets (includes partial PKs)
+	for &subset in &config.my_leader_subsets() {
+		if let Some(&shared_secret) = shared_secrets.get(&subset) {
+			let seed = h_keygen(subset, &shared_secret, global_randomness);
+			let contribution = derive_subset_contribution(&seed, ETA as i32);
+			let partial_pk = compute_partial_pk(rho, &contribution, subset);
+			let pk_commitment = h_commit_pk(subset, &partial_pk);
+
+			my_contributions.insert(subset, contribution);
+			my_partial_pks.insert(subset, partial_pk);
+			my_pk_commitments.insert(subset, pk_commitment);
+		}
+	}
+
+	// Compute contributions for non-leader subsets (no partial PKs needed)
+	for &subset in &config.my_subsets() {
+		if let alloc::collections::btree_map::Entry::Vacant(e) = my_contributions.entry(subset) {
+			if let Some(&shared_secret) = shared_secrets.get(&subset) {
+				let seed = h_keygen(subset, &shared_secret, global_randomness);
+				let contribution = derive_subset_contribution(&seed, ETA as i32);
+				e.insert(contribution);
+			}
+		}
+	}
+
+	(my_contributions, my_partial_pks, my_pk_commitments)
+}
+
+/// Build the complete Round1 broadcasts map including this party's own broadcast.
+fn build_round1_broadcasts_with_own<S: TranscriptSigner>(
+	mut round1_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
+	config: &MithrilDkgConfig<S>,
+	my_randomness: &[u8; RANDOMNESS_SIZE],
+) -> BTreeMap<ParticipantId, MithrilRound1Broadcast> {
+	round1_broadcasts.insert(
+		config.my_party_id,
+		MithrilRound1Broadcast {
+			party_id: config.my_party_id,
+			commitment: h_commit(config.my_party_id, my_randomness),
+		},
+	);
+	round1_broadcasts
+}
+
+/// Verify that leader commitments match our expected values before signing.
+/// Per Mithril paper DKGRound4 lines 11-16.
+fn verify_leader_commitments_before_signing<S: TranscriptSigner>(
+	state: &MithrilRound4State<S>,
+) -> Result<(), MithrilDkgError> {
+	for &subset in &state.config.my_subsets() {
+		let leader_id = state.config.get_leader(subset).ok_or_else(|| {
+			MithrilDkgError::InternalError(format!("no leader for subset {:b}", subset))
+		})?;
+
+		// Skip if we're the leader for this subset
+		if leader_id == state.config.my_party_id {
+			continue;
+		}
+
+		// Verify the leader's commitment matches our expected value
+		if let Some(contribution) = state.my_contributions.get(&subset) {
+			let expected_pk = compute_partial_pk(&state.rho, contribution, subset);
+			let expected_commitment = h_commit_pk(subset, &expected_pk);
+
+			let round3 = state.round3_broadcasts.get(&leader_id).ok_or_else(|| {
+				MithrilDkgError::MissingData(format!(
+					"missing Round 3 from leader {} for subset {:b}",
+					leader_id, subset
+				))
+			})?;
+
+			let leader_commitment = round3.partial_pk_commitments.get(&subset).ok_or_else(|| {
+				MithrilDkgError::MissingData(format!(
+					"missing PK commitment from leader {} for subset {:b}",
+					leader_id, subset
+				))
+			})?;
+
+			if *leader_commitment != expected_commitment {
+				return Err(MithrilDkgError::PkCommitmentMismatch {
+					party_id: leader_id,
+					subset,
+				});
+			}
+		}
+	}
+	Ok(())
+}
+
+/// Create the Round 4 broadcast message with our partial PKs and transcript signature.
+fn create_round4_broadcast<S: TranscriptSigner>(
+	state: &MithrilRound4State<S>,
+) -> MithrilRound4Broadcast {
+	let transcript_hash = compute_transcript_hash(
+		&state.round1_broadcasts,
+		&state.round2_broadcasts,
+		&state.round3_broadcasts,
+	);
+	let partial_output_hash = compute_partial_output_hash(&state.my_partial_pks);
+	let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
+	let signature = state.config.my_signer.sign(&signing_message);
+
+	MithrilRound4Broadcast {
+		party_id: state.config.my_party_id,
+		partial_public_keys: state.my_partial_pks.clone(),
+		transcript_signature: signature.as_ref().to_vec(),
+	}
+}
+
+/// Collect and verify all partial PKs from received broadcasts.
+fn collect_and_verify_all_partial_pks<S: TranscriptSigner>(
+	state: &MithrilRound4State<S>,
+	transcript_hash: &[u8; 32],
+) -> Result<BTreeMap<SubsetMask, PartialPublicKey>, MithrilDkgError> {
+	let mut all_partial_pks: BTreeMap<SubsetMask, PartialPublicKey> = BTreeMap::new();
+
+	// Add our own partial PKs
+	for (subset, pk) in &state.my_partial_pks {
+		all_partial_pks.insert(*subset, pk.clone());
+	}
+
+	// Verify and add other parties' partial PKs
+	for (&party_id, broadcast) in &state.received_broadcasts {
+		verify_party_broadcast(state, party_id, broadcast, transcript_hash)?;
+
+		for (&subset, pk) in &broadcast.partial_public_keys {
+			all_partial_pks.insert(subset, pk.clone());
+		}
+	}
+
+	Ok(all_partial_pks)
+}
+
+/// Verify a single party's Round 4 broadcast (signature and PK commitments).
+fn verify_party_broadcast<S: TranscriptSigner>(
+	state: &MithrilRound4State<S>,
+	party_id: ParticipantId,
+	broadcast: &MithrilRound4Broadcast,
+	transcript_hash: &[u8; 32],
+) -> Result<(), MithrilDkgError> {
+	// Verify transcript signature
+	let partial_output_hash = compute_partial_output_hash(&broadcast.partial_public_keys);
+	let signing_message = compute_signing_message(transcript_hash, &partial_output_hash);
+
+	let public_key = state.config.participant_public_keys.get(&party_id).ok_or_else(|| {
+		MithrilDkgError::MissingData(format!("missing public key for party {}", party_id))
+	})?;
+
+	if !S::verify_bytes(public_key, &signing_message, &broadcast.transcript_signature) {
+		return Err(MithrilDkgError::SignatureVerificationFailed { party_id });
+	}
+
+	// Verify PK commitments match Round 3
+	let round3 = state.round3_broadcasts.get(&party_id).ok_or_else(|| {
+		MithrilDkgError::MissingData(format!("missing Round 3 from party {}", party_id))
+	})?;
+
+	for (&subset, pk) in &broadcast.partial_public_keys {
+		verify_partial_pk_commitment(state, party_id, subset, pk, round3)?;
+	}
+
+	Ok(())
+}
+
+/// Verify a single partial PK matches its commitment and (if possible) the shared secret.
+fn verify_partial_pk_commitment<S: TranscriptSigner>(
+	state: &MithrilRound4State<S>,
+	party_id: ParticipantId,
+	subset: SubsetMask,
+	pk: &PartialPublicKey,
+	round3: &MithrilRound3Broadcast,
+) -> Result<(), MithrilDkgError> {
+	// Check commitment matches
+	let expected = round3.partial_pk_commitments.get(&subset).ok_or_else(|| {
+		MithrilDkgError::MissingData(format!(
+			"missing PK commitment from party {} for subset {:b}",
+			party_id, subset
+		))
+	})?;
+
+	let actual = h_commit_pk(subset, pk);
+	if actual != *expected {
+		return Err(MithrilDkgError::PkCommitmentMismatch { party_id, subset });
+	}
+
+	// If we have the shared secret, verify the PK is correct
+	if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
+		let seed = h_keygen(subset, &shared_secret, &state.global_randomness);
+		let expected_contribution = derive_subset_contribution(&seed, ETA as i32);
+		let expected_pk = compute_partial_pk(&state.rho, &expected_contribution, subset);
+		if pk.t != expected_pk.t {
+			return Err(MithrilDkgError::PkVerificationFailed { party_id, subset });
+		}
+	}
+
+	Ok(())
+}
 
 fn compute_partial_pk(
 	rho: &[u8; 32],
