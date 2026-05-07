@@ -216,39 +216,44 @@ pub fn recover_share(
 			}
 		}
 
-		// Find the corresponding share
-		if let Some(share) = shares.get(&u_translated) {
-			// Convert share to NTT domain and accumulate
-			let mut s1_ntt = share.s1_share.clone();
-			let mut s2_ntt = share.s2_share.clone();
+		// Find the corresponding share - MUST exist for correct recovery
+		let share = shares.get(&u_translated).ok_or_else(|| {
+			ThresholdError::InvalidConfiguration(format!(
+				"Missing required share for subset mask 0x{:04x} (pattern 0x{:04x})",
+				u_translated, pattern_u
+			))
+		})?;
 
-			for s1_poly in s1_ntt.vec.iter_mut().take(L) {
-				crate::circl_ntt::ntt(s1_poly);
-			}
-			for s2_poly in s2_ntt.vec.iter_mut().take(K) {
-				crate::circl_ntt::ntt(s2_poly);
-			}
+		// Convert share to NTT domain and accumulate
+		let mut s1_ntt = share.s1_share.clone();
+		let mut s2_ntt = share.s2_share.clone();
 
-			// Add in NTT domain (pointwise addition)
-			// Use wrapping_add to handle overflow for large configurations
-			for (combined_poly, ntt_poly) in
-				s1_combined.vec.iter_mut().zip(s1_ntt.vec.iter()).take(L)
+		for s1_poly in s1_ntt.vec.iter_mut().take(L) {
+			crate::circl_ntt::ntt(s1_poly);
+		}
+		for s2_poly in s2_ntt.vec.iter_mut().take(K) {
+			crate::circl_ntt::ntt(s2_poly);
+		}
+
+		// Add in NTT domain (pointwise addition)
+		// Use wrapping_add to handle overflow for large configurations
+		for (combined_poly, ntt_poly) in
+			s1_combined.vec.iter_mut().zip(s1_ntt.vec.iter()).take(L)
+		{
+			for (combined_coeff, ntt_coeff) in
+				combined_poly.coeffs.iter_mut().zip(ntt_poly.coeffs.iter())
 			{
-				for (combined_coeff, ntt_coeff) in
-					combined_poly.coeffs.iter_mut().zip(ntt_poly.coeffs.iter())
-				{
-					*combined_coeff = combined_coeff.wrapping_add(*ntt_coeff);
-				}
+				*combined_coeff = combined_coeff.wrapping_add(*ntt_coeff);
 			}
+		}
 
-			for (combined_poly, ntt_poly) in
-				s2_combined.vec.iter_mut().zip(s2_ntt.vec.iter()).take(K)
+		for (combined_poly, ntt_poly) in
+			s2_combined.vec.iter_mut().zip(s2_ntt.vec.iter()).take(K)
+		{
+			for (combined_coeff, ntt_coeff) in
+				combined_poly.coeffs.iter_mut().zip(ntt_poly.coeffs.iter())
 			{
-				for (combined_coeff, ntt_coeff) in
-					combined_poly.coeffs.iter_mut().zip(ntt_poly.coeffs.iter())
-				{
-					*combined_coeff = combined_coeff.wrapping_add(*ntt_coeff);
-				}
+				*combined_coeff = combined_coeff.wrapping_add(*ntt_coeff);
 			}
 		}
 	}
@@ -445,6 +450,37 @@ mod tests {
 				);
 			},
 			Ok(_) => panic!("Expected error for unknown active party"),
+		}
+	}
+
+	#[test]
+	fn test_recover_share_rejects_missing_share() {
+		use crate::participants::ParticipantList;
+		use alloc::collections::BTreeMap;
+
+		// Create DKG participants: [10, 20, 30]
+		let dkg_participants = ParticipantList::new(&[10, 20, 30]).unwrap();
+
+		// Empty shares map - no shares at all
+		let shares: BTreeMap<u16, SecretShare> = BTreeMap::new();
+
+		// Valid active parties
+		let active_parties = vec![10, 20];
+
+		// This should fail because the required shares are missing
+		let result = recover_share(&shares, 10, &active_parties, 2, 3, &dkg_participants);
+
+		assert!(result.is_err());
+		match result {
+			Err(err) => {
+				let err_msg = err.to_string();
+				assert!(
+					err_msg.contains("Missing required share"),
+					"Expected error about missing share, got: {}",
+					err_msg
+				);
+			},
+			Ok(_) => panic!("Expected error for missing share"),
 		}
 	}
 }
