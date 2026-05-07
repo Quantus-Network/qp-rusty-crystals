@@ -192,8 +192,8 @@ impl ThresholdSigner {
 
 	/// Get the DKG participants list.
 	///
-	/// This returns the original participant set from DKG, which is used to validate
-	/// that signing participants are a valid subset (HQ3: act ⊆ [N]).
+	/// Returns the original participant set from DKG, used to validate
+	/// that signing participants are a valid subset.
 	pub fn dkg_participants(&self) -> &crate::participants::ParticipantList {
 		self.private_key.dkg_participants()
 	}
@@ -252,13 +252,6 @@ impl ThresholdSigner {
 	/// * `context` - Optional context string (max 255 bytes)
 	/// * `other_round1` - Round 1 broadcasts from other participating parties
 	///
-	/// # Security Note (HQ2)
-	///
-	/// This function generates our Round 2 broadcast. Verification of OTHER parties'
-	/// Round 2 commitments against their Round 1 hashes must be done separately before
-	/// using their data. When using `DilithiumSignProtocol`, this verification is
-	/// performed automatically in `Round3Generate` via `verify_round2_commitments()`.
-	///
 	/// # Errors
 	///
 	/// Returns an error if:
@@ -303,7 +296,6 @@ impl ThresholdSigner {
 		let other_party_ids: Vec<u32> = other_round1.iter().map(|r1| r1.party_id).collect();
 
 		// Process Round 2 - sets up our own commitments
-		// Verification and aggregation of others' commitments happens in round3_respond() (HQ2)
 		let round2_data = process_round2(
 			&self.private_key,
 			&self.public_key,
@@ -337,7 +329,7 @@ impl ThresholdSigner {
 	/// * `other_round1` - Round 1 broadcasts from other parties (for commitment verification)
 	/// * `other_round2` - Round 2 broadcasts from other participating parties
 	///
-	/// # Security (HQ2)
+	/// # Security
 	///
 	/// This function verifies that each party's Round 2 commitment data matches their
 	/// Round 1 commitment hash BEFORE aggregating. This prevents rushing adversary attacks.
@@ -347,7 +339,7 @@ impl ThresholdSigner {
 	/// Returns an error if:
 	/// - The signer is not in the `AfterRound2` state
 	/// - Response computation fails
-	/// - Any party's commitment verification fails (HQ2)
+	/// - Any party's commitment verification fails
 	///
 	/// # State Transition
 	///
@@ -370,14 +362,14 @@ impl ThresholdSigner {
 			},
 		};
 
-		// HQ2: Verify and aggregate commitments from Round 2 broadcasts
+		// Verify and aggregate commitments from Round 2 broadcasts
 		let k = self.config.k_iterations() as usize;
 		let single_commitment_size = 8 * 736; // K * POLY_Q_SIZE
 		let tr = self.public_key.tr();
 
 		for r2 in other_round2 {
 			if !r2.commitment_data.is_empty() {
-				// HQ2: Find matching Round 1 broadcast and verify commitment hash
+				// Find matching Round 1 broadcast and verify commitment hash
 				let r1 = other_round1
 					.iter()
 					.find(|r1| r1.party_id == r2.party_id)

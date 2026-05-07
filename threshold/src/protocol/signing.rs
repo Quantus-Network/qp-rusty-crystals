@@ -139,7 +139,7 @@ pub(crate) fn compute_commitment_hash(
 	hash
 }
 
-/// Verify that commitment data matches the commitment hash from Round 1 (HQ2).
+/// Verify that commitment data matches the commitment hash from Round 1.
 ///
 /// This prevents rushing adversary attacks where a malicious party could
 /// adaptively choose their w_i values after seeing other parties' commitments.
@@ -336,17 +336,11 @@ fn pack_w_dilithium(w: &polyvec::Polyveck, buf: &mut [u8]) {
 }
 
 /// Get threshold parameters (r, r', nu) for a configuration.
+///
 /// Returns (r, r_prime, nu) where:
 /// - r is the rejection sampling radius
 /// - r_prime is the hyperball sampling radius
-/// - nu is the scaling factor for ML-DSA-87 (must be 7, not 3) (HQ6)
-///
-/// Note: The nu parameter must match the security level:
-/// - ML-DSA-44: nu = 3
-/// - ML-DSA-65: nu = 5
-/// - ML-DSA-87: nu = 7
-///
-/// This implementation targets ML-DSA-87, so nu = 7.
+/// - nu is the scaling factor (7 for ML-DSA-87)
 ///
 /// # Errors
 ///
@@ -410,12 +404,6 @@ pub(crate) fn pack_round1_commitment(round1: &Round1Data, config: &ThresholdConf
 /// # Arguments
 ///
 /// * `other_party_ids` - IDs of other parties in this signing session
-///
-/// # Security Note (HQ2)
-///
-/// Verification and aggregation of other parties' commitment data happens in
-/// `round3_respond()`, which verifies each party's Round 2 data against their
-/// Round 1 hash before aggregating.
 pub(crate) fn process_round2(
 	private_key: &PrivateKeyShare,
 	public_key: &PublicKey,
@@ -665,12 +653,7 @@ pub(crate) fn unpack_responses(
 /// Check if a single party's z response for one iteration satisfies the norm bound.
 /// Returns true if the response is valid (within bounds).
 ///
-/// Note: This only checks the norm bound, not whether the response is "meaningful".
-/// A party could submit zeros or near-zeros that pass this check but contribute
-/// nothing useful. This is fine because:
-/// 1. We assume up to t-1 malicious parties in threshold signing
-/// 2. The final signature verification catches invalid aggregated signatures
-/// 3. A malicious party gains nothing by submitting zeros vs garbage
+/// Checks the norm bound on a party's response vector.
 fn check_party_z_norm(z_i: &polyvec::Polyvecl, gamma1_minus_beta: i32) -> bool {
 	for z_poly in z_i.vec.iter().take(L) {
 		for coeff in z_poly.coeffs.iter() {

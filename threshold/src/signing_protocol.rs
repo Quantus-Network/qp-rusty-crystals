@@ -412,7 +412,7 @@ impl DilithiumSignProtocol {
 	/// - `participants` contains duplicates
 	/// - `my_participant_id` is not in `participants`
 	/// - `leader_id` is not in `participants`
-	/// - Any participant is not in the original DKG participant set (HQ3: act ⊆ [N])
+	/// - Any participant is not in the original DKG participant set
 	///
 	/// # Security Warning
 	///
@@ -443,7 +443,7 @@ impl DilithiumSignProtocol {
 			));
 		}
 
-		// HQ3: Validate that all signing participants are valid DKG participants (act ⊆ [N])
+		// Validate all signing participants are valid DKG participants
 		let dkg_participants = signer.dkg_participants();
 		for &participant in &participants {
 			if !dkg_participants.contains(participant) {
@@ -725,7 +725,7 @@ impl DilithiumSignProtocol {
 					.cloned()
 					.collect();
 
-				// Generate Round 3 response (HQ2: verification happens inside round3_respond)
+				// Generate Round 3 response
 				let r3 = self
 					.signer
 					.round3_respond(&others_r1, &others_r2)
@@ -809,7 +809,7 @@ impl DilithiumSignProtocol {
 			SignProtocolState::WaitingForLeaderDecision => {
 				// Follower: check if we received leader's decision
 				if let Some(signature) = self.received_signature.take() {
-					// Verify the signature before accepting it (H4: don't trust the leader blindly)
+					// Verify the signature before accepting it
 					let public_key = self.signer.public_key();
 					if crate::verify_signature(public_key, &self.message, &self.context, &signature)
 					{
@@ -1145,9 +1145,7 @@ pub fn run_local_signing_with_stats(
 	let participants: Vec<ParticipantId> = signers.iter().map(|s| s.party_id()).collect();
 	let leader_id = *participants.iter().min().unwrap();
 
-	// Create protocol instances
-	// Note: In production, each party must generate their own cryptographically random seed.
-	// For this local test helper, we use deterministic seeds derived from party IDs.
+	// Create protocol instances with deterministic seeds for testing
 	let mut protocols: Vec<DilithiumSignProtocol> = signers
 		.into_iter()
 		.enumerate()
@@ -1822,7 +1820,7 @@ mod tests {
 
 	#[test]
 	fn test_follower_rejects_invalid_signature_from_leader() {
-		// H4: Followers must verify signatures before accepting them
+		// Followers must verify signatures before accepting them
 		let config = ThresholdConfig::new(2, 3).unwrap();
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 
@@ -1864,7 +1862,7 @@ mod tests {
 
 	#[test]
 	fn test_follower_accepts_valid_signature_from_leader() {
-		// H4: Followers should accept valid signatures
+		// Followers should accept valid signatures from the leader
 		let config = ThresholdConfig::new(2, 3).unwrap();
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 

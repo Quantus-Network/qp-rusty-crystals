@@ -117,7 +117,7 @@ pub enum ThresholdError {
 		/// Party ID that sent duplicate.
 		party_id: u32,
 	},
-	/// Commitment data does not match commitment hash (HQ2).
+	/// Commitment data does not match commitment hash.
 	///
 	/// This indicates a potential rushing adversary attack where a party
 	/// tried to change their commitment after seeing other parties' values.

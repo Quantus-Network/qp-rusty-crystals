@@ -914,9 +914,6 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			broadcast_sent: false,
 		});
 
-		// Note: sensitive data (shared_secrets, global_randomness, my_contributions)
-		// has been moved to the new state, so no explicit zeroization needed here.
-
 		// Process any buffered Round 4 messages
 		self.process_buffered_round4();
 
@@ -2794,8 +2791,6 @@ mod tests {
 		assert!(count > 0, "Messages should be buffered");
 
 		// Send messages from different (fake) parties to verify buffer accepts multiple senders
-		// Note: These will be from invalid parties but should still be buffered
-		// (validation happens when processing, not when buffering)
 		for party_id in 0..10u32 {
 			let round3_broadcast =
 				MithrilRound3Broadcast { party_id, partial_pk_commitments: BTreeMap::new() };
