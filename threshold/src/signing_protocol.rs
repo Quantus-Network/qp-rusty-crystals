@@ -1349,7 +1349,6 @@ mod tests {
 		)
 		.unwrap();
 
-
 		let r2 = Round2Broadcast::new(2, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 		let msg = SigningMessage::Round2(r2.clone());
 		let serialized = protocol.serialize_message(&msg).unwrap();
@@ -1804,7 +1803,6 @@ mod tests {
 			[0xAA; 32],
 		)
 		.unwrap();
-
 
 		// Start Round 1
 		let _ = protocol.poke().unwrap();
