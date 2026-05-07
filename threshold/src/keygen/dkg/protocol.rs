@@ -1089,6 +1089,17 @@ fn collect_and_verify_all_partial_pks<S: TranscriptSigner>(
 		}
 	}
 
+	// Verify we have a partial PK for every subset
+	let expected_subsets = state.config.all_subsets();
+	for subset in &expected_subsets {
+		if !all_partial_pks.contains_key(subset) {
+			return Err(MithrilDkgError::MissingData(format!(
+				"missing partial public key for subset {:b}",
+				subset
+			)));
+		}
+	}
+
 	Ok(all_partial_pks)
 }
 
@@ -2771,5 +2782,168 @@ mod tests {
 		// Even if the buffered message is "invalid" in some sense, it shouldn't crash
 		let result = dkgs[0].poke();
 		assert!(result.is_ok(), "Processing buffered messages should not crash");
+	}
+
+	#[test]
+	fn test_complete_fails_if_subset_missing_partial_pk() {
+		// Run a 2-of-3 DKG to near completion, then manually remove a partial PK
+		// to verify that collect_and_verify_all_partial_pks catches the missing subset.
+		//
+		// In 2-of-3, subsets are: 3 (parties 0,1), 5 (parties 0,2), 6 (parties 1,2)
+		// Leaders: subset 3 -> party 0, subset 5 -> party 0, subset 6 -> party 1
+		// So party 0 is leader for 2 subsets, party 1 is leader for 1 subset.
+		// We need to sabotage party 1's broadcast (remove subset 6's PK) to trigger the check.
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let rng = rand::rngs::StdRng::seed_from_u64(999);
+
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = (0..3).collect();
+
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
+		for (i, pk) in public_keys.into_iter().enumerate() {
+			pk_map.insert(i as ParticipantId, pk);
+		}
+
+		let mut dkgs: Vec<MithrilDkg<TestSigner, _>> = signers
+			.into_iter()
+			.enumerate()
+			.map(|(i, signer)| {
+				let config = MithrilDkgConfig::new(
+					threshold_config,
+					i as ParticipantId,
+					participants.clone(),
+					signer,
+					pk_map.clone(),
+				)
+				.unwrap();
+				MithrilDkg::new(config, rng.clone())
+			})
+			.collect();
+
+		// Run DKG through Round 3 (all broadcasts sent and received)
+		let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> = vec![Vec::new(); 3];
+
+		// Run until all parties are in Round 4 and have sent their broadcasts,
+		// but stop party 0 before it receives party 1's Round 4 broadcast
+		// (party 1 is the leader for subset 6, so we need to sabotage their broadcast)
+		let mut party0_round4_from_party1_received = false;
+		'outer: for _ in 0..100 {
+			// Deliver pending messages
+			for party_id in 0..3 {
+				let messages = mem::take(&mut pending_messages[party_id]);
+				for (from, data) in messages {
+					// For party 0, hold back party 1's Round 4 broadcast
+					if party_id == 0 && from == 1 {
+						if let Ok(msg) = bincode::deserialize::<MithrilDkgMessage>(&data) {
+							if matches!(msg, MithrilDkgMessage::Round4Broadcast(_)) {
+								// Don't deliver - we'll deliver a sabotaged version
+								party0_round4_from_party1_received = true;
+								continue;
+							}
+						}
+					}
+					dkgs[party_id].message(from, data).unwrap();
+				}
+			}
+
+			// Poke all parties
+			for party_id in 0..3 {
+				match dkgs[party_id].poke().unwrap() {
+					MithrilAction::SendMany(data) => {
+						for (other, pending) in pending_messages.iter_mut().enumerate() {
+							if other != party_id {
+								pending.push((party_id as ParticipantId, data.clone()));
+							}
+						}
+					}
+					MithrilAction::SendPrivate(to, data) => {
+						pending_messages[to as usize].push((party_id as ParticipantId, data));
+					}
+					MithrilAction::Wait => {}
+					MithrilAction::Return(_) => {}
+				}
+			}
+
+			// Check if party 0 is in Round 4 and we've intercepted party 1's broadcast
+			if party0_round4_from_party1_received {
+				if let MithrilDkgState::Round4(state) = &dkgs[0].state {
+					if state.broadcast_sent {
+						break 'outer;
+					}
+				}
+			}
+		}
+
+		// Verify party 0 is in Round 4
+		{
+			let state = match &dkgs[0].state {
+				MithrilDkgState::Round4(s) => s,
+				other => panic!("Expected Round4 state, got {:?}", other),
+			};
+			assert!(state.broadcast_sent, "Party 0 should have sent broadcast");
+			// Party 0 should have received party 2's broadcast but not party 1's
+			assert!(!state.received_broadcasts.contains_key(&1), "Should not have party 1's broadcast yet");
+		}
+
+		// Create a sabotaged broadcast from party 1 with empty partial PKs
+		// Party 1 is leader for subset 6, so removing their PKs will leave subset 6 missing
+		let sabotaged_partial_pks: BTreeMap<SubsetMask, PartialPublicKey> = BTreeMap::new();
+
+		// Compute the transcript hash (same as in complete_inner)
+		let transcript_hash = {
+			let state = match &dkgs[0].state {
+				MithrilDkgState::Round4(s) => s,
+				_ => panic!("Expected Round4"),
+			};
+			compute_transcript_hash(
+				&state.round1_broadcasts,
+				&state.round2_broadcasts,
+				&state.round3_broadcasts,
+			)
+		};
+
+		// Create a valid signature over the sabotaged (empty) partial PKs
+		let partial_output_hash = compute_partial_output_hash(&sabotaged_partial_pks);
+		let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
+		let signer = TestSigner { id: 1 }; // Party 1's signer
+		let valid_signature = signer.sign(&signing_message);
+
+		let sabotaged_broadcast = MithrilRound4Broadcast {
+			party_id: 1,
+			partial_public_keys: sabotaged_partial_pks,
+			transcript_signature: valid_signature,
+		};
+
+		// Insert the sabotaged broadcast and also ensure party 2's broadcast is there
+		if let MithrilDkgState::Round4(state) = &mut dkgs[0].state {
+			state.received_broadcasts.insert(1, sabotaged_broadcast);
+
+			// Make sure we also have party 2's broadcast (they have no leader subsets, so empty PKs is fine)
+			if !state.received_broadcasts.contains_key(&2) {
+				let empty_pks: BTreeMap<SubsetMask, PartialPublicKey> = BTreeMap::new();
+				let partial_output_hash = compute_partial_output_hash(&empty_pks);
+				let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
+				let signer = TestSigner { id: 2 };
+				let sig = signer.sign(&signing_message);
+				state.received_broadcasts.insert(2, MithrilRound4Broadcast {
+					party_id: 2,
+					partial_public_keys: empty_pks,
+					transcript_signature: sig,
+				});
+			}
+		}
+
+		// Now try to complete - should fail with missing partial PK error for subset 6
+		let result = dkgs[0].complete();
+		assert!(result.is_err(), "Complete should fail with missing partial PK");
+
+		let err = result.unwrap_err();
+		let err_msg = format!("{:?}", err);
+		assert!(
+			err_msg.contains("missing partial public key"),
+			"Error should mention missing partial PK, got: {}",
+			err_msg
+		);
 	}
 }
