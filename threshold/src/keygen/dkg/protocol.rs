@@ -452,18 +452,40 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					return Ok(()); // Sender mismatch, ignore
 				}
 				if let MithrilDkgState::Round1(state) = &mut self.state {
+					// Verify subset_mask is a valid subset for this threshold config
+					// (prevents attacker from using fake subset masks)
+					if !state.config.is_valid_subset(private.subset_mask) {
+						warn!(
+							"DKG: Round1Private with invalid subset {:b} (from party {})",
+							private.subset_mask, from
+						);
+						return Ok(()); // Invalid subset, ignore
+					}
+
+					// M2: Verify sender is the leader for this subset
 					let expected_leader = state.config.get_leader(private.subset_mask);
-					if expected_leader == Some(from) {
-						state
-							.received_shared_secrets
-							.entry(private.subset_mask)
-							.or_insert(private.shared_secret);
-					} else {
+					if expected_leader != Some(from) {
 						warn!(
 							"DKG: Round1Private from non-leader: party {} sent for subset {:b} but leader is {:?}",
 							from, private.subset_mask, expected_leader
 						);
+						return Ok(()); // Not the leader, ignore
 					}
+
+					// M2: Verify we are actually a member of this subset
+					// (prevents malicious leader from sending K_S to non-member parties)
+					if !state.config.is_in_subset(private.subset_mask) {
+						warn!(
+							"DKG: Round1Private for subset {:b} but we are not a member (from party {})",
+							private.subset_mask, from
+						);
+						return Ok(()); // Not in subset, ignore
+					}
+
+					state
+						.received_shared_secrets
+						.entry(private.subset_mask)
+						.or_insert(private.shared_secret);
 				}
 				// Private messages don't need buffering - they're only relevant in Round 1
 			},
@@ -2353,6 +2375,205 @@ mod tests {
 		if let MithrilDkgState::Round1(state) = &dkg.state {
 			assert!(!state.received_broadcasts.contains_key(&1));
 			assert!(!state.received_broadcasts.contains_key(&2));
+		} else {
+			panic!("Expected Round1 state");
+		}
+	}
+
+	/// Test that a leader's Round1Private for a subset is rejected if receiver is not in that
+	/// subset. This prevents a malicious leader from sending K_S to parties outside the subset.
+	#[test]
+	fn test_round1_private_rejected_for_non_member() {
+		// 2-of-3 DKG: subsets are {0,1}=0b011, {0,2}=0b101, {1,2}=0b110
+		// Party 0 is leader of subsets 0b011 and 0b101
+		// Party 1 is leader of subset 0b110
+		// Party 2 is never a leader
+		//
+		// Test: Party 0 (leader of 0b110's subset? No - leader of 0b011) tries to send
+		// a Round1Private for subset 0b110 to party 2. But party 0 is NOT the leader
+		// of subset 0b110 (party 1 is), so this should be rejected.
+		//
+		// Better test: Party 1 (leader of 0b110) sends K_S for subset 0b110 to party 0.
+		// Party 0 is NOT in subset 0b110 (members are 1,2), so it should reject.
+
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = vec![0, 1, 2];
+
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
+		for &p in &participants {
+			pk_map.insert(p, p);
+		}
+
+		// Create party 0's DKG
+		let config = MithrilDkgConfig::new(
+			threshold_config,
+			0, // We are party 0
+			participants,
+			TestSigner { id: 0 },
+			pk_map,
+		)
+		.unwrap();
+
+		let seed = [100u8; 32];
+		let mut dkg = MithrilDkg::new(config, seed);
+
+		// Start the DKG to get into Round1 state
+		let _ = dkg.poke().unwrap();
+
+		// Party 1 is the leader of subset 0b110 = {1, 2}
+		// Party 0 is NOT in subset 0b110
+		// Create a Round1Private from party 1 for subset 0b110
+		let private = MithrilRound1Private {
+			from_party_id: 1,
+			subset_mask: 0b110, // Subset {1, 2} - party 0 is not a member
+			shared_secret: [42u8; 32],
+		};
+		let msg = MithrilDkgMessage::Round1Private(private);
+		let data = borsh::to_vec(&msg).unwrap();
+
+		// Send it from party 1 (legitimate leader of this subset)
+		dkg.message(1, data).unwrap();
+
+		// The message should be rejected because party 0 is not in subset 0b110
+		if let MithrilDkgState::Round1(state) = &dkg.state {
+			assert!(
+				!state.received_shared_secrets.contains_key(&0b110),
+				"Party 0 should not accept K_S for subset 0b110 (not a member)"
+			);
+		} else {
+			panic!("Expected Round1 state");
+		}
+	}
+
+	/// Test that a legitimate Round1Private is accepted when receiver is in the subset.
+	#[test]
+	fn test_round1_private_accepted_for_member() {
+		// 2-of-3 DKG: subsets are {0,1}=0b011, {0,2}=0b101, {1,2}=0b110
+		// Party 0 is leader of subsets 0b011 and 0b101
+		//
+		// Test: Party 0 sends Round1Private for subset 0b011 to party 1.
+		// Party 1 IS in subset 0b011, so it should be accepted.
+
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = vec![0, 1, 2];
+
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
+		for &p in &participants {
+			pk_map.insert(p, p);
+		}
+
+		// Create party 1's DKG
+		let config = MithrilDkgConfig::new(
+			threshold_config,
+			1, // We are party 1
+			participants,
+			TestSigner { id: 1 },
+			pk_map,
+		)
+		.unwrap();
+
+		let seed = [101u8; 32];
+		let mut dkg = MithrilDkg::new(config, seed);
+
+		// Start the DKG to get into Round1 state
+		let _ = dkg.poke().unwrap();
+
+		// Party 0 is the leader of subset 0b011 = {0, 1}
+		// Party 1 IS in subset 0b011
+		// Create a Round1Private from party 0 for subset 0b011
+		let private = MithrilRound1Private {
+			from_party_id: 0,
+			subset_mask: 0b011, // Subset {0, 1} - party 1 is a member
+			shared_secret: [42u8; 32],
+		};
+		let msg = MithrilDkgMessage::Round1Private(private);
+		let data = borsh::to_vec(&msg).unwrap();
+
+		// Send it from party 0 (legitimate leader of this subset)
+		dkg.message(0, data).unwrap();
+
+		// The message should be accepted because party 1 is in subset 0b011
+		if let MithrilDkgState::Round1(state) = &dkg.state {
+			assert!(
+				state.received_shared_secrets.contains_key(&0b011),
+				"Party 1 should accept K_S for subset 0b011 (is a member)"
+			);
+			assert_eq!(
+				state.received_shared_secrets.get(&0b011),
+				Some(&[42u8; 32]),
+				"Shared secret should match"
+			);
+		} else {
+			panic!("Expected Round1 state");
+		}
+	}
+
+	/// Test that Round1Private with an invalid subset mask is rejected.
+	/// Invalid subsets include wrong size or bits outside valid participant range.
+	#[test]
+	fn test_round1_private_rejected_for_invalid_subset() {
+		// 2-of-3 DKG: valid subsets have size k = 3 - 2 + 1 = 2
+		// Valid subsets: 0b011, 0b101, 0b110
+		// Invalid: 0b111 (size 3), 0b001 (size 1), 0b1000 (bit outside range)
+
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = vec![0, 1, 2];
+
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
+		for &p in &participants {
+			pk_map.insert(p, p);
+		}
+
+		// Create party 1's DKG
+		let config = MithrilDkgConfig::new(
+			threshold_config,
+			1, // We are party 1
+			participants,
+			TestSigner { id: 1 },
+			pk_map,
+		)
+		.unwrap();
+
+		let seed = [102u8; 32];
+		let mut dkg = MithrilDkg::new(config, seed);
+
+		// Start the DKG to get into Round1 state
+		let _ = dkg.poke().unwrap();
+
+		// Test 1: subset 0b111 (size 3, but k=2 required) - party 0 would be leader
+		let private = MithrilRound1Private {
+			from_party_id: 0,
+			subset_mask: 0b111, // Invalid: size 3, not 2
+			shared_secret: [42u8; 32],
+		};
+		let msg = MithrilDkgMessage::Round1Private(private);
+		let data = borsh::to_vec(&msg).unwrap();
+		dkg.message(0, data).unwrap();
+
+		if let MithrilDkgState::Round1(state) = &dkg.state {
+			assert!(
+				!state.received_shared_secrets.contains_key(&0b111),
+				"Should reject invalid subset 0b111 (wrong size)"
+			);
+		} else {
+			panic!("Expected Round1 state");
+		}
+
+		// Test 2: subset 0b001 (size 1, but k=2 required) - party 0 would be leader
+		let private = MithrilRound1Private {
+			from_party_id: 0,
+			subset_mask: 0b001, // Invalid: size 1, not 2
+			shared_secret: [43u8; 32],
+		};
+		let msg = MithrilDkgMessage::Round1Private(private);
+		let data = borsh::to_vec(&msg).unwrap();
+		dkg.message(0, data).unwrap();
+
+		if let MithrilDkgState::Round1(state) = &dkg.state {
+			assert!(
+				!state.received_shared_secrets.contains_key(&0b001),
+				"Should reject invalid subset 0b001 (wrong size)"
+			);
 		} else {
 			panic!("Expected Round1 state");
 		}

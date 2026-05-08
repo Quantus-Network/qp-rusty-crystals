@@ -260,6 +260,25 @@ impl<S: TranscriptSigner> MithrilDkgConfig<S> {
 		self.all_subsets().into_iter().filter(|&mask| self.is_in_subset(mask)).collect()
 	}
 
+	/// Check if a subset mask is valid for this threshold configuration.
+	///
+	/// A valid subset has exactly `k = n - t + 1` members, where each member
+	/// is a participant in the DKG.
+	pub fn is_valid_subset(&self, subset_mask: SubsetMask) -> bool {
+		let n = self.total_parties();
+		let t = self.threshold();
+		let k = n - t + 1;
+
+		// Check correct number of bits set
+		if subset_mask.count_ones() != k {
+			return false;
+		}
+
+		// Check all set bits correspond to valid participant indices
+		let max_valid_mask = (1u16 << n) - 1;
+		(subset_mask & !max_valid_mask) == 0
+	}
+
 	/// Get all valid subsets for this threshold configuration.
 	///
 	/// # Panics
@@ -740,6 +759,41 @@ mod tests {
 
 		assert!(result.is_err());
 		assert_eq!(result.unwrap_err(), "duplicate participant ID in all_participants");
+	}
+
+	#[test]
+	fn test_is_valid_subset() {
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let mut public_keys = BTreeMap::new();
+		public_keys.insert(0, 0u32);
+		public_keys.insert(1, 1u32);
+		public_keys.insert(2, 2u32);
+
+		let config: MithrilDkgConfig<TestSigner> = MithrilDkgConfig::new(
+			threshold_config,
+			0,
+			vec![0, 1, 2],
+			TestSigner { id: 0 },
+			public_keys,
+		)
+		.unwrap();
+
+		// For 2-of-3: k = 3 - 2 + 1 = 2, so valid subsets have exactly 2 members
+		// Valid subsets: 0b011, 0b101, 0b110
+		assert!(config.is_valid_subset(0b011), "0b011 should be valid");
+		assert!(config.is_valid_subset(0b101), "0b101 should be valid");
+		assert!(config.is_valid_subset(0b110), "0b110 should be valid");
+
+		// Invalid: wrong size
+		assert!(!config.is_valid_subset(0b111), "0b111 invalid: size 3, need 2");
+		assert!(!config.is_valid_subset(0b001), "0b001 invalid: size 1, need 2");
+		assert!(!config.is_valid_subset(0b010), "0b010 invalid: size 1, need 2");
+		assert!(!config.is_valid_subset(0b100), "0b100 invalid: size 1, need 2");
+		assert!(!config.is_valid_subset(0b000), "0b000 invalid: size 0, need 2");
+
+		// Invalid: bits outside valid participant range (only 3 participants, so bits 0-2 valid)
+		assert!(!config.is_valid_subset(0b1001), "0b1001 invalid: bit 3 set, only 3 participants");
+		assert!(!config.is_valid_subset(0b1010), "0b1010 invalid: bit 3 set, only 3 participants");
 	}
 
 	#[test]
