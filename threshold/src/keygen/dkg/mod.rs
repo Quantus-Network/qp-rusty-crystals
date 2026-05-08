@@ -73,8 +73,54 @@
 //! # NEAR MPC Compatibility
 //!
 //! The `MithrilDkg` struct follows the poke/message pattern used by NEAR's
-//! `threshold-signatures` crate, making it compatible with NEAR MPC's
-//! `run_protocol` infrastructure.
+//! `cait-sith` crate, making it compatible with NEAR MPC's `run_protocol`
+//! infrastructure.
+//!
+//! # Liveness Considerations
+//!
+//! This implementation uses a sans-I/O architecture where the protocol logic is
+//! decoupled from networking. **The networking layer is responsible for implementing
+//! timeouts and failure detection.**
+//!
+//! Key liveness concerns that must be handled by the networking layer:
+//!
+//! - **Leader failure**: In Round 1, subset leaders send private `K_S` messages to
+//!   subset members. If a leader fails to send these messages, members of that
+//!   subset will wait indefinitely.
+//!
+//! - **Broadcast delays**: If any party fails to broadcast in any round, other
+//!   parties will wait at `MithrilAction::Wait`.
+//!
+//! - **Partial failures**: If some parties complete while others fail, the protocol
+//!   may need to be restarted with a new participant set.
+//!
+//! Recommended approach: wrap the entire protocol execution in a timeout and
+//! implement connection liveness checks during `Wait` periods:
+//!
+//! ```ignore
+//! use std::time::Duration;
+//!
+//! let timeout = Duration::from_secs(60);
+//!
+//! let result = tokio::time::timeout(timeout, async {
+//!     loop {
+//!         match dkg.poke()? {
+//!             MithrilAction::Wait => {
+//!                 // Check connection liveness while waiting
+//!                 if !all_participants_connected() {
+//!                     return Err("participant disconnected");
+//!                 }
+//!                 // Wait for next message from network
+//!                 let (from, data) = receive_message().await?;
+//!                 dkg.message(from, data)?;
+//!             }
+//!             MithrilAction::SendMany(data) => broadcast(data).await?,
+//!             MithrilAction::SendPrivate(to, data) => send_to(to, data).await?,
+//!             MithrilAction::Return(output) => return Ok(output),
+//!         }
+//!     }
+//! }).await??;
+//! ```
 
 mod protocol;
 mod state;

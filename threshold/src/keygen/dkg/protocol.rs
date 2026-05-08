@@ -373,6 +373,13 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	/// - **Future round messages**: Buffered for later processing
 	/// - **Past round messages**: Silently ignored (too late)
 	/// - **Sender mismatch**: Silently ignored (bad actor or routing error)
+	/// - **Non-participant sender**: Silently ignored (prevents quorum inflation attacks)
+	///
+	/// # Security
+	///
+	/// This function validates that `from` is in the configured `all_participants` list
+	/// before processing. This prevents quorum inflation attacks where an attacker
+	/// injects messages with fake sender IDs to satisfy broadcast quorum checks.
 	///
 	/// # Arguments
 	/// * `from` - The party ID of the sender (from the transport layer)
