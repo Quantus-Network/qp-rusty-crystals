@@ -105,7 +105,6 @@ pub use types::{
 	MithrilRound2Broadcast,
 	MithrilRound3Broadcast,
 	MithrilRound4Broadcast,
-	NoOpSigner,
 	PartialPublicKey,
 	// Core types
 	SubsetContribution,

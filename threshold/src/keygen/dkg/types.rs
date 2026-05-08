@@ -75,31 +75,6 @@ pub trait TranscriptSigner {
 	fn public_key(&self) -> Self::PublicKey;
 }
 
-/// A no-op transcript signer for testing.
-///
-/// This signer produces empty signatures that always verify.
-#[derive(Clone, Debug, Default)]
-pub struct NoOpSigner;
-
-impl TranscriptSigner for NoOpSigner {
-	type Signature = Vec<u8>;
-	type PublicKey = ();
-
-	fn sign(&self, _transcript_hash: &[u8; 32]) -> Self::Signature {
-		Vec::new()
-	}
-
-	fn verify(_pk: &Self::PublicKey, _hash: &[u8; 32], _sig: &Self::Signature) -> bool {
-		true
-	}
-
-	fn verify_bytes(_pk: &Self::PublicKey, _hash: &[u8; 32], _sig: &[u8]) -> bool {
-		true
-	}
-
-	fn public_key(&self) -> Self::PublicKey {}
-}
-
 // ============================================================================
 // Type Aliases and Constants
 // ============================================================================
