@@ -238,17 +238,3 @@ mod verification {
 		dilithium_pk.verify(message, signature.as_bytes(), ctx_option)
 	}
 }
-
-// ============================================================================
-// Constants
-// ============================================================================
-
-/// Maximum number of parties supported by the threshold scheme.
-///
-/// This is limited to 6 because the hyperball sampling parameters (r, r')
-/// required for secure threshold signing have only been computed for n ≤ 6
-/// in the reference Threshold-ML-DSA implementation.
-pub const MAX_PARTIES: u8 = 6;
-
-/// Minimum threshold value (at least 2 parties required).
-pub const MIN_THRESHOLD: u8 = 2;
