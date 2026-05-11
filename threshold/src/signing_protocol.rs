@@ -15,6 +15,20 @@
 //! message and all parties reset and try again. If combination succeeds, the leader
 //! broadcasts the signature to all parties.
 //!
+//! # Participant Set Requirement
+//!
+//! **IMPORTANT**: The Mithril threshold signing scheme requires **exactly T (threshold) active
+//! participants** to sign. This is a fundamental design limitation of the replicated secret
+//! sharing (RSS) scheme described in the Mithril paper (Section 2.2, Algorithm 6 `RSSRecover`).
+//!
+//! - Signing with **fewer than T** parties will fail (cannot reconstruct the secret).
+//! - Signing with **more than T** parties is **not supported** and will be rejected.
+//!   The `compute_sharing_patterns(T, parties)` function returns exactly T entries,
+//!   so additional parties would have no valid sharing pattern assignment.
+//!
+//! The leader should pre-select exactly T participants from the available nodes before
+//! starting the signing protocol.
+//!
 //! # Trust Model
 //!
 //! The protocol uses a leader-based approach for Round 4 (signature combination):
@@ -452,6 +466,21 @@ impl DilithiumSignProtocol {
 					participant
 				)));
 			}
+		}
+
+		// Validate exactly threshold participants.
+		// The Mithril scheme (Section 2.2, Algorithm 6 RSSRecover) assumes exactly T active
+		// parties. The sharing patterns computed by `compute_sharing_patterns(T, parties)`
+		// return exactly T entries, so more than T active parties would cause index-out-of-bounds
+		// errors in `recover_share`. Fewer than T parties cannot reconstruct the secret.
+		let threshold = signer.config().threshold() as usize;
+		if participants.len() != threshold {
+			return Err(SignProtocolError::InvalidConfig(format!(
+				"Mithril threshold signing requires exactly {} (threshold) active participants, but {} were provided. \
+				The scheme does not support more or fewer than threshold parties.",
+				threshold,
+				participants.len()
+			)));
 		}
 
 		Ok(Self {
@@ -1236,12 +1265,13 @@ mod tests {
 		let config = ThresholdConfig::new(2, 3).unwrap();
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 
+		// Sign with exactly threshold (2) participants
 		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
 		let protocol = DilithiumSignProtocol::new(
 			signer,
 			b"test message".to_vec(),
 			b"context".to_vec(),
-			vec![0, 1, 2],
+			vec![0, 1], // exactly threshold participants
 			0,
 			0,          // leader_id
 			[0xAA; 32], // round1_seed
@@ -1249,7 +1279,7 @@ mod tests {
 		.unwrap();
 
 		assert_eq!(protocol.my_participant_id(), 0);
-		assert_eq!(protocol.participants().as_slice(), &[0, 1, 2]);
+		assert_eq!(protocol.participants().as_slice(), &[0, 1]);
 		assert_eq!(protocol.leader_id(), 0);
 		assert!(protocol.is_leader());
 	}
@@ -1647,7 +1677,7 @@ mod tests {
 			signer,
 			b"test message".to_vec(),
 			b"context".to_vec(),
-			vec![0, 1, 2],
+			vec![0, 1], // exactly threshold participants
 			0,
 			0, // leader_id
 			[0xAA; 32],
@@ -1684,7 +1714,7 @@ mod tests {
 			signer,
 			b"test message".to_vec(),
 			b"context".to_vec(),
-			vec![0, 1, 2],
+			vec![0, 1], // exactly threshold participants
 			0,
 			0, // leader_id
 			[0xAA; 32],
@@ -1696,18 +1726,18 @@ mod tests {
 		assert!(matches!(protocol.state(), SignProtocolState::Round1Waiting));
 
 		// Simulate receiving a Round 3 message while still in Round 1
-		let r3 = Round3Broadcast::new(2, vec![10, 20, 30, 40]);
+		let r3 = Round3Broadcast::new(1, vec![10, 20, 30, 40]);
 		let msg = SigningMessage::Round3(r3);
 		let data = protocol.serialize_message(&msg).unwrap();
 
 		// Send the Round 3 message - it should be buffered
-		protocol.message(2, data).unwrap();
+		protocol.message(1, data).unwrap();
 
 		// Verify the message was buffered
 		assert!(!protocol.message_buffer.is_empty());
-		assert!(protocol.message_buffer.round3.contains_key(&2));
+		assert!(protocol.message_buffer.round3.contains_key(&1));
 		// Should NOT be in r3_broadcasts yet
-		assert!(!protocol.r3_broadcasts.contains_key(&2));
+		assert!(!protocol.r3_broadcasts.contains_key(&1));
 	}
 
 	#[test]
@@ -1715,13 +1745,13 @@ mod tests {
 		let config = ThresholdConfig::new(2, 3).unwrap();
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 
-		// Create protocol for party 0
+		// Create protocol for party 0 with exactly threshold (2) participants
 		let signer0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
 		let mut protocol0 = DilithiumSignProtocol::new(
 			signer0,
 			b"test message".to_vec(),
 			b"context".to_vec(),
-			vec![0, 1, 2],
+			vec![0, 1], // exactly threshold participants
 			0,
 			0, // leader_id
 			[0xAA; 32],
@@ -1734,7 +1764,7 @@ mod tests {
 			signer1,
 			b"test message".to_vec(),
 			b"context".to_vec(),
-			vec![0, 1, 2],
+			vec![0, 1], // exactly threshold participants
 			1,
 			0,          // leader_id
 			[0xBB; 32], // Different seed for party 1
@@ -1754,11 +1784,8 @@ mod tests {
 		// Party 1 receives Round 1 from party 0 and advances
 		protocol1.message(0, r1_data0.clone()).unwrap();
 
-		// Create a fake Round 1 from party 2
-		let r1_party2 = Round1Broadcast::new(2, [0x42u8; 32]);
-		let r1_msg2 = SigningMessage::Round1(r1_party2);
-		let r1_data2 = protocol1.serialize_message(&r1_msg2).unwrap();
-		protocol1.message(2, r1_data2.clone()).unwrap();
+		// With only 2 parties (threshold), after party 1 receives from party 0,
+		// it has all the round 1 messages it needs
 
 		// Party 1 should now advance to Round 2
 		let r2_data1 = match protocol1.poke().unwrap() {
@@ -1772,9 +1799,8 @@ mod tests {
 		assert!(!protocol0.message_buffer.round2.is_empty());
 		assert!(!protocol0.r2_broadcasts.contains_key(&1));
 
-		// Now party 0 receives the remaining Round 1 messages
+		// Now party 0 receives the remaining Round 1 message from party 1
 		protocol0.message(1, r1_data1).unwrap();
-		protocol0.message(2, r1_data2).unwrap();
 
 		// Party 0 should now advance to Round 2 and process the buffered Round 2 message
 		let _ = protocol0.poke().unwrap();
@@ -1825,12 +1851,13 @@ mod tests {
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 
 		// Create a follower (party 1, with party 0 as leader)
+		// Use exactly threshold (2) participants
 		let signer = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
 		let mut follower = DilithiumSignProtocol::new(
 			signer,
 			b"test message".to_vec(),
 			b"context".to_vec(),
-			vec![0, 1, 2],
+			vec![0, 1], // exactly threshold participants
 			1, // follower
 			0, // leader is party 0
 			[0xAA; 32],
@@ -1883,7 +1910,7 @@ mod tests {
 					signer,
 					message.clone(),
 					context.clone(),
-					vec![0, 1],
+					vec![0, 1], // exactly threshold participants
 					i as u32,
 					0, // party 0 is leader
 					round1_seed,
@@ -1930,7 +1957,7 @@ mod tests {
 			signer,
 			message.clone(),
 			context.clone(),
-			vec![0, 1, 2],
+			vec![0, 1], // exactly threshold participants
 			1, // follower
 			0, // leader is party 0
 			[0xCC; 32],

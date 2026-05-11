@@ -209,11 +209,12 @@ mod party_management_tests {
 		let signer =
 			ThresholdSigner::new(shares[0].clone(), public_key.clone(), config).expect("signer");
 
+		// Use exactly threshold (2) participants
 		let mut protocol = DilithiumSignProtocol::new(
 			signer,
 			b"test message".to_vec(),
 			b"context".to_vec(),
-			vec![0, 1, 2],
+			vec![0, 1], // exactly threshold participants
 			0,          // my_id
 			0,          // leader_id
 			[0xAA; 32], // round1_seed
@@ -223,10 +224,9 @@ mod party_management_tests {
 		// Generate our Round 1
 		let _ = protocol.poke().expect("poke");
 
-		// Now in Round1Waiting, should be waiting for parties 1 and 2
+		// Now in Round1Waiting, should be waiting for party 1 only
 		let waiting = protocol.waiting_for();
-		assert_eq!(waiting.len(), 2);
+		assert_eq!(waiting.len(), 1);
 		assert!(waiting.contains(&1));
-		assert!(waiting.contains(&2));
 	}
 }

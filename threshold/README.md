@@ -136,54 +136,6 @@ cargo bench -- signing_4round
 
 GPL-3.0 License - see the parent qp-rusty-crystals project.
 
-## Breaking API Changes (v1.0)
-
-### Seed-Based Randomness API
-
-All APIs now take deterministic `[u8; 32]` seeds instead of RNG generics. This simplifies the API and ensures callers explicitly provide randomness.
-
-**Signing Protocol:**
-```rust
-// Before:
-let protocol = DilithiumSignProtocol::new(signer, public_key, config)?;
-
-// After:
-let seed: [u8; 32] = get_random_seed(); // Caller provides randomness
-let protocol = DilithiumSignProtocol::new(signer, public_key, config, seed)?;
-```
-
-**DKG:**
-```rust
-// Before:
-let mut dkg = MithrilDkg::new(config, rng);  // rng: impl Rng
-
-// After:
-let seed: [u8; 32] = get_random_seed();
-let mut dkg = MithrilDkg::new(config, seed);
-```
-
-**Local DKG helper:**
-```rust
-// Before:
-let rng = rand::rngs::StdRng::seed_from_u64(42);
-let outputs = run_local_mithril_dkg(t, n, signers, public_keys, rng)?;
-
-// After:
-let seed = [42u8; 32];
-let outputs = run_local_mithril_dkg(t, n, signers, public_keys, seed)?;
-```
-
-### BorshSerialize/BorshDeserialize
-
-All message types now use `borsh` instead of `serde + bincode`:
-- `MithrilDkgMessage`, `SigningMessage`, `ResharingMessage` etc.
-- Use `borsh::to_vec()` and `borsh::from_slice()` for serialization
-
-### Error Handling Improvements
-
-- `recover_share()` now returns errors for unknown active parties and missing shares (previously silent failures)
-- `SignMessageBuffer` uses `BTreeMap` for bounded memory and deduplication
-
 ## References
 
 - [Threshold ML-DSA Research](https://mithril-th.org/)

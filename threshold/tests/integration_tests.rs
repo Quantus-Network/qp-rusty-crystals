@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use qp_rusty_crystals_threshold::{
 	generate_with_dealer,
 	keygen::dkg::{run_local_mithril_dkg, TranscriptSigner},
-	signing_protocol::{run_local_signing, run_local_signing_with_stats},
-	verify_signature, ThresholdConfig, ThresholdSigner,
+	signing_protocol::{run_local_signing, run_local_signing_with_stats, DilithiumSignProtocol},
+	verify_signature, ParticipantId, ThresholdConfig, ThresholdSigner,
 };
 
 /// Helper to encode bytes as hex string
@@ -911,6 +911,54 @@ fn test_subset_signing_3_of_5() {
 		Err(e) => {
 			panic!("❌ Subset signing (3 from 5) failed: {}", e);
 		},
+	}
+}
+
+/// Test that signing with MORE than threshold parties is correctly rejected.
+///
+/// The Mithril scheme (Section 2.2, Algorithm 6 RSSRecover) assumes exactly T active
+/// parties. The `compute_sharing_patterns(T, parties)` function returns exactly T entries,
+/// so the scheme fundamentally does not support more than T active participants.
+#[test]
+fn test_signing_rejects_more_than_threshold_parties() {
+	println!("\n=== VERIFY REJECTION OF MORE THAN THRESHOLD PARTIES ===\n");
+
+	let mut seed = [0u8; 32];
+	for (i, byte) in seed.iter_mut().enumerate() {
+		*byte = (i as u8).wrapping_add(80);
+	}
+
+	// DKG with 5 parties, threshold 3
+	let dkg_config = ThresholdConfig::new(3, 5).expect("Valid DKG config");
+	let (public_key, all_shares) =
+		generate_with_dealer(&seed, dkg_config).expect("Key generation");
+
+	// Attempt to sign with 4 parties (more than the threshold of 3)
+	let signing_parties: Vec<ParticipantId> = vec![0, 1, 2, 3];
+	let signing_config = ThresholdConfig::new(3, 4).expect("Valid signing config");
+
+	let signer = ThresholdSigner::new(all_shares[0].clone(), public_key.clone(), signing_config)
+		.expect("Valid signer");
+
+	let result = DilithiumSignProtocol::new(
+		signer,
+		b"test message".to_vec(),
+		b"".to_vec(),
+		signing_parties,
+		0, // my_participant_id
+		0, // leader_id
+		[0u8; 32],
+	);
+
+	assert!(result.is_err(), "Should reject more than threshold parties");
+	if let Err(e) = result {
+		let error_msg = format!("{:?}", e);
+		assert!(
+			error_msg.contains("exactly") && error_msg.contains("threshold"),
+			"Error should mention 'exactly threshold': {}",
+			error_msg
+		);
+		println!("✅ Correctly rejected 4 parties for threshold=3: {:?}", e);
 	}
 }
 
