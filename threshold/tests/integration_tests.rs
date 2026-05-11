@@ -930,8 +930,7 @@ fn test_signing_rejects_more_than_threshold_parties() {
 
 	// DKG with 5 parties, threshold 3
 	let dkg_config = ThresholdConfig::new(3, 5).expect("Valid DKG config");
-	let (public_key, all_shares) =
-		generate_with_dealer(&seed, dkg_config).expect("Key generation");
+	let (public_key, all_shares) = generate_with_dealer(&seed, dkg_config).expect("Key generation");
 
 	// Attempt to sign with 4 parties (more than the threshold of 3)
 	let signing_parties: Vec<ParticipantId> = vec![0, 1, 2, 3];

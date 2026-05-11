@@ -22,9 +22,9 @@
 //! sharing (RSS) scheme described in the Mithril paper (Section 2.2, Algorithm 6 `RSSRecover`).
 //!
 //! - Signing with **fewer than T** parties will fail (cannot reconstruct the secret).
-//! - Signing with **more than T** parties is **not supported** and will be rejected.
-//!   The `compute_sharing_patterns(T, parties)` function returns exactly T entries,
-//!   so additional parties would have no valid sharing pattern assignment.
+//! - Signing with **more than T** parties is **not supported** and will be rejected. The
+//!   `compute_sharing_patterns(T, parties)` function returns exactly T entries, so additional
+//!   parties would have no valid sharing pattern assignment.
 //!
 //! The leader should pre-select exactly T participants from the available nodes before
 //! starting the signing protocol.
@@ -1858,8 +1858,8 @@ mod tests {
 			b"test message".to_vec(),
 			b"context".to_vec(),
 			vec![0, 1], // exactly threshold participants
-			1, // follower
-			0, // leader is party 0
+			1,          // follower
+			0,          // leader is party 0
 			[0xAA; 32],
 		)
 		.unwrap();
@@ -1958,8 +1958,8 @@ mod tests {
 			message.clone(),
 			context.clone(),
 			vec![0, 1], // exactly threshold participants
-			1, // follower
-			0, // leader is party 0
+			1,          // follower
+			0,          // leader is party 0
 			[0xCC; 32],
 		)
 		.unwrap();

@@ -84,15 +84,14 @@
 //!
 //! Key liveness concerns that must be handled by the networking layer:
 //!
-//! - **Leader failure**: In Round 1, subset leaders send private `K_S` messages to
-//!   subset members. If a leader fails to send these messages, members of that
-//!   subset will wait indefinitely.
+//! - **Leader failure**: In Round 1, subset leaders send private `K_S` messages to subset members.
+//!   If a leader fails to send these messages, members of that subset will wait indefinitely.
 //!
-//! - **Broadcast delays**: If any party fails to broadcast in any round, other
-//!   parties will wait at `MithrilAction::Wait`.
+//! - **Broadcast delays**: If any party fails to broadcast in any round, other parties will wait at
+//!   `MithrilAction::Wait`.
 //!
-//! - **Partial failures**: If some parties complete while others fail, the protocol
-//!   may need to be restarted with a new participant set.
+//! - **Partial failures**: If some parties complete while others fail, the protocol may need to be
+//!   restarted with a new participant set.
 //!
 //! Recommended approach: wrap the entire protocol execution in a timeout and
 //! implement connection liveness checks during `Wait` periods:
