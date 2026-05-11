@@ -57,8 +57,10 @@ pub(crate) fn compute_sharing_patterns(
 	if threshold > parties {
 		return Err("Threshold cannot exceed number of parties");
 	}
-	if parties > 16 {
-		return Err("Maximum 16 parties supported");
+	// Maximum 15 parties due to u16 subset mask representation.
+	// (1 << 16 would overflow u16)
+	if parties >= 16 {
+		return Err("Maximum 15 parties supported for subset mask representation");
 	}
 
 	let t = threshold as usize;
