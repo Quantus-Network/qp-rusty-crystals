@@ -204,6 +204,12 @@ impl Zeroize for PrivateKeyShare {
 	}
 }
 
+impl Drop for PrivateKeyShare {
+	fn drop(&mut self) {
+		self.zeroize();
+	}
+}
+
 impl ZeroizeOnDrop for PrivateKeyShare {}
 
 impl fmt::Debug for PrivateKeyShare {
