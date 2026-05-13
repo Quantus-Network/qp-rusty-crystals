@@ -30,11 +30,11 @@
 //!
 //! # Security: Zeroization
 //!
-//! All state structs implement `Zeroize` to ensure that sensitive cryptographic
-//! material (randomness, shared secrets, secret key contributions) can be securely
-//! erased from memory. The `MithrilDkg` protocol wrapper implements `Drop` to
-//! automatically zeroize the current state when the protocol is dropped (including
-//! on panic). This ensures cleanup even if the protocol doesn't complete normally.
+//! The state struct implements `Zeroize` and `Drop` to ensure that sensitive cryptographic
+//! material (randomness, shared secrets, secret key contributions) is securely erased from
+//! memory when the protocol completes or is dropped. This uses a flat struct design with
+//! Option fields, which allows proper `ZeroizeOnDrop` without the issues of enum-based
+//! state machines that require `mem::take`.
 //!
 //! Sensitive fields that are zeroized include:
 //!
@@ -45,12 +45,14 @@
 use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 use core::fmt;
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	keys::{PrivateKeyShare, PublicKey},
 	participants::ParticipantId,
 };
+
+use super::protocol::MithrilDkgError;
 
 use super::types::{
 	MithrilDkgConfig, MithrilRound1Broadcast, MithrilRound2Broadcast, MithrilRound3Broadcast,
@@ -58,198 +60,37 @@ use super::types::{
 	RANDOMNESS_SIZE, SHARED_SECRET_SIZE,
 };
 
-/// State for Round 1 (Commitment phase).
-///
-/// In this round, each party:
-/// - Generates random values and computes a commitment
-/// - Sends encrypted shared secrets to subset leaders
-/// - Waits for commitments from all other parties
-pub struct MithrilRound1State<S: TranscriptSigner> {
-	/// Protocol configuration.
-	pub config: MithrilDkgConfig<S>,
-	/// This party's random contribution.
-	pub my_randomness: [u8; RANDOMNESS_SIZE],
-	/// Hash commitment to `my_randomness`.
-	pub my_commitment: [u8; 32],
-	/// Shared secrets for each subset this party belongs to.
-	pub my_shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
-	/// Round 1 broadcasts received from other parties.
-	pub received_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
-	/// Shared secrets received from other parties.
-	pub received_shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
-	/// Whether this party has sent its broadcast.
-	pub broadcast_sent: bool,
-	/// Whether this party has sent its private messages.
-	pub privates_sent: bool,
+/// Current phase of the DKG protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DkgPhase {
+	/// Initial state before the protocol starts.
+	#[default]
+	Initialized,
+	/// Round 1: Commitment phase.
+	Round1,
+	/// Round 2: Reveal phase.
+	Round2,
+	/// Round 3: Partial PK commitment phase.
+	Round3,
+	/// Round 4: Partial PK reveal and aggregation phase.
+	Round4,
+	/// Protocol completed successfully.
+	Complete,
+	/// Protocol failed with an error.
+	Failed,
 }
 
-impl<S: TranscriptSigner> fmt::Debug for MithrilRound1State<S> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("MithrilRound1State")
-			.field("my_party_id", &self.config.my_party_id)
-			.field("received_broadcasts", &self.received_broadcasts.len())
-			.field("received_shared_secrets", &self.received_shared_secrets.len())
-			.field("broadcast_sent", &self.broadcast_sent)
-			.field("privates_sent", &self.privates_sent)
-			.finish()
-	}
-}
-
-impl<S: TranscriptSigner> Zeroize for MithrilRound1State<S> {
-	fn zeroize(&mut self) {
-		self.my_randomness.zeroize();
-		for secret in self.my_shared_secrets.values_mut() {
-			secret.zeroize();
-		}
-		for secret in self.received_shared_secrets.values_mut() {
-			secret.zeroize();
-		}
-	}
-}
-
-/// State for Round 2 (Reveal phase).
-///
-/// In this round, each party:
-/// - Broadcasts their randomness revealed from Round 1
-/// - Verifies other parties' revealed values match their commitments
-pub struct MithrilRound2State<S: TranscriptSigner> {
-	/// Protocol configuration.
-	pub config: MithrilDkgConfig<S>,
-	/// This party's randomness (carried from Round 1).
-	pub my_randomness: [u8; RANDOMNESS_SIZE],
-	/// Round 1 broadcasts from all parties.
-	pub round1_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
-	/// Combined shared secrets for each subset.
-	pub shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
-	/// Round 2 broadcasts received from other parties.
-	pub received_broadcasts: BTreeMap<ParticipantId, MithrilRound2Broadcast>,
-	/// Whether this party has sent its broadcast.
-	pub broadcast_sent: bool,
-}
-
-impl<S: TranscriptSigner> fmt::Debug for MithrilRound2State<S> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("MithrilRound2State")
-			.field("my_party_id", &self.config.my_party_id)
-			.field("received_broadcasts", &self.received_broadcasts.len())
-			.field("broadcast_sent", &self.broadcast_sent)
-			.finish()
-	}
-}
-
-impl<S: TranscriptSigner> Zeroize for MithrilRound2State<S> {
-	fn zeroize(&mut self) {
-		self.my_randomness.zeroize();
-		for secret in self.shared_secrets.values_mut() {
-			secret.zeroize();
-		}
-	}
-}
-
-/// State for Round 3 (Partial PK Commitment phase).
-///
-/// In this round, each party:
-/// - Derives the global randomness from all parties' contributions
-/// - Computes their secret share contributions for each subset
-/// - Broadcasts commitments to their partial public keys
-pub struct MithrilRound3State<S: TranscriptSigner> {
-	/// Protocol configuration.
-	pub config: MithrilDkgConfig<S>,
-	/// Round 1 broadcasts from all parties.
-	pub round1_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
-	/// Round 2 broadcasts from all parties.
-	pub round2_broadcasts: BTreeMap<ParticipantId, MithrilRound2Broadcast>,
-	/// Combined shared secrets for each subset.
-	pub shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
-	/// Global randomness derived from all parties.
-	pub global_randomness: Vec<u8>,
-	/// Public matrix seed (rho) derived from global randomness.
-	pub rho: [u8; 32],
-	/// This party's partial public keys for each subset.
-	pub my_partial_pks: BTreeMap<SubsetMask, PartialPublicKey>,
-	/// This party's secret contributions for each subset.
-	pub my_contributions: BTreeMap<SubsetMask, SubsetContribution>,
-	/// Commitments to this party's partial public keys.
-	pub my_pk_commitments: BTreeMap<SubsetMask, [u8; 32]>,
-	/// Round 3 broadcasts received from other parties.
-	pub received_broadcasts: BTreeMap<ParticipantId, MithrilRound3Broadcast>,
-	/// Whether this party has sent its broadcast.
-	pub broadcast_sent: bool,
-}
-
-impl<S: TranscriptSigner> fmt::Debug for MithrilRound3State<S> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("MithrilRound3State")
-			.field("my_party_id", &self.config.my_party_id)
-			.field("my_partial_pks", &self.my_partial_pks.len())
-			.field("received_broadcasts", &self.received_broadcasts.len())
-			.field("broadcast_sent", &self.broadcast_sent)
-			.finish()
-	}
-}
-
-impl<S: TranscriptSigner> Zeroize for MithrilRound3State<S> {
-	fn zeroize(&mut self) {
-		for secret in self.shared_secrets.values_mut() {
-			secret.zeroize();
-		}
-		self.global_randomness.zeroize();
-		for contribution in self.my_contributions.values_mut() {
-			contribution.zeroize();
-		}
-	}
-}
-
-/// State for Round 4 (Partial PK Reveal phase).
-///
-/// In this round, each party:
-/// - Broadcasts their partial public keys
-/// - Verifies other parties' partial PKs match their Round 3 commitments
-/// - Signs the transcript for accountability
-/// - Combines all partial PKs into the final threshold public key
-pub struct MithrilRound4State<S: TranscriptSigner> {
-	/// Protocol configuration.
-	pub config: MithrilDkgConfig<S>,
-	/// Round 1 broadcasts from all parties.
-	pub round1_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
-	/// Round 2 broadcasts from all parties.
-	pub round2_broadcasts: BTreeMap<ParticipantId, MithrilRound2Broadcast>,
-	/// Round 3 broadcasts from all parties.
-	pub round3_broadcasts: BTreeMap<ParticipantId, MithrilRound3Broadcast>,
-	/// Combined shared secrets for each subset.
-	pub shared_secrets: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
-	/// Global randomness derived from all parties.
-	pub global_randomness: Vec<u8>,
-	/// Public matrix seed (rho).
-	pub rho: [u8; 32],
-	/// This party's partial public keys for each subset.
-	pub my_partial_pks: BTreeMap<SubsetMask, PartialPublicKey>,
-	/// This party's secret contributions for each subset.
-	pub my_contributions: BTreeMap<SubsetMask, SubsetContribution>,
-	/// Round 4 broadcasts received from other parties.
-	pub received_broadcasts: BTreeMap<ParticipantId, MithrilRound4Broadcast>,
-	/// Whether this party has sent its broadcast.
-	pub broadcast_sent: bool,
-}
-
-impl<S: TranscriptSigner> fmt::Debug for MithrilRound4State<S> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("MithrilRound4State")
-			.field("my_party_id", &self.config.my_party_id)
-			.field("received_broadcasts", &self.received_broadcasts.len())
-			.field("broadcast_sent", &self.broadcast_sent)
-			.finish()
-	}
-}
-
-impl<S: TranscriptSigner> Zeroize for MithrilRound4State<S> {
-	fn zeroize(&mut self) {
-		for secret in self.shared_secrets.values_mut() {
-			secret.zeroize();
-		}
-		self.global_randomness.zeroize();
-		for contribution in self.my_contributions.values_mut() {
-			contribution.zeroize();
+impl DkgPhase {
+	/// Get the phase name for error messages.
+	pub fn name(&self) -> &'static str {
+		match self {
+			DkgPhase::Initialized => "Initialized",
+			DkgPhase::Round1 => "Round1",
+			DkgPhase::Round2 => "Round2",
+			DkgPhase::Round3 => "Round3",
+			DkgPhase::Round4 => "Round4",
+			DkgPhase::Complete => "Complete",
+			DkgPhase::Failed => "Failed",
 		}
 	}
 }
@@ -268,10 +109,11 @@ pub struct MithrilDkgOutput {
 
 /// State machine for the Mithril DKG protocol.
 ///
-/// This enum represents the current state of a party in the DKG protocol.
-/// The protocol progresses through states: `Initialized` -> `Round1` -> `Round2`
-/// -> `Round3` -> `Round4` -> `Complete`, or may transition to `Failed` from
-/// any state if an error occurs.
+/// Uses a flat struct with Option fields instead of an enum with associated data.
+/// This design:
+/// - Avoids `mem::take` which would lose data on validation errors
+/// - Enables proper `ZeroizeOnDrop` - all fields are zeroized when dropped
+/// - Keeps data persistent across phases until explicitly cleared
 ///
 /// # Usage
 ///
@@ -291,113 +133,307 @@ pub struct MithrilDkgOutput {
 ///     }
 /// }
 /// ```
-///
-/// # Note on Memory Layout
-///
-/// `Complete` carries a boxed `MithrilDkgOutput` because the output is ~2.8 KB
-/// (full Dilithium key material), and inlining it would force every other
-/// variant — and every callsite holding a `MithrilDkgState` — to reserve that
-/// space. See `clippy::large_enum_variant`.
-pub enum MithrilDkgState<S: TranscriptSigner> {
-	/// Initial state before the protocol starts.
-	Initialized(MithrilDkgConfig<S>),
-	/// Round 1: Commitment phase.
-	Round1(MithrilRound1State<S>),
-	/// Round 2: Reveal phase.
-	Round2(MithrilRound2State<S>),
-	/// Round 3: Partial PK commitment phase.
-	Round3(MithrilRound3State<S>),
-	/// Round 4: Partial PK reveal and aggregation phase.
-	Round4(MithrilRound4State<S>),
-	/// Protocol completed successfully.
-	Complete(Box<MithrilDkgOutput>),
-	/// Protocol failed with an error message.
-	Failed(String),
+pub struct MithrilDkgState<S: TranscriptSigner> {
+	/// Current phase of the protocol.
+	pub phase: DkgPhase,
+
+	/// Protocol configuration (persists across all phases).
+	pub config: Option<MithrilDkgConfig<S>>,
+
+	// ========================================================================
+	// Round 1 data
+	// ========================================================================
+	/// This party's random contribution.
+	pub my_randomness: Option<[u8; RANDOMNESS_SIZE]>,
+	/// Hash commitment to `my_randomness`.
+	pub my_commitment: Option<[u8; 32]>,
+	/// Shared secrets for each subset this party is leader of.
+	pub my_shared_secrets: Option<BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>>,
+	/// Round 1 broadcasts received from other parties.
+	pub round1_broadcasts: Option<BTreeMap<ParticipantId, MithrilRound1Broadcast>>,
+	/// Shared secrets received from other parties (subset leaders).
+	pub received_shared_secrets: Option<BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>>,
+
+	// ========================================================================
+	// Round 2 data
+	// ========================================================================
+	/// Combined shared secrets for each subset (my + received).
+	pub shared_secrets: Option<BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>>,
+	/// Round 2 broadcasts received from other parties.
+	pub round2_broadcasts: Option<BTreeMap<ParticipantId, MithrilRound2Broadcast>>,
+
+	// ========================================================================
+	// Round 3 data
+	// ========================================================================
+	/// Global randomness derived from all parties' contributions.
+	pub global_randomness: Option<Vec<u8>>,
+	/// Public matrix seed (rho) derived from global randomness.
+	pub rho: Option<[u8; 32]>,
+	/// This party's secret contributions for each subset.
+	pub my_contributions: Option<BTreeMap<SubsetMask, SubsetContribution>>,
+	/// This party's partial public keys for each subset.
+	pub my_partial_pks: Option<BTreeMap<SubsetMask, PartialPublicKey>>,
+	/// Commitments to this party's partial public keys.
+	pub my_pk_commitments: Option<BTreeMap<SubsetMask, [u8; 32]>>,
+	/// Round 3 broadcasts received from other parties.
+	pub round3_broadcasts: Option<BTreeMap<ParticipantId, MithrilRound3Broadcast>>,
+
+	// ========================================================================
+	// Round 4 data
+	// ========================================================================
+	/// Round 4 broadcasts received from other parties.
+	pub round4_broadcasts: Option<BTreeMap<ParticipantId, MithrilRound4Broadcast>>,
+
+	// ========================================================================
+	// Terminal states
+	// ========================================================================
+	/// DKG output (when Complete).
+	pub output: Option<Box<MithrilDkgOutput>>,
+	/// Error message (when Failed).
+	pub error_message: Option<String>,
+
+	// ========================================================================
+	// Flags
+	// ========================================================================
+	/// Whether this party has sent its broadcast for the current round.
+	pub broadcast_sent: bool,
+	/// Whether this party has sent its private messages (Round 1 only).
+	pub privates_sent: bool,
+}
+
+impl<S: TranscriptSigner> Default for MithrilDkgState<S> {
+	fn default() -> Self {
+		Self {
+			phase: DkgPhase::Initialized,
+			config: None,
+			my_randomness: None,
+			my_commitment: None,
+			my_shared_secrets: None,
+			round1_broadcasts: None,
+			received_shared_secrets: None,
+			shared_secrets: None,
+			round2_broadcasts: None,
+			global_randomness: None,
+			rho: None,
+			my_contributions: None,
+			my_partial_pks: None,
+			my_pk_commitments: None,
+			round3_broadcasts: None,
+			round4_broadcasts: None,
+			output: None,
+			error_message: None,
+			broadcast_sent: false,
+			privates_sent: false,
+		}
+	}
 }
 
 impl<S: TranscriptSigner> fmt::Debug for MithrilDkgState<S> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Initialized(_) => write!(f, "Initialized"),
-			Self::Round1(s) => write!(f, "Round1({:?})", s),
-			Self::Round2(s) => write!(f, "Round2({:?})", s),
-			Self::Round3(s) => write!(f, "Round3({:?})", s),
-			Self::Round4(s) => write!(f, "Round4({:?})", s),
-			Self::Complete(_) => write!(f, "Complete"),
-			Self::Failed(msg) => write!(f, "Failed({})", msg),
-		}
+		f.debug_struct("MithrilDkgState")
+			.field("phase", &self.phase)
+			.field("broadcast_sent", &self.broadcast_sent)
+			.field("privates_sent", &self.privates_sent)
+			.finish()
 	}
 }
 
 impl<S: TranscriptSigner> Zeroize for MithrilDkgState<S> {
 	fn zeroize(&mut self) {
-		match self {
-			Self::Initialized(_) => {},
-			Self::Round1(state) => state.zeroize(),
-			Self::Round2(state) => state.zeroize(),
-			Self::Round3(state) => state.zeroize(),
-			Self::Round4(state) => state.zeroize(),
-			Self::Complete(_) => {},
-			Self::Failed(_) => {},
+		// Zeroize sensitive randomness
+		if let Some(ref mut r) = self.my_randomness {
+			r.zeroize();
 		}
+		self.my_randomness = None;
+
+		// Zeroize shared secrets
+		if let Some(ref mut secrets) = self.my_shared_secrets {
+			for secret in secrets.values_mut() {
+				secret.zeroize();
+			}
+		}
+		self.my_shared_secrets = None;
+
+		if let Some(ref mut secrets) = self.received_shared_secrets {
+			for secret in secrets.values_mut() {
+				secret.zeroize();
+			}
+		}
+		self.received_shared_secrets = None;
+
+		if let Some(ref mut secrets) = self.shared_secrets {
+			for secret in secrets.values_mut() {
+				secret.zeroize();
+			}
+		}
+		self.shared_secrets = None;
+
+		// Zeroize global randomness
+		if let Some(ref mut gr) = self.global_randomness {
+			gr.zeroize();
+		}
+		self.global_randomness = None;
+
+		// Zeroize contributions (contain secret polynomials)
+		if let Some(ref mut contributions) = self.my_contributions {
+			for contribution in contributions.values_mut() {
+				contribution.zeroize();
+			}
+		}
+		self.my_contributions = None;
+
+		// Clear non-sensitive data
+		self.my_commitment = None;
+		self.round1_broadcasts = None;
+		self.round2_broadcasts = None;
+		self.rho = None;
+		self.my_partial_pks = None;
+		self.my_pk_commitments = None;
+		self.round3_broadcasts = None;
+		self.round4_broadcasts = None;
+		self.config = None;
+		self.output = None;
+		self.error_message = None;
+		self.broadcast_sent = false;
+		self.privates_sent = false;
+		self.phase = DkgPhase::Initialized;
 	}
 }
+
+impl<S: TranscriptSigner> Drop for MithrilDkgState<S> {
+	fn drop(&mut self) {
+		self.zeroize();
+	}
+}
+
+impl<S: TranscriptSigner> ZeroizeOnDrop for MithrilDkgState<S> {}
 
 impl<S: TranscriptSigner> MithrilDkgState<S> {
 	/// Create a new DKG state machine in the `Initialized` state.
 	///
 	/// The protocol will begin when `poke()` is called.
 	pub fn new(config: MithrilDkgConfig<S>) -> Self {
-		MithrilDkgState::Initialized(config)
+		Self {
+			phase: DkgPhase::Initialized,
+			config: Some(config),
+			my_randomness: None,
+			my_commitment: None,
+			my_shared_secrets: None,
+			round1_broadcasts: None,
+			received_shared_secrets: None,
+			shared_secrets: None,
+			round2_broadcasts: None,
+			global_randomness: None,
+			rho: None,
+			my_contributions: None,
+			my_partial_pks: None,
+			my_pk_commitments: None,
+			round3_broadcasts: None,
+			round4_broadcasts: None,
+			output: None,
+			error_message: None,
+			broadcast_sent: false,
+			privates_sent: false,
+		}
 	}
 
 	/// Check if the protocol has completed successfully.
 	pub fn is_complete(&self) -> bool {
-		matches!(self, MithrilDkgState::Complete(_))
+		self.phase == DkgPhase::Complete
 	}
 
 	/// Check if the protocol has failed.
 	pub fn is_failed(&self) -> bool {
-		matches!(self, MithrilDkgState::Failed(_))
+		self.phase == DkgPhase::Failed
 	}
 
-	/// Get the DKG output if the protocol has completed successfully.
-	///
-	/// Returns `Some(&MithrilDkgOutput)` if the protocol is in the `Complete` state,
-	/// `None` otherwise.
-	pub fn output(&self) -> Option<&MithrilDkgOutput> {
-		match self {
-			MithrilDkgState::Complete(output) => Some(output.as_ref()),
-			_ => None,
-		}
-	}
-
-	/// Get the list of all participants from the current state's config.
+	/// Get the list of all participants from the config.
 	///
 	/// Returns `None` if the protocol is in a terminal state (Complete or Failed).
 	pub fn all_participants(&self) -> Option<&[ParticipantId]> {
-		match self {
-			MithrilDkgState::Initialized(config) => Some(&config.all_participants),
-			MithrilDkgState::Round1(state) => Some(&state.config.all_participants),
-			MithrilDkgState::Round2(state) => Some(&state.config.all_participants),
-			MithrilDkgState::Round3(state) => Some(&state.config.all_participants),
-			MithrilDkgState::Round4(state) => Some(&state.config.all_participants),
-			MithrilDkgState::Complete(_) | MithrilDkgState::Failed(_) => None,
+		if self.phase == DkgPhase::Complete || self.phase == DkgPhase::Failed {
+			return None;
 		}
+		self.config.as_ref().map(|c| c.all_participants.as_slice())
 	}
 
-	/// Get this party's ID from the current state's config.
+	/// Get this party's ID from the config.
 	///
 	/// Returns `None` if the protocol is in a terminal state (Complete or Failed).
 	pub fn my_party_id(&self) -> Option<ParticipantId> {
-		match self {
-			MithrilDkgState::Initialized(config) => Some(config.my_party_id),
-			MithrilDkgState::Round1(state) => Some(state.config.my_party_id),
-			MithrilDkgState::Round2(state) => Some(state.config.my_party_id),
-			MithrilDkgState::Round3(state) => Some(state.config.my_party_id),
-			MithrilDkgState::Round4(state) => Some(state.config.my_party_id),
-			MithrilDkgState::Complete(_) | MithrilDkgState::Failed(_) => None,
+		if self.phase == DkgPhase::Complete || self.phase == DkgPhase::Failed {
+			return None;
 		}
+		self.config.as_ref().map(|c| c.my_party_id)
+	}
+
+	// ========================================================================
+	// Phase expectation helpers
+	// ========================================================================
+
+	/// Verify Initialized phase and return config reference.
+	pub fn expect_initialized(&self) -> Result<&MithrilDkgConfig<S>, MithrilDkgError> {
+		if self.phase != DkgPhase::Initialized {
+			return Err(MithrilDkgError::InvalidState(format!(
+				"expected Initialized, got {}",
+				self.phase.name()
+			)));
+		}
+		self.config
+			.as_ref()
+			.ok_or_else(|| MithrilDkgError::InvalidState("Initialized phase but no config".into()))
+	}
+
+	/// Verify Round1 phase and return config reference.
+	pub fn expect_round1(&self) -> Result<&MithrilDkgConfig<S>, MithrilDkgError> {
+		if self.phase != DkgPhase::Round1 {
+			return Err(MithrilDkgError::InvalidState(format!(
+				"expected Round1, got {}",
+				self.phase.name()
+			)));
+		}
+		self.config
+			.as_ref()
+			.ok_or_else(|| MithrilDkgError::InvalidState("Round1 phase but no config".into()))
+	}
+
+	/// Verify Round2 phase and return config reference.
+	pub fn expect_round2(&self) -> Result<&MithrilDkgConfig<S>, MithrilDkgError> {
+		if self.phase != DkgPhase::Round2 {
+			return Err(MithrilDkgError::InvalidState(format!(
+				"expected Round2, got {}",
+				self.phase.name()
+			)));
+		}
+		self.config
+			.as_ref()
+			.ok_or_else(|| MithrilDkgError::InvalidState("Round2 phase but no config".into()))
+	}
+
+	/// Verify Round3 phase and return config reference.
+	pub fn expect_round3(&self) -> Result<&MithrilDkgConfig<S>, MithrilDkgError> {
+		if self.phase != DkgPhase::Round3 {
+			return Err(MithrilDkgError::InvalidState(format!(
+				"expected Round3, got {}",
+				self.phase.name()
+			)));
+		}
+		self.config
+			.as_ref()
+			.ok_or_else(|| MithrilDkgError::InvalidState("Round3 phase but no config".into()))
+	}
+
+	/// Verify Round4 phase and return config reference.
+	pub fn expect_round4(&self) -> Result<&MithrilDkgConfig<S>, MithrilDkgError> {
+		if self.phase != DkgPhase::Round4 {
+			return Err(MithrilDkgError::InvalidState(format!(
+				"expected Round4, got {}",
+				self.phase.name()
+			)));
+		}
+		self.config
+			.as_ref()
+			.ok_or_else(|| MithrilDkgError::InvalidState("Round4 phase but no config".into()))
 	}
 }
 

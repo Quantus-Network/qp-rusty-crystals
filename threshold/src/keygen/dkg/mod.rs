@@ -128,8 +128,8 @@ mod types;
 // Re-export public types
 pub use protocol::{run_local_mithril_dkg, MithrilAction, MithrilDkg, MithrilDkgError};
 pub use state::{
-	all_broadcasts_received, all_private_messages_received, MithrilDkgOutput, MithrilDkgState,
-	MithrilRound1State, MithrilRound2State, MithrilRound3State, MithrilRound4State,
+	all_broadcasts_received, all_private_messages_received, DkgPhase, MithrilDkgOutput,
+	MithrilDkgState,
 };
 pub use types::{
 	compute_partial_output_hash,

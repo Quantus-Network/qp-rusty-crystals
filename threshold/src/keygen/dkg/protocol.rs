@@ -21,8 +21,8 @@ use crate::{
 
 use super::{
 	state::{
-		all_broadcasts_received, all_private_messages_received, MithrilDkgOutput, MithrilDkgState,
-		MithrilRound1State, MithrilRound2State, MithrilRound3State, MithrilRound4State,
+		all_broadcasts_received, all_private_messages_received, DkgPhase, MithrilDkgOutput,
+		MithrilDkgState,
 	},
 	types::{
 		compute_partial_output_hash, compute_signing_message, compute_transcript_hash,
@@ -352,14 +352,27 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			return Ok(MithrilAction::SendPrivate(to, data));
 		}
 
-		match &self.state {
-			MithrilDkgState::Initialized(_) => self.start_round1(),
-			MithrilDkgState::Round1(_) => self.process_round1(),
-			MithrilDkgState::Round2(_) => self.process_round2(),
-			MithrilDkgState::Round3(_) => self.process_round3(),
-			MithrilDkgState::Round4(_) => self.process_round4(),
-			MithrilDkgState::Complete(output) => Ok(MithrilAction::Return(output.clone())),
-			MithrilDkgState::Failed(msg) => Err(MithrilDkgError::InvalidState(msg.clone())),
+		match self.state.phase {
+			DkgPhase::Initialized => self.start_round1(),
+			DkgPhase::Round1 => self.process_round1(),
+			DkgPhase::Round2 => self.process_round2(),
+			DkgPhase::Round3 => self.process_round3(),
+			DkgPhase::Round4 => self.process_round4(),
+			DkgPhase::Complete => {
+				let output = self.state.output.as_ref().ok_or_else(|| {
+					MithrilDkgError::InvalidState("Complete but no output".into())
+				})?;
+				Ok(MithrilAction::Return(output.clone()))
+			},
+			DkgPhase::Failed => {
+				let msg = self
+					.state
+					.error_message
+					.as_ref()
+					.cloned()
+					.unwrap_or_else(|| "unknown error".into());
+				Err(MithrilDkgError::InvalidState(msg))
+			},
 		}
 	}
 
@@ -431,13 +444,21 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					);
 					return Ok(()); // Sender mismatch, ignore
 				}
-				match &mut self.state {
-					MithrilDkgState::Round1(state) => {
-						state.received_broadcasts.entry(from).or_insert(broadcast);
+				match self.state.phase {
+					DkgPhase::Round1 => {
+						self.state
+							.round1_broadcasts
+							.get_or_insert_with(BTreeMap::new)
+							.entry(from)
+							.or_insert(broadcast);
 					},
-					MithrilDkgState::Round2(state) => {
+					DkgPhase::Round2 => {
 						// Late Round 1 message, still accept it
-						state.round1_broadcasts.entry(from).or_insert(broadcast);
+						self.state
+							.round1_broadcasts
+							.get_or_insert_with(BTreeMap::new)
+							.entry(from)
+							.or_insert(broadcast);
 					},
 					_ => {
 						warn!(
@@ -457,10 +478,14 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					);
 					return Ok(()); // Sender mismatch, ignore
 				}
-				if let MithrilDkgState::Round1(state) = &mut self.state {
+				if self.state.phase == DkgPhase::Round1 {
+					let config = self.state.config.as_ref().ok_or_else(|| {
+						MithrilDkgError::InvalidState("Round1 but no config".into())
+					})?;
+
 					// Verify subset_mask is a valid subset for this threshold config
 					// (prevents attacker from using fake subset masks)
-					if !state.config.is_valid_subset(private.subset_mask) {
+					if !config.is_valid_subset(private.subset_mask) {
 						warn!(
 							"DKG: Round1Private with invalid subset {:b} (from party {})",
 							private.subset_mask, from
@@ -469,7 +494,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					}
 
 					// M2: Verify sender is the leader for this subset
-					let expected_leader = state.config.get_leader(private.subset_mask);
+					let expected_leader = config.get_leader(private.subset_mask);
 					if expected_leader != Some(from) {
 						warn!(
 							"DKG: Round1Private from non-leader: party {} sent for subset {:b} but leader is {:?}",
@@ -480,7 +505,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 
 					// M2: Verify we are actually a member of this subset
 					// (prevents malicious leader from sending K_S to non-member parties)
-					if !state.config.is_in_subset(private.subset_mask) {
+					if !config.is_in_subset(private.subset_mask) {
 						warn!(
 							"DKG: Round1Private for subset {:b} but we are not a member (from party {})",
 							private.subset_mask, from
@@ -488,8 +513,9 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 						return Ok(()); // Not in subset, ignore
 					}
 
-					state
+					self.state
 						.received_shared_secrets
+						.get_or_insert_with(BTreeMap::new)
 						.entry(private.subset_mask)
 						.or_insert(private.shared_secret);
 				}
@@ -503,15 +529,23 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					);
 					return Ok(()); // Sender mismatch, ignore
 				}
-				match &mut self.state {
-					MithrilDkgState::Round2(state) => {
-						state.received_broadcasts.entry(from).or_insert(broadcast);
+				match self.state.phase {
+					DkgPhase::Round2 => {
+						self.state
+							.round2_broadcasts
+							.get_or_insert_with(BTreeMap::new)
+							.entry(from)
+							.or_insert(broadcast);
 					},
-					MithrilDkgState::Round3(state) => {
+					DkgPhase::Round3 => {
 						// Late Round 2 message, still accept it
-						state.round2_broadcasts.entry(from).or_insert(broadcast);
+						self.state
+							.round2_broadcasts
+							.get_or_insert_with(BTreeMap::new)
+							.entry(from)
+							.or_insert(broadcast);
 					},
-					MithrilDkgState::Round1(_) | MithrilDkgState::Initialized(_) => {
+					DkgPhase::Round1 | DkgPhase::Initialized => {
 						// Future message, buffer it
 						self.message_buffer.buffer_round2(broadcast);
 					},
@@ -531,17 +565,23 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					);
 					return Ok(()); // Sender mismatch, ignore
 				}
-				match &mut self.state {
-					MithrilDkgState::Round3(state) => {
-						state.received_broadcasts.entry(from).or_insert(broadcast);
+				match self.state.phase {
+					DkgPhase::Round3 => {
+						self.state
+							.round3_broadcasts
+							.get_or_insert_with(BTreeMap::new)
+							.entry(from)
+							.or_insert(broadcast);
 					},
-					MithrilDkgState::Round4(state) => {
+					DkgPhase::Round4 => {
 						// Late Round 3 message, still accept it
-						state.round3_broadcasts.entry(from).or_insert(broadcast);
+						self.state
+							.round3_broadcasts
+							.get_or_insert_with(BTreeMap::new)
+							.entry(from)
+							.or_insert(broadcast);
 					},
-					MithrilDkgState::Round1(_) |
-					MithrilDkgState::Round2(_) |
-					MithrilDkgState::Initialized(_) => {
+					DkgPhase::Round1 | DkgPhase::Round2 | DkgPhase::Initialized => {
 						// Future message, buffer it
 						self.message_buffer.buffer_round3(broadcast);
 					},
@@ -561,14 +601,18 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					);
 					return Ok(()); // Sender mismatch, ignore
 				}
-				match &mut self.state {
-					MithrilDkgState::Round4(state) => {
-						state.received_broadcasts.entry(from).or_insert(broadcast);
+				match self.state.phase {
+					DkgPhase::Round4 => {
+						self.state
+							.round4_broadcasts
+							.get_or_insert_with(BTreeMap::new)
+							.entry(from)
+							.or_insert(broadcast);
 					},
-					MithrilDkgState::Round1(_) |
-					MithrilDkgState::Round2(_) |
-					MithrilDkgState::Round3(_) |
-					MithrilDkgState::Initialized(_) => {
+					DkgPhase::Round1 |
+					DkgPhase::Round2 |
+					DkgPhase::Round3 |
+					DkgPhase::Initialized => {
 						// Future message, buffer it
 						self.message_buffer.buffer_round4(broadcast);
 					},
@@ -588,9 +632,13 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	/// Process buffered Round 2 messages after transitioning to Round 2.
 	fn process_buffered_round2(&mut self) {
 		let buffered = self.message_buffer.take_round2();
-		for r2 in buffered {
-			if let MithrilDkgState::Round2(state) = &mut self.state {
-				state.received_broadcasts.entry(r2.party_id).or_insert(r2);
+		if self.state.phase == DkgPhase::Round2 {
+			for r2 in buffered {
+				self.state
+					.round2_broadcasts
+					.get_or_insert_with(BTreeMap::new)
+					.entry(r2.party_id)
+					.or_insert(r2);
 			}
 		}
 	}
@@ -598,9 +646,13 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	/// Process buffered Round 3 messages after transitioning to Round 3.
 	fn process_buffered_round3(&mut self) {
 		let buffered = self.message_buffer.take_round3();
-		for r3 in buffered {
-			if let MithrilDkgState::Round3(state) = &mut self.state {
-				state.received_broadcasts.entry(r3.party_id).or_insert(r3);
+		if self.state.phase == DkgPhase::Round3 {
+			for r3 in buffered {
+				self.state
+					.round3_broadcasts
+					.get_or_insert_with(BTreeMap::new)
+					.entry(r3.party_id)
+					.or_insert(r3);
 			}
 		}
 	}
@@ -608,9 +660,13 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	/// Process buffered Round 4 messages after transitioning to Round 4.
 	fn process_buffered_round4(&mut self) {
 		let buffered = self.message_buffer.take_round4();
-		for r4 in buffered {
-			if let MithrilDkgState::Round4(state) = &mut self.state {
-				state.received_broadcasts.entry(r4.party_id).or_insert(r4);
+		if self.state.phase == DkgPhase::Round4 {
+			for r4 in buffered {
+				self.state
+					.round4_broadcasts
+					.get_or_insert_with(BTreeMap::new)
+					.entry(r4.party_id)
+					.or_insert(r4);
 			}
 		}
 	}
@@ -620,11 +676,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	// ========================================================================
 
 	fn start_round1(&mut self) -> Result<MithrilAction, MithrilDkgError> {
-		let config =
-			match mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into())) {
-				MithrilDkgState::Initialized(c) => c,
-				_ => return Err(MithrilDkgError::InvalidState("expected Initialized".into())),
-			};
+		let config = self.state.expect_initialized()?;
 
 		// Derive all randomness from the master seed
 		let leader_subsets = config.my_leader_subsets();
@@ -633,45 +685,51 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 
 		let my_commitment = h_commit(config.my_party_id, &my_randomness);
 
-		self.state = MithrilDkgState::Round1(MithrilRound1State {
-			config,
-			my_randomness,
-			my_commitment,
-			my_shared_secrets,
-			received_broadcasts: BTreeMap::new(),
-			received_shared_secrets: BTreeMap::new(),
-			broadcast_sent: false,
-			privates_sent: false,
-		});
+		// Transition to Round1 by setting fields directly
+		self.state.phase = DkgPhase::Round1;
+		self.state.my_randomness = Some(my_randomness);
+		self.state.my_commitment = Some(my_commitment);
+		self.state.my_shared_secrets = Some(my_shared_secrets);
+		self.state.round1_broadcasts = Some(BTreeMap::new());
+		self.state.received_shared_secrets = Some(BTreeMap::new());
+		self.state.broadcast_sent = false;
+		self.state.privates_sent = false;
 
 		self.poke()
 	}
 
 	fn process_round1(&mut self) -> Result<MithrilAction, MithrilDkgError> {
-		let state = match &mut self.state {
-			MithrilDkgState::Round1(s) => s,
-			_ => return Err(MithrilDkgError::InvalidState("expected Round1".into())),
-		};
+		// Verify we're in Round1 and have config
+		self.state.expect_round1()?;
 
-		if !state.broadcast_sent {
-			let broadcast = MithrilRound1Broadcast {
-				party_id: state.config.my_party_id,
-				commitment: state.my_commitment,
-			};
+		if !self.state.broadcast_sent {
+			let config = self.state.config.as_ref().unwrap(); // Safe: expect_round1 verified
+			let my_commitment = self
+				.state
+				.my_commitment
+				.ok_or_else(|| MithrilDkgError::InvalidState("Round1 but no commitment".into()))?;
+
+			let broadcast =
+				MithrilRound1Broadcast { party_id: config.my_party_id, commitment: my_commitment };
 			let msg = MithrilDkgMessage::Round1Broadcast(broadcast);
 			let data =
 				borsh::to_vec(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
-			state.broadcast_sent = true;
+			self.state.broadcast_sent = true;
 			return Ok(MithrilAction::SendMany(data));
 		}
 
-		if !state.privates_sent {
-			for (&subset, &secret) in &state.my_shared_secrets {
-				let parties = state.config.get_parties_in_subset(subset);
+		if !self.state.privates_sent {
+			let config = self.state.config.as_ref().unwrap(); // Safe: expect_round1 verified
+			let my_shared_secrets = self.state.my_shared_secrets.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round1 but no shared secrets".into())
+			})?;
+
+			for (&subset, &secret) in my_shared_secrets {
+				let parties = config.get_parties_in_subset(subset);
 				for &party in &parties {
-					if party != state.config.my_party_id {
+					if party != config.my_party_id {
 						let private = MithrilRound1Private {
-							from_party_id: state.config.my_party_id,
+							from_party_id: config.my_party_id,
 							subset_mask: subset,
 							shared_secret: secret,
 						};
@@ -683,31 +741,36 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 				}
 			}
 
-			if let MithrilDkgState::Round1(s) = &mut self.state {
-				s.privates_sent = true;
-			}
+			self.state.privates_sent = true;
 
 			if let Some((to, data)) = self.pending_privates.pop() {
 				return Ok(MithrilAction::SendPrivate(to, data));
 			}
 		}
 
-		let state = match &self.state {
-			MithrilDkgState::Round1(s) => s,
-			_ => return Err(MithrilDkgError::InvalidState("expected Round1".into())),
-		};
+		// Check if we have all required messages
+		let config = self.state.config.as_ref().unwrap(); // Safe: expect_round1 verified
+		let round1_broadcasts =
+			self.state.round1_broadcasts.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round1 but no broadcasts map".into())
+			})?;
+		let received_shared_secrets =
+			self.state.received_shared_secrets.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round1 but no received_shared_secrets".into())
+			})?;
+		let my_shared_secrets =
+			self.state.my_shared_secrets.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round1 but no shared secrets".into())
+			})?;
 
 		let all_broadcasts = all_broadcasts_received(
-			&state.received_broadcasts,
-			&state.config.all_participants,
-			state.config.my_party_id,
+			round1_broadcasts,
+			&config.all_participants,
+			config.my_party_id,
 		);
-		let my_subsets = state.config.my_subsets();
-		let all_privates = all_private_messages_received(
-			&state.received_shared_secrets,
-			&state.my_shared_secrets,
-			&my_subsets,
-		);
+		let my_subsets = config.my_subsets();
+		let all_privates =
+			all_private_messages_received(received_shared_secrets, my_shared_secrets, &my_subsets);
 
 		if all_broadcasts && all_privates {
 			self.transition_to_round2()?;
@@ -718,34 +781,26 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	}
 
 	fn transition_to_round2(&mut self) -> Result<(), MithrilDkgError> {
-		let old_state =
-			mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
+		self.state.expect_round1()?;
 
-		let mut state = match old_state {
-			MithrilDkgState::Round1(s) => s,
-			_ => return Err(MithrilDkgError::InvalidState("expected Round1".into())),
-		};
-
-		// Move shared secrets, combining our own with received ones
-		let mut shared_secrets = mem::take(&mut state.my_shared_secrets);
-		for (subset, secret) in mem::take(&mut state.received_shared_secrets) {
-			shared_secrets.insert(subset, secret);
+		// Combine our shared secrets with received ones
+		let mut combined_secrets = self.state.my_shared_secrets.take().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round1 but no my_shared_secrets".into())
+		})?;
+		if let Some(received) = self.state.received_shared_secrets.take() {
+			for (subset, secret) in received {
+				combined_secrets.insert(subset, secret);
+			}
 		}
 
-		// Copy randomness (it's Copy, so we need to explicitly zeroize the original)
-		let my_randomness = state.my_randomness;
+		// Transition to Round2
+		self.state.phase = DkgPhase::Round2;
+		self.state.shared_secrets = Some(combined_secrets);
+		self.state.round2_broadcasts = Some(BTreeMap::new());
+		self.state.broadcast_sent = false;
 
-		self.state = MithrilDkgState::Round2(MithrilRound2State {
-			config: state.config,
-			my_randomness,
-			round1_broadcasts: state.received_broadcasts,
-			shared_secrets,
-			received_broadcasts: BTreeMap::new(),
-			broadcast_sent: false,
-		});
-
-		// Zeroize sensitive data remaining in the old state
-		state.my_randomness.zeroize();
+		// Note: my_randomness stays in place for use in Round2 broadcast
+		// It will be zeroized during transition_to_round3
 
 		// Process any buffered Round 2 messages
 		self.process_buffered_round2();
@@ -758,38 +813,44 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	// ========================================================================
 
 	fn process_round2(&mut self) -> Result<MithrilAction, MithrilDkgError> {
-		let state = match &mut self.state {
-			MithrilDkgState::Round2(s) => s,
-			_ => return Err(MithrilDkgError::InvalidState("expected Round2".into())),
-		};
+		self.state.expect_round2()?;
 
-		if !state.broadcast_sent {
-			let broadcast = MithrilRound2Broadcast {
-				party_id: state.config.my_party_id,
-				randomness: state.my_randomness,
-			};
+		if !self.state.broadcast_sent {
+			let config = self.state.config.as_ref().unwrap(); // Safe: expect_round2 verified
+			let my_randomness = self
+				.state
+				.my_randomness
+				.ok_or_else(|| MithrilDkgError::InvalidState("Round2 but no randomness".into()))?;
+
+			let broadcast =
+				MithrilRound2Broadcast { party_id: config.my_party_id, randomness: my_randomness };
 			let msg = MithrilDkgMessage::Round2Broadcast(broadcast);
 			let data =
 				borsh::to_vec(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
-			state.broadcast_sent = true;
+			self.state.broadcast_sent = true;
 			return Ok(MithrilAction::SendMany(data));
 		}
 
-		let state = match &self.state {
-			MithrilDkgState::Round2(s) => s,
-			_ => return Err(MithrilDkgError::InvalidState("expected Round2".into())),
-		};
+		// Check if we have all broadcasts
+		let config = self.state.config.as_ref().unwrap(); // Safe: expect_round2 verified
+		let round2_broadcasts =
+			self.state.round2_broadcasts.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round2 but no broadcasts map".into())
+			})?;
+		let round1_broadcasts = self.state.round1_broadcasts.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round2 but no round1_broadcasts".into())
+		})?;
 
 		let all_broadcasts = all_broadcasts_received(
-			&state.received_broadcasts,
-			&state.config.all_participants,
-			state.config.my_party_id,
+			round2_broadcasts,
+			&config.all_participants,
+			config.my_party_id,
 		);
 
 		if all_broadcasts {
 			// Verify commitments
-			for (&party_id, broadcast) in &state.received_broadcasts {
-				let expected = state.round1_broadcasts.get(&party_id).ok_or_else(|| {
+			for (&party_id, broadcast) in round2_broadcasts {
+				let expected = round1_broadcasts.get(&party_id).ok_or_else(|| {
 					MithrilDkgError::MissingData(format!("missing Round 1 from party {}", party_id))
 				})?;
 				let actual = h_commit(party_id, &broadcast.randomness);
@@ -806,57 +867,61 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	}
 
 	fn transition_to_round3(&mut self) -> Result<(), MithrilDkgError> {
-		let old_state =
-			mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
-
-		let mut state = match old_state {
-			MithrilDkgState::Round2(s) => s,
-			_ => return Err(MithrilDkgError::InvalidState("expected Round2".into())),
-		};
+		let config = self.state.expect_round2()?;
+		let my_party_id = config.my_party_id; // Copy before mutable borrows
+		let my_randomness = self
+			.state
+			.my_randomness
+			.ok_or_else(|| MithrilDkgError::InvalidState("Round2 but no randomness".into()))?;
+		let round2_broadcasts = self.state.round2_broadcasts.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round2 but no round2_broadcasts".into())
+		})?;
+		let shared_secrets =
+			self.state.shared_secrets.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round2 but no shared_secrets".into())
+			})?;
 
 		// Compute global randomness from all parties' contributions
-		let (global_randomness, mut my_broadcast) = compute_global_randomness(
-			&state.config,
-			&state.received_broadcasts,
-			state.my_randomness,
-		);
+		let (global_randomness, my_broadcast) =
+			compute_global_randomness(config, round2_broadcasts, my_randomness);
 
 		let rho = h_seed(&global_randomness);
 
 		// Compute contributions and partial PKs for all subsets we belong to
-		let (my_contributions, my_partial_pks, my_pk_commitments) = compute_my_contributions(
-			&state.config,
-			&state.shared_secrets,
-			&global_randomness,
-			&rho,
+		let (my_contributions, my_partial_pks, my_pk_commitments) =
+			compute_my_contributions(config, shared_secrets, &global_randomness, &rho);
+
+		// Build the complete round1 broadcasts including our own
+		let mut round1_broadcasts = self.state.round1_broadcasts.take().unwrap_or_default();
+		round1_broadcasts.insert(
+			my_party_id,
+			MithrilRound1Broadcast {
+				party_id: my_party_id,
+				commitment: h_commit(my_party_id, &my_randomness),
+			},
 		);
 
-		// Build the new Round3 state
-		let round1_broadcasts = build_round1_broadcasts_with_own(
-			mem::take(&mut state.round1_broadcasts),
-			&state.config,
-			&state.my_randomness,
-		);
-		let mut round2_broadcasts = mem::take(&mut state.received_broadcasts);
-		round2_broadcasts.insert(state.config.my_party_id, my_broadcast.clone());
+		// Build the complete round2 broadcasts including our own
+		let mut round2_broadcasts = self.state.round2_broadcasts.take().unwrap_or_default();
+		round2_broadcasts.insert(my_party_id, my_broadcast);
 
-		self.state = MithrilDkgState::Round3(MithrilRound3State {
-			config: state.config,
-			round1_broadcasts,
-			round2_broadcasts,
-			shared_secrets: mem::take(&mut state.shared_secrets),
-			global_randomness,
-			rho,
-			my_partial_pks,
-			my_contributions,
-			my_pk_commitments,
-			received_broadcasts: BTreeMap::new(),
-			broadcast_sent: false,
-		});
+		// Zeroize my_randomness before moving forward
+		if let Some(ref mut r) = self.state.my_randomness {
+			r.zeroize();
+		}
+		self.state.my_randomness = None;
 
-		// Zeroize sensitive data remaining in the old state
-		state.my_randomness.zeroize();
-		my_broadcast.randomness.zeroize();
+		// Transition to Round3
+		self.state.phase = DkgPhase::Round3;
+		self.state.global_randomness = Some(global_randomness);
+		self.state.rho = Some(rho);
+		self.state.my_contributions = Some(my_contributions);
+		self.state.my_partial_pks = Some(my_partial_pks);
+		self.state.my_pk_commitments = Some(my_pk_commitments);
+		self.state.round1_broadcasts = Some(round1_broadcasts);
+		self.state.round2_broadcasts = Some(round2_broadcasts);
+		self.state.round3_broadcasts = Some(BTreeMap::new());
+		self.state.broadcast_sent = false;
 
 		// Process any buffered Round 3 messages
 		self.process_buffered_round3();
@@ -869,32 +934,36 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	// ========================================================================
 
 	fn process_round3(&mut self) -> Result<MithrilAction, MithrilDkgError> {
-		let state = match &mut self.state {
-			MithrilDkgState::Round3(s) => s,
-			_ => return Err(MithrilDkgError::InvalidState("expected Round3".into())),
-		};
+		self.state.expect_round3()?;
 
-		if !state.broadcast_sent {
+		if !self.state.broadcast_sent {
+			let config = self.state.config.as_ref().unwrap(); // Safe: expect_round3 verified
+			let my_pk_commitments = self.state.my_pk_commitments.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round3 but no pk_commitments".into())
+			})?;
+
 			let broadcast = MithrilRound3Broadcast {
-				party_id: state.config.my_party_id,
-				partial_pk_commitments: state.my_pk_commitments.clone(),
+				party_id: config.my_party_id,
+				partial_pk_commitments: my_pk_commitments.clone(),
 			};
 			let msg = MithrilDkgMessage::Round3Broadcast(broadcast);
 			let data =
 				borsh::to_vec(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
-			state.broadcast_sent = true;
+			self.state.broadcast_sent = true;
 			return Ok(MithrilAction::SendMany(data));
 		}
 
-		let state = match &self.state {
-			MithrilDkgState::Round3(s) => s,
-			_ => return Err(MithrilDkgError::InvalidState("expected Round3".into())),
-		};
+		// Check if we have all broadcasts
+		let config = self.state.config.as_ref().unwrap(); // Safe: expect_round3 verified
+		let round3_broadcasts =
+			self.state.round3_broadcasts.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round3 but no broadcasts map".into())
+			})?;
 
 		let all_broadcasts = all_broadcasts_received(
-			&state.received_broadcasts,
-			&state.config.all_participants,
-			state.config.my_party_id,
+			round3_broadcasts,
+			&config.all_participants,
+			config.my_party_id,
 		);
 
 		if all_broadcasts {
@@ -906,41 +975,27 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	}
 
 	fn transition_to_round4(&mut self) -> Result<(), MithrilDkgError> {
-		let old_state =
-			mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
+		let config = self.state.expect_round3()?;
+		let my_party_id = config.my_party_id; // Copy before mutable borrows
+		let my_pk_commitments =
+			self.state.my_pk_commitments.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round3 but no pk_commitments".into())
+			})?;
 
-		let mut state = match old_state {
-			MithrilDkgState::Round3(s) => s,
-			_ => return Err(MithrilDkgError::InvalidState("expected Round3".into())),
+		let my_round3_broadcast = MithrilRound3Broadcast {
+			party_id: my_party_id,
+			partial_pk_commitments: my_pk_commitments.clone(),
 		};
 
-		// Take all fields that need to be moved to Round4
-		let shared_secrets = mem::take(&mut state.shared_secrets);
-		let global_randomness = mem::take(&mut state.global_randomness);
-		let my_contributions = mem::take(&mut state.my_contributions);
+		self.state
+			.round3_broadcasts
+			.get_or_insert_with(BTreeMap::new)
+			.insert(my_party_id, my_round3_broadcast);
 
-		let mut round3_broadcasts = mem::take(&mut state.received_broadcasts);
-		round3_broadcasts.insert(
-			state.config.my_party_id,
-			MithrilRound3Broadcast {
-				party_id: state.config.my_party_id,
-				partial_pk_commitments: state.my_pk_commitments.clone(),
-			},
-		);
-
-		self.state = MithrilDkgState::Round4(MithrilRound4State {
-			config: state.config,
-			round1_broadcasts: mem::take(&mut state.round1_broadcasts),
-			round2_broadcasts: mem::take(&mut state.round2_broadcasts),
-			round3_broadcasts,
-			shared_secrets,
-			global_randomness,
-			rho: state.rho,
-			my_partial_pks: mem::take(&mut state.my_partial_pks),
-			my_contributions,
-			received_broadcasts: BTreeMap::new(),
-			broadcast_sent: false,
-		});
+		// Transition to Round4
+		self.state.phase = DkgPhase::Round4;
+		self.state.round4_broadcasts = Some(BTreeMap::new());
+		self.state.broadcast_sent = false;
 
 		// Process any buffered Round 4 messages
 		self.process_buffered_round4();
@@ -953,34 +1008,33 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	// ========================================================================
 
 	fn process_round4(&mut self) -> Result<MithrilAction, MithrilDkgError> {
-		let state = match &mut self.state {
-			MithrilDkgState::Round4(s) => s,
-			_ => return Err(MithrilDkgError::InvalidState("expected Round4".into())),
-		};
+		self.state.expect_round4()?;
 
-		if !state.broadcast_sent {
+		if !self.state.broadcast_sent {
 			// Per Mithril paper DKGRound4 lines 11-16: Non-leaders MUST verify
 			// PK commitments BEFORE signing the transcript.
-			verify_leader_commitments_before_signing(state)?;
+			self.verify_leader_commitments_before_signing()?;
 
 			// Sign and broadcast our partial PKs
-			let broadcast = create_round4_broadcast(state);
+			let broadcast = self.create_round4_broadcast()?;
 			let msg = MithrilDkgMessage::Round4Broadcast(broadcast);
 			let data =
 				borsh::to_vec(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
-			state.broadcast_sent = true;
+			self.state.broadcast_sent = true;
 			return Ok(MithrilAction::SendMany(data));
 		}
 
-		let state = match &self.state {
-			MithrilDkgState::Round4(s) => s,
-			_ => return Err(MithrilDkgError::InvalidState("expected Round4".into())),
-		};
+		// Check if we have all broadcasts
+		let config = self.state.config.as_ref().unwrap(); // Safe: expect_round4 verified
+		let round4_broadcasts =
+			self.state.round4_broadcasts.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round4 but no broadcasts map".into())
+			})?;
 
 		let all_broadcasts = all_broadcasts_received(
-			&state.received_broadcasts,
-			&state.config.all_participants,
-			state.config.my_party_id,
+			round4_broadcasts,
+			&config.all_participants,
+			config.my_party_id,
 		);
 
 		if all_broadcasts {
@@ -992,42 +1046,182 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	}
 
 	fn complete(&mut self) -> Result<(), MithrilDkgError> {
-		let old_state =
-			mem::replace(&mut self.state, MithrilDkgState::Failed("transitioning".into()));
+		self.state.expect_round4()?;
 
-		let mut state = match old_state {
-			MithrilDkgState::Round4(s) => s,
-			_ => return Err(MithrilDkgError::InvalidState("expected Round4".into())),
-		};
+		// Compute the DKG output
+		let result = self.complete_inner();
 
-		let result = self.complete_inner(&state);
+		// Zeroize sensitive data
+		self.state.zeroize();
 
-		// Always zeroize the old state, whether we succeeded or failed
-		state.zeroize();
-
-		result
+		// Now set the completion state
+		match result {
+			Ok((public_key, private_share)) => {
+				self.state.phase = DkgPhase::Complete;
+				self.state.output = Some(Box::new(MithrilDkgOutput { public_key, private_share }));
+				Ok(())
+			},
+			Err(e) => {
+				self.state.phase = DkgPhase::Failed;
+				self.state.error_message = Some(format!("{}", e));
+				Err(e)
+			},
+		}
 	}
 
-	fn complete_inner(&mut self, state: &MithrilRound4State<S>) -> Result<(), MithrilDkgError> {
-		let transcript_hash = compute_transcript_hash(
-			&state.round1_broadcasts,
-			&state.round2_broadcasts,
-			&state.round3_broadcasts,
-		);
+	fn complete_inner(&self) -> Result<(PublicKey, PrivateKeyShare), MithrilDkgError> {
+		let config = self
+			.state
+			.config
+			.as_ref()
+			.ok_or_else(|| MithrilDkgError::InvalidState("Round4 but no config".into()))?;
+		let round1_broadcasts = self.state.round1_broadcasts.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round4 but no round1_broadcasts".into())
+		})?;
+		let round2_broadcasts = self.state.round2_broadcasts.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round4 but no round2_broadcasts".into())
+		})?;
+		let round3_broadcasts = self.state.round3_broadcasts.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round4 but no round3_broadcasts".into())
+		})?;
+		let round4_broadcasts = self.state.round4_broadcasts.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round4 but no round4_broadcasts".into())
+		})?;
+		let rho = self
+			.state
+			.rho
+			.ok_or_else(|| MithrilDkgError::InvalidState("Round4 but no rho".into()))?;
+		let my_partial_pks =
+			self.state.my_partial_pks.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round4 but no my_partial_pks".into())
+			})?;
+		let my_contributions = self.state.my_contributions.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round4 but no my_contributions".into())
+		})?;
+		let global_randomness = self.state.global_randomness.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round4 but no global_randomness".into())
+		})?;
+		let shared_secrets =
+			self.state.shared_secrets.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round4 but no shared_secrets".into())
+			})?;
+
+		let transcript_hash =
+			compute_transcript_hash(round1_broadcasts, round2_broadcasts, round3_broadcasts);
 
 		// Collect our own partial PKs and verify+collect others'
-		let all_partial_pks = collect_and_verify_all_partial_pks(state, &transcript_hash)?;
+		let all_partial_pks = collect_and_verify_all_partial_pks(
+			config,
+			round3_broadcasts,
+			round4_broadcasts,
+			my_partial_pks,
+			shared_secrets,
+			global_randomness,
+			&rho,
+			&transcript_hash,
+		)?;
 
 		// Combine partial PKs to get final public key
-		let public_key = combine_partial_pks(&state.rho, &all_partial_pks)?;
+		let public_key = combine_partial_pks(&rho, &all_partial_pks)?;
 
 		// Build private key share
-		let private_share = build_private_share(state, &public_key)?;
+		let private_share = build_private_share(config, my_contributions, &rho, &public_key)?;
 
-		self.state =
-			MithrilDkgState::Complete(Box::new(MithrilDkgOutput { public_key, private_share }));
+		Ok((public_key, private_share))
+	}
 
+	/// Verify that leader commitments match our expected values before signing.
+	/// Per Mithril paper DKGRound4 lines 11-16.
+	fn verify_leader_commitments_before_signing(&self) -> Result<(), MithrilDkgError> {
+		let config = self
+			.state
+			.config
+			.as_ref()
+			.ok_or_else(|| MithrilDkgError::InvalidState("Round4 but no config".into()))?;
+		let round3_broadcasts = self.state.round3_broadcasts.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round4 but no round3_broadcasts".into())
+		})?;
+		let rho = self
+			.state
+			.rho
+			.ok_or_else(|| MithrilDkgError::InvalidState("Round4 but no rho".into()))?;
+		let my_contributions = self.state.my_contributions.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round4 but no my_contributions".into())
+		})?;
+
+		for &subset in &config.my_subsets() {
+			let leader_id = config.get_leader(subset).ok_or_else(|| {
+				MithrilDkgError::InternalError(format!("no leader for subset {:b}", subset))
+			})?;
+
+			// Skip if we're the leader for this subset
+			if leader_id == config.my_party_id {
+				continue;
+			}
+
+			// Verify the leader's commitment matches our expected value
+			if let Some(contribution) = my_contributions.get(&subset) {
+				let expected_pk = compute_partial_pk(&rho, contribution, subset);
+				let expected_commitment = h_commit_pk(subset, &expected_pk);
+
+				let round3 = round3_broadcasts.get(&leader_id).ok_or_else(|| {
+					MithrilDkgError::MissingData(format!(
+						"missing Round 3 from leader {} for subset {:b}",
+						leader_id, subset
+					))
+				})?;
+
+				let leader_commitment =
+					round3.partial_pk_commitments.get(&subset).ok_or_else(|| {
+						MithrilDkgError::MissingData(format!(
+							"missing PK commitment from leader {} for subset {:b}",
+							leader_id, subset
+						))
+					})?;
+
+				if *leader_commitment != expected_commitment {
+					return Err(MithrilDkgError::PkCommitmentMismatch {
+						party_id: leader_id,
+						subset,
+					});
+				}
+			}
+		}
 		Ok(())
+	}
+
+	/// Create the Round 4 broadcast message with our partial PKs and transcript signature.
+	fn create_round4_broadcast(&self) -> Result<MithrilRound4Broadcast, MithrilDkgError> {
+		let config = self
+			.state
+			.config
+			.as_ref()
+			.ok_or_else(|| MithrilDkgError::InvalidState("Round4 but no config".into()))?;
+		let round1_broadcasts = self.state.round1_broadcasts.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round4 but no round1_broadcasts".into())
+		})?;
+		let round2_broadcasts = self.state.round2_broadcasts.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round4 but no round2_broadcasts".into())
+		})?;
+		let round3_broadcasts = self.state.round3_broadcasts.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("Round4 but no round3_broadcasts".into())
+		})?;
+		let my_partial_pks =
+			self.state.my_partial_pks.as_ref().ok_or_else(|| {
+				MithrilDkgError::InvalidState("Round4 but no my_partial_pks".into())
+			})?;
+
+		let transcript_hash =
+			compute_transcript_hash(round1_broadcasts, round2_broadcasts, round3_broadcasts);
+		let partial_output_hash = compute_partial_output_hash(my_partial_pks);
+		let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
+		let signature = config.my_signer.sign(&signing_message);
+
+		Ok(MithrilRound4Broadcast {
+			party_id: config.my_party_id,
+			partial_public_keys: my_partial_pks.clone(),
+			transcript_signature: signature.as_ref().to_vec(),
+		})
 	}
 }
 
@@ -1103,106 +1297,52 @@ fn compute_my_contributions<S: TranscriptSigner>(
 	(my_contributions, my_partial_pks, my_pk_commitments)
 }
 
-/// Build the complete Round1 broadcasts map including this party's own broadcast.
-fn build_round1_broadcasts_with_own<S: TranscriptSigner>(
-	mut round1_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
-	config: &MithrilDkgConfig<S>,
-	my_randomness: &[u8; RANDOMNESS_SIZE],
-) -> BTreeMap<ParticipantId, MithrilRound1Broadcast> {
-	round1_broadcasts.insert(
-		config.my_party_id,
-		MithrilRound1Broadcast {
-			party_id: config.my_party_id,
-			commitment: h_commit(config.my_party_id, my_randomness),
-		},
-	);
-	round1_broadcasts
-}
-
 /// Verify that leader commitments match our expected values before signing.
 /// Per Mithril paper DKGRound4 lines 11-16.
-fn verify_leader_commitments_before_signing<S: TranscriptSigner>(
-	state: &MithrilRound4State<S>,
-) -> Result<(), MithrilDkgError> {
-	for &subset in &state.config.my_subsets() {
-		let leader_id = state.config.get_leader(subset).ok_or_else(|| {
-			MithrilDkgError::InternalError(format!("no leader for subset {:b}", subset))
-		})?;
-
-		// Skip if we're the leader for this subset
-		if leader_id == state.config.my_party_id {
-			continue;
-		}
-
-		// Verify the leader's commitment matches our expected value
-		if let Some(contribution) = state.my_contributions.get(&subset) {
-			let expected_pk = compute_partial_pk(&state.rho, contribution, subset);
-			let expected_commitment = h_commit_pk(subset, &expected_pk);
-
-			let round3 = state.round3_broadcasts.get(&leader_id).ok_or_else(|| {
-				MithrilDkgError::MissingData(format!(
-					"missing Round 3 from leader {} for subset {:b}",
-					leader_id, subset
-				))
-			})?;
-
-			let leader_commitment =
-				round3.partial_pk_commitments.get(&subset).ok_or_else(|| {
-					MithrilDkgError::MissingData(format!(
-						"missing PK commitment from leader {} for subset {:b}",
-						leader_id, subset
-					))
-				})?;
-
-			if *leader_commitment != expected_commitment {
-				return Err(MithrilDkgError::PkCommitmentMismatch { party_id: leader_id, subset });
-			}
-		}
-	}
-	Ok(())
-}
+/// Note: This function is now a method on MithrilDkg - keeping this stub for reference.
+// Old function removed - now a method on MithrilDkg
 
 /// Create the Round 4 broadcast message with our partial PKs and transcript signature.
-fn create_round4_broadcast<S: TranscriptSigner>(
-	state: &MithrilRound4State<S>,
-) -> MithrilRound4Broadcast {
-	let transcript_hash = compute_transcript_hash(
-		&state.round1_broadcasts,
-		&state.round2_broadcasts,
-		&state.round3_broadcasts,
-	);
-	let partial_output_hash = compute_partial_output_hash(&state.my_partial_pks);
-	let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
-	let signature = state.config.my_signer.sign(&signing_message);
-
-	MithrilRound4Broadcast {
-		party_id: state.config.my_party_id,
-		partial_public_keys: state.my_partial_pks.clone(),
-		transcript_signature: signature.as_ref().to_vec(),
-	}
-}
+/// Note: This function is now a method on MithrilDkg - keeping this stub for reference.
+// Old function removed - now a method on MithrilDkg
 
 /// Collect and verify all partial PKs from received broadcasts.
+#[allow(clippy::too_many_arguments)]
 fn collect_and_verify_all_partial_pks<S: TranscriptSigner>(
-	state: &MithrilRound4State<S>,
+	config: &MithrilDkgConfig<S>,
+	round3_broadcasts: &BTreeMap<ParticipantId, MithrilRound3Broadcast>,
+	round4_broadcasts: &BTreeMap<ParticipantId, MithrilRound4Broadcast>,
+	my_partial_pks: &BTreeMap<SubsetMask, PartialPublicKey>,
+	shared_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+	global_randomness: &[u8],
+	rho: &[u8; 32],
 	transcript_hash: &[u8; 32],
 ) -> Result<BTreeMap<SubsetMask, PartialPublicKey>, MithrilDkgError> {
 	let mut all_partial_pks: BTreeMap<SubsetMask, PartialPublicKey> = BTreeMap::new();
 
 	// Add our own partial PKs (only for subsets where we are the leader)
-	for (subset, pk) in &state.my_partial_pks {
-		if state.config.is_leader(*subset) {
+	for (subset, pk) in my_partial_pks {
+		if config.is_leader(*subset) {
 			all_partial_pks.insert(*subset, pk.clone());
 		}
 	}
 
 	// Verify and add other parties' partial PKs
-	for (&party_id, broadcast) in &state.received_broadcasts {
-		verify_party_broadcast(state, party_id, broadcast, transcript_hash)?;
+	for (&party_id, broadcast) in round4_broadcasts {
+		verify_party_broadcast(
+			config,
+			round3_broadcasts,
+			shared_secrets,
+			global_randomness,
+			rho,
+			party_id,
+			broadcast,
+			transcript_hash,
+		)?;
 
 		for (&subset, pk) in &broadcast.partial_public_keys {
 			// Per Mithril DKGAggregate line 6: only accept PKs from the leader (j = min(S))
-			let leader = state.config.get_leader(subset);
+			let leader = config.get_leader(subset);
 			if leader != Some(party_id) {
 				log::warn!(
 					"DKG: Ignoring partial PK for subset {:b} from party {} (leader is {:?})",
@@ -1217,7 +1357,7 @@ fn collect_and_verify_all_partial_pks<S: TranscriptSigner>(
 	}
 
 	// Verify we have a partial PK for every subset
-	let expected_subsets = state.config.all_subsets();
+	let expected_subsets = config.all_subsets();
 	for subset in &expected_subsets {
 		if !all_partial_pks.contains_key(subset) {
 			return Err(MithrilDkgError::MissingData(format!(
@@ -1231,8 +1371,13 @@ fn collect_and_verify_all_partial_pks<S: TranscriptSigner>(
 }
 
 /// Verify a single party's Round 4 broadcast (signature and PK commitments).
+#[allow(clippy::too_many_arguments)]
 fn verify_party_broadcast<S: TranscriptSigner>(
-	state: &MithrilRound4State<S>,
+	config: &MithrilDkgConfig<S>,
+	round3_broadcasts: &BTreeMap<ParticipantId, MithrilRound3Broadcast>,
+	shared_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+	global_randomness: &[u8],
+	rho: &[u8; 32],
 	party_id: ParticipantId,
 	broadcast: &MithrilRound4Broadcast,
 	transcript_hash: &[u8; 32],
@@ -1241,7 +1386,7 @@ fn verify_party_broadcast<S: TranscriptSigner>(
 	let partial_output_hash = compute_partial_output_hash(&broadcast.partial_public_keys);
 	let signing_message = compute_signing_message(transcript_hash, &partial_output_hash);
 
-	let public_key = state.config.participant_public_keys.get(&party_id).ok_or_else(|| {
+	let public_key = config.participant_public_keys.get(&party_id).ok_or_else(|| {
 		MithrilDkgError::MissingData(format!("missing public key for party {}", party_id))
 	})?;
 
@@ -1250,20 +1395,30 @@ fn verify_party_broadcast<S: TranscriptSigner>(
 	}
 
 	// Verify PK commitments match Round 3
-	let round3 = state.round3_broadcasts.get(&party_id).ok_or_else(|| {
+	let round3 = round3_broadcasts.get(&party_id).ok_or_else(|| {
 		MithrilDkgError::MissingData(format!("missing Round 3 from party {}", party_id))
 	})?;
 
 	for (&subset, pk) in &broadcast.partial_public_keys {
-		verify_partial_pk_commitment(state, party_id, subset, pk, round3)?;
+		verify_partial_pk_commitment(
+			shared_secrets,
+			global_randomness,
+			rho,
+			party_id,
+			subset,
+			pk,
+			round3,
+		)?;
 	}
 
 	Ok(())
 }
 
 /// Verify a single partial PK matches its commitment and (if possible) the shared secret.
-fn verify_partial_pk_commitment<S: TranscriptSigner>(
-	state: &MithrilRound4State<S>,
+fn verify_partial_pk_commitment(
+	shared_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+	global_randomness: &[u8],
+	rho: &[u8; 32],
 	party_id: ParticipantId,
 	subset: SubsetMask,
 	pk: &PartialPublicKey,
@@ -1283,10 +1438,10 @@ fn verify_partial_pk_commitment<S: TranscriptSigner>(
 	}
 
 	// If we have the shared secret, verify the PK is correct
-	if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
-		let seed = h_keygen(subset, &shared_secret, &state.global_randomness);
+	if let Some(&shared_secret) = shared_secrets.get(&subset) {
+		let seed = h_keygen(subset, &shared_secret, global_randomness);
 		let expected_contribution = derive_subset_contribution(&seed);
-		let expected_pk = compute_partial_pk(&state.rho, &expected_contribution, subset);
+		let expected_pk = compute_partial_pk(rho, &expected_contribution, subset);
 		if pk.t != expected_pk.t {
 			return Err(MithrilDkgError::PkVerificationFailed { party_id, subset });
 		}
@@ -1313,14 +1468,16 @@ fn combine_partial_pks(
 }
 
 fn build_private_share<S: TranscriptSigner>(
-	state: &MithrilRound4State<S>,
+	config: &MithrilDkgConfig<S>,
+	my_contributions: &BTreeMap<SubsetMask, SubsetContribution>,
+	rho: &[u8; 32],
 	public_key: &PublicKey,
 ) -> Result<PrivateKeyShare, MithrilDkgError> {
-	let dkg_participants = ParticipantList::new(&state.config.all_participants)
+	let dkg_participants = ParticipantList::new(&config.all_participants)
 		.ok_or_else(|| MithrilDkgError::InternalError("invalid participants".into()))?;
 
 	let mut combined_shares: BTreeMap<SubsetMask, SecretShareData> = BTreeMap::new();
-	for (subset_mask, contribution) in &state.my_contributions {
+	for (subset_mask, contribution) in my_contributions {
 		combined_shares.insert(
 			*subset_mask,
 			SecretShareData { s1: contribution.s1.clone(), s2: contribution.s2.clone() },
@@ -1335,10 +1492,10 @@ fn build_private_share<S: TranscriptSigner>(
 	{
 		let mut h = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut h, b"dkg-party-key-v2", 16);
-		fips202::shake256_absorb(&mut h, &state.rho, 32);
-		fips202::shake256_absorb(&mut h, &state.config.my_party_id.to_le_bytes(), 4);
+		fips202::shake256_absorb(&mut h, rho, 32);
+		fips202::shake256_absorb(&mut h, &config.my_party_id.to_le_bytes(), 4);
 		let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-		for (subset_mask, contribution) in &state.my_contributions {
+		for (subset_mask, contribution) in my_contributions {
 			buf.clear();
 			buf.extend_from_slice(&subset_mask.to_le_bytes());
 			for poly in &contribution.s1 {
@@ -1361,11 +1518,11 @@ fn build_private_share<S: TranscriptSigner>(
 	let tr = *public_key.tr();
 
 	Ok(PrivateKeyShare::new(
-		state.config.my_party_id,
-		state.config.total_parties(),
-		state.config.threshold(),
+		config.my_party_id,
+		config.total_parties(),
+		config.threshold(),
 		party_key,
-		state.rho,
+		*rho,
 		tr,
 		combined_shares,
 		dkg_participants,
@@ -2378,12 +2535,10 @@ mod tests {
 		dkg.message(2, data).unwrap();
 
 		// The message should be ignored - check that party 1's slot is empty
-		if let MithrilDkgState::Round1(state) = &dkg.state {
-			assert!(!state.received_broadcasts.contains_key(&1));
-			assert!(!state.received_broadcasts.contains_key(&2));
-		} else {
-			panic!("Expected Round1 state");
-		}
+		assert!(dkg.state.phase == DkgPhase::Round1, "Expected Round1 state");
+		let round1_broadcasts = dkg.state.round1_broadcasts.as_ref().expect("broadcasts map");
+		assert!(!round1_broadcasts.contains_key(&1));
+		assert!(!round1_broadcasts.contains_key(&2));
 	}
 
 	/// Test that a leader's Round1Private for a subset is rejected if receiver is not in that
@@ -2441,14 +2596,13 @@ mod tests {
 		dkg.message(1, data).unwrap();
 
 		// The message should be rejected because party 0 is not in subset 0b110
-		if let MithrilDkgState::Round1(state) = &dkg.state {
-			assert!(
-				!state.received_shared_secrets.contains_key(&0b110),
-				"Party 0 should not accept K_S for subset 0b110 (not a member)"
-			);
-		} else {
-			panic!("Expected Round1 state");
-		}
+		assert!(dkg.state.phase == DkgPhase::Round1, "Expected Round1 state");
+		let received_shared_secrets =
+			dkg.state.received_shared_secrets.as_ref().expect("received_shared_secrets");
+		assert!(
+			!received_shared_secrets.contains_key(&0b110),
+			"Party 0 should not accept K_S for subset 0b110 (not a member)"
+		);
 	}
 
 	/// Test that a legitimate Round1Private is accepted when receiver is in the subset.
@@ -2499,19 +2653,18 @@ mod tests {
 		dkg.message(0, data).unwrap();
 
 		// The message should be accepted because party 1 is in subset 0b011
-		if let MithrilDkgState::Round1(state) = &dkg.state {
-			assert!(
-				state.received_shared_secrets.contains_key(&0b011),
-				"Party 1 should accept K_S for subset 0b011 (is a member)"
-			);
-			assert_eq!(
-				state.received_shared_secrets.get(&0b011),
-				Some(&[42u8; 32]),
-				"Shared secret should match"
-			);
-		} else {
-			panic!("Expected Round1 state");
-		}
+		assert!(dkg.state.phase == DkgPhase::Round1, "Expected Round1 state");
+		let received_shared_secrets =
+			dkg.state.received_shared_secrets.as_ref().expect("received_shared_secrets");
+		assert!(
+			received_shared_secrets.contains_key(&0b011),
+			"Party 1 should accept K_S for subset 0b011 (is a member)"
+		);
+		assert_eq!(
+			received_shared_secrets.get(&0b011),
+			Some(&[42u8; 32]),
+			"Shared secret should match"
+		);
 	}
 
 	/// Test that Round1Private with an invalid subset mask is rejected.
@@ -2556,14 +2709,13 @@ mod tests {
 		let data = borsh::to_vec(&msg).unwrap();
 		dkg.message(0, data).unwrap();
 
-		if let MithrilDkgState::Round1(state) = &dkg.state {
-			assert!(
-				!state.received_shared_secrets.contains_key(&0b111),
-				"Should reject invalid subset 0b111 (wrong size)"
-			);
-		} else {
-			panic!("Expected Round1 state");
-		}
+		assert!(dkg.state.phase == DkgPhase::Round1, "Expected Round1 state");
+		let received_shared_secrets =
+			dkg.state.received_shared_secrets.as_ref().expect("received_shared_secrets");
+		assert!(
+			!received_shared_secrets.contains_key(&0b111),
+			"Should reject invalid subset 0b111 (wrong size)"
+		);
 
 		// Test 2: subset 0b001 (size 1, but k=2 required) - party 0 would be leader
 		let private = MithrilRound1Private {
@@ -2575,14 +2727,13 @@ mod tests {
 		let data = borsh::to_vec(&msg).unwrap();
 		dkg.message(0, data).unwrap();
 
-		if let MithrilDkgState::Round1(state) = &dkg.state {
-			assert!(
-				!state.received_shared_secrets.contains_key(&0b001),
-				"Should reject invalid subset 0b001 (wrong size)"
-			);
-		} else {
-			panic!("Expected Round1 state");
-		}
+		assert!(dkg.state.phase == DkgPhase::Round1, "Expected Round1 state");
+		let received_shared_secrets =
+			dkg.state.received_shared_secrets.as_ref().expect("received_shared_secrets");
+		assert!(
+			!received_shared_secrets.contains_key(&0b001),
+			"Should reject invalid subset 0b001 (wrong size)"
+		);
 	}
 
 	/// Test that buffered messages are processed when the DKG transitions to the appropriate round.
@@ -2654,7 +2805,7 @@ mod tests {
 
 		// All parties should be in Round 1, waiting for messages
 		for dkg in &dkgs {
-			assert!(matches!(dkg.state, MithrilDkgState::Round1(_)), "Should be in Round1");
+			assert!(dkg.state.phase == DkgPhase::Round1, "Should be in Round1");
 		}
 
 		// Deliver messages to parties 1 and 2, but delay delivery to party 0
@@ -2724,20 +2875,20 @@ mod tests {
 		);
 
 		// Verify party 0 is now in Round 2 (or later) and has processed the buffered messages
-		match &dkgs[0].state {
-			MithrilDkgState::Round2(state) => {
+		match dkgs[0].state.phase {
+			DkgPhase::Round2 => {
 				// Check that messages from parties 1 and 2 were processed
-				let has_p1 = state.received_broadcasts.contains_key(&1);
-				let has_p2 = state.received_broadcasts.contains_key(&2);
+				let round2_broadcasts =
+					dkgs[0].state.round2_broadcasts.as_ref().expect("round2_broadcasts");
+				let has_p1 = round2_broadcasts.contains_key(&1);
+				let has_p2 = round2_broadcasts.contains_key(&2);
 				assert!(has_p1 || has_p2, "Buffered Round 2 messages should have been processed");
 			},
-			MithrilDkgState::Round3(_) |
-			MithrilDkgState::Round4(_) |
-			MithrilDkgState::Complete(_) => {
+			DkgPhase::Round3 | DkgPhase::Round4 | DkgPhase::Complete => {
 				// Even better - protocol progressed further
 			},
 			other => {
-				panic!("Expected Round2 or later, got {:?}", core::mem::discriminant(other));
+				panic!("Expected Round2 or later, got {:?}", other);
 			},
 		}
 	}
@@ -2858,10 +3009,7 @@ mod tests {
 		}
 
 		// Verify party 0 is in Round 2
-		assert!(
-			matches!(dkgs[0].state, MithrilDkgState::Round2(_)),
-			"Party 0 should be in Round 2"
-		);
+		assert!(dkgs[0].state.phase == DkgPhase::Round2, "Party 0 should be in Round 2");
 
 		// Now try to send a Round 1 message to party 0 (it's already past Round 1)
 		let late_round1 = MithrilRound1Broadcast { party_id: 1, commitment: [77u8; 32] };
@@ -2873,10 +3021,7 @@ mod tests {
 		assert!(result.is_ok(), "Past-round message should not cause error");
 
 		// State should still be Round 2, unaffected
-		assert!(
-			matches!(dkgs[0].state, MithrilDkgState::Round2(_)),
-			"State should still be Round 2"
-		);
+		assert!(dkgs[0].state.phase == DkgPhase::Round2, "State should still be Round 2");
 	}
 
 	/// Test Round 4 messages buffered when in Round 2 (multi-round gap).
@@ -2943,10 +3088,7 @@ mod tests {
 			}
 		}
 
-		assert!(
-			matches!(dkgs[0].state, MithrilDkgState::Round2(_)),
-			"Party 0 should be in Round 2"
-		);
+		assert!(dkgs[0].state.phase == DkgPhase::Round2, "Party 0 should be in Round 2");
 
 		// Create a Round 4 message and send it to party 0 while in Round 2
 		let round4_broadcast = MithrilRound4Broadcast {
@@ -3190,26 +3332,20 @@ mod tests {
 
 			// Check if party 0 is in Round 4 and we've intercepted party 1's broadcast
 			if party0_round4_from_party1_received {
-				if let MithrilDkgState::Round4(state) = &dkgs[0].state {
-					if state.broadcast_sent {
-						break 'outer;
-					}
+				if dkgs[0].state.phase == DkgPhase::Round4 && dkgs[0].state.broadcast_sent {
+					break 'outer;
 				}
 			}
 		}
 
 		// Verify party 0 is in Round 4
 		{
-			let state = match &dkgs[0].state {
-				MithrilDkgState::Round4(s) => s,
-				other => panic!("Expected Round4 state, got {:?}", other),
-			};
-			assert!(state.broadcast_sent, "Party 0 should have sent broadcast");
+			assert!(dkgs[0].state.phase == DkgPhase::Round4, "Expected Round4 state");
+			assert!(dkgs[0].state.broadcast_sent, "Party 0 should have sent broadcast");
 			// Party 0 should have received party 2's broadcast but not party 1's
-			assert!(
-				!state.received_broadcasts.contains_key(&1),
-				"Should not have party 1's broadcast yet"
-			);
+			let round4_broadcasts =
+				dkgs[0].state.round4_broadcasts.as_ref().expect("round4_broadcasts");
+			assert!(!round4_broadcasts.contains_key(&1), "Should not have party 1's broadcast yet");
 		}
 
 		// Create a sabotaged broadcast from party 1 with empty partial PKs
@@ -3218,15 +3354,14 @@ mod tests {
 
 		// Compute the transcript hash (same as in complete_inner)
 		let transcript_hash = {
-			let state = match &dkgs[0].state {
-				MithrilDkgState::Round4(s) => s,
-				_ => panic!("Expected Round4"),
-			};
-			compute_transcript_hash(
-				&state.round1_broadcasts,
-				&state.round2_broadcasts,
-				&state.round3_broadcasts,
-			)
+			assert!(dkgs[0].state.phase == DkgPhase::Round4, "Expected Round4");
+			let round1_broadcasts =
+				dkgs[0].state.round1_broadcasts.as_ref().expect("round1_broadcasts");
+			let round2_broadcasts =
+				dkgs[0].state.round2_broadcasts.as_ref().expect("round2_broadcasts");
+			let round3_broadcasts =
+				dkgs[0].state.round3_broadcasts.as_ref().expect("round3_broadcasts");
+			compute_transcript_hash(round1_broadcasts, round2_broadcasts, round3_broadcasts)
 		};
 
 		// Create a valid signature over the sabotaged (empty) partial PKs
@@ -3242,12 +3377,14 @@ mod tests {
 		};
 
 		// Insert the sabotaged broadcast and also ensure party 2's broadcast is there
-		if let MithrilDkgState::Round4(state) = &mut dkgs[0].state {
-			state.received_broadcasts.insert(1, sabotaged_broadcast);
+		{
+			let round4_broadcasts =
+				dkgs[0].state.round4_broadcasts.get_or_insert_with(BTreeMap::new);
+			round4_broadcasts.insert(1, sabotaged_broadcast);
 
 			// Make sure we also have party 2's broadcast (they have no leader subsets, so empty PKs
 			// is fine)
-			state.received_broadcasts.entry(2).or_insert_with(|| {
+			round4_broadcasts.entry(2).or_insert_with(|| {
 				let empty_pks: BTreeMap<SubsetMask, PartialPublicKey> = BTreeMap::new();
 				let partial_output_hash = compute_partial_output_hash(&empty_pks);
 				let signing_message =
@@ -3281,8 +3418,8 @@ mod tests {
 		// Per Mithril DKGAggregate line 6: only accept PKs where j = min(S).
 		//
 		// We directly test collect_and_verify_all_partial_pks by constructing a
-		// MithrilRound4State where a non-leader has submitted a PK for a subset
-		// they don't lead.
+		// MithrilDkgState in Round4 phase where a non-leader has submitted a PK
+		// for a subset they don't lead.
 
 		// In 2-of-3, subsets are: 3 (parties 0,1), 5 (parties 0,2), 6 (parties 1,2)
 		// Leaders: subset 3 -> party 0, subset 5 -> party 0, subset 6 -> party 1
@@ -3429,20 +3566,14 @@ mod tests {
 		let result = dkg.message(99, fake_data);
 		assert!(result.is_ok(), "Non-participant message should not cause error");
 
-		// Verify the fake message was NOT added to received_broadcasts
-		if let MithrilDkgState::Round1(state) = &dkg.state {
-			assert!(
-				!state.received_broadcasts.contains_key(&99),
-				"Non-participant's broadcast should not be stored"
-			);
-			assert_eq!(
-				state.received_broadcasts.len(),
-				0,
-				"Should have no received broadcasts yet"
-			);
-		} else {
-			panic!("Expected Round1 state");
-		}
+		// Verify the fake message was NOT added to round1_broadcasts
+		assert!(dkg.state.phase == DkgPhase::Round1, "Expected Round1 state");
+		let round1_broadcasts = dkg.state.round1_broadcasts.as_ref().expect("round1_broadcasts");
+		assert!(
+			!round1_broadcasts.contains_key(&99),
+			"Non-participant's broadcast should not be stored"
+		);
+		assert_eq!(round1_broadcasts.len(), 0, "Should have no received broadcasts yet");
 
 		// Also test that a message claiming to be from participant 1 but sent by non-participant 99
 		// is rejected (this tests the envelope 'from' vs message 'party_id' check)
@@ -3458,18 +3589,16 @@ mod tests {
 		assert!(result.is_ok(), "Spoofed message should not cause error");
 
 		// Verify the message was NOT added
-		if let MithrilDkgState::Round1(state) = &dkg.state {
-			assert!(
-				!state.received_broadcasts.contains_key(&1),
-				"Spoofed broadcast should not be stored under party 1"
-			);
-			assert!(
-				!state.received_broadcasts.contains_key(&99),
-				"Spoofed broadcast should not be stored under party 99"
-			);
-		} else {
-			panic!("Expected Round1 state");
-		}
+		assert!(dkg.state.phase == DkgPhase::Round1, "Expected Round1 state");
+		let round1_broadcasts = dkg.state.round1_broadcasts.as_ref().expect("round1_broadcasts");
+		assert!(
+			!round1_broadcasts.contains_key(&1),
+			"Spoofed broadcast should not be stored under party 1"
+		);
+		assert!(
+			!round1_broadcasts.contains_key(&99),
+			"Spoofed broadcast should not be stored under party 99"
+		);
 	}
 
 	#[test]
@@ -3511,15 +3640,10 @@ mod tests {
 		let result = dkg.message(0, self_data);
 		assert!(result.is_ok(), "Self message should not cause error");
 
-		// Verify the message was NOT added to received_broadcasts
-		if let MithrilDkgState::Round1(state) = &dkg.state {
-			assert!(
-				!state.received_broadcasts.contains_key(&0),
-				"Self broadcast should not be stored"
-			);
-		} else {
-			panic!("Expected Round1 state");
-		}
+		// Verify the message was NOT added to round1_broadcasts
+		assert!(dkg.state.phase == DkgPhase::Round1, "Expected Round1 state");
+		let round1_broadcasts = dkg.state.round1_broadcasts.as_ref().expect("round1_broadcasts");
+		assert!(!round1_broadcasts.contains_key(&0), "Self broadcast should not be stored");
 	}
 
 	#[test]
