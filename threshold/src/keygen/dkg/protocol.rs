@@ -11,7 +11,6 @@ use alloc::{
 use core::{fmt, mem};
 
 use log::warn;
-use qp_rusty_crystals_dilithium::params::ETA;
 use zeroize::Zeroize;
 
 use crate::{
@@ -1080,7 +1079,7 @@ fn compute_my_contributions<S: TranscriptSigner>(
 	for &subset in &config.my_leader_subsets() {
 		if let Some(&shared_secret) = shared_secrets.get(&subset) {
 			let seed = h_keygen(subset, &shared_secret, global_randomness);
-			let contribution = derive_subset_contribution(&seed, ETA as i32);
+			let contribution = derive_subset_contribution(&seed);
 			let partial_pk = compute_partial_pk(rho, &contribution, subset);
 			let pk_commitment = h_commit_pk(subset, &partial_pk);
 
@@ -1095,7 +1094,7 @@ fn compute_my_contributions<S: TranscriptSigner>(
 		if let alloc::collections::btree_map::Entry::Vacant(e) = my_contributions.entry(subset) {
 			if let Some(&shared_secret) = shared_secrets.get(&subset) {
 				let seed = h_keygen(subset, &shared_secret, global_randomness);
-				let contribution = derive_subset_contribution(&seed, ETA as i32);
+				let contribution = derive_subset_contribution(&seed);
 				e.insert(contribution);
 			}
 		}
@@ -1286,7 +1285,7 @@ fn verify_partial_pk_commitment<S: TranscriptSigner>(
 	// If we have the shared secret, verify the PK is correct
 	if let Some(&shared_secret) = state.shared_secrets.get(&subset) {
 		let seed = h_keygen(subset, &shared_secret, &state.global_randomness);
-		let expected_contribution = derive_subset_contribution(&seed, ETA as i32);
+		let expected_contribution = derive_subset_contribution(&seed);
 		let expected_pk = compute_partial_pk(&state.rho, &expected_contribution, subset);
 		if pk.t != expected_pk.t {
 			return Err(MithrilDkgError::PkVerificationFailed { party_id, subset });

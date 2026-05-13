@@ -8,7 +8,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 
 use qp_rusty_crystals_dilithium::{
 	fips202, packing,
-	params::{K, L, N, Q},
+	params::{K, L, Q},
 	poly, polyvec,
 };
 
@@ -259,13 +259,13 @@ fn generate_threshold_shares(
 		// Create η-bounded shares for s1
 		let mut s1_share = polyvec::Polyvecl::default();
 		for (j, s1_poly) in s1_share.vec.iter_mut().enumerate().take(L) {
-			sample_poly_leq_eta(s1_poly, &share_seed, j as u16, 2);
+			poly::uniform_eta(s1_poly, &share_seed, j as u16);
 		}
 
 		// Create η-bounded shares for s2
 		let mut s2_share = polyvec::Polyveck::default();
 		for (j, s2_poly) in s2_share.vec.iter_mut().enumerate().take(K) {
-			sample_poly_leq_eta(s2_poly, &share_seed, (L + j) as u16, 2);
+			poly::uniform_eta(s2_poly, &share_seed, (L + j) as u16);
 		}
 
 		// Compute NTT of s1 share
@@ -343,38 +343,6 @@ fn generate_threshold_shares(
 	}
 
 	Ok((s1_total, s2_total, s1h_total, party_shares))
-}
-
-/// Sample a polynomial with coefficients in [-eta, eta].
-fn sample_poly_leq_eta(p: &mut poly::Poly, seed: &[u8; 64], nonce: u16, eta: i32) {
-	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, seed, 64);
-	fips202::shake256_absorb(&mut state, &nonce.to_le_bytes(), 2);
-	fips202::shake256_finalize(&mut state);
-
-	let mut buf = [0u8; 512];
-	fips202::shake256_squeeze(&mut buf, 512, &mut state);
-
-	let mut idx = 0;
-	for i in 0..N as usize {
-		loop {
-			if idx >= buf.len() {
-				// Need more random bytes
-				fips202::shake256_squeeze(&mut buf, 512, &mut state);
-				idx = 0;
-			}
-
-			let b = buf[idx] as i32;
-			idx += 1;
-
-			// Rejection sampling for uniform in [-eta, eta]
-			let bound = 2 * eta + 1;
-			if b < (256 / bound) * bound {
-				p.coeffs[i] = (b % bound) - eta;
-				break;
-			}
-		}
-	}
 }
 
 #[cfg(test)]

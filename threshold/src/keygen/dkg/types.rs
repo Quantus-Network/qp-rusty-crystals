@@ -112,7 +112,10 @@ pub const DOMAIN_PK_COMMIT: &[u8] = b"MITHRIL_DKG_PK_COMMIT_V1";
 /// Domain separator for transcript hash.
 pub const DOMAIN_TRANSCRIPT: &[u8] = b"MITHRIL_DKG_TRANSCRIPT_V1";
 
-use qp_rusty_crystals_dilithium::params::{K, L, N};
+use qp_rusty_crystals_dilithium::{
+	params::{K, L, N},
+	poly,
+};
 
 // ============================================================================
 // Configuration
@@ -578,55 +581,23 @@ pub fn compute_signing_message(
 }
 
 /// Derive an η-bounded SubsetContribution from a seed.
-pub fn derive_subset_contribution(
-	combined_seed: &[u8; SUBSET_SEED_SIZE],
-	eta: i32,
-) -> SubsetContribution {
+///
+/// Uses ETA=2 (ML-DSA-87 parameter) via the dilithium crate's `uniform_eta`.
+pub fn derive_subset_contribution(combined_seed: &[u8; SUBSET_SEED_SIZE]) -> SubsetContribution {
 	let mut contribution = SubsetContribution::new();
+	let mut temp_poly = poly::Poly::default();
 
 	for i in 0..L {
-		sample_poly_leq_eta(&mut contribution.s1[i], combined_seed, i as u16, eta);
+		poly::uniform_eta(&mut temp_poly, combined_seed, i as u16);
+		contribution.s1[i].copy_from_slice(&temp_poly.coeffs);
 	}
 
 	for i in 0..K {
-		sample_poly_leq_eta(&mut contribution.s2[i], combined_seed, (L + i) as u16, eta);
+		poly::uniform_eta(&mut temp_poly, combined_seed, (L + i) as u16);
+		contribution.s2[i].copy_from_slice(&temp_poly.coeffs);
 	}
 
 	contribution
-}
-
-fn sample_poly_leq_eta(
-	poly: &mut [i32; N as usize],
-	seed: &[u8; SUBSET_SEED_SIZE],
-	nonce: u16,
-	eta: i32,
-) {
-	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, seed, SUBSET_SEED_SIZE);
-	fips202::shake256_absorb(&mut state, &nonce.to_le_bytes(), 2);
-	fips202::shake256_finalize(&mut state);
-
-	let mut buf = [0u8; 512];
-	fips202::shake256_squeeze(&mut buf, 512, &mut state);
-
-	let mut idx = 0;
-	for coeff in poly.iter_mut() {
-		loop {
-			if idx >= buf.len() {
-				fips202::shake256_squeeze(&mut buf, 512, &mut state);
-				idx = 0;
-			}
-
-			let b = buf[idx] as i32;
-			idx += 1;
-
-			let bound = 2 * eta + 1;
-			if b < (256 / bound) * bound {
-				*coeff = (b % bound) - eta;
-				break;
-			}
-		}
-	}
 }
 
 #[cfg(test)]
@@ -781,7 +752,7 @@ mod tests {
 	#[test]
 	fn test_derive_contribution_bounded() {
 		let seed = [42u8; SUBSET_SEED_SIZE];
-		let contribution = derive_subset_contribution(&seed, 2);
+		let contribution = derive_subset_contribution(&seed);
 		assert!(contribution.verify_bounds(2));
 	}
 }
