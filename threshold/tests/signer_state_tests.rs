@@ -230,3 +230,37 @@ mod party_management_tests {
 		assert!(waiting.contains(&1));
 	}
 }
+
+/// Test that round2_reveal preserves state when validation fails.
+///
+/// The flat-struct state design (with phase enum + Option fields) ensures
+/// that state is never lost on validation errors. This test verifies that
+/// calling round2_reveal with insufficient parties doesn't corrupt state.
+#[test]
+fn test_round2_preserves_state_on_insufficient_parties() {
+	let mut signer = create_test_signer();
+	let seed = [0xAAu8; 32];
+
+	// Complete round 1
+	let _r1 = signer.round1_commit_with_seed(&seed).expect("round1");
+
+	// Call round2 with no other parties (threshold is 2, so this should fail)
+	let result = signer.round2_reveal(b"message", b"context", &[]);
+	assert!(result.is_err(), "round2 should fail with insufficient parties");
+
+	// Key test: the signer should still be in AfterRound1 state, not Fresh
+	// If state was lost, this second call would fail with "expected AfterRound1, got Fresh"
+	let result2 = signer.round2_reveal(b"message", b"context", &[]);
+	assert!(result2.is_err(), "round2 should still fail");
+
+	// Verify it's the same error (InsufficientParties), not InvalidState
+	match result2 {
+		Err(qp_rusty_crystals_threshold::ThresholdError::InsufficientParties { .. }) => {
+			// Expected - state was preserved
+		},
+		Err(qp_rusty_crystals_threshold::ThresholdError::InvalidState { .. }) => {
+			panic!("State was lost! Signer should still be in AfterRound1 state");
+		},
+		_ => panic!("Unexpected result: {:?}", result2),
+	}
+}

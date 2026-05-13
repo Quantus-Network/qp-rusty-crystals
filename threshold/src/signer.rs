@@ -37,7 +37,6 @@
 //! ```
 
 use alloc::{collections::BTreeSet, format, string::ToString, vec::Vec};
-use core::mem;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use qp_rusty_crystals_dilithium::polyvec;
@@ -96,32 +95,154 @@ pub struct ThresholdSigner {
 	state: SignerState,
 }
 
+/// Current phase of the signing protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SigningPhase {
+	/// Ready to start a new signing session.
+	#[default]
+	Fresh,
+	/// Round 1 complete, holding commitment data.
+	AfterRound1,
+	/// Round 2 complete, ready to compute response.
+	AfterRound2,
+	/// Round 3 complete, signature can be combined.
+	AfterRound3,
+}
+
 /// Internal state of the signer.
-impl Default for SignerState {
-	fn default() -> Self {
-		SignerState::Fresh
+///
+/// Uses a flat struct with Option fields instead of an enum with associated data.
+/// This design:
+/// - Avoids `mem::take` which would lose data on validation errors
+/// - Enables proper `ZeroizeOnDrop` - all fields are zeroized when dropped
+/// - Keeps data persistent across phases until explicitly cleared
+#[derive(Default)]
+struct SignerState {
+	/// Current phase of the protocol.
+	phase: SigningPhase,
+	/// Round 1 data (commitment values, hyperball samples).
+	round1_data: Option<Round1Data>,
+	/// Round 2 data (aggregated commitments, active participants).
+	round2_data: Option<Round2Data>,
+	/// Message being signed.
+	message: Option<Vec<u8>>,
+	/// Context for the signature.
+	context: Option<Vec<u8>>,
+	/// Our computed responses (for Round 3).
+	my_responses: Option<Vec<polyvec::Polyvecl>>,
+}
+
+impl Zeroize for SignerState {
+	fn zeroize(&mut self) {
+		self.phase = SigningPhase::Fresh;
+		if let Some(ref mut data) = self.round1_data {
+			data.zeroize();
+		}
+		self.round1_data = None;
+		if let Some(ref mut data) = self.round2_data {
+			data.zeroize();
+		}
+		self.round2_data = None;
+		if let Some(ref mut msg) = self.message {
+			msg.zeroize();
+		}
+		self.message = None;
+		if let Some(ref mut ctx) = self.context {
+			ctx.zeroize();
+		}
+		self.context = None;
+		if let Some(ref mut responses) = self.my_responses {
+			// polyvec doesn't implement Zeroize, clear manually
+			for resp in responses.iter_mut() {
+				for i in 0..L {
+					resp.vec[i].coeffs.fill(0);
+				}
+			}
+		}
+		self.my_responses = None;
 	}
 }
 
-enum SignerState {
-	/// Ready to start a new signing session.
-	Fresh,
-	/// Round 1 complete, holding commitment data.
-	AfterRound1 { round1_data: Round1Data },
-	/// Round 2 complete, ready to compute response.
-	AfterRound2 {
-		round1_data: Round1Data,
-		round2_data: Round2Data,
-		message: Vec<u8>,
-		context: Vec<u8>,
-	},
-	/// Round 3 complete, signature can be combined.
-	AfterRound3 {
-		round2_data: Round2Data,
-		my_responses: Vec<polyvec::Polyvecl>,
-		message: Vec<u8>,
-		context: Vec<u8>,
-	},
+impl Drop for SignerState {
+	fn drop(&mut self) {
+		self.zeroize();
+	}
+}
+
+impl ZeroizeOnDrop for SignerState {}
+
+impl SignerState {
+	/// Verify Fresh phase (for starting round 1).
+	fn expect_fresh(&self) -> ThresholdResult<()> {
+		if self.phase != SigningPhase::Fresh {
+			return Err(ThresholdError::InvalidState {
+				current: self.phase_name(),
+				expected: "Fresh",
+			});
+		}
+		Ok(())
+	}
+
+	/// Verify AfterRound1 phase and return round1_data.
+	fn expect_round1(&self) -> ThresholdResult<&Round1Data> {
+		if self.phase != SigningPhase::AfterRound1 {
+			return Err(ThresholdError::InvalidState {
+				current: self.phase_name(),
+				expected: "AfterRound1",
+			});
+		}
+		self.round1_data.as_ref().ok_or(ThresholdError::InvalidState {
+			current: self.phase_name(),
+			expected: "AfterRound1",
+		})
+	}
+
+	/// Verify AfterRound2 phase and return (round1_data, round2_data).
+	fn expect_round2(&self) -> ThresholdResult<(&Round1Data, &Round2Data)> {
+		if self.phase != SigningPhase::AfterRound2 {
+			return Err(ThresholdError::InvalidState {
+				current: self.phase_name(),
+				expected: "AfterRound2",
+			});
+		}
+		let round1 = self.round1_data.as_ref().ok_or(ThresholdError::InvalidState {
+			current: self.phase_name(),
+			expected: "AfterRound2",
+		})?;
+		let round2 = self.round2_data.as_ref().ok_or(ThresholdError::InvalidState {
+			current: self.phase_name(),
+			expected: "AfterRound2",
+		})?;
+		Ok((round1, round2))
+	}
+
+	/// Verify AfterRound3 phase and return (round2_data, my_responses, message, context).
+	fn expect_round3(&self) -> ThresholdResult<(&Round2Data, &[polyvec::Polyvecl], &[u8], &[u8])> {
+		if self.phase != SigningPhase::AfterRound3 {
+			return Err(ThresholdError::InvalidState {
+				current: self.phase_name(),
+				expected: "AfterRound3",
+			});
+		}
+		let err =
+			|| ThresholdError::InvalidState { current: self.phase_name(), expected: "AfterRound3" };
+		Ok((
+			self.round2_data.as_ref().ok_or_else(err)?,
+			self.my_responses.as_ref().ok_or_else(err)?,
+			self.message.as_ref().ok_or_else(err)?,
+			self.context.as_ref().ok_or_else(err)?,
+		))
+	}
+
+	/// Get the current phase name (for error messages).
+	fn phase_name(&self) -> &'static str {
+		match self.phase {
+			SigningPhase::Fresh => "Fresh",
+			SigningPhase::AfterRound1 => "AfterRound1",
+			SigningPhase::AfterRound2 => "AfterRound2",
+			SigningPhase::AfterRound3 => "AfterRound3",
+		}
+	}
 }
 
 impl ThresholdSigner {
@@ -172,7 +293,7 @@ impl ThresholdSigner {
             )));
 		}
 
-		Ok(Self { config, public_key, private_key, state: SignerState::Fresh })
+		Ok(Self { config, public_key, private_key, state: SignerState::default() })
 	}
 
 	/// Get this party's ID.
@@ -221,13 +342,7 @@ impl ThresholdSigner {
 	/// The seed MUST be generated from a cryptographically secure source.
 	/// Reusing seeds across signing sessions will compromise security.
 	pub fn round1_commit_with_seed(&mut self, seed: &[u8; 32]) -> ThresholdResult<Round1Broadcast> {
-		// Check state
-		if !matches!(self.state, SignerState::Fresh) {
-			return Err(ThresholdError::InvalidState {
-				current: self.state_name(),
-				expected: "Fresh",
-			});
-		}
+		self.state.expect_fresh()?;
 
 		// Generate Round 1 data
 		let round1_data = generate_round1(&self.private_key, &self.config, seed)?;
@@ -236,7 +351,8 @@ impl ThresholdSigner {
 			Round1Broadcast::new(self.private_key.party_id(), round1_data.commitment_hash);
 
 		// Update state
-		self.state = SignerState::AfterRound1 { round1_data };
+		self.state.round1_data = Some(round1_data);
+		self.state.phase = SigningPhase::AfterRound1;
 
 		Ok(broadcast)
 	}
@@ -268,19 +384,7 @@ impl ThresholdSigner {
 		context: &[u8],
 		other_round1: &[Round1Broadcast],
 	) -> ThresholdResult<Round2Broadcast> {
-		// Check state and extract round1_data
-		let round1_data = match mem::take(&mut self.state) {
-			SignerState::AfterRound1 { round1_data } => round1_data,
-			other => {
-				self.state = other;
-				return Err(ThresholdError::InvalidState {
-					current: self.state_name(),
-					expected: "AfterRound1",
-				});
-			},
-		};
-
-		// Check we have enough parties
+		// Validate inputs first (before state check to give better errors)
 		let total_parties = other_round1.len() + 1; // +1 for ourselves
 		if total_parties < self.config.threshold() as usize {
 			return Err(ThresholdError::InsufficientParties {
@@ -289,8 +393,11 @@ impl ThresholdSigner {
 			});
 		}
 
+		// Check state and get round1_data
+		let round1_data = self.state.expect_round1()?;
+
 		// Pack our commitment data for the Round 2 broadcast
-		let commitment_data = pack_round1_commitment(&round1_data, &self.config);
+		let commitment_data = pack_round1_commitment(round1_data, &self.config);
 
 		// Collect other parties' IDs
 		let other_party_ids: Vec<u32> = other_round1.iter().map(|r1| r1.party_id).collect();
@@ -300,7 +407,7 @@ impl ThresholdSigner {
 			&self.private_key,
 			&self.public_key,
 			&self.config,
-			&round1_data,
+			round1_data,
 			message,
 			context,
 			&other_party_ids,
@@ -309,12 +416,10 @@ impl ThresholdSigner {
 		let broadcast = Round2Broadcast::new(self.private_key.party_id(), commitment_data);
 
 		// Update state
-		self.state = SignerState::AfterRound2 {
-			round1_data,
-			round2_data,
-			message: message.to_vec(),
-			context: context.to_vec(),
-		};
+		self.state.round2_data = Some(round2_data);
+		self.state.message = Some(message.to_vec());
+		self.state.context = Some(context.to_vec());
+		self.state.phase = SigningPhase::AfterRound2;
 
 		Ok(broadcast)
 	}
@@ -349,32 +454,21 @@ impl ThresholdSigner {
 		other_round1: &[Round1Broadcast],
 		other_round2: &[Round2Broadcast],
 	) -> ThresholdResult<Round3Broadcast> {
-		// Check state and extract data
-		let (round1_data, mut round2_data, message, context) = match mem::take(&mut self.state) {
-			SignerState::AfterRound2 { round1_data, round2_data, message, context } =>
-				(round1_data, round2_data, message, context),
-			other => {
-				self.state = other;
-				return Err(ThresholdError::InvalidState {
-					current: self.state_name(),
-					expected: "AfterRound2",
-				});
-			},
-		};
-
-		// Verify and aggregate commitments from Round 2 broadcasts
+		// Validate inputs first (before state mutation)
 		let k = self.config.k_iterations() as usize;
 		let single_commitment_size = 8 * 736; // K * POLY_Q_SIZE
+		let expected_len = k * single_commitment_size;
 		let tr = self.public_key.tr();
 
 		for r2 in other_round2 {
 			if !r2.commitment_data.is_empty() {
-				// Find matching Round 1 broadcast and verify commitment hash
+				// Find matching Round 1 broadcast
 				let r1 = other_round1
 					.iter()
 					.find(|r1| r1.party_id == r2.party_id)
 					.ok_or(ThresholdError::MissingBroadcast { party_id: r2.party_id })?;
 
+				// Verify commitment hash
 				if !verify_commitment_hash(
 					tr,
 					r2.party_id,
@@ -388,9 +482,7 @@ impl ThresholdSigner {
 					});
 				}
 
-				// Commitment verified, now aggregate
-				// Validate data length matches expected size for k iterations
-				let expected_len = k * single_commitment_size;
+				// Validate data length
 				if r2.commitment_data.len() != expected_len {
 					return Err(ThresholdError::InvalidCommitmentData {
 						party_id: r2.party_id,
@@ -402,41 +494,78 @@ impl ThresholdSigner {
 						),
 					});
 				}
+			}
+		}
 
-				for k_idx in 0..k {
-					let start = k_idx * single_commitment_size;
-					let end = start + single_commitment_size;
+		// Check state
+		if self.state.phase != SigningPhase::AfterRound2 {
+			return Err(ThresholdError::InvalidState {
+				current: self.state.phase_name(),
+				expected: "AfterRound2",
+			});
+		}
 
-					let w_other = unpack_commitment_dilithium(&r2.commitment_data[start..end])
-						.map_err(|e| ThresholdError::InvalidCommitmentData {
-							party_id: r2.party_id,
-							reason: format!(
-								"Commitment passed hash check but failed to unpack (k={}): {}",
-								k_idx, e
-							),
-						})?;
-					aggregate_commitments_dilithium(&mut round2_data.w_aggregated[k_idx], &w_other);
+		// Aggregate commitments into round2_data (mutable borrow scope)
+		{
+			let round2_data =
+				self.state.round2_data.as_mut().ok_or(ThresholdError::InvalidState {
+					current: "AfterRound2", // phase already validated above
+					expected: "AfterRound2",
+				})?;
+
+			for r2 in other_round2 {
+				if !r2.commitment_data.is_empty() {
+					for k_idx in 0..k {
+						let start = k_idx * single_commitment_size;
+						let end = start + single_commitment_size;
+
+						let w_other = unpack_commitment_dilithium(&r2.commitment_data[start..end])
+							.map_err(|e| ThresholdError::InvalidCommitmentData {
+								party_id: r2.party_id,
+								reason: format!(
+									"Commitment passed hash check but failed to unpack (k={}): {}",
+									k_idx, e
+								),
+							})?;
+						aggregate_commitments_dilithium(
+							&mut round2_data.w_aggregated[k_idx],
+							&w_other,
+						);
+					}
 				}
 			}
 		}
 
+		// Get immutable references for response generation
+		let round1_data = self.state.round1_data.as_ref().ok_or(ThresholdError::InvalidState {
+			current: "AfterRound2", // phase already validated above
+			expected: "AfterRound2",
+		})?;
+		let round2_data = self.state.round2_data.as_ref().ok_or(ThresholdError::InvalidState {
+			current: "AfterRound2", // phase already validated above
+			expected: "AfterRound2",
+		})?;
+
 		// Generate response
 		let responses =
-			generate_round3_response(&self.private_key, &self.config, &round1_data, &round2_data)?;
+			generate_round3_response(&self.private_key, &self.config, round1_data, round2_data)?;
 
 		// Pack responses for broadcast
 		let packed_response = pack_responses(&responses);
 		let broadcast = Round3Broadcast::new(self.private_key.party_id(), packed_response);
 
-		// Update state
-		self.state =
-			SignerState::AfterRound3 { round2_data, my_responses: responses, message, context };
+		// Update state - clear round1_data as it's no longer needed
+		self.state.my_responses = Some(responses);
+		// Zeroize round1_data before clearing (it contains sensitive hyperball samples)
+		if let Some(ref mut r1) = self.state.round1_data {
+			r1.zeroize();
+		}
+		self.state.round1_data = None;
+		self.state.phase = SigningPhase::AfterRound3;
 
 		Ok(broadcast)
 	}
 
-	/// Combine all responses into a final signature.
-	///
 	/// Collect all Round 3 responses with duplicate detection.
 	///
 	/// This helper extracts the shared logic between `combine` and `combine_with_message`.
@@ -474,6 +603,8 @@ impl ThresholdSigner {
 		Ok(all_responses)
 	}
 
+	/// Combine all responses into a final signature.
+	///
 	/// After all parties have broadcast their Round 3 responses, any party
 	/// can call this method to combine them into a final signature.
 	///
@@ -494,17 +625,7 @@ impl ThresholdSigner {
 		_all_round2: &[Round2Broadcast],
 		all_round3: &[Round3Broadcast],
 	) -> ThresholdResult<Signature> {
-		// Check state and get stored message/context
-		let (round2_data, my_responses, message, context) = match &self.state {
-			SignerState::AfterRound3 { round2_data, my_responses, message, context } =>
-				(round2_data, my_responses, message, context),
-			_ => {
-				return Err(ThresholdError::InvalidState {
-					current: self.state_name(),
-					expected: "AfterRound3",
-				});
-			},
-		};
+		let (round2_data, my_responses, message, context) = self.state.expect_round3()?;
 
 		let all_responses = self.collect_responses(my_responses, all_round3)?;
 
@@ -534,17 +655,7 @@ impl ThresholdSigner {
 		_all_round2: &[Round2Broadcast],
 		all_round3: &[Round3Broadcast],
 	) -> ThresholdResult<Signature> {
-		// Check state
-		let (round2_data, my_responses) = match &self.state {
-			SignerState::AfterRound3 { round2_data, my_responses, .. } =>
-				(round2_data, my_responses),
-			_ => {
-				return Err(ThresholdError::InvalidState {
-					current: self.state_name(),
-					expected: "AfterRound3",
-				});
-			},
-		};
+		let (round2_data, my_responses, _, _) = self.state.expect_round3()?;
 
 		let all_responses = self.collect_responses(my_responses, all_round3)?;
 
@@ -565,41 +676,7 @@ impl ThresholdSigner {
 	/// This clears all internal state and returns the signer to the `Fresh` state.
 	/// Call this after completing a signing session or to abort a session in progress.
 	pub fn reset(&mut self) {
-		// Zeroize any sensitive state before clearing
-		match &mut self.state {
-			SignerState::Fresh => {},
-			SignerState::AfterRound1 { round1_data } => {
-				round1_data.zeroize();
-			},
-			SignerState::AfterRound2 { round1_data, round2_data, message, context } => {
-				round1_data.zeroize();
-				round2_data.zeroize();
-				message.zeroize();
-				context.zeroize();
-			},
-			SignerState::AfterRound3 { round2_data, my_responses, message, context } => {
-				round2_data.zeroize();
-				// polyvec doesn't implement Zeroize, clear manually
-				for resp in my_responses.iter_mut() {
-					for i in 0..L {
-						resp.vec[i].coeffs.fill(0);
-					}
-				}
-				message.zeroize();
-				context.zeroize();
-			},
-		}
-		self.state = SignerState::Fresh;
-	}
-
-	/// Get the current state name (for error messages).
-	fn state_name(&self) -> &'static str {
-		match &self.state {
-			SignerState::Fresh => "Fresh",
-			SignerState::AfterRound1 { .. } => "AfterRound1",
-			SignerState::AfterRound2 { .. } => "AfterRound2",
-			SignerState::AfterRound3 { .. } => "AfterRound3",
-		}
+		self.state.zeroize();
 	}
 }
 
@@ -618,8 +695,8 @@ mod tests {
 	#[test]
 	fn test_signer_state_transitions() {
 		// This test would require a valid key setup
-		// For now, just test that the state names are correct
-		let state = SignerState::Fresh;
-		assert!(matches!(state, SignerState::Fresh));
+		// For now, just test that the phase names are correct
+		let state = SignerState::default();
+		assert!(matches!(state.phase, SigningPhase::Fresh));
 	}
 }
