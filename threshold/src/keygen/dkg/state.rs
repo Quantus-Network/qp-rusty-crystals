@@ -30,9 +30,13 @@
 //!
 //! # Security: Zeroization
 //!
-//! All state structs implement `Zeroize` and `ZeroizeOnDrop` to ensure that sensitive
-//! cryptographic material (randomness, shared secrets, secret key contributions) is
-//! securely erased from memory when no longer needed. This includes:
+//! All state structs implement `Zeroize` to ensure that sensitive cryptographic
+//! material (randomness, shared secrets, secret key contributions) can be securely
+//! erased from memory. The `MithrilDkg` protocol wrapper implements `Drop` to
+//! automatically zeroize the current state when the protocol is dropped (including
+//! on panic). This ensures cleanup even if the protocol doesn't complete normally.
+//!
+//! Sensitive fields that are zeroized include:
 //!
 //! - `my_randomness` - the party's random contribution
 //! - `my_shared_secrets` / `shared_secrets` - shared secrets for subset derivation
