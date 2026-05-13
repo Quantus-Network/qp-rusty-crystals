@@ -156,7 +156,7 @@ pub(crate) fn compute_ntt_dot_product(
 /// Used for rejection sampling in the threshold signing protocol. Samples are
 /// drawn from a hyperball of specified radius and scaled by nu for the s1
 /// components.
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct HyperballSampleVector {
 	data: Box<[f64]>,
 }
@@ -349,23 +349,6 @@ impl HyperballSampleVector {
 		Self { data: data.into_boxed_slice() }
 	}
 }
-
-impl Zeroize for HyperballSampleVector {
-	fn zeroize(&mut self) {
-		// Zeroize all f64 values in the boxed slice
-		// This contains secret witness data (y + cs2) that could reveal s1
-		// Use zeroize crate's implementation for f64 slices
-		self.data.zeroize();
-	}
-}
-
-impl Drop for HyperballSampleVector {
-	fn drop(&mut self) {
-		self.zeroize();
-	}
-}
-
-impl ZeroizeOnDrop for HyperballSampleVector {}
 
 // ============================================================================
 // Hint Computation

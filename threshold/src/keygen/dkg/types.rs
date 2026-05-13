@@ -30,7 +30,7 @@ use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::fmt;
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{config::ThresholdConfig, error::MAX_PARTIES};
 
@@ -300,7 +300,7 @@ where
 // ============================================================================
 
 /// Contribution for a single subset (η-bounded secret polynomials).
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
 pub struct SubsetContribution {
 	/// Share of s1 polynomial vector.
 	pub s1: Vec<[i32; N as usize]>,
@@ -337,17 +337,6 @@ impl SubsetContribution {
 impl Default for SubsetContribution {
 	fn default() -> Self {
 		Self::new()
-	}
-}
-
-impl Zeroize for SubsetContribution {
-	fn zeroize(&mut self) {
-		for poly in &mut self.s1 {
-			poly.zeroize();
-		}
-		for poly in &mut self.s2 {
-			poly.zeroize();
-		}
 	}
 }
 

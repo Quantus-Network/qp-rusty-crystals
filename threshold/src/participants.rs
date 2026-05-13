@@ -33,6 +33,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use core::iter;
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use zeroize::Zeroize;
 
 /// Type alias for participant identifiers.
 ///
@@ -59,6 +60,13 @@ pub struct ParticipantList {
 	participants: Vec<ParticipantId>,
 	/// Maps participant ID to index in the sorted list
 	indices: BTreeMap<ParticipantId, usize>,
+}
+
+impl Zeroize for ParticipantList {
+	fn zeroize(&mut self) {
+		self.participants.zeroize();
+		self.indices.clear();
+	}
 }
 
 impl ParticipantList {

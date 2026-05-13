@@ -112,23 +112,12 @@ pub struct PrivateKeyShare {
 }
 
 /// Internal secret share data for a specific signer subset.
-#[derive(Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
 pub(crate) struct SecretShareData {
 	/// Share of s1 polynomial vector (L polynomials).
 	pub(crate) s1: Vec<[i32; 256]>,
 	/// Share of s2 polynomial vector (K polynomials).
 	pub(crate) s2: Vec<[i32; 256]>,
-}
-
-impl Zeroize for SecretShareData {
-	fn zeroize(&mut self) {
-		for poly in &mut self.s1 {
-			poly.zeroize();
-		}
-		for poly in &mut self.s2 {
-			poly.zeroize();
-		}
-	}
 }
 
 impl PrivateKeyShare {

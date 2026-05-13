@@ -14,7 +14,7 @@ use qp_rusty_crystals_dilithium::{
 	},
 	poly, polyvec,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	config::ThresholdConfig,
@@ -36,6 +36,7 @@ use crate::{
 // ============================================================================
 
 /// Internal state after Round 1 completes.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct Round1Data {
 	/// K different w commitments for canonical iterations.
 	pub(crate) w_commitments: Vec<polyvec::Polyveck>,
@@ -47,28 +48,8 @@ pub(crate) struct Round1Data {
 	pub(crate) rho_prime: [u8; 64],
 }
 
-impl Zeroize for Round1Data {
-	fn zeroize(&mut self) {
-		self.commitment_hash.zeroize();
-		self.rho_prime.zeroize();
-		// Zeroize w_commitments (polyvec doesn't implement Zeroize)
-		for w in &mut self.w_commitments {
-			for i in 0..K {
-				w.vec[i].coeffs.fill(0);
-			}
-		}
-		self.w_commitments.clear();
-		// HyperballSampleVector implements Zeroize/ZeroizeOnDrop,
-		// but we explicitly zeroize before clearing for defense in depth
-		for sample in &mut self.hyperball_samples {
-			sample.zeroize();
-		}
-		self.hyperball_samples.clear();
-	}
-}
-
 /// Internal state after Round 2 completes.
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub(crate) struct Round2Data {
 	/// Message hash μ.
 	pub(crate) mu: [u8; 64],
@@ -78,20 +59,6 @@ pub(crate) struct Round2Data {
 	/// Stores the actual participant IDs (which can be arbitrary u32 values).
 	/// The ParticipantList provides index mapping for internal bitmask operations.
 	pub(crate) active_participants: ParticipantList,
-}
-
-impl Zeroize for Round2Data {
-	fn zeroize(&mut self) {
-		self.mu.zeroize();
-		for w in &mut self.w_aggregated {
-			for i in 0..K {
-				w.vec[i].coeffs.fill(0);
-			}
-		}
-		self.w_aggregated.clear();
-		// ParticipantList doesn't contain secrets, but clear it anyway
-		self.active_participants = ParticipantList::new(&[]).unwrap();
-	}
 }
 
 // ============================================================================
