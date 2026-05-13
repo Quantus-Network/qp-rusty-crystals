@@ -54,8 +54,6 @@ use crate::{
 	},
 };
 
-use qp_rusty_crystals_dilithium::params::L;
-
 /// A threshold signer for a single party.
 ///
 /// Each party in the threshold scheme creates one `ThresholdSigner` with their
@@ -109,6 +107,12 @@ enum SigningPhase {
 	AfterRound3,
 }
 
+impl Zeroize for SigningPhase {
+	fn zeroize(&mut self) {
+		*self = SigningPhase::Fresh;
+	}
+}
+
 /// Internal state of the signer.
 ///
 /// Uses a flat struct with Option fields instead of an enum with associated data.
@@ -116,7 +120,7 @@ enum SigningPhase {
 /// - Avoids `mem::take` which would lose data on validation errors
 /// - Enables proper `ZeroizeOnDrop` - all fields are zeroized when dropped
 /// - Keeps data persistent across phases until explicitly cleared
-#[derive(Default)]
+#[derive(Default, Zeroize, ZeroizeOnDrop)]
 struct SignerState {
 	/// Current phase of the protocol.
 	phase: SigningPhase,
@@ -131,45 +135,6 @@ struct SignerState {
 	/// Our computed responses (for Round 3).
 	my_responses: Option<Vec<polyvec::Polyvecl>>,
 }
-
-impl Zeroize for SignerState {
-	fn zeroize(&mut self) {
-		self.phase = SigningPhase::Fresh;
-		if let Some(ref mut data) = self.round1_data {
-			data.zeroize();
-		}
-		self.round1_data = None;
-		if let Some(ref mut data) = self.round2_data {
-			data.zeroize();
-		}
-		self.round2_data = None;
-		if let Some(ref mut msg) = self.message {
-			msg.zeroize();
-		}
-		self.message = None;
-		if let Some(ref mut ctx) = self.context {
-			ctx.zeroize();
-		}
-		self.context = None;
-		if let Some(ref mut responses) = self.my_responses {
-			// polyvec doesn't implement Zeroize, clear manually
-			for resp in responses.iter_mut() {
-				for i in 0..L {
-					resp.vec[i].coeffs.fill(0);
-				}
-			}
-		}
-		self.my_responses = None;
-	}
-}
-
-impl Drop for SignerState {
-	fn drop(&mut self) {
-		self.zeroize();
-	}
-}
-
-impl ZeroizeOnDrop for SignerState {}
 
 impl SignerState {
 	/// Verify Fresh phase (for starting round 1).
@@ -537,11 +502,8 @@ impl ThresholdSigner {
 		let broadcast = Round3Broadcast::new(self.private_key.party_id(), packed_response);
 
 		// Update state - clear round1_data as it's no longer needed
+		// (dropping the Option zeroizes its contents via ZeroizeOnDrop).
 		self.state.my_responses = Some(responses);
-		// Zeroize round1_data before clearing (it contains sensitive hyperball samples)
-		if let Some(ref mut r1) = self.state.round1_data {
-			r1.zeroize();
-		}
 		self.state.round1_data = None;
 		self.state.phase = SigningPhase::AfterRound3;
 
@@ -658,16 +620,12 @@ impl ThresholdSigner {
 	/// This clears all internal state and returns the signer to the `Fresh` state.
 	/// Call this after completing a signing session or to abort a session in progress.
 	pub fn reset(&mut self) {
-		self.state.zeroize();
+		self.state = SignerState::default();
 	}
 }
 
-impl Drop for ThresholdSigner {
-	fn drop(&mut self) {
-		self.reset();
-	}
-}
-
+// `state` (SignerState) and `private_key` (PrivateKeyShare) both implement
+// ZeroizeOnDrop, so their secret material is zeroized via field-by-field drop.
 impl ZeroizeOnDrop for ThresholdSigner {}
 
 #[cfg(test)]
