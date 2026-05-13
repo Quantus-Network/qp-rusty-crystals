@@ -197,26 +197,8 @@ impl SignerState {
 		})
 	}
 
-	/// Verify AfterRound2 phase and return (round1_data, round2_data).
-	fn expect_round2(&self) -> ThresholdResult<(&Round1Data, &Round2Data)> {
-		if self.phase != SigningPhase::AfterRound2 {
-			return Err(ThresholdError::InvalidState {
-				current: self.phase_name(),
-				expected: "AfterRound2",
-			});
-		}
-		let round1 = self.round1_data.as_ref().ok_or(ThresholdError::InvalidState {
-			current: self.phase_name(),
-			expected: "AfterRound2",
-		})?;
-		let round2 = self.round2_data.as_ref().ok_or(ThresholdError::InvalidState {
-			current: self.phase_name(),
-			expected: "AfterRound2",
-		})?;
-		Ok((round1, round2))
-	}
-
 	/// Verify AfterRound3 phase and return (round2_data, my_responses, message, context).
+	#[allow(clippy::type_complexity)]
 	fn expect_round3(&self) -> ThresholdResult<(&Round2Data, &[polyvec::Polyvecl], &[u8], &[u8])> {
 		if self.phase != SigningPhase::AfterRound3 {
 			return Err(ThresholdError::InvalidState {
