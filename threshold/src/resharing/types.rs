@@ -12,6 +12,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use qp_rusty_crystals_dilithium::params::{K, L, N};
 
 use crate::{
+	error::MAX_PARTIES,
 	keys::{PrivateKeyShare, PublicKey},
 	participants::{ParticipantId, ParticipantList},
 	ThresholdConfig,
@@ -122,6 +123,14 @@ impl ResharingConfig {
 		// Validate threshold configs
 		let old_n = old_participants.len() as u32;
 		let new_n = new_participants.len() as u32;
+
+		// Validate new party count doesn't exceed MAX_PARTIES (required for ThresholdConfig)
+		if new_n > MAX_PARTIES {
+			return Err(ResharingConfigError::TooManyNewParties {
+				parties: new_n,
+				max: MAX_PARTIES,
+			});
+		}
 
 		if old_threshold < 2 || old_threshold > old_n {
 			return Err(ResharingConfigError::InvalidOldThreshold {
@@ -234,6 +243,8 @@ pub enum ResharingConfigError {
 	InvalidOldThreshold { threshold: u32, parties: u32 },
 	/// Invalid new committee threshold.
 	InvalidNewThreshold { threshold: u32, parties: u32 },
+	/// Too many parties in new committee (max 6).
+	TooManyNewParties { parties: u32, max: u32 },
 	/// Party is not in either committee.
 	PartyNotInEitherCommittee { party_id: ParticipantId },
 	/// Duplicate participant ID in a committee.
@@ -252,6 +263,9 @@ impl fmt::Display for ResharingConfigError {
 			},
 			ResharingConfigError::InvalidNewThreshold { threshold, parties } => {
 				write!(f, "Invalid new threshold: t={}, n={}", threshold, parties)
+			},
+			ResharingConfigError::TooManyNewParties { parties, max } => {
+				write!(f, "Too many parties in new committee: {} (max {})", parties, max)
 			},
 			ResharingConfigError::PartyNotInEitherCommittee { party_id } => {
 				write!(f, "Party {} is not in either old or new committee", party_id)
