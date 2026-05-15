@@ -574,7 +574,8 @@ mod resharing_edge_cases {
 		)
 		.expect("Valid resharing config");
 
-		let mut protocol = ResharingProtocol::new(resharing_config);
+		let protocol_seed = [42u8; 32];
+		let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed);
 
 		// Before completion, take_output should return None
 		let output1 = protocol.take_output();

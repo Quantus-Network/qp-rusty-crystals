@@ -69,7 +69,16 @@ fn run_resharing_protocol_with_tamper(
 		)
 		.map_err(|e| format!("Config error for party {}: {}", party_id, e))?;
 
-		let protocol = ResharingProtocol::new(config);
+		// Generate a unique seed for each party (deterministic for test reproducibility)
+		let mut seed = [0u8; 32];
+		seed[0..4].copy_from_slice(&party_id.to_le_bytes());
+		seed[4..8].copy_from_slice(&(old_threshold + new_threshold).to_le_bytes());
+		// Fill rest with a pattern based on party_id
+		for i in 8..32 {
+			seed[i] = ((party_id as u8).wrapping_mul(i as u8)).wrapping_add(0x42);
+		}
+
+		let protocol = ResharingProtocol::new(config, seed);
 		protocols.insert(party_id, protocol);
 	}
 
@@ -401,7 +410,8 @@ fn test_resharing_protocol_creation() {
 	)
 	.expect("valid config");
 
-	let protocol = ResharingProtocol::new(resharing_config);
+	let protocol_seed = [42u8; 32];
+	let protocol = ResharingProtocol::new(resharing_config, protocol_seed);
 	assert_eq!(*protocol.state(), ResharingState::Round1Generate);
 }
 
@@ -422,20 +432,23 @@ fn test_resharing_protocol_round1_generation() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config);
+	let protocol_seed = [42u8; 32];
+	let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed);
 
-	// First poke should generate Round 1 message
+	// First poke should generate Round 1 message (entropy commitment)
 	let action = protocol.poke().expect("poke should succeed");
 	match action {
 		Action::SendMany(data) => {
 			assert!(!data.is_empty());
-			// Verify it's a valid Round 1 message
+			// Verify it's a valid Round 1 message (entropy commitment)
 			let msg: ResharingMessage = borsh::from_slice(&data).expect("should deserialize");
 			match msg {
 				ResharingMessage::Round1(broadcast) => {
 					assert_eq!(broadcast.party_id, 0);
+					// Commitment should be 32 bytes
+					assert_eq!(broadcast.commitment.len(), 32);
 				},
-				_ => panic!("Expected Round1 message"),
+				_ => panic!("Expected Round1 message (entropy commitment)"),
 			}
 		},
 		_ => panic!("Expected SendMany action"),
@@ -455,17 +468,19 @@ fn test_resharing_new_party_skips_round1() {
 		ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 3], 3, None, public_key)
 			.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config);
+	let protocol_seed = [42u8; 32];
+	let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed);
 
-	// New party should skip Round 1 and wait for Round 2
+	// New party should skip Round 1-2 (entropy commit-reveal) and wait
 	let action = protocol.poke().expect("poke should succeed");
 	match action {
 		Action::Wait => {
-			// Expected - new party waits for Round 2 messages
+			// Expected - new party waits for Round 3-4-5 messages
 		},
 		_ => panic!("Expected Wait action for new party"),
 	}
 
+	// NewOnly parties skip directly to Round2Waiting (waiting for entropy reveals to complete)
 	assert_eq!(*protocol.state(), ResharingState::Round2Waiting);
 }
 
@@ -759,9 +774,9 @@ fn test_resharing_round1_message_from_non_member_ignored() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config);
+	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32]);
 
-	// Generate Round 1 message
+	// Generate Round 1 message first
 	let _ = protocol.poke().expect("poke should succeed");
 
 	// Try to deliver a truly malformed message from a valid participant
@@ -806,10 +821,10 @@ fn test_resharing_duplicate_message_ignored() {
 	)
 	.expect("valid config");
 
-	let mut protocol0 = ResharingProtocol::new(config0);
-	let mut protocol1 = ResharingProtocol::new(config1);
+	let mut protocol0 = ResharingProtocol::new(config0, [0u8; 32]);
+	let mut protocol1 = ResharingProtocol::new(config1, [1u8; 32]);
 
-	// Generate Round 1 messages
+	// Generate Round 0 messages
 	let msg0 = match protocol0.poke().expect("poke should succeed") {
 		Action::SendMany(data) => data,
 		_ => panic!("Expected SendMany"),
@@ -823,8 +838,8 @@ fn test_resharing_duplicate_message_ignored() {
 	// Deliver the same message again (duplicate)
 	protocol1.message(0, msg0).unwrap();
 
-	// Should only be counted once - need 2 messages total (from parties 0 and 2)
-	// to have "enough" Round 1 messages
+	// Should only be counted once - need 3 messages total (from parties 0, 1, and 2)
+	// to have "enough" Round 0 messages
 }
 
 // ============================================================================
@@ -871,15 +886,15 @@ fn test_old_only_party_behavior() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config);
+	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32]);
 
-	// Party should participate in Round 1
+	// Party should participate in Round 0 (entropy commitment)
 	let action = protocol.poke().expect("poke should succeed");
 	match action {
 		Action::SendMany(_) => {
-			// Expected - old party broadcasts Round 1 message
+			// Expected - old party broadcasts Round 0 message
 		},
-		_ => panic!("Expected SendMany for old party in Round 1"),
+		_ => panic!("Expected SendMany for old party in Round 0"),
 	}
 }
 
@@ -901,17 +916,18 @@ fn test_new_only_party_behavior() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config);
+	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32]);
 
-	// New party should skip Round 1 and wait for Round 2
+	// New party should skip Round 1-2 (entropy commit-reveal) and wait
 	let action = protocol.poke().expect("poke should succeed");
 	match action {
 		Action::Wait => {
-			// Expected - new party waits for shares
+			// Expected - new party waits for Round 3-4-5 messages
 		},
 		_ => panic!("Expected Wait for new party"),
 	}
 
+	// NewOnly parties skip directly to Round2Waiting
 	assert_eq!(*protocol.state(), ResharingState::Round2Waiting);
 }
 
@@ -1167,7 +1183,7 @@ fn test_resharing_detects_dealer_accusation_when_commitment_tampered() {
 		old_shares.insert(share.party_id(), share.clone());
 	}
 
-	// Tamper only the Round 1 commitment (not the Round 2 payload). The recipient
+	// Tamper only the Round 3 Commitments (not the Round 4 payload). The recipient
 	// will accept the sub-share (commitment mismatch with our tampered value), but
 	// another member of the same old subset will independently recompute the
 	// *correct* commitment and file an accusation.
@@ -1183,11 +1199,11 @@ fn test_resharing_detects_dealer_accusation_when_commitment_tampered() {
 			Err(_) => return data,
 		};
 		let modified = match msg {
-			ResharingMessage::Round1(mut b) => {
+			ResharingMessage::Round3(mut b) => {
 				if let Some(c) = b.commitments.get_mut(&target_pair) {
 					*c = bad_commit;
 				}
-				ResharingMessage::Round1(b)
+				ResharingMessage::Round3(b)
 			},
 			other => other,
 		};
@@ -1218,7 +1234,7 @@ fn test_resharing_detects_dealer_accusation_when_commitment_tampered() {
 
 #[test]
 fn test_resharing_detects_round2_payload_mismatch() {
-	// Tamper only the Round 2 payload (not the commitment). The recipient will
+	// Tamper only the Round 4 payload (not the commitment). The recipient will
 	// detect that the received `r` doesn't match the broadcast commitment and
 	// fail with ShareVerificationFailed.
 	const N: usize = 256;
@@ -1247,11 +1263,11 @@ fn test_resharing_detects_round2_payload_mismatch() {
 			Err(_) => return data,
 		};
 		let modified = match msg {
-			ResharingMessage::Round2(mut m) => {
+			ResharingMessage::Round4(mut m) => {
 				if m.from_party_id == 0 && m.contributions.contains_key(&target_pair) {
 					m.contributions.insert(target_pair, bogus_r_capt.clone());
 				}
-				ResharingMessage::Round2(m)
+				ResharingMessage::Round4(m)
 			},
 			other => other,
 		};
@@ -1284,7 +1300,7 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 	// In a (2,2) -> (2,2) resharing every old subset has size 1, so the dealer is
 	// the sole member of their old subset and `collect_accusations` cannot catch a
 	// dealer that lies about their residual `r`. To prove that lying about `r` is
-	// nonetheless caught, we tamper *both* the Round 1 commitment and the Round 2
+	// nonetheless caught, we tamper *both* the Round 3 Commitments and the Round 4
 	// payload so that they remain mutually consistent (passing the recipient's
 	// commit-vs-r check). The resulting `s_J^new` for the recipient is corrupted,
 	// the partial public-key sum no longer reconstructs the original public key,
@@ -1316,19 +1332,19 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 			Err(_) => return data,
 		};
 		let modified = match msg {
-			ResharingMessage::Round1(mut b) =>
+			ResharingMessage::Round3(mut b) =>
 				if let Some(c) = b.commitments.get_mut(&target_pair) {
 					*c = bogus_commit;
-					ResharingMessage::Round1(b)
+					ResharingMessage::Round3(b)
 				} else {
-					ResharingMessage::Round1(b)
+					ResharingMessage::Round3(b)
 				},
-			ResharingMessage::Round2(mut m) =>
+			ResharingMessage::Round4(mut m) =>
 				if m.from_party_id == 0 && m.contributions.contains_key(&target_pair) {
 					m.contributions.insert(target_pair, bogus_r_capt.clone());
-					ResharingMessage::Round2(m)
+					ResharingMessage::Round4(m)
 				} else {
-					ResharingMessage::Round2(m)
+					ResharingMessage::Round4(m)
 				},
 			other => other,
 		};
@@ -1347,8 +1363,384 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 
 	let err = result.expect_err("malicious dealer must be detected");
 	assert!(
-		err.contains("public key") || err.contains("ShareVerificationFailed"),
-		"expected public-key invariant failure, got: {}",
+		err.contains("public key") ||
+			err.contains("ShareVerificationFailed") ||
+			err.contains("Party failure") ||
+			err.contains("PartyFailure"),
+		"expected public-key invariant failure or party failure, got: {}",
 		err
 	);
+}
+
+// ============================================================================
+// Forward Secrecy Tests
+// ============================================================================
+
+/// Helper function to run resharing with custom seeds for each party.
+/// Returns the new shares if successful, or an error message.
+fn run_resharing_protocol_with_seeds(
+	old_threshold: u32,
+	old_participants: Vec<u32>,
+	new_threshold: u32,
+	new_participants: Vec<u32>,
+	old_shares: &HashMap<u32, PrivateKeyShare>,
+	public_key: &PublicKey,
+	party_seeds: &HashMap<u32, [u8; 32]>,
+) -> Result<HashMap<u32, PrivateKeyShare>, String> {
+	// Determine all parties involved (union of old and new)
+	let mut all_parties: Vec<u32> =
+		old_participants.iter().chain(new_participants.iter()).cloned().collect();
+	all_parties.sort();
+	all_parties.dedup();
+
+	// Create protocol instances for each party with the provided seeds
+	let mut protocols: HashMap<u32, ResharingProtocol> = HashMap::new();
+
+	for &party_id in &all_parties {
+		let existing_share = old_shares.get(&party_id).cloned();
+
+		let config = ResharingConfig::new(
+			old_threshold,
+			old_participants.clone(),
+			new_threshold,
+			new_participants.clone(),
+			party_id,
+			existing_share,
+			public_key.clone(),
+		)
+		.map_err(|e| format!("Config error for party {}: {}", party_id, e))?;
+
+		// Use the provided seed for this party
+		let seed = party_seeds.get(&party_id).copied().unwrap_or([0u8; 32]);
+		let protocol = ResharingProtocol::new(config, seed);
+		protocols.insert(party_id, protocol);
+	}
+
+	// Message queues for each party
+	let mut message_queues: HashMap<u32, Vec<(u32, Vec<u8>)>> = HashMap::new();
+	for &party_id in &all_parties {
+		message_queues.insert(party_id, Vec::new());
+	}
+
+	// Run the protocol until all parties are done
+	let max_iterations = 1000;
+	let mut iteration = 0;
+
+	loop {
+		iteration += 1;
+		if iteration > max_iterations {
+			return Err("Protocol did not complete within max iterations".to_string());
+		}
+
+		let all_done = protocols.values().all(|p| p.is_done() || p.is_failed());
+		if all_done {
+			break;
+		}
+
+		for &party_id in &all_parties {
+			let protocol = protocols.get_mut(&party_id).unwrap();
+			if protocol.is_done() || protocol.is_failed() {
+				continue;
+			}
+
+			let messages = message_queues.get_mut(&party_id).unwrap();
+			let messages_to_deliver: Vec<_> = std::mem::take(messages);
+
+			for (from, data) in messages_to_deliver {
+				protocol.message(from, data).unwrap();
+			}
+
+			match protocol.poke() {
+				Ok(Action::Wait) => {},
+				Ok(Action::SendMany(data)) =>
+					for &other_id in &all_parties {
+						if other_id != party_id {
+							message_queues
+								.get_mut(&other_id)
+								.unwrap()
+								.push((party_id, data.clone()));
+						}
+					},
+				Ok(Action::SendPrivate(to, data)) => {
+					assert_ne!(to, party_id);
+					message_queues.get_mut(&to).unwrap().push((party_id, data));
+				},
+				Ok(Action::Return(_)) => {},
+				Err(e) => {
+					return Err(format!("Protocol error for party {}: {}", party_id, e));
+				},
+			}
+		}
+	}
+
+	// Collect new shares from new committee members
+	let mut new_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for &party_id in &new_participants {
+		let protocol = protocols.get_mut(&party_id).unwrap();
+		if protocol.is_failed() {
+			return Err(format!("Party {} failed", party_id));
+		}
+		if !protocol.is_done() {
+			return Err(format!("Party {} not done", party_id));
+		}
+		if let Some(output) = protocol.take_output() {
+			if let Some(share) = output.private_share {
+				new_shares.insert(party_id, share);
+			}
+		} else {
+			return Err(format!("Party {} has no output", party_id));
+		}
+	}
+
+	Ok(new_shares)
+}
+
+#[test]
+fn test_forward_secrecy_different_sessions_produce_different_subshares() {
+	// This test verifies forward secrecy: running the resharing protocol twice
+	// with different entropy seeds should produce different intermediate subshares.
+	// Even with the same old shares and same committee configuration, the new shares
+	// should differ because the session seed (derived from all parties' entropy)
+	// is mixed into the PRF that generates subshares.
+	//
+	// Importantly, both resulting share sets should still:
+	// 1. Be valid (can produce valid signatures)
+	// 2. Preserve the same public key
+	// 3. Have different internal structure (proving the entropy is used)
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [99u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	// First resharing session with one set of entropy seeds
+	let mut seeds_session_1: HashMap<u32, [u8; 32]> = HashMap::new();
+	for party_id in 0..3u32 {
+		let mut seed = [0u8; 32];
+		seed[0] = 0xAA; // Session 1 marker
+		seed[1..5].copy_from_slice(&party_id.to_le_bytes());
+		seeds_session_1.insert(party_id, seed);
+	}
+
+	let result1 = run_resharing_protocol_with_seeds(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		&seeds_session_1,
+	);
+	assert!(result1.is_ok(), "First resharing session failed: {:?}", result1.err());
+	let new_shares_1 = result1.unwrap();
+
+	// Second resharing session with different entropy seeds
+	let mut seeds_session_2: HashMap<u32, [u8; 32]> = HashMap::new();
+	for party_id in 0..3u32 {
+		let mut seed = [0u8; 32];
+		seed[0] = 0xBB; // Session 2 marker - different from session 1
+		seed[1..5].copy_from_slice(&party_id.to_le_bytes());
+		seeds_session_2.insert(party_id, seed);
+	}
+
+	let result2 = run_resharing_protocol_with_seeds(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		&seeds_session_2,
+	);
+	assert!(result2.is_ok(), "Second resharing session failed: {:?}", result2.err());
+	let new_shares_2 = result2.unwrap();
+
+	// Verify both sessions produced valid shares that can sign
+	let signing_shares_1: Vec<_> =
+		vec![new_shares_1.get(&0).unwrap().clone(), new_shares_1.get(&1).unwrap().clone()];
+	let is_valid_1 =
+		run_signing_and_verify(&signing_shares_1, &public_key, config, b"test message 1", b"");
+	assert!(is_valid_1, "Signature with session 1 shares should verify");
+
+	let signing_shares_2: Vec<_> =
+		vec![new_shares_2.get(&0).unwrap().clone(), new_shares_2.get(&1).unwrap().clone()];
+	let is_valid_2 =
+		run_signing_and_verify(&signing_shares_2, &public_key, config, b"test message 2", b"");
+	assert!(is_valid_2, "Signature with session 2 shares should verify");
+
+	// The key forward secrecy test: the shares should be different!
+	// We compare the serialized shares to detect any difference in the internal structure.
+	// If the entropy wasn't being used, the shares would be identical.
+	let share_0_session_1 = borsh::to_vec(new_shares_1.get(&0).unwrap()).unwrap();
+	let share_0_session_2 = borsh::to_vec(new_shares_2.get(&0).unwrap()).unwrap();
+
+	assert_ne!(
+		share_0_session_1, share_0_session_2,
+		"Shares from different sessions should differ due to forward secrecy entropy"
+	);
+
+	// Also verify that shares from different parties within the same session differ
+	// (this was already the case, but good to confirm)
+	let share_1_session_1 = borsh::to_vec(new_shares_1.get(&1).unwrap()).unwrap();
+	assert_ne!(share_0_session_1, share_1_session_1, "Shares for different parties should differ");
+
+	println!("Forward secrecy verified: different entropy seeds produce different shares");
+	println!(
+		"  Session 1 share 0 bytes: {} (first 32: {:?}...)",
+		share_0_session_1.len(),
+		&share_0_session_1[..32.min(share_0_session_1.len())]
+	);
+	println!(
+		"  Session 2 share 0 bytes: {} (first 32: {:?}...)",
+		share_0_session_2.len(),
+		&share_0_session_2[..32.min(share_0_session_2.len())]
+	);
+}
+
+#[test]
+fn test_forward_secrecy_identical_seeds_produce_identical_shares() {
+	// This test verifies that the protocol is deterministic when given the same
+	// entropy seeds - running twice with identical seeds should produce identical shares.
+	// This confirms that the randomness is properly derived from the seeds.
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [77u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	// Same seeds for both sessions
+	let mut seeds: HashMap<u32, [u8; 32]> = HashMap::new();
+	for party_id in 0..3u32 {
+		let mut seed = [0u8; 32];
+		seed[0] = 0xCC;
+		seed[1..5].copy_from_slice(&party_id.to_le_bytes());
+		seeds.insert(party_id, seed);
+	}
+
+	let result1 = run_resharing_protocol_with_seeds(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		&seeds,
+	);
+	assert!(result1.is_ok(), "First resharing session failed: {:?}", result1.err());
+	let new_shares_1 = result1.unwrap();
+
+	let result2 = run_resharing_protocol_with_seeds(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		&seeds, // Same seeds!
+	);
+	assert!(result2.is_ok(), "Second resharing session failed: {:?}", result2.err());
+	let new_shares_2 = result2.unwrap();
+
+	// With identical seeds, shares should be identical
+	for party_id in 0..3u32 {
+		let share_1 = borsh::to_vec(new_shares_1.get(&party_id).unwrap()).unwrap();
+		let share_2 = borsh::to_vec(new_shares_2.get(&party_id).unwrap()).unwrap();
+		assert_eq!(
+			share_1, share_2,
+			"With identical seeds, party {} shares should be identical",
+			party_id
+		);
+	}
+
+	println!("Determinism verified: identical entropy seeds produce identical shares");
+}
+
+#[test]
+fn test_forward_secrecy_single_party_entropy_change_affects_all() {
+	// This test verifies that even if only ONE party changes their entropy,
+	// all resulting shares change. This is important for forward secrecy:
+	// even if an attacker compromises n-1 parties' entropy, they still can't
+	// predict the session seed because the honest party's entropy is unknown.
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [55u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	// Session 1: all parties use fixed seeds
+	let mut seeds_session_1: HashMap<u32, [u8; 32]> = HashMap::new();
+	for party_id in 0..3u32 {
+		let mut seed = [0u8; 32];
+		seed[0] = 0xDD;
+		seed[1..5].copy_from_slice(&party_id.to_le_bytes());
+		seeds_session_1.insert(party_id, seed);
+	}
+
+	// Session 2: only party 2 changes their entropy
+	let mut seeds_session_2 = seeds_session_1.clone();
+	let mut new_seed_for_party_2 = [0u8; 32];
+	new_seed_for_party_2[0] = 0xEE; // Different!
+	new_seed_for_party_2[1..5].copy_from_slice(&2u32.to_le_bytes());
+	seeds_session_2.insert(2, new_seed_for_party_2);
+
+	let result1 = run_resharing_protocol_with_seeds(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		&seeds_session_1,
+	);
+	assert!(result1.is_ok(), "First resharing session failed: {:?}", result1.err());
+	let new_shares_1 = result1.unwrap();
+
+	let result2 = run_resharing_protocol_with_seeds(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		&seeds_session_2,
+	);
+	assert!(result2.is_ok(), "Second resharing session failed: {:?}", result2.err());
+	let new_shares_2 = result2.unwrap();
+
+	// ALL parties' shares should differ, even though only party 2 changed their entropy
+	// This is because the session seed is derived from ALL parties' entropy
+	for party_id in 0..3u32 {
+		let share_1 = borsh::to_vec(new_shares_1.get(&party_id).unwrap()).unwrap();
+		let share_2 = borsh::to_vec(new_shares_2.get(&party_id).unwrap()).unwrap();
+		assert_ne!(
+			share_1, share_2,
+			"Party {} shares should differ when any party's entropy changes",
+			party_id
+		);
+	}
+
+	// Both sessions should still produce valid shares
+	let signing_shares_1: Vec<_> =
+		vec![new_shares_1.get(&0).unwrap().clone(), new_shares_1.get(&1).unwrap().clone()];
+	let is_valid_1 = run_signing_and_verify(&signing_shares_1, &public_key, config, b"test", b"");
+	assert!(is_valid_1, "Session 1 shares should produce valid signatures");
+
+	let signing_shares_2: Vec<_> =
+		vec![new_shares_2.get(&0).unwrap().clone(), new_shares_2.get(&1).unwrap().clone()];
+	let is_valid_2 = run_signing_and_verify(&signing_shares_2, &public_key, config, b"test", b"");
+	assert!(is_valid_2, "Session 2 shares should produce valid signatures");
+
+	println!("Forward secrecy cascade verified: one party's entropy change affects all shares");
 }

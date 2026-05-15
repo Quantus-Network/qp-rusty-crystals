@@ -45,16 +45,23 @@ use crate::{
 
 use super::types::{
 	DealerAccusation, NewShareData, ResharingConfig, ResharingMessage, ResharingOutput,
-	ResharingRound1Broadcast, ResharingRound2Message, ResharingRound3Broadcast, SubsetMask,
-	SubsetPair, COMMITMENT_HASH_SIZE,
+	ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal, ResharingRound3Broadcast,
+	ResharingRound4Message, ResharingRound5Broadcast, SubsetMask, SubsetPair, COMMITMENT_HASH_SIZE,
+	ENTROPY_SIZE,
 };
 
-/// Domain separator for the per-subset PRF seed.
-const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v2";
+/// Domain separator for the per-subset PRF seed (includes session seed for forward secrecy).
+const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
 
-const COMMIT_DOMAIN: &[u8] = b"resharing-commit-v2";
+const COMMIT_DOMAIN: &[u8] = b"resharing-commit-v3";
 
-const NEW_SHARE_COMMIT_DOMAIN: &[u8] = b"resharing-new-share-commit-v2";
+const NEW_SHARE_COMMIT_DOMAIN: &[u8] = b"resharing-new-share-commit-v3";
+
+/// Domain separator for entropy commitment.
+const ENTROPY_COMMIT_DOMAIN: &[u8] = b"resharing-entropy-commit-v1";
+
+/// Domain separator for session seed derivation.
+const SESSION_SEED_DOMAIN: &[u8] = b"resharing-session-seed-v1";
 
 /// Maximum resharing message size in bytes (256 KB).
 /// This limits the size of serialized resharing protocol messages.
@@ -165,20 +172,36 @@ impl fmt::Display for ResharingProtocolError {
 // ============================================================================
 
 /// Current state of the resharing protocol.
+///
+/// # Protocol Rounds (5-round forward-secrecy protocol)
+///
+/// - **Round 1**: Entropy commitment (old committee broadcasts `H(entropy)`)
+/// - **Round 2**: Entropy reveal (old committee reveals entropy, session seed computed)
+/// - **Round 3**: Sub-share commitments (designated dealers broadcast `H(r_{I→J})`)
+/// - **Round 4**: Private delivery (dealers send `r_{I→J}` to new committee)
+/// - **Round 5**: Verification (share commitments, partial PKs, accusations)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResharingState {
-	/// Generating Round 1 message (commitments to per-subset sub-shares).
+	/// Generating Round 1 message (entropy commitment).
 	Round1Generate,
 	/// Waiting for Round 1 messages from old committee members.
 	Round1Waiting,
-	/// Generating Round 2 messages (private sub-share reveals).
+	/// Generating Round 2 message (entropy reveal).
 	Round2Generate,
-	/// Waiting for Round 2 messages (receiving sub-shares).
+	/// Waiting for Round 2 messages from old committee members.
 	Round2Waiting,
-	/// Generating Round 3 message (verification commitments + accusations).
+	/// Generating Round 3 message (commitments to per-subset sub-shares).
 	Round3Generate,
-	/// Waiting for Round 3 messages.
+	/// Waiting for Round 3 messages from old committee members.
 	Round3Waiting,
+	/// Generating Round 4 messages (private sub-share reveals).
+	Round4Generate,
+	/// Waiting for Round 4 messages (receiving sub-shares).
+	Round4Waiting,
+	/// Generating Round 5 message (verification commitments + accusations).
+	Round5Generate,
+	/// Waiting for Round 5 messages.
+	Round5Waiting,
 	/// Combining shares and finalizing.
 	Combining,
 	/// Protocol completed successfully.
@@ -196,6 +219,9 @@ pub struct ResharingProtocol {
 	config: ResharingConfig,
 	state: ResharingState,
 
+	/// Seed for entropy generation (provided by caller).
+	seed: [u8; 32],
+
 	/// Old subset masks (from the existing share's stored shares), in canonical
 	/// (BTreeMap) order. Indexed by `old_subset_index`.
 	old_subset_order: Vec<SubsetMask>,
@@ -203,26 +229,44 @@ pub struct ResharingProtocol {
 	/// `new_subset_index`. Used to assign per-old-subset "residual" new subsets.
 	new_subset_order: Vec<SubsetMask>,
 
+	// ========================================================================
+	// Round 1-2: Entropy commit-reveal (forward secrecy)
+	// ========================================================================
+	/// This party's generated entropy (old committee members only).
+	my_entropy: Option<[u8; ENTROPY_SIZE]>,
+	/// Round 1 entropy commitments received from old committee members.
+	round1_entropy_commits: BTreeMap<ParticipantId, [u8; COMMITMENT_HASH_SIZE]>,
+	/// Round 2 entropy reveals received from old committee members.
+	round2_entropy_reveals: BTreeMap<ParticipantId, [u8; ENTROPY_SIZE]>,
+	/// Session seed computed from all entropy contributions (computed after Round 2).
+	session_seed: Option<[u8; 32]>,
+
+	// ========================================================================
+	// Round 3-4: Sub-share commitment and delivery
+	// ========================================================================
 	/// Pre-computed sub-shares we are responsible for dealing.
 	/// Keyed by `(old_subset, new_subset)`.
 	my_subshares: BTreeMap<SubsetPair, NewShareData>,
-	/// Our Round 1 broadcast (commitments for subsets we deal).
-	my_round1: Option<ResharingRound1Broadcast>,
-	/// Round 1 broadcasts received from other old committee members.
-	round1_broadcasts: BTreeMap<ParticipantId, ResharingRound1Broadcast>,
-
-	/// Round 2 messages we have queued to send (each addressed to a specific recipient).
-	pending_round2: Vec<ResharingRound2Message>,
-	/// Index of the next pending Round 2 message to emit.
-	round2_sent_count: usize,
-	/// Round 2 messages we received, keyed by sender.
-	/// Each value is the merged set of `(I, J) -> r` from that sender.
-	round2_messages: BTreeMap<ParticipantId, ResharingRound2Message>,
-
-	/// Round 3 broadcasts.
+	/// Our Round 3 broadcast (commitments for subsets we deal).
+	my_round3: Option<ResharingRound3Broadcast>,
+	/// Round 3 broadcasts received from other old committee members.
 	round3_broadcasts: BTreeMap<ParticipantId, ResharingRound3Broadcast>,
 
-	/// Computed new shares: `new_subset -> s_J^new`. Populated in Round 3.
+	/// Round 4 messages we have queued to send (each addressed to a specific recipient).
+	pending_round4: Vec<ResharingRound4Message>,
+	/// Index of the next pending Round 4 message to emit.
+	round4_sent_count: usize,
+	/// Round 4 messages we received, keyed by sender.
+	/// Each value is the merged set of `(I, J) -> r` from that sender.
+	round4_messages: BTreeMap<ParticipantId, ResharingRound4Message>,
+
+	// ========================================================================
+	// Round 5: Verification
+	// ========================================================================
+	/// Round 5 broadcasts.
+	round5_broadcasts: BTreeMap<ParticipantId, ResharingRound5Broadcast>,
+
+	/// Computed new shares: `new_subset -> s_J^new`. Populated in Round 5.
 	new_shares: BTreeMap<SubsetMask, NewShareData>,
 	/// Final output (cached so `take_output` can return it after Combining).
 	completed_output: Option<ResharingOutput>,
@@ -230,21 +274,41 @@ pub struct ResharingProtocol {
 
 impl ResharingProtocol {
 	/// Create a new resharing protocol instance.
-	pub fn new(config: ResharingConfig) -> Self {
+	///
+	/// # Arguments
+	///
+	/// * `config` - The resharing configuration specifying old/new committees and this party's
+	///   role.
+	/// * `seed` - 32 bytes of entropy for generating this party's random contribution to the
+	///   session seed. Must be cryptographically random (e.g., from `OsRng`). Each party must
+	///   provide independent entropy; using the same seed across parties breaks forward secrecy.
+	///
+	/// # Forward Secrecy
+	///
+	/// The `seed` parameter enables forward secrecy by ensuring that the randomness used to derive
+	/// new shares includes fresh entropy from all old committee members. Even if old shares are
+	/// later compromised, an attacker cannot reconstruct the specific randomness used in this
+	/// resharing session.
+	pub fn new(config: ResharingConfig, seed: [u8; 32]) -> Self {
 		let old_subset_order = compute_old_subset_order(&config);
 		let new_subset_order = compute_new_subset_order(&config);
 		Self {
 			config,
 			state: ResharingState::Round1Generate,
+			seed,
 			old_subset_order,
 			new_subset_order,
+			my_entropy: None,
+			round1_entropy_commits: BTreeMap::new(),
+			round2_entropy_reveals: BTreeMap::new(),
+			session_seed: None,
 			my_subshares: BTreeMap::new(),
-			my_round1: None,
-			round1_broadcasts: BTreeMap::new(),
-			pending_round2: Vec::new(),
-			round2_sent_count: 0,
-			round2_messages: BTreeMap::new(),
+			my_round3: None,
 			round3_broadcasts: BTreeMap::new(),
+			pending_round4: Vec::new(),
+			round4_sent_count: 0,
+			round4_messages: BTreeMap::new(),
+			round5_broadcasts: BTreeMap::new(),
 			new_shares: BTreeMap::new(),
 			completed_output: None,
 		}
@@ -312,6 +376,10 @@ impl ResharingProtocol {
 			ResharingState::Round2Waiting => self.handle_round2_waiting(),
 			ResharingState::Round3Generate => self.handle_round3_generate(),
 			ResharingState::Round3Waiting => self.handle_round3_waiting(),
+			ResharingState::Round4Generate => self.handle_round4_generate(),
+			ResharingState::Round4Waiting => self.handle_round4_waiting(),
+			ResharingState::Round5Generate => self.handle_round5_generate(),
+			ResharingState::Round5Waiting => self.handle_round5_waiting(),
 			ResharingState::Combining => self.handle_combining(),
 			ResharingState::Done =>
 				Err(ResharingProtocolError::InvalidState("Protocol already completed".to_string())),
@@ -357,45 +425,47 @@ impl ResharingProtocol {
 		}
 
 		match msg {
-			ResharingMessage::Round1(broadcast) => self.handle_round1_message(from, broadcast),
+			ResharingMessage::Round1(m) => self.handle_round1_message(from, m),
 			ResharingMessage::Round2(m) => self.handle_round2_message(from, m),
 			ResharingMessage::Round3(broadcast) => self.handle_round3_message(from, broadcast),
+			ResharingMessage::Round4(m) => self.handle_round4_message(from, m),
+			ResharingMessage::Round5(broadcast) => self.handle_round5_message(from, broadcast),
 		}
 
 		Ok(())
 	}
 
 	// ========================================================================
-	// Round 1: Commitments
+	// Round 1: Entropy Commitment (Forward Secrecy)
 	// ========================================================================
 
 	fn handle_round1_generate(
 		&mut self,
 	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// Only old committee members participate in Round 1.
+		// Only old committee members participate in Round 1 (entropy commitment).
+		// New-only parties skip directly to Round 2 waiting.
 		if !self.config.role.is_old_committee() {
 			self.state = ResharingState::Round2Waiting;
 			return Ok(Action::Wait);
 		}
 
-		self.compute_my_subshares()?;
-		let commitments = self.commit_to_my_subshares();
+		// Generate entropy from the seed provided at construction
+		let entropy = self.generate_entropy();
+		self.my_entropy = Some(entropy);
 
-		let broadcast = ResharingRound1Broadcast { party_id: self.config.my_party_id, commitments };
-		self.my_round1 = Some(broadcast.clone());
-		self.round1_broadcasts.insert(self.config.my_party_id, broadcast.clone());
+		// Compute commitment: H("resharing-entropy-commit-v1" || entropy)
+		let commitment = commit_entropy(&entropy);
+		self.round1_entropy_commits.insert(self.config.my_party_id, commitment);
 
-		// Pre-build the per-recipient Round 2 messages so we can stream them in
-		// later pokes without re-deriving anything.
-		self.build_pending_round2_messages();
-
+		let broadcast =
+			ResharingRound1EntropyCommitment { party_id: self.config.my_party_id, commitment };
 		let data = Self::serialize_message(&ResharingMessage::Round1(broadcast))?;
 		self.state = ResharingState::Round1Waiting;
 		Ok(Action::SendMany(data))
 	}
 
 	fn handle_round1_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		if self.have_enough_round1() {
+		if self.have_all_round1_entropy_commits() {
 			self.state = ResharingState::Round2Generate;
 			self.poke()
 		} else {
@@ -403,85 +473,274 @@ impl ResharingProtocol {
 		}
 	}
 
-	fn handle_round1_message(&mut self, from: ParticipantId, broadcast: ResharingRound1Broadcast) {
-		if !matches!(self.state, ResharingState::Round1Generate | ResharingState::Round1Waiting) {
+	fn handle_round1_message(
+		&mut self,
+		from: ParticipantId,
+		msg: ResharingRound1EntropyCommitment,
+	) {
+		// Accept Round 1 messages during Round 1 or Round 2 (for late arrivals)
+		if !matches!(
+			self.state,
+			ResharingState::Round1Generate |
+				ResharingState::Round1Waiting |
+				ResharingState::Round2Generate |
+				ResharingState::Round2Waiting
+		) {
 			return;
 		}
+		// Only old committee members send entropy commitments
 		if !self.config.old_participants.contains(from) {
 			return;
 		}
-		if self.round1_broadcasts.contains_key(&from) {
+		// Ignore duplicates
+		if self.round1_entropy_commits.contains_key(&from) {
 			return;
 		}
-		self.round1_broadcasts.insert(from, broadcast);
+		self.round1_entropy_commits.insert(from, msg.commitment);
 	}
 
-	fn have_enough_round1(&self) -> bool {
-		// We need a Round 1 broadcast from every party that is a designated dealer for at
-		// least one old subset. With the assumption that `old_participants ==
-		// dkg_participants` this is exactly the set of old committee members that own at
-		// least one subset. Conservative requirement: all old participants.
-		self.round1_broadcasts.len() >= self.config.old_participants.len()
+	fn have_all_round1_entropy_commits(&self) -> bool {
+		// We need entropy commitments from all old committee members
+		self.round1_entropy_commits.len() >= self.config.old_participants.len()
+	}
+
+	/// Generate this party's entropy contribution from the constructor seed.
+	fn generate_entropy(&self) -> [u8; ENTROPY_SIZE] {
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, b"resharing-entropy-derive-v1", 27);
+		fips202::shake256_absorb(&mut state, &self.seed, 32);
+		fips202::shake256_absorb(&mut state, &self.config.my_party_id.to_le_bytes(), 4);
+		fips202::shake256_finalize(&mut state);
+		let mut entropy = [0u8; ENTROPY_SIZE];
+		fips202::shake256_squeeze(&mut entropy, ENTROPY_SIZE, &mut state);
+		entropy
 	}
 
 	// ========================================================================
-	// Round 2: Private Reveal
+	// Round 2: Entropy Reveal (Forward Secrecy)
 	// ========================================================================
 
 	fn handle_round2_generate(
 		&mut self,
 	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// Old-only parties without dealer responsibilities and new-only parties simply
-		// wait for inbound traffic.
-		if !self.config.role.is_old_committee() || self.pending_round2.is_empty() {
+		// Only old committee members participate in Round 2 (entropy reveal).
+		// New-only parties stay in Round 2 waiting.
+		if !self.config.role.is_old_committee() {
 			self.state = ResharingState::Round2Waiting;
-			return self.poke();
+			return Ok(Action::Wait);
 		}
 
+		let entropy = self.my_entropy.ok_or_else(|| {
+			ResharingProtocolError::InternalError("Missing entropy for Round 2".to_string())
+		})?;
+
+		// Store our own reveal
+		self.round2_entropy_reveals.insert(self.config.my_party_id, entropy);
+
+		let broadcast = ResharingRound2EntropyReveal { party_id: self.config.my_party_id, entropy };
+		let data = Self::serialize_message(&ResharingMessage::Round2(broadcast))?;
 		self.state = ResharingState::Round2Waiting;
-		self.send_next_round2_message()
+		Ok(Action::SendMany(data))
 	}
 
 	fn handle_round2_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// Old-committee dealers continue to drain pending Round 2 messages.
-		if self.config.role.is_old_committee() && self.round2_sent_count < self.pending_round2.len()
-		{
-			return self.send_next_round2_message();
+		if self.have_all_round2_entropy_reveals() {
+			// Verify all reveals match their commitments and compute session seed
+			self.verify_entropy_and_compute_session_seed()?;
+			self.state = ResharingState::Round3Generate;
+			self.poke()
+		} else {
+			Ok(Action::Wait)
+		}
+	}
+
+	fn handle_round2_message(&mut self, from: ParticipantId, msg: ResharingRound2EntropyReveal) {
+		// Accept Round 2 messages during Round 1-3 (for late arrivals)
+		if !matches!(
+			self.state,
+			ResharingState::Round1Waiting |
+				ResharingState::Round2Generate |
+				ResharingState::Round2Waiting |
+				ResharingState::Round3Generate |
+				ResharingState::Round3Waiting
+		) {
+			return;
+		}
+		// Only old committee members send entropy reveals
+		if !self.config.old_participants.contains(from) {
+			return;
+		}
+		// Ignore duplicates
+		if self.round2_entropy_reveals.contains_key(&from) {
+			return;
+		}
+		self.round2_entropy_reveals.insert(from, msg.entropy);
+	}
+
+	fn have_all_round2_entropy_reveals(&self) -> bool {
+		// We need entropy reveals from all old committee members
+		self.round2_entropy_reveals.len() >= self.config.old_participants.len()
+	}
+
+	/// Verify all entropy reveals match their commitments and compute the session seed.
+	fn verify_entropy_and_compute_session_seed(&mut self) -> Result<(), ResharingProtocolError> {
+		// Verify each reveal matches its commitment
+		for (&party_id, &entropy) in &self.round2_entropy_reveals {
+			let expected_commit = commit_entropy(&entropy);
+			let actual_commit = self.round1_entropy_commits.get(&party_id).ok_or_else(|| {
+				ResharingProtocolError::InternalError(format!(
+					"Missing entropy commitment from party {} during verification",
+					party_id
+				))
+			})?;
+			if expected_commit != *actual_commit {
+				return Err(ResharingProtocolError::CommitmentMismatch(party_id));
+			}
 		}
 
-		// New committee members proceed to Round 3 once they have received from every
-		// expected dealer.
-		if self.config.role.is_new_committee() && self.have_all_expected_round2() {
-			self.state = ResharingState::Round3Generate;
+		// Compute session seed: SHAKE256("resharing-session-seed-v1" || party_id_1 || entropy_1 ||
+		// ...) Process parties in sorted order for determinism
+		let mut sorted_parties: Vec<_> = self.round2_entropy_reveals.iter().collect();
+		sorted_parties.sort_by_key(|(party_id, _)| *party_id);
+
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, SESSION_SEED_DOMAIN, SESSION_SEED_DOMAIN.len());
+		for (&party_id, entropy) in &sorted_parties {
+			fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
+			fips202::shake256_absorb(&mut state, *entropy, ENTROPY_SIZE);
+		}
+		fips202::shake256_finalize(&mut state);
+		let mut session_seed = [0u8; 32];
+		fips202::shake256_squeeze(&mut session_seed, 32, &mut state);
+		self.session_seed = Some(session_seed);
+
+		Ok(())
+	}
+
+	// ========================================================================
+	// Round 3: Sub-Share Commitments
+	// ========================================================================
+
+	fn handle_round3_generate(
+		&mut self,
+	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
+		// Only old committee members participate in Round 3.
+		if !self.config.role.is_old_committee() {
+			self.state = ResharingState::Round4Waiting;
+			return Ok(Action::Wait);
+		}
+
+		// Compute sub-shares (now using session seed for forward secrecy)
+		self.compute_my_subshares()?;
+		let commitments = self.commit_to_my_subshares();
+
+		let broadcast = ResharingRound3Broadcast { party_id: self.config.my_party_id, commitments };
+		self.my_round3 = Some(broadcast.clone());
+		self.round3_broadcasts.insert(self.config.my_party_id, broadcast.clone());
+
+		// Pre-build the per-recipient Round 4 messages so we can stream them in
+		// later pokes without re-deriving anything.
+		self.build_pending_round4_messages();
+
+		let data = Self::serialize_message(&ResharingMessage::Round3(broadcast))?;
+		self.state = ResharingState::Round3Waiting;
+		Ok(Action::SendMany(data))
+	}
+
+	fn handle_round3_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
+		if self.have_enough_round3() {
+			self.state = ResharingState::Round4Generate;
+			self.poke()
+		} else {
+			Ok(Action::Wait)
+		}
+	}
+
+	fn handle_round3_message(&mut self, from: ParticipantId, broadcast: ResharingRound3Broadcast) {
+		// Accept Round 3 messages during Round 2-4 states (for late arrivals and NewOnly parties)
+		if !matches!(
+			self.state,
+			ResharingState::Round2Waiting |
+				ResharingState::Round3Generate |
+				ResharingState::Round3Waiting |
+				ResharingState::Round4Generate |
+				ResharingState::Round4Waiting
+		) {
+			return;
+		}
+		if !self.config.old_participants.contains(from) {
+			return;
+		}
+		if self.round3_broadcasts.contains_key(&from) {
+			return;
+		}
+		self.round3_broadcasts.insert(from, broadcast);
+	}
+
+	fn have_enough_round3(&self) -> bool {
+		// We need a Round 3 broadcast from every party that is a designated dealer for at
+		// least one old subset. Conservative requirement: all old participants.
+		self.round3_broadcasts.len() >= self.config.old_participants.len()
+	}
+
+	// ========================================================================
+	// Round 4: Private Sub-Share Reveal
+	// ========================================================================
+
+	fn handle_round4_generate(
+		&mut self,
+	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
+		// Old-only parties without dealer responsibilities and new-only parties simply
+		// wait for inbound traffic.
+		if !self.config.role.is_old_committee() || self.pending_round4.is_empty() {
+			self.state = ResharingState::Round4Waiting;
 			return self.poke();
 		}
 
-		// Old-only parties advance to Round 3 generation (they will broadcast accusations
+		self.state = ResharingState::Round4Waiting;
+		self.send_next_round4_message()
+	}
+
+	fn handle_round4_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
+		// Old-committee dealers continue to drain pending Round 4 messages.
+		if self.config.role.is_old_committee() && self.round4_sent_count < self.pending_round4.len()
+		{
+			return self.send_next_round4_message();
+		}
+
+		// New committee members proceed to Round 5 once they have received from every
+		// expected dealer.
+		if self.config.role.is_new_committee() && self.have_all_expected_round4() {
+			self.state = ResharingState::Round5Generate;
+			return self.poke();
+		}
+
+		// Old-only parties advance to Round 5 generation (they will broadcast accusations
 		// only).
 		if !self.config.role.is_new_committee() &&
-			self.round2_sent_count >= self.pending_round2.len()
+			self.round4_sent_count >= self.pending_round4.len()
 		{
-			self.state = ResharingState::Round3Generate;
+			self.state = ResharingState::Round5Generate;
 			return self.poke();
 		}
 
 		Ok(Action::Wait)
 	}
 
-	fn send_next_round2_message(
+	fn send_next_round4_message(
 		&mut self,
 	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		if self.round2_sent_count >= self.pending_round2.len() {
+		if self.round4_sent_count >= self.pending_round4.len() {
 			return Ok(Action::Wait);
 		}
-		let msg = &self.pending_round2[self.round2_sent_count];
+		let msg = &self.pending_round4[self.round4_sent_count];
 		let to_party = msg.to_party_id;
-		let data = Self::serialize_message(&ResharingMessage::Round2(msg.clone()))?;
-		self.round2_sent_count += 1;
+		let data = Self::serialize_message(&ResharingMessage::Round4(msg.clone()))?;
+		self.round4_sent_count += 1;
 		Ok(Action::SendPrivate(to_party, data))
 	}
 
-	fn handle_round2_message(&mut self, from: ParticipantId, msg: ResharingRound2Message) {
+	fn handle_round4_message(&mut self, from: ParticipantId, msg: ResharingRound4Message) {
 		if matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
 			return;
 		}
@@ -495,17 +754,17 @@ impl ResharingProtocol {
 			return;
 		}
 		// Reject duplicates from the same dealer.
-		if self.round2_messages.contains_key(&from) {
+		if self.round4_messages.contains_key(&from) {
 			return;
 		}
-		self.round2_messages.insert(from, msg);
+		self.round4_messages.insert(from, msg);
 	}
 
-	fn have_all_expected_round2(&self) -> bool {
+	fn have_all_expected_round4(&self) -> bool {
 		// Expected senders = the set of designated dealers for each old subset.
 		let expected: BTreeMap<ParticipantId, ()> =
 			self.designated_dealer_set().into_iter().map(|p| (p, ())).collect();
-		expected.keys().all(|d| self.round2_messages.contains_key(d))
+		expected.keys().all(|d| self.round4_messages.contains_key(d))
 	}
 
 	fn designated_dealer_set(&self) -> Vec<ParticipantId> {
@@ -520,10 +779,10 @@ impl ResharingProtocol {
 	}
 
 	// ========================================================================
-	// Round 3: Verification + Accusations
+	// Round 5: Verification + Accusations
 	// ========================================================================
 
-	fn handle_round3_generate(
+	fn handle_round5_generate(
 		&mut self,
 	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
 		let mut accusations: Vec<DealerAccusation> = Vec::new();
@@ -568,7 +827,7 @@ impl ResharingProtocol {
 			BTreeMap::new()
 		};
 
-		let broadcast = ResharingRound3Broadcast {
+		let broadcast = ResharingRound5Broadcast {
 			party_id: self.config.my_party_id,
 			share_commitments,
 			partial_pks,
@@ -576,14 +835,14 @@ impl ResharingProtocol {
 			success,
 			error_message,
 		};
-		self.round3_broadcasts.insert(self.config.my_party_id, broadcast.clone());
-		let data = Self::serialize_message(&ResharingMessage::Round3(broadcast))?;
-		self.state = ResharingState::Round3Waiting;
+		self.round5_broadcasts.insert(self.config.my_party_id, broadcast.clone());
+		let data = Self::serialize_message(&ResharingMessage::Round5(broadcast))?;
+		self.state = ResharingState::Round5Waiting;
 		Ok(Action::SendMany(data))
 	}
 
-	fn handle_round3_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		if self.have_all_round3() {
+	fn handle_round5_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
+		if self.have_all_round5() {
 			self.state = ResharingState::Combining;
 			self.poke()
 		} else {
@@ -591,25 +850,25 @@ impl ResharingProtocol {
 		}
 	}
 
-	fn handle_round3_message(&mut self, from: ParticipantId, broadcast: ResharingRound3Broadcast) {
+	fn handle_round5_message(&mut self, from: ParticipantId, broadcast: ResharingRound5Broadcast) {
 		if matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
 			return;
 		}
 		if !self.config.all_participants().contains(&from) {
 			return;
 		}
-		if self.round3_broadcasts.contains_key(&from) {
+		if self.round5_broadcasts.contains_key(&from) {
 			return;
 		}
-		self.round3_broadcasts.insert(from, broadcast);
+		self.round5_broadcasts.insert(from, broadcast);
 	}
 
-	fn have_all_round3(&self) -> bool {
-		// Round 3 has contributions from BOTH old and new committee members
+	fn have_all_round5(&self) -> bool {
+		// Round 5 has contributions from BOTH old and new committee members
 		// (old members file accusations; new members commit to new shares),
 		// so we need broadcasts from every party that is in either committee.
 		let union = self.config.all_participants();
-		union.iter().all(|p| self.round3_broadcasts.contains_key(p))
+		union.iter().all(|p| self.round5_broadcasts.contains_key(p))
 	}
 
 	// ========================================================================
@@ -617,9 +876,9 @@ impl ResharingProtocol {
 	// ========================================================================
 
 	fn handle_combining(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// Surface any explicit failure flags from Round 3.
+		// Surface any explicit failure flags from Round 5.
 		let failed_parties: Vec<ParticipantId> = self
-			.round3_broadcasts
+			.round5_broadcasts
 			.iter()
 			.filter(|(_, b)| !b.success)
 			.map(|(id, _)| *id)
@@ -633,7 +892,7 @@ impl ResharingProtocol {
 		// Surface any dealer accusations.
 		let mut accused: alloc::collections::BTreeSet<ParticipantId> =
 			alloc::collections::BTreeSet::new();
-		for broadcast in self.round3_broadcasts.values() {
+		for broadcast in self.round5_broadcasts.values() {
 			for accusation in &broadcast.accusations {
 				accused.insert(accusation.dealer);
 			}
@@ -665,6 +924,7 @@ impl ResharingProtocol {
 	// ========================================================================
 
 	/// Pre-compute every sub-share `r_{I→J}` we are responsible for dealing.
+	/// Uses the session seed for forward secrecy.
 	fn compute_my_subshares(&mut self) -> Result<(), ResharingProtocolError> {
 		let existing = self.config.existing_share.as_ref().ok_or_else(|| {
 			ResharingProtocolError::InternalError("Missing existing share".to_string())
@@ -678,6 +938,11 @@ impl ResharingProtocol {
 			));
 		}
 
+		// Get session seed for forward-secrecy PRF derivation
+		let session_seed = self.session_seed.ok_or_else(|| {
+			ResharingProtocolError::InternalError("Missing session seed".to_string())
+		})?;
+
 		for (i_idx, &i_mask) in self.old_subset_order.clone().iter().enumerate() {
 			// Only compute for subsets where we are the designated dealer.
 			if self.designated_dealer_for(i_mask) != Some(self.config.my_party_id) {
@@ -690,7 +955,13 @@ impl ResharingProtocol {
 				))
 			})?;
 			let residual_idx = i_idx % n_new;
-			let subshares = derive_subshares(i_mask, s_i, &new_subsets, residual_idx);
+			let subshares = derive_subshares_with_session_seed(
+				i_mask,
+				s_i,
+				&new_subsets,
+				residual_idx,
+				&session_seed,
+			);
 			for (j_idx, j_mask) in new_subsets.iter().enumerate() {
 				self.my_subshares.insert((i_mask, *j_mask), subshares[j_idx].clone());
 			}
@@ -707,13 +978,13 @@ impl ResharingProtocol {
 		out
 	}
 
-	/// Build the per-recipient Round 2 messages we will emit one-by-one in `poke`.
+	/// Build the per-recipient Round 4 messages we will emit one-by-one in `poke`.
 	///
 	/// Self-deals (when this party is also a member of `J`) are inserted directly
-	/// into `round2_messages`; only outbound messages are queued in `pending_round2`.
+	/// into `round4_messages`; only outbound messages are queued in `pending_round4`.
 	/// This mirrors the DKG pattern (`process_round1` skips self) and removes the
 	/// implicit "network must loopback SendPrivate(self, _)" requirement.
-	fn build_pending_round2_messages(&mut self) {
+	fn build_pending_round4_messages(&mut self) {
 		let mut by_recipient: BTreeMap<ParticipantId, BTreeMap<SubsetPair, NewShareData>> =
 			BTreeMap::new();
 		for (pair, share) in &self.my_subshares {
@@ -727,11 +998,11 @@ impl ResharingProtocol {
 		let me = self.config.my_party_id;
 		for (recipient, contributions) in by_recipient {
 			let msg =
-				ResharingRound2Message { from_party_id: me, to_party_id: recipient, contributions };
+				ResharingRound4Message { from_party_id: me, to_party_id: recipient, contributions };
 			if recipient == me {
-				self.round2_messages.insert(me, msg);
+				self.round4_messages.insert(me, msg);
 			} else {
-				self.pending_round2.push(msg);
+				self.pending_round4.push(msg);
 			}
 		}
 	}
@@ -752,7 +1023,7 @@ impl ResharingProtocol {
 		None
 	}
 
-	/// Old committee post-Round-1 verification: re-derive sub-shares for every old
+	/// Old committee post-Round-3 verification: re-derive sub-shares for every old
 	/// subset we belong to, compare against the dealer's broadcast commitments, and
 	/// produce accusations for any mismatches.
 	fn collect_accusations(&self) -> Result<Vec<DealerAccusation>, ResharingProtocolError> {
@@ -765,6 +1036,11 @@ impl ResharingProtocol {
 		if n_new == 0 {
 			return Ok(Vec::new());
 		}
+
+		// Get the session seed for forward-secrecy PRF derivation
+		let session_seed = self.session_seed.ok_or_else(|| {
+			ResharingProtocolError::InternalError("Missing session seed".to_string())
+		})?;
 
 		let mut accusations = Vec::new();
 		for (i_idx, &i_mask) in self.old_subset_order.iter().enumerate() {
@@ -781,14 +1057,20 @@ impl ResharingProtocol {
 			if dealer == self.config.my_party_id {
 				continue;
 			}
-			let dealer_broadcast = self.round1_broadcasts.get(&dealer).ok_or_else(|| {
+			let dealer_broadcast = self.round3_broadcasts.get(&dealer).ok_or_else(|| {
 				ResharingProtocolError::InternalError(format!(
-					"Missing Round 1 broadcast from designated dealer {} for subset {:b}",
+					"Missing Round 3 broadcast from designated dealer {} for subset {:b}",
 					dealer, i_mask
 				))
 			})?;
 			let residual_idx = i_idx % n_new;
-			let expected = derive_subshares(i_mask, s_i, new_subsets, residual_idx);
+			let expected = derive_subshares_with_session_seed(
+				i_mask,
+				s_i,
+				new_subsets,
+				residual_idx,
+				&session_seed,
+			);
 			for (j_idx, &j_mask) in new_subsets.iter().enumerate() {
 				let expected_commit = commit_subshare(i_mask, j_mask, &expected[j_idx]);
 				match dealer_broadcast.commitments.get(&(i_mask, j_mask)) {
@@ -806,8 +1088,8 @@ impl ResharingProtocol {
 		Ok(accusations)
 	}
 
-	/// New committee post-Round-2 work: verify each received `r_{I→J}` against the
-	/// matching Round 1 commitment, then sum them into `s_J^new` and produce a
+	/// New committee post-Round-4 work: verify each received `r_{I→J}` against the
+	/// matching Round 3 commitment, then sum them into `s_J^new` and produce a
 	/// commitment per new subset we are in.
 	fn verify_and_aggregate_new_shares(
 		&mut self,
@@ -836,15 +1118,15 @@ impl ResharingProtocol {
 						i_mask
 					))),
 			};
-			let dealer_r1 = self.round1_broadcasts.get(&dealer).ok_or_else(|| {
+			let dealer_r3 = self.round3_broadcasts.get(&dealer).ok_or_else(|| {
 				ResharingProtocolError::ShareVerificationFailed(format!(
-					"missing Round 1 commitment from dealer {} for subset {:b}",
+					"missing Round 3 commitment from dealer {} for subset {:b}",
 					dealer, i_mask
 				))
 			})?;
-			let dealer_r2 = self.round2_messages.get(&dealer).ok_or_else(|| {
+			let dealer_r4 = self.round4_messages.get(&dealer).ok_or_else(|| {
 				ResharingProtocolError::ShareVerificationFailed(format!(
-					"missing Round 2 message from dealer {} for subset {:b}",
+					"missing Round 4 message from dealer {} for subset {:b}",
 					dealer, i_mask
 				))
 			})?;
@@ -852,7 +1134,7 @@ impl ResharingProtocol {
 				if (j_mask & (1 << my_idx)) == 0 {
 					continue;
 				}
-				let r = dealer_r2.contributions.get(&(i_mask, j_mask)).ok_or_else(|| {
+				let r = dealer_r4.contributions.get(&(i_mask, j_mask)).ok_or_else(|| {
 					ResharingProtocolError::ShareVerificationFailed(format!(
 						"dealer {} did not deliver r_{{{:b}->{:b}}}",
 						dealer, i_mask, j_mask
@@ -860,7 +1142,7 @@ impl ResharingProtocol {
 				})?;
 				let expected_commit = commit_subshare(i_mask, j_mask, r);
 				let dealer_commit =
-					dealer_r1.commitments.get(&(i_mask, j_mask)).ok_or_else(|| {
+					dealer_r3.commitments.get(&(i_mask, j_mask)).ok_or_else(|| {
 						ResharingProtocolError::ShareVerificationFailed(format!(
 							"dealer {} did not commit to r_{{{:b}->{:b}}}",
 							dealer, i_mask, j_mask
@@ -892,7 +1174,7 @@ impl ResharingProtocol {
 	fn verify_new_share_consistency(&self) -> Result<(), ResharingProtocolError> {
 		let mut by_subset: BTreeMap<SubsetMask, Vec<(ParticipantId, [u8; COMMITMENT_HASH_SIZE])>> =
 			BTreeMap::new();
-		for (party, broadcast) in &self.round3_broadcasts {
+		for (party, broadcast) in &self.round5_broadcasts {
 			for (j_mask, commit) in &broadcast.share_commitments {
 				by_subset.entry(*j_mask).or_default().push((*party, *commit));
 			}
@@ -943,7 +1225,7 @@ impl ResharingProtocol {
 	/// resharing reconstructs the original public key.
 	fn verify_public_key_preservation(&self) -> Result<(), ResharingProtocolError> {
 		let mut canonical: BTreeMap<SubsetMask, Vec<[i32; N as usize]>> = BTreeMap::new();
-		for broadcast in self.round3_broadcasts.values() {
+		for broadcast in self.round5_broadcasts.values() {
 			for (j_mask, t_partial) in &broadcast.partial_pks {
 				match canonical.get(j_mask) {
 					None => {
@@ -1093,19 +1375,21 @@ fn generate_subset_masks(n: usize, k: usize) -> Vec<SubsetMask> {
 /// `Σ_J r_{I→J} = s_I` (mod Q), where `s_I` is the (η-bounded) old subset
 /// share. The sub-share for `new_subsets[residual_idx]` absorbs the sum
 /// adjustment; all others are sampled deterministically η-bounded from a PRF
-/// seeded by `s_I` and the subset masks.
-fn derive_subshares(
+/// seeded by `s_I`, the subset masks, and the session seed (for forward secrecy).
+fn derive_subshares_with_session_seed(
 	i_mask: SubsetMask,
 	s_i: &SecretShareData,
 	new_subsets: &[SubsetMask],
 	residual_idx: usize,
+	session_seed: &[u8; 32],
 ) -> Vec<NewShareData> {
 	debug_assert!(new_subsets.len() > residual_idx);
 	let mut out: Vec<NewShareData> = (0..new_subsets.len()).map(|_| NewShareData::new()).collect();
 
-	// Build a PRF seed from (domain || I_mask || s1 || s2). All members of subset I
-	// know `s_i` and so derive the same seed.
-	let prf_seed = build_subset_seed(i_mask, s_i);
+	// Build a PRF seed from (domain || session_seed || I_mask || s1 || s2).
+	// All members of subset I know `s_i` and have computed the same session_seed,
+	// so they derive the same PRF seed.
+	let prf_seed = build_subset_seed_with_session(i_mask, s_i, session_seed);
 
 	// Track running sums to compute the residual.
 	let mut sum_s1: Vec<[i32; N as usize]> = vec![[0i32; N as usize]; L];
@@ -1148,9 +1432,16 @@ fn derive_subshares(
 	out
 }
 
-fn build_subset_seed(i_mask: SubsetMask, s_i: &SecretShareData) -> [u8; 64] {
+/// Build subset seed incorporating session seed for forward secrecy.
+fn build_subset_seed_with_session(
+	i_mask: SubsetMask,
+	s_i: &SecretShareData,
+	session_seed: &[u8; 32],
+) -> [u8; 64] {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, SUBSET_SEED_DOMAIN, SUBSET_SEED_DOMAIN.len());
+	// Mix in session seed for forward secrecy
+	fips202::shake256_absorb(&mut state, session_seed, 32);
 	fips202::shake256_absorb(&mut state, &i_mask.to_le_bytes(), 2);
 	let mut buf: Vec<u8> = Vec::new();
 	for poly in &s_i.s1 {
@@ -1170,6 +1461,17 @@ fn build_subset_seed(i_mask: SubsetMask, s_i: &SecretShareData) -> [u8; 64] {
 	fips202::shake256_finalize(&mut state);
 	let mut out = [0u8; 64];
 	fips202::shake256_squeeze(&mut out, 64, &mut state);
+	out
+}
+
+/// Compute commitment to entropy: H("resharing-entropy-commit-v1" || entropy).
+fn commit_entropy(entropy: &[u8; ENTROPY_SIZE]) -> [u8; COMMITMENT_HASH_SIZE] {
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, ENTROPY_COMMIT_DOMAIN, ENTROPY_COMMIT_DOMAIN.len());
+	fips202::shake256_absorb(&mut state, entropy, ENTROPY_SIZE);
+	fips202::shake256_finalize(&mut state);
+	let mut out = [0u8; COMMITMENT_HASH_SIZE];
+	fips202::shake256_squeeze(&mut out, COMMITMENT_HASH_SIZE, &mut state);
 	out
 }
 
@@ -1337,7 +1639,11 @@ mod tests {
 	fn test_subset_seed_is_deterministic_for_same_share() {
 		let s =
 			SecretShareData { s1: vec![[3i32; N as usize]; L], s2: vec![[5i32; N as usize]; K] };
-		assert_eq!(build_subset_seed(0b011, &s), build_subset_seed(0b011, &s));
+		let session_seed = [42u8; 32];
+		assert_eq!(
+			build_subset_seed_with_session(0b011, &s, &session_seed),
+			build_subset_seed_with_session(0b011, &s, &session_seed)
+		);
 	}
 
 	#[test]
@@ -1345,10 +1651,17 @@ mod tests {
 		let s =
 			SecretShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
+		let session_seed = [42u8; 32];
 		for residual_idx in 0..new_subsets.len() {
-			let subshares = derive_subshares(0b011, &s, &new_subsets, residual_idx);
-			let mut sum_s1 = vec![[0i64; N as usize]; L];
-			let mut sum_s2 = vec![[0i64; N as usize]; K];
+			let subshares = derive_subshares_with_session_seed(
+				0b011,
+				&s,
+				&new_subsets,
+				residual_idx,
+				&session_seed,
+			);
+			let mut sum_s1: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; L];
+			let mut sum_s2: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; K];
 			for sub in &subshares {
 				for (a, b) in sum_s1.iter_mut().zip(sub.s1.iter()) {
 					for (ac, bc) in a.iter_mut().zip(b.iter()) {
@@ -1383,8 +1696,9 @@ mod tests {
 		let s =
 			SecretShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
-		let a = derive_subshares(0b011, &s, &new_subsets, 0);
-		let b = derive_subshares(0b011, &s, &new_subsets, 0);
+		let session_seed = [42u8; 32];
+		let a = derive_subshares_with_session_seed(0b011, &s, &new_subsets, 0, &session_seed);
+		let b = derive_subshares_with_session_seed(0b011, &s, &new_subsets, 0, &session_seed);
 		for (x, y) in a.iter().zip(b.iter()) {
 			assert_eq!(x.s1, y.s1);
 			assert_eq!(x.s2, y.s2);
@@ -1460,8 +1774,9 @@ mod tests {
 		let s_b =
 			SecretShareData { s1: vec![[3i32; N as usize]; L], s2: vec![[5i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
-		let a = derive_subshares(0b011, &s_a, &new_subsets, 0);
-		let b = derive_subshares(0b011, &s_b, &new_subsets, 0);
+		let session_seed = [42u8; 32];
+		let a = derive_subshares_with_session_seed(0b011, &s_a, &new_subsets, 0, &session_seed);
+		let b = derive_subshares_with_session_seed(0b011, &s_b, &new_subsets, 0, &session_seed);
 		// Even the *first* sub-share (which is sampled, not residual) must differ
 		// because the PRF seed depends on `s_i`.
 		assert_ne!(a[1].s1, b[1].s1);
@@ -1474,25 +1789,26 @@ mod tests {
 		let s =
 			SecretShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
-		let a = derive_subshares(0b011, &s, &new_subsets, 0);
-		let b = derive_subshares(0b101, &s, &new_subsets, 0);
+		let session_seed = [42u8; 32];
+		let a = derive_subshares_with_session_seed(0b011, &s, &new_subsets, 0, &session_seed);
+		let b = derive_subshares_with_session_seed(0b101, &s, &new_subsets, 0, &session_seed);
 		// The *non-residual* sub-shares are PRF outputs keyed on (s, i_mask, j_mask),
 		// so they must differ.
 		assert_ne!(a[1].s1, b[1].s1);
 	}
 
 	#[test]
-	fn test_round1_broadcast_does_not_leak_subshares() {
-		// Sanity: a Round 1 broadcast carries hash commitments and nothing else.
+	fn test_round3_broadcast_does_not_leak_subshares() {
+		// Sanity: a Round 3 broadcast carries hash commitments and nothing else.
 		// In particular it must not contain any plaintext NewShareData fields.
 		let mut commitments = BTreeMap::new();
 		commitments.insert((0b011u16, 0b101u16), [9u8; COMMITMENT_HASH_SIZE]);
-		let r1 = ResharingRound1Broadcast { party_id: 7, commitments };
+		let r3 = ResharingRound3Broadcast { party_id: 7, commitments };
 		// The struct only has `party_id` (u32) and `commitments` (BTreeMap of hashes).
 		// If anyone ever adds back leaky plaintext fields, this test should be
 		// updated alongside the security review.
-		assert_eq!(r1.party_id, 7);
-		assert_eq!(r1.commitments.len(), 1);
+		assert_eq!(r3.party_id, 7);
+		assert_eq!(r3.commitments.len(), 1);
 	}
 
 	#[test]

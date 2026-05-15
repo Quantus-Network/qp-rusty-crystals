@@ -21,6 +21,9 @@ use crate::{
 /// Size of commitment hash in bytes.
 pub const COMMITMENT_HASH_SIZE: usize = 32;
 
+/// Size of entropy contribution in bytes.
+pub const ENTROPY_SIZE: usize = 32;
+
 /// Subset mask - a bitmask indicating which parties are in a subset.
 /// Uses u16 to support up to 16 parties.
 pub type SubsetMask = u16;
@@ -291,14 +294,26 @@ impl fmt::Display for ResharingConfigError {
 ///
 /// This allows messages to be serialized/deserialized without knowing
 /// the specific round at deserialization time.
+///
+/// # Protocol Rounds (5-round forward-secrecy protocol)
+///
+/// - **Round 1**: Entropy commitment (old committee broadcasts `H(entropy)`)
+/// - **Round 2**: Entropy reveal (old committee reveals entropy, session seed computed)
+/// - **Round 3**: Sub-share commitments (designated dealers broadcast `H(r_{I→J})`)
+/// - **Round 4**: Private delivery (dealers send `r_{I→J}` to new committee)
+/// - **Round 5**: Verification (share commitments, partial PKs, accusations)
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum ResharingMessage {
-	/// Round 1: Hash commitments to per-subset sub-shares from old committee.
-	Round1(ResharingRound1Broadcast),
-	/// Round 2: New share distributions to new committee.
-	Round2(ResharingRound2Message),
-	/// Round 3: Verification commitments from new committee.
+	/// Round 1: Entropy commitment from old committee members.
+	Round1(ResharingRound1EntropyCommitment),
+	/// Round 2: Entropy reveal from old committee members.
+	Round2(ResharingRound2EntropyReveal),
+	/// Round 3: Hash commitments to per-subset sub-shares from old committee.
 	Round3(ResharingRound3Broadcast),
+	/// Round 4: New share distributions to new committee.
+	Round4(ResharingRound4Message),
+	/// Round 5: Verification commitments from new committee.
+	Round5(ResharingRound5Broadcast),
 }
 
 impl ResharingMessage {
@@ -306,8 +321,10 @@ impl ResharingMessage {
 	pub fn party_id(&self) -> ParticipantId {
 		match self {
 			ResharingMessage::Round1(msg) => msg.party_id,
-			ResharingMessage::Round2(msg) => msg.from_party_id,
+			ResharingMessage::Round2(msg) => msg.party_id,
 			ResharingMessage::Round3(msg) => msg.party_id,
+			ResharingMessage::Round4(msg) => msg.from_party_id,
+			ResharingMessage::Round5(msg) => msg.party_id,
 		}
 	}
 
@@ -317,22 +334,77 @@ impl ResharingMessage {
 			ResharingMessage::Round1(_) => 1,
 			ResharingMessage::Round2(_) => 2,
 			ResharingMessage::Round3(_) => 3,
+			ResharingMessage::Round4(_) => 4,
+			ResharingMessage::Round5(_) => 5,
 		}
 	}
 }
 
 // ============================================================================
-// Round 1: Per-Subset Commitment Broadcast
+// Round 1: Entropy Commitment (Forward Secrecy)
 // ============================================================================
 
 /// Round 1 broadcast from old committee members.
 ///
+/// Each old committee member generates fresh entropy and broadcasts a hash
+/// commitment to it. This is the first step of the commit-reveal scheme that
+/// provides forward secrecy by ensuring the session seed cannot be predicted
+/// before all commitments are published.
+///
+/// # Forward Secrecy
+///
+/// By having all old committee members contribute entropy via commit-reveal,
+/// an attacker who compromises old shares after resharing cannot determine
+/// the randomness used to derive new shares, even if they observe all protocol
+/// messages.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct ResharingRound1EntropyCommitment {
+	/// Party ID of the sender.
+	pub party_id: ParticipantId,
+	/// Hash commitment to the entropy: `SHAKE256("resharing-entropy-commit-v1" || entropy)`.
+	pub commitment: [u8; COMMITMENT_HASH_SIZE],
+}
+
+// ============================================================================
+// Round 2: Entropy Reveal (Forward Secrecy)
+// ============================================================================
+
+/// Round 2 broadcast from old committee members.
+///
+/// Each old committee member reveals their entropy contribution. All parties
+/// verify the revealed entropy matches the Round 1 commitment, then compute
+/// the session seed as:
+///
+/// ```text
+/// session_seed = SHAKE256("resharing-session-seed-v1" || party_id_1 || entropy_1 || ...)
+/// ```
+///
+/// where parties are processed in sorted order by party ID.
+///
+/// # Verification
+///
+/// If any party's revealed entropy does not match their commitment, the
+/// protocol fails immediately with `CommitmentMismatch(party_id)`.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct ResharingRound2EntropyReveal {
+	/// Party ID of the sender.
+	pub party_id: ParticipantId,
+	/// The revealed entropy (32 bytes of randomness).
+	pub entropy: [u8; ENTROPY_SIZE],
+}
+
+// ============================================================================
+// Round 3: Per-Subset Commitment Broadcast
+// ============================================================================
+
+/// Round 3 broadcast from old committee members.
+///
 /// Each old committee member broadcasts hash commitments to the per-subset
-/// "sub-share" contributions they will privately deliver in Round 2. A party
+/// "sub-share" contributions they will privately deliver in Round 4. A party
 /// only commits to subsets where they are the *designated dealer* (the
 /// lowest-ID old participant in the subset). Other members of the same old
 /// subset independently recompute the same contributions and verify the
-/// commitment in Round 3.
+/// commitment in Round 5.
 ///
 /// # Security
 ///
@@ -341,14 +413,21 @@ impl ResharingMessage {
 /// each `r_{I→J}`, which is hiding because each `r_{I→J}` has at least
 /// `5^256 ≈ 2^594` bits of entropy (the η-bounded sample space) or is itself
 /// a function of secret share material.
+///
+/// # Forward Secrecy
+///
+/// The session seed (computed from Round 1-2 entropy contributions) is mixed
+/// into the PRF that derives sub-shares, ensuring that even if old shares are
+/// later compromised, the specific randomness used in this resharing cannot
+/// be reconstructed.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub struct ResharingRound1Broadcast {
+pub struct ResharingRound3Broadcast {
 	/// Party ID of the sender.
 	pub party_id: ParticipantId,
 	/// Commitments keyed by `(old_subset_mask, new_subset_mask)`.
 	///
 	/// The sender is the designated dealer for `old_subset_mask`. Each commitment is
-	/// `SHAKE256("resharing-commit-v2" || old_subset || new_subset || pack(r))`.
+	/// `SHAKE256("resharing-commit-v3" || old_subset || new_subset || pack(r))`.
 	pub commitments: BTreeMap<SubsetPair, [u8; COMMITMENT_HASH_SIZE]>,
 }
 
@@ -356,10 +435,10 @@ pub struct ResharingRound1Broadcast {
 pub type SubsetPair = (SubsetMask, SubsetMask);
 
 // ============================================================================
-// Round 2: Private Sub-Share Reveal
+// Round 4: Private Sub-Share Reveal
 // ============================================================================
 
-/// Round 2 private message from a designated dealer to a new committee member.
+/// Round 4 private message from a designated dealer to a new committee member.
 ///
 /// For each pair `(I, J)` where the sender is the designated dealer of old subset
 /// `I` and the recipient is a member of new subset `J`, the message carries the
@@ -380,7 +459,7 @@ pub type SubsetPair = (SubsetMask, SubsetMask);
 /// Transmitting this message over an unencrypted channel exposes sub-shares to
 /// eavesdroppers and compromises the threshold scheme's security.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub struct ResharingRound2Message {
+pub struct ResharingRound4Message {
 	/// Party ID of the sender (dealer).
 	pub from_party_id: ParticipantId,
 	/// Party ID of the recipient.
@@ -412,12 +491,12 @@ impl Default for NewShareData {
 }
 
 // ============================================================================
-// Round 3: Verification
+// Round 5: Verification
 // ============================================================================
 
-/// Round 3 broadcast.
+/// Round 5 broadcast.
 ///
-/// Round 3 has three purposes:
+/// Round 5 has three purposes:
 ///
 /// 1. **New committee verification.** Each new committee member broadcasts a commitment to each
 ///    `s_J^new` they computed for new subsets `J` containing them. Other members of the same `J`
@@ -437,7 +516,7 @@ impl Default for NewShareData {
 ///    configurations), where there is no other old-subset member to cross-verify in purpose 2.
 ///    Publishing `t_J^new` is safe: recovering `s_J^new` from `t_J^new` is the LWE problem.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub struct ResharingRound3Broadcast {
+pub struct ResharingRound5Broadcast {
 	/// Party ID of the sender.
 	pub party_id: ParticipantId,
 	/// Commitments to each computed new subset share (only populated by new committee members).
@@ -448,7 +527,7 @@ pub struct ResharingRound3Broadcast {
 	/// Accusations against dealers whose broadcast commitments did not match
 	/// the sender's independent recomputation.
 	pub accusations: Vec<DealerAccusation>,
-	/// Indicates whether this party processed Round 1/2 successfully.
+	/// Indicates whether this party processed Round 3/4 successfully.
 	pub success: bool,
 	/// Optional error message if `success` is false.
 	pub error_message: Option<String>,
@@ -592,31 +671,45 @@ mod tests {
 
 	#[test]
 	fn test_message_round_numbers() {
-		let r1 = ResharingMessage::Round1(ResharingRound1Broadcast {
+		let r1 = ResharingMessage::Round1(ResharingRound1EntropyCommitment {
 			party_id: 0,
-			commitments: BTreeMap::new(),
+			commitment: [0u8; COMMITMENT_HASH_SIZE],
 		});
 		assert_eq!(r1.round(), 1);
 		assert_eq!(r1.party_id(), 0);
 
-		let r2 = ResharingMessage::Round2(ResharingRound2Message {
-			from_party_id: 1,
-			to_party_id: 2,
-			contributions: BTreeMap::new(),
+		let r2 = ResharingMessage::Round2(ResharingRound2EntropyReveal {
+			party_id: 1,
+			entropy: [0u8; ENTROPY_SIZE],
 		});
 		assert_eq!(r2.round(), 2);
 		assert_eq!(r2.party_id(), 1);
 
 		let r3 = ResharingMessage::Round3(ResharingRound3Broadcast {
 			party_id: 2,
+			commitments: BTreeMap::new(),
+		});
+		assert_eq!(r3.round(), 3);
+		assert_eq!(r3.party_id(), 2);
+
+		let r4 = ResharingMessage::Round4(ResharingRound4Message {
+			from_party_id: 3,
+			to_party_id: 4,
+			contributions: BTreeMap::new(),
+		});
+		assert_eq!(r4.round(), 4);
+		assert_eq!(r4.party_id(), 3);
+
+		let r5 = ResharingMessage::Round5(ResharingRound5Broadcast {
+			party_id: 5,
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
 			accusations: Vec::new(),
 			success: true,
 			error_message: None,
 		});
-		assert_eq!(r3.round(), 3);
-		assert_eq!(r3.party_id(), 2);
+		assert_eq!(r5.round(), 5);
+		assert_eq!(r5.party_id(), 5);
 	}
 
 	#[test]
@@ -772,33 +865,45 @@ mod tests {
 
 	#[test]
 	fn test_resharing_message_party_id_extraction() {
-		let r1 = ResharingMessage::Round1(ResharingRound1Broadcast {
+		let r1 = ResharingMessage::Round1(ResharingRound1EntropyCommitment {
 			party_id: 42,
-			commitments: BTreeMap::new(),
+			commitment: [0u8; COMMITMENT_HASH_SIZE],
 		});
 		assert_eq!(r1.party_id(), 42);
 
-		let r2 = ResharingMessage::Round2(ResharingRound2Message {
-			from_party_id: 99,
-			to_party_id: 100,
-			contributions: BTreeMap::new(),
+		let r2 = ResharingMessage::Round2(ResharingRound2EntropyReveal {
+			party_id: 99,
+			entropy: [0u8; ENTROPY_SIZE],
 		});
 		assert_eq!(r2.party_id(), 99);
 
 		let r3 = ResharingMessage::Round3(ResharingRound3Broadcast {
 			party_id: 77,
+			commitments: BTreeMap::new(),
+		});
+		assert_eq!(r3.party_id(), 77);
+
+		let r4 = ResharingMessage::Round4(ResharingRound4Message {
+			from_party_id: 88,
+			to_party_id: 100,
+			contributions: BTreeMap::new(),
+		});
+		assert_eq!(r4.party_id(), 88);
+
+		let r5 = ResharingMessage::Round5(ResharingRound5Broadcast {
+			party_id: 55,
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
 			accusations: Vec::new(),
 			success: true,
 			error_message: None,
 		});
-		assert_eq!(r3.party_id(), 77);
+		assert_eq!(r5.party_id(), 55);
 	}
 
 	#[test]
-	fn test_resharing_round3_broadcast_error_handling() {
-		let success = ResharingRound3Broadcast {
+	fn test_resharing_round5_broadcast_error_handling() {
+		let success = ResharingRound5Broadcast {
 			party_id: 0,
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
@@ -809,7 +914,7 @@ mod tests {
 		assert!(success.success);
 		assert!(success.error_message.is_none());
 
-		let failure = ResharingRound3Broadcast {
+		let failure = ResharingRound5Broadcast {
 			party_id: 1,
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
