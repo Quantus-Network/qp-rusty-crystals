@@ -1297,15 +1297,6 @@ fn compute_my_contributions<S: TranscriptSigner>(
 	(my_contributions, my_partial_pks, my_pk_commitments)
 }
 
-/// Verify that leader commitments match our expected values before signing.
-/// Per Mithril paper DKGRound4 lines 11-16.
-/// Note: This function is now a method on MithrilDkg - keeping this stub for reference.
-// Old function removed - now a method on MithrilDkg
-
-/// Create the Round 4 broadcast message with our partial PKs and transcript signature.
-/// Note: This function is now a method on MithrilDkg - keeping this stub for reference.
-// Old function removed - now a method on MithrilDkg
-
 /// Collect and verify all partial PKs from received broadcasts.
 #[allow(clippy::too_many_arguments)]
 fn collect_and_verify_all_partial_pks<S: TranscriptSigner>(
@@ -3331,10 +3322,11 @@ mod tests {
 			}
 
 			// Check if party 0 is in Round 4 and we've intercepted party 1's broadcast
-			if party0_round4_from_party1_received {
-				if dkgs[0].state.phase == DkgPhase::Round4 && dkgs[0].state.broadcast_sent {
-					break 'outer;
-				}
+			if party0_round4_from_party1_received &&
+				dkgs[0].state.phase == DkgPhase::Round4 &&
+				dkgs[0].state.broadcast_sent
+			{
+				break 'outer;
 			}
 		}
 
