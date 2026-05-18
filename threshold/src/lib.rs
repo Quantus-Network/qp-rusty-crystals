@@ -163,7 +163,10 @@ pub use participants::{ParticipantId, ParticipantList};
 pub use keys::{PrivateKeyShare, PublicKey};
 
 // Broadcast message types
-pub use broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature, SIGNATURE_SIZE};
+pub use broadcast::{
+	Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature, MAX_COMMITMENT_DATA_SIZE,
+	MAX_RESPONSE_SIZE, SIGNATURE_SIZE,
+};
 
 // The main signer
 pub use signer::ThresholdSigner;

@@ -15,13 +15,30 @@
 //! ```
 //!
 //! After Round 3, any party can combine the broadcasts into a final `Signature`.
+//!
+//! # Security
+//!
+//! All broadcast types implement bounded deserialization to prevent memory
+//! exhaustion attacks from malicious peers sending oversized payloads.
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
 /// Size of the ML-DSA-87 signature in bytes.
 pub const SIGNATURE_SIZE: usize = 4627;
+
+/// Maximum size of commitment data in Round2Broadcast.
+///
+/// This is derived from: max_k_iterations (380) × single_commitment_size (K × POLY_Q_SIZE = 8 × 736).
+/// We add a small margin (rounding up to 2.5 MB) to allow for future parameter changes.
+pub const MAX_COMMITMENT_DATA_SIZE: usize = 2_500_000;
+
+/// Maximum size of response data in Round3Broadcast.
+///
+/// This is derived from: max_k_iterations (380) × single_response_size (L × 640 = 7 × 640).
+/// We add a small margin (rounding up to 2 MB) to allow for future parameter changes.
+pub const MAX_RESPONSE_SIZE: usize = 2_000_000;
 
 /// Round 1 broadcast message: commitment hash.
 ///
@@ -57,12 +74,40 @@ impl Round1Broadcast {
 ///
 /// The `commitment_data` contains K iterations of packed polynomial vectors,
 /// where K depends on the threshold configuration.
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+///
+/// # Deserialization Limits
+///
+/// When deserializing from untrusted input, `commitment_data` is limited to
+/// [`MAX_COMMITMENT_DATA_SIZE`] bytes to prevent memory exhaustion attacks.
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize)]
 pub struct Round2Broadcast {
 	/// The party ID that generated this broadcast.
 	pub party_id: u32,
 	/// Packed commitment polynomials (K iterations of w values).
 	pub commitment_data: Vec<u8>,
+}
+
+impl BorshDeserialize for Round2Broadcast {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let party_id = u32::deserialize_reader(reader)?;
+
+		// Read the length prefix for the Vec
+		let len = u32::deserialize_reader(reader)? as usize;
+
+		// Check length before allocating to prevent memory exhaustion
+		if len > MAX_COMMITMENT_DATA_SIZE {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"commitment_data exceeds maximum allowed size",
+			));
+		}
+
+		// Now safe to allocate and read
+		let mut commitment_data = vec![0u8; len];
+		reader.read_exact(&mut commitment_data)?;
+
+		Ok(Self { party_id, commitment_data })
+	}
 }
 
 impl Round2Broadcast {
@@ -82,12 +127,40 @@ impl Round2Broadcast {
 /// # Contents
 ///
 /// The `response` contains K iterations of packed response polynomials.
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+///
+/// # Deserialization Limits
+///
+/// When deserializing from untrusted input, `response` is limited to
+/// [`MAX_RESPONSE_SIZE`] bytes to prevent memory exhaustion attacks.
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize)]
 pub struct Round3Broadcast {
 	/// The party ID that generated this broadcast.
 	pub party_id: u32,
 	/// Packed response polynomials (K iterations of z values).
 	pub response: Vec<u8>,
+}
+
+impl BorshDeserialize for Round3Broadcast {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let party_id = u32::deserialize_reader(reader)?;
+
+		// Read the length prefix for the Vec
+		let len = u32::deserialize_reader(reader)? as usize;
+
+		// Check length before allocating to prevent memory exhaustion
+		if len > MAX_RESPONSE_SIZE {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"response exceeds maximum allowed size",
+			));
+		}
+
+		// Now safe to allocate and read
+		let mut response = vec![0u8; len];
+		reader.read_exact(&mut response)?;
+
+		Ok(Self { party_id, response })
+	}
 }
 
 impl Round3Broadcast {
@@ -114,10 +187,37 @@ impl Round3Broadcast {
 ///
 /// let is_valid = verify_signature(&public_key, message, context, &signature);
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+///
+/// # Deserialization Limits
+///
+/// When deserializing from untrusted input, `bytes` must be exactly
+/// [`SIGNATURE_SIZE`] bytes. This prevents both memory exhaustion attacks
+/// and ensures only valid-length signatures are accepted.
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize)]
 pub struct Signature {
 	/// The signature bytes in standard ML-DSA-87 format.
 	bytes: Vec<u8>,
+}
+
+impl BorshDeserialize for Signature {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		// Read the length prefix for the Vec
+		let len = u32::deserialize_reader(reader)? as usize;
+
+		// Signatures must be exactly SIGNATURE_SIZE bytes
+		if len != SIGNATURE_SIZE {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"signature must be exactly SIGNATURE_SIZE bytes",
+			));
+		}
+
+		// Now safe to allocate and read
+		let mut bytes = vec![0u8; len];
+		reader.read_exact(&mut bytes)?;
+
+		Ok(Self { bytes })
+	}
 }
 
 impl Signature {
@@ -209,5 +309,83 @@ mod tests {
 		let sig = Signature::from_bytes(&bytes).unwrap();
 		let recovered = sig.into_bytes();
 		assert_eq!(recovered, bytes);
+	}
+
+	// ========================================================================
+	// Bounded deserialization tests (security)
+	// ========================================================================
+
+	#[test]
+	fn test_round2_deserialize_rejects_oversized_commitment() {
+		// Craft a malicious payload with a huge length prefix
+		let mut malicious_payload = Vec::new();
+		// party_id (u32, little-endian)
+		malicious_payload.extend_from_slice(&1u32.to_le_bytes());
+		// length prefix claiming 100 MB (way over the 2.5 MB limit)
+		malicious_payload.extend_from_slice(&(100_000_000u32).to_le_bytes());
+		// We don't need actual data - the check should fail before allocation
+
+		let result: Result<Round2Broadcast, _> = borsh::from_slice(&malicious_payload);
+		assert!(result.is_err(), "should reject oversized commitment_data");
+	}
+
+	#[test]
+	fn test_round2_deserialize_accepts_valid_size() {
+		let broadcast = Round2Broadcast::new(1, vec![0u8; 1000]);
+		let serialized = borsh::to_vec(&broadcast).unwrap();
+		let recovered: Round2Broadcast = borsh::from_slice(&serialized).unwrap();
+		assert_eq!(recovered, broadcast);
+	}
+
+	#[test]
+	fn test_round3_deserialize_rejects_oversized_response() {
+		// Craft a malicious payload with a huge length prefix
+		let mut malicious_payload = Vec::new();
+		// party_id (u32, little-endian)
+		malicious_payload.extend_from_slice(&1u32.to_le_bytes());
+		// length prefix claiming 100 MB (way over the 2 MB limit)
+		malicious_payload.extend_from_slice(&(100_000_000u32).to_le_bytes());
+
+		let result: Result<Round3Broadcast, _> = borsh::from_slice(&malicious_payload);
+		assert!(result.is_err(), "should reject oversized response");
+	}
+
+	#[test]
+	fn test_round3_deserialize_accepts_valid_size() {
+		let broadcast = Round3Broadcast::new(2, vec![0u8; 1000]);
+		let serialized = borsh::to_vec(&broadcast).unwrap();
+		let recovered: Round3Broadcast = borsh::from_slice(&serialized).unwrap();
+		assert_eq!(recovered, broadcast);
+	}
+
+	#[test]
+	fn test_signature_deserialize_rejects_oversized() {
+		// Craft a malicious payload with a huge length prefix
+		let mut malicious_payload = Vec::new();
+		// length prefix claiming 100 MB
+		malicious_payload.extend_from_slice(&(100_000_000u32).to_le_bytes());
+
+		let result: Result<Signature, _> = borsh::from_slice(&malicious_payload);
+		assert!(result.is_err(), "should reject oversized signature");
+	}
+
+	#[test]
+	fn test_signature_deserialize_rejects_wrong_size() {
+		// Craft a payload with wrong signature size (too small)
+		let mut payload = Vec::new();
+		// length prefix for 100 bytes (not SIGNATURE_SIZE)
+		payload.extend_from_slice(&(100u32).to_le_bytes());
+		payload.extend_from_slice(&[0u8; 100]);
+
+		let result: Result<Signature, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "should reject wrong-sized signature");
+	}
+
+	#[test]
+	fn test_signature_deserialize_accepts_valid() {
+		let sig = Signature::from_bytes(&[0u8; SIGNATURE_SIZE]).unwrap();
+		let serialized = borsh::to_vec(&sig).unwrap();
+		let recovered: Signature = borsh::from_slice(&serialized).unwrap();
+		assert_eq!(recovered, sig);
 	}
 }
