@@ -129,16 +129,12 @@ fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
 		let mut s1_share = polyvec::Polyvecl::default();
 		let mut s2_share = polyvec::Polyveck::default();
 
-		for i in 0..L.min(share_data.s1.len()) {
-			for j in 0..N as usize {
-				s1_share.vec[i].coeffs[j] = share_data.s1[i][j];
-			}
+		for i in 0..L {
+			s1_share.vec[i].coeffs.copy_from_slice(&share_data.s1[i]);
 		}
 
-		for i in 0..K.min(share_data.s2.len()) {
-			for j in 0..N as usize {
-				s2_share.vec[i].coeffs[j] = share_data.s2[i][j];
-			}
+		for i in 0..K {
+			s2_share.vec[i].coeffs.copy_from_slice(&share_data.s2[i]);
 		}
 
 		shares.insert(*subset_id, SecretShare { s1_share, s2_share });

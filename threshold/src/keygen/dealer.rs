@@ -170,21 +170,15 @@ pub fn generate_with_dealer(
 		// Convert to SecretShareData format (u16 for subset masks to support up to 16 parties)
 		let mut shares_data: BTreeMap<u16, SecretShareData> = BTreeMap::new();
 		for (subset_id, share) in party_shares_map {
-			let s1_data: Vec<[i32; 256]> = (0..L)
-				.map(|i| {
-					let mut arr = [0i32; 256];
-					arr.copy_from_slice(&share.s1_share.vec[i].coeffs);
-					arr
-				})
-				.collect();
+			let mut s1_data = [[0i32; 256]; L];
+			for i in 0..L {
+				s1_data[i].copy_from_slice(&share.s1_share.vec[i].coeffs);
+			}
 
-			let s2_data: Vec<[i32; 256]> = (0..K)
-				.map(|i| {
-					let mut arr = [0i32; 256];
-					arr.copy_from_slice(&share.s2_share.vec[i].coeffs);
-					arr
-				})
-				.collect();
+			let mut s2_data = [[0i32; 256]; K];
+			for i in 0..K {
+				s2_data[i].copy_from_slice(&share.s2_share.vec[i].coeffs);
+			}
 
 			shares_data.insert(subset_id, SecretShareData { s1: s1_data, s2: s2_data });
 		}

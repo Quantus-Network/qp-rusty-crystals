@@ -36,7 +36,10 @@ use super::{
 
 use crate::participants::ParticipantId;
 
-use qp_rusty_crystals_dilithium::fips202;
+use qp_rusty_crystals_dilithium::{
+	fips202,
+	params::{K, L},
+};
 
 /// Maximum DKG message size in bytes (256 KB).
 /// This limits the size of serialized DKG protocol messages.
@@ -1453,10 +1456,16 @@ fn build_private_share<S: TranscriptSigner>(
 
 	let mut combined_shares: BTreeMap<SubsetMask, SecretShareData> = BTreeMap::new();
 	for (subset_mask, contribution) in my_contributions {
-		combined_shares.insert(
-			*subset_mask,
-			SecretShareData { s1: contribution.s1.clone(), s2: contribution.s2.clone() },
-		);
+		// Convert from Vec to fixed-size arrays
+		let mut s1_arr = [[0i32; 256]; L];
+		for (i, poly) in contribution.s1.iter().enumerate().take(L) {
+			s1_arr[i] = *poly;
+		}
+		let mut s2_arr = [[0i32; 256]; K];
+		for (i, poly) in contribution.s2.iter().enumerate().take(K) {
+			s2_arr[i] = *poly;
+		}
+		combined_shares.insert(*subset_mask, SecretShareData { s1: s1_arr, s2: s2_arr });
 	}
 
 	// Derive `party_key` from the actual secret share polynomials so that this byte

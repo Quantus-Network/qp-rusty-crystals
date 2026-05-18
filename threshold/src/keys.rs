@@ -4,11 +4,12 @@
 //! threshold signing. The private key share is intentionally opaque to
 //! prevent accidental exposure of secret material.
 
-use alloc::{collections::BTreeMap, format, vec::Vec};
+use alloc::{collections::BTreeMap, format};
 use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use qp_rusty_crystals_dilithium::params::{K, L};
 
 use crate::participants::{ParticipantId, ParticipantList};
 
@@ -112,12 +113,15 @@ pub struct PrivateKeyShare {
 }
 
 /// Internal secret share data for a specific signer subset.
+///
+/// Uses fixed-size arrays to guarantee exact dimensions at compile time,
+/// preventing malformed deserialized data from causing issues downstream.
 #[derive(Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
 pub(crate) struct SecretShareData {
-	/// Share of s1 polynomial vector (L polynomials).
-	pub(crate) s1: Vec<[i32; 256]>,
-	/// Share of s2 polynomial vector (K polynomials).
-	pub(crate) s2: Vec<[i32; 256]>,
+	/// Share of s1 polynomial vector (exactly L polynomials of 256 coefficients).
+	pub(crate) s1: [[i32; 256]; L],
+	/// Share of s2 polynomial vector (exactly K polynomials of 256 coefficients).
+	pub(crate) s2: [[i32; 256]; K],
 }
 
 impl PrivateKeyShare {

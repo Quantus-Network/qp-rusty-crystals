@@ -1321,8 +1321,16 @@ impl ResharingProtocol {
 	fn build_private_key_share(&self) -> Result<PrivateKeyShare, ResharingProtocolError> {
 		let mut shares_data: BTreeMap<u16, SecretShareData> = BTreeMap::new();
 		for (j_mask, share) in &self.new_shares {
-			shares_data
-				.insert(*j_mask, SecretShareData { s1: share.s1.clone(), s2: share.s2.clone() });
+			// Convert from Vec to fixed-size arrays
+			let mut s1_arr = [[0i32; N as usize]; L];
+			for (i, poly) in share.s1.iter().enumerate().take(L) {
+				s1_arr[i] = *poly;
+			}
+			let mut s2_arr = [[0i32; N as usize]; K];
+			for (i, poly) in share.s2.iter().enumerate().take(K) {
+				s2_arr[i] = *poly;
+			}
+			shares_data.insert(*j_mask, SecretShareData { s1: s1_arr, s2: s2_arr });
 		}
 
 		let rho = self.derive_rho();
@@ -1678,8 +1686,7 @@ mod tests {
 
 	#[test]
 	fn test_subset_seed_is_deterministic_for_same_share() {
-		let s =
-			SecretShareData { s1: vec![[3i32; N as usize]; L], s2: vec![[5i32; N as usize]; K] };
+		let s = SecretShareData { s1: [[3i32; N as usize]; L], s2: [[5i32; N as usize]; K] };
 		let session_seed = [42u8; 32];
 		assert_eq!(
 			build_subset_seed_with_session(0b011, &s, &session_seed),
@@ -1689,8 +1696,7 @@ mod tests {
 
 	#[test]
 	fn test_derive_subshares_sums_to_original_share() {
-		let s =
-			SecretShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
+		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
 		for residual_idx in 0..new_subsets.len() {
@@ -1734,8 +1740,7 @@ mod tests {
 
 	#[test]
 	fn test_derive_subshares_is_deterministic() {
-		let s =
-			SecretShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
+		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
 		let a = derive_subshares_with_session_seed(0b011, &s, &new_subsets, 0, &session_seed);
@@ -1810,10 +1815,8 @@ mod tests {
 	fn test_subshares_for_disjoint_share_data_diverge() {
 		// Two different `s_I^old` values must produce different sub-share splits
 		// (otherwise an attacker who saw them couldn't distinguish secrets).
-		let s_a =
-			SecretShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
-		let s_b =
-			SecretShareData { s1: vec![[3i32; N as usize]; L], s2: vec![[5i32; N as usize]; K] };
+		let s_a = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
+		let s_b = SecretShareData { s1: [[3i32; N as usize]; L], s2: [[5i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
 		let a = derive_subshares_with_session_seed(0b011, &s_a, &new_subsets, 0, &session_seed);
@@ -1827,8 +1830,7 @@ mod tests {
 	fn test_subshares_independent_per_old_subset() {
 		// Different old subsets sharing the same `s_I^old` value must still produce
 		// different sub-shares, because the PRF seed mixes `i_mask`.
-		let s =
-			SecretShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
+		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
 		let a = derive_subshares_with_session_seed(0b011, &s, &new_subsets, 0, &session_seed);
