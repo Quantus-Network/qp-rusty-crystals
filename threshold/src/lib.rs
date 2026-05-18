@@ -157,7 +157,7 @@ pub use config::ThresholdConfig;
 pub use error::{ThresholdError, ThresholdResult};
 
 // Participant management
-pub use participants::{ParticipantId, ParticipantList};
+pub use participants::{ParticipantId, ParticipantList, MAX_PARTICIPANTS};
 
 // Key types
 pub use keys::{PrivateKeyShare, PublicKey};

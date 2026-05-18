@@ -30,8 +30,8 @@ pub const SIGNATURE_SIZE: usize = 4627;
 
 /// Maximum size of commitment data in Round2Broadcast.
 ///
-/// This is derived from: max_k_iterations (380) × single_commitment_size (K × POLY_Q_SIZE = 8 × 736).
-/// We add a small margin (rounding up to 2.5 MB) to allow for future parameter changes.
+/// This is derived from: max_k_iterations (380) × single_commitment_size (K × POLY_Q_SIZE = 8 ×
+/// 736). We add a small margin (rounding up to 2.5 MB) to allow for future parameter changes.
 pub const MAX_COMMITMENT_DATA_SIZE: usize = 2_500_000;
 
 /// Maximum size of response data in Round3Broadcast.

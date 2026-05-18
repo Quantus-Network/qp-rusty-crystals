@@ -127,6 +127,14 @@ impl ResharingConfig {
 		let old_n = old_participants.len() as u32;
 		let new_n = new_participants.len() as u32;
 
+		// Validate old party count doesn't exceed MAX_PARTIES (required for ThresholdConfig)
+		if old_n > MAX_PARTIES {
+			return Err(ResharingConfigError::TooManyOldParties {
+				parties: old_n,
+				max: MAX_PARTIES,
+			});
+		}
+
 		// Validate new party count doesn't exceed MAX_PARTIES (required for ThresholdConfig)
 		if new_n > MAX_PARTIES {
 			return Err(ResharingConfigError::TooManyNewParties {
@@ -246,6 +254,8 @@ pub enum ResharingConfigError {
 	InvalidOldThreshold { threshold: u32, parties: u32 },
 	/// Invalid new committee threshold.
 	InvalidNewThreshold { threshold: u32, parties: u32 },
+	/// Too many parties in old committee (max 6).
+	TooManyOldParties { parties: u32, max: u32 },
 	/// Too many parties in new committee (max 6).
 	TooManyNewParties { parties: u32, max: u32 },
 	/// Party is not in either committee.
@@ -266,6 +276,9 @@ impl fmt::Display for ResharingConfigError {
 			},
 			ResharingConfigError::InvalidNewThreshold { threshold, parties } => {
 				write!(f, "Invalid new threshold: t={}, n={}", threshold, parties)
+			},
+			ResharingConfigError::TooManyOldParties { parties, max } => {
+				write!(f, "Too many parties in old committee: {} (max {})", parties, max)
 			},
 			ResharingConfigError::TooManyNewParties { parties, max } => {
 				write!(f, "Too many parties in new committee: {} (max {})", parties, max)
@@ -941,5 +954,53 @@ mod tests {
 		let err = ResharingConfigError::DuplicateParticipant;
 		let msg = format!("{}", err);
 		assert!(msg.contains("Duplicate"));
+
+		let err = ResharingConfigError::TooManyOldParties { parties: 10, max: 6 };
+		let msg = format!("{}", err);
+		assert!(msg.contains("10"));
+		assert!(msg.contains("6"));
+		assert!(msg.contains("old"));
+	}
+
+	#[test]
+	fn test_config_too_many_old_parties() {
+		let pk = make_test_public_key();
+
+		// Test with 7 parties in old committee (exceeds MAX_PARTIES=6)
+		let result = ResharingConfig::new(
+			2,
+			vec![0, 1, 2, 3, 4, 5, 6], // 7 parties
+			2,
+			vec![0, 1, 2],
+			0,
+			None,
+			pk.clone(),
+		);
+
+		assert!(matches!(
+			result,
+			Err(ResharingConfigError::TooManyOldParties { parties: 7, max: 6 })
+		));
+	}
+
+	#[test]
+	fn test_config_too_many_new_parties() {
+		let pk = make_test_public_key();
+
+		// Test with 7 parties in new committee (exceeds MAX_PARTIES=6)
+		let result = ResharingConfig::new(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2, 3, 4, 5, 6], // 7 parties
+			0,
+			None,
+			pk.clone(),
+		);
+
+		assert!(matches!(
+			result,
+			Err(ResharingConfigError::TooManyNewParties { parties: 7, max: 6 })
+		));
 	}
 }
