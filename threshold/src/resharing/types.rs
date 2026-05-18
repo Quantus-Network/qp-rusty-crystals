@@ -75,25 +75,66 @@ impl ResharingRole {
 /// Configuration for the resharing protocol.
 ///
 /// Specifies the old and new committee structures, and this party's role.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+///
+/// # Construction
+///
+/// Use [`ResharingConfig::new()`] to create a configuration. Direct field access
+/// is not available to ensure all configurations are validated.
+///
+/// # Deserialization
+///
+/// When deserializing, the configuration is validated to ensure both old and new
+/// committee configurations are supported by the threshold scheme. Invalid
+/// configurations will fail deserialization.
+#[derive(Debug, Clone, BorshSerialize)]
 pub struct ResharingConfig {
 	/// Threshold configuration for the old committee.
-	pub old_threshold: u32,
+	old_threshold: u32,
 	/// Participants in the old committee (sorted).
-	pub old_participants: ParticipantList,
+	old_participants: ParticipantList,
 	/// Threshold configuration for the new committee.
-	pub new_threshold: u32,
+	new_threshold: u32,
 	/// Participants in the new committee (sorted).
-	pub new_participants: ParticipantList,
+	new_participants: ParticipantList,
 	/// This party's identifier.
-	pub my_party_id: ParticipantId,
+	my_party_id: ParticipantId,
 	/// This party's role in the resharing.
-	pub role: ResharingRole,
+	role: ResharingRole,
 	/// This party's existing private key share (if in old committee).
 	/// None if this party is NewOnly.
-	pub existing_share: Option<PrivateKeyShare>,
+	existing_share: Option<PrivateKeyShare>,
 	/// The public key (must be preserved during resharing).
-	pub public_key: PublicKey,
+	public_key: PublicKey,
+}
+
+impl BorshDeserialize for ResharingConfig {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let old_threshold = u32::deserialize_reader(reader)?;
+		let old_participants = ParticipantList::deserialize_reader(reader)?;
+		let new_threshold = u32::deserialize_reader(reader)?;
+		let new_participants = ParticipantList::deserialize_reader(reader)?;
+		let my_party_id = ParticipantId::deserialize_reader(reader)?;
+		let role = ResharingRole::deserialize_reader(reader)?;
+		let existing_share = Option::<PrivateKeyShare>::deserialize_reader(reader)?;
+		let public_key = PublicKey::deserialize_reader(reader)?;
+
+		Self::from_raw_parts(
+			old_threshold,
+			old_participants,
+			new_threshold,
+			new_participants,
+			my_party_id,
+			role,
+			existing_share,
+			public_key,
+		)
+		.map_err(|e| {
+			borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				alloc::string::ToString::to_string(&e),
+			)
+		})
+	}
 }
 
 impl ResharingConfig {
@@ -113,7 +154,8 @@ impl ResharingConfig {
 	/// - `my_party_id` is not in either committee
 	/// - `existing_share` is provided but party is not in old committee
 	/// - `existing_share` is missing but party is in old committee
-	/// - Threshold configurations are invalid
+	/// - Threshold configurations are invalid or unsupported
+	/// - Duplicate participant IDs in either committee
 	pub fn new(
 		old_threshold: u32,
 		old_participants: Vec<ParticipantId>,
@@ -123,48 +165,14 @@ impl ResharingConfig {
 		existing_share: Option<PrivateKeyShare>,
 		public_key: PublicKey,
 	) -> Result<Self, ResharingConfigError> {
-		// Validate threshold configs
-		let old_n = old_participants.len() as u32;
-		let new_n = new_participants.len() as u32;
-
-		// Validate old party count doesn't exceed MAX_PARTIES (required for ThresholdConfig)
-		if old_n > MAX_PARTIES {
-			return Err(ResharingConfigError::TooManyOldParties {
-				parties: old_n,
-				max: MAX_PARTIES,
-			});
-		}
-
-		// Validate new party count doesn't exceed MAX_PARTIES (required for ThresholdConfig)
-		if new_n > MAX_PARTIES {
-			return Err(ResharingConfigError::TooManyNewParties {
-				parties: new_n,
-				max: MAX_PARTIES,
-			});
-		}
-
-		if old_threshold < 2 || old_threshold > old_n {
-			return Err(ResharingConfigError::InvalidOldThreshold {
-				threshold: old_threshold,
-				parties: old_n,
-			});
-		}
-
-		if new_threshold < 2 || new_threshold > new_n {
-			return Err(ResharingConfigError::InvalidNewThreshold {
-				threshold: new_threshold,
-				parties: new_n,
-			});
-		}
-
-		// Create participant lists
+		// Create participant lists (validates no duplicates)
 		let old_participant_list = ParticipantList::new(&old_participants)
 			.ok_or(ResharingConfigError::DuplicateParticipant)?;
 
 		let new_participant_list = ParticipantList::new(&new_participants)
 			.ok_or(ResharingConfigError::DuplicateParticipant)?;
 
-		// Determine role
+		// Determine role based on membership
 		let in_old = old_participant_list.contains(my_party_id);
 		let in_new = new_participant_list.contains(my_party_id);
 
@@ -177,6 +185,86 @@ impl ResharingConfig {
 					party_id: my_party_id,
 				}),
 		};
+
+		Self::from_raw_parts(
+			old_threshold,
+			old_participant_list,
+			new_threshold,
+			new_participant_list,
+			my_party_id,
+			role,
+			existing_share,
+			public_key,
+		)
+	}
+
+	/// Internal constructor from already-parsed parts.
+	/// Validates all invariants.
+	fn from_raw_parts(
+		old_threshold: u32,
+		old_participants: ParticipantList,
+		new_threshold: u32,
+		new_participants: ParticipantList,
+		my_party_id: ParticipantId,
+		role: ResharingRole,
+		existing_share: Option<PrivateKeyShare>,
+		public_key: PublicKey,
+	) -> Result<Self, ResharingConfigError> {
+		let old_n = old_participants.len() as u32;
+		let new_n = new_participants.len() as u32;
+
+		// Validate old committee against ThresholdConfig requirements
+		// This checks MAX_PARTIES, threshold bounds, and supported (t, n) combinations
+		if ThresholdConfig::new(old_threshold, old_n).is_err() {
+			return Err(if old_n > MAX_PARTIES {
+				ResharingConfigError::TooManyOldParties {
+					parties: old_n,
+					max: MAX_PARTIES,
+				}
+			} else {
+				ResharingConfigError::InvalidOldThreshold {
+					threshold: old_threshold,
+					parties: old_n,
+				}
+			});
+		}
+
+		// Validate new committee against ThresholdConfig requirements
+		if ThresholdConfig::new(new_threshold, new_n).is_err() {
+			return Err(if new_n > MAX_PARTIES {
+				ResharingConfigError::TooManyNewParties {
+					parties: new_n,
+					max: MAX_PARTIES,
+				}
+			} else {
+				ResharingConfigError::InvalidNewThreshold {
+					threshold: new_threshold,
+					parties: new_n,
+				}
+			});
+		}
+
+		// Validate role matches actual membership
+		let in_old = old_participants.contains(my_party_id);
+		let in_new = new_participants.contains(my_party_id);
+
+		let expected_role = match (in_old, in_new) {
+			(true, true) => ResharingRole::Both,
+			(true, false) => ResharingRole::OldOnly,
+			(false, true) => ResharingRole::NewOnly,
+			(false, false) =>
+				return Err(ResharingConfigError::PartyNotInEitherCommittee {
+					party_id: my_party_id,
+				}),
+		};
+
+		if role != expected_role {
+			return Err(ResharingConfigError::RoleMismatch {
+				party_id: my_party_id,
+				expected: expected_role,
+				actual: role,
+			});
+		}
 
 		// Validate existing share matches role
 		match (&role, &existing_share) {
@@ -191,9 +279,9 @@ impl ResharingConfig {
 
 		Ok(Self {
 			old_threshold,
-			old_participants: old_participant_list,
+			old_participants,
 			new_threshold,
-			new_participants: new_participant_list,
+			new_participants,
 			my_party_id,
 			role,
 			existing_share,
@@ -211,6 +299,46 @@ impl ResharingConfig {
 	pub fn new_config(&self) -> ThresholdConfig {
 		ThresholdConfig::new(self.new_threshold, self.new_participants.len() as u32)
 			.expect("validated in constructor")
+	}
+
+	/// Get the old committee threshold value.
+	pub fn old_threshold(&self) -> u32 {
+		self.old_threshold
+	}
+
+	/// Get the new committee threshold value.
+	pub fn new_threshold(&self) -> u32 {
+		self.new_threshold
+	}
+
+	/// Get the old committee participants.
+	pub fn old_participants(&self) -> &ParticipantList {
+		&self.old_participants
+	}
+
+	/// Get the new committee participants.
+	pub fn new_participants(&self) -> &ParticipantList {
+		&self.new_participants
+	}
+
+	/// Get this party's identifier.
+	pub fn my_party_id(&self) -> ParticipantId {
+		self.my_party_id
+	}
+
+	/// Get this party's role in the resharing.
+	pub fn role(&self) -> ResharingRole {
+		self.role
+	}
+
+	/// Get this party's existing private key share (if in old committee).
+	pub fn existing_share(&self) -> Option<&PrivateKeyShare> {
+		self.existing_share.as_ref()
+	}
+
+	/// Get the public key.
+	pub fn public_key(&self) -> &PublicKey {
+		&self.public_key
 	}
 
 	/// Get all parties involved in resharing (union of old and new).
@@ -266,6 +394,12 @@ pub enum ResharingConfigError {
 	UnexpectedExistingShare,
 	/// No existing share provided but party is in old committee.
 	MissingExistingShare,
+	/// Role field doesn't match actual committee membership.
+	RoleMismatch {
+		party_id: ParticipantId,
+		expected: ResharingRole,
+		actual: ResharingRole,
+	},
 }
 
 impl fmt::Display for ResharingConfigError {
@@ -294,6 +428,13 @@ impl fmt::Display for ResharingConfigError {
 			},
 			ResharingConfigError::MissingExistingShare => {
 				write!(f, "No existing share provided but party is in old committee")
+			},
+			ResharingConfigError::RoleMismatch { party_id, expected, actual } => {
+				write!(
+					f,
+					"Role mismatch for party {}: expected {:?}, got {:?}",
+					party_id, expected, actual
+				)
 			},
 		}
 	}

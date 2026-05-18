@@ -339,8 +339,8 @@ fn test_resharing_config_creation() {
 
 	assert!(resharing_config.is_ok());
 	let config = resharing_config.unwrap();
-	assert!(config.role.is_old_committee());
-	assert!(config.role.is_new_committee());
+	assert!(config.role().is_old_committee());
+	assert!(config.role().is_new_committee());
 }
 
 #[test]
@@ -362,8 +362,8 @@ fn test_resharing_config_new_party() {
 
 	assert!(resharing_config.is_ok());
 	let config = resharing_config.unwrap();
-	assert!(!config.role.is_old_committee());
-	assert!(config.role.is_new_committee());
+	assert!(!config.role().is_old_committee());
+	assert!(config.role().is_new_committee());
 }
 
 #[test]
@@ -385,8 +385,8 @@ fn test_resharing_config_leaving_party() {
 
 	assert!(resharing_config.is_ok());
 	let config = resharing_config.unwrap();
-	assert!(config.role.is_old_committee());
-	assert!(!config.role.is_new_committee());
+	assert!(config.role().is_old_committee());
+	assert!(!config.role().is_new_committee());
 }
 
 // ============================================================================
