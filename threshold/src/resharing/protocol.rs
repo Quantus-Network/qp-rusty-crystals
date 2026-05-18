@@ -890,11 +890,24 @@ impl ResharingProtocol {
 		}
 
 		// Surface any dealer accusations.
+		// Only accept accusations from parties that are actually in the old subset
+		// being accused about (they need s_I^old to verify the dealer's commitment).
 		let mut accused: alloc::collections::BTreeSet<ParticipantId> =
 			alloc::collections::BTreeSet::new();
-		for broadcast in self.round5_broadcasts.values() {
+		for (accuser, broadcast) in &self.round5_broadcasts {
 			for accusation in &broadcast.accusations {
-				accused.insert(accusation.dealer);
+				// Validate: accuser must be in the old subset to have recomputed the commitment
+				if self.is_in_old_subset(*accuser, accusation.old_subset) {
+					accused.insert(accusation.dealer);
+				} else {
+					log::warn!(
+						"Ignoring invalid accusation from party {} against dealer {} \
+						 for old_subset {:b}: accuser not in subset",
+						accuser,
+						accusation.dealer,
+						accusation.old_subset
+					);
+				}
 			}
 		}
 		if !accused.is_empty() {
@@ -1021,6 +1034,18 @@ impl ResharingProtocol {
 			}
 		}
 		None
+	}
+
+	/// Check if a party is a member of an old subset.
+	///
+	/// Bit positions in `i_mask` correspond to indices in the (sorted)
+	/// `old_participants` list.
+	fn is_in_old_subset(&self, party: ParticipantId, i_mask: SubsetMask) -> bool {
+		if let Some(idx) = self.config.old_participants.index_of(party) {
+			(i_mask & (1 << idx)) != 0
+		} else {
+			false
+		}
 	}
 
 	/// Old committee post-Round-3 verification: re-derive sub-shares for every old
