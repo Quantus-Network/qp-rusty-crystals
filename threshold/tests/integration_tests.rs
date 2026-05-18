@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use qp_rusty_crystals_threshold::{
 	generate_with_dealer,
 	keygen::dkg::{run_local_mithril_dkg, TranscriptSigner},
-	signing_protocol::{run_local_signing, run_local_signing_with_stats, DilithiumSignProtocol},
+	signing_protocol::{run_local_signing, DilithiumSignProtocol},
 	verify_signature, ParticipantId, ThresholdConfig, ThresholdSigner,
 };
 
@@ -41,7 +41,8 @@ fn run_threshold_protocol_4_round(
 		.map_err(|e| format!("Signer creation error: {:?}", e))?;
 
 	// Run the 4-round signing protocol with leader-based retry
-	let signature = run_local_signing(signers, message, context)
+	// Use the keygen seed as the session seed for deterministic tests
+	let (signature, _retry_count) = run_local_signing(signers, message, context, seed)
 		.map_err(|e| format!("Signing error: {:?}", e))?;
 
 	// Verify the signature
@@ -453,22 +454,22 @@ fn test_threshold_matrix() {
 		};
 
 		// Run the 4-round signing protocol with leader-based retry
-		match run_local_signing_with_stats(signers, message, context) {
-			Ok((signature, stats)) => {
+		match run_local_signing(signers, message, context, &seed) {
+			Ok((signature, retry_count)) => {
 				// Verify the signature
 				if verify_signature(&public_key, message, context, &signature) {
 					let elapsed = start.elapsed();
 					total_time += elapsed;
-					total_retries += stats.retry_count;
-					if stats.retry_count > max_retries {
-						max_retries = stats.retry_count;
+					total_retries += retry_count;
+					if retry_count > max_retries {
+						max_retries = retry_count;
 					}
 					println!(
 						"{:<10} {:<10} {:<10} {:<10}",
 						format!("{}-of-{}", threshold, total_parties),
 						"✅ PASSED",
 						format!("{:.2?}", elapsed),
-						stats.retry_count
+						retry_count
 					);
 					passed += 1;
 				} else {
@@ -643,23 +644,27 @@ fn test_threshold_matrix_dkg() {
 			},
 		};
 
+		// Create a session seed from the DKG seed for signing
+		let mut session_seed = [0u8; 32];
+		session_seed[..8].copy_from_slice(&seed.to_le_bytes());
+
 		// Run the 4-round signing protocol with leader-based retry
-		match run_local_signing_with_stats(signers, message, context) {
-			Ok((signature, stats)) => {
+		match run_local_signing(signers, message, context, &session_seed) {
+			Ok((signature, retry_count)) => {
 				// Verify the signature
 				if verify_signature(&public_key, message, context, &signature) {
 					let elapsed = start.elapsed();
 					total_time += elapsed;
-					total_retries += stats.retry_count;
-					if stats.retry_count > max_retries {
-						max_retries = stats.retry_count;
+					total_retries += retry_count;
+					if retry_count > max_retries {
+						max_retries = retry_count;
 					}
 					println!(
 						"{:<10} {:<10} {:<10} {:<10}",
 						format!("{}-of-{}", threshold, total_parties),
 						"✅ PASSED",
 						format!("{:.2?}", elapsed),
-						stats.retry_count
+						retry_count
 					);
 					passed += 1;
 				} else {
@@ -810,7 +815,7 @@ fn run_subset_signing_4_round(
 		.map_err(|e| format!("Signer creation error: {:?}", e))?;
 
 	// Run the 4-round signing protocol with leader-based retry
-	let signature = run_local_signing(signers, message, context)
+	let (signature, _retry_count) = run_local_signing(signers, message, context, seed)
 		.map_err(|e| format!("Signing error: {:?}", e))?;
 
 	// Verify the signature

@@ -665,7 +665,8 @@ mod dkg_coverage {
 	#[test]
 	fn test_dealer_shares_sign_correctly() {
 		let config = ThresholdConfig::new(2, 3).expect("Valid config");
-		let (public_key, shares) = generate_with_dealer(&[42u8; 32], config).expect("Key gen");
+		let seed = [42u8; 32];
+		let (public_key, shares) = generate_with_dealer(&seed, config).expect("Key gen");
 
 		// Create signers for parties 0 and 1
 		let signers: Vec<ThresholdSigner> = shares
@@ -678,11 +679,11 @@ mod dkg_coverage {
 		let context = b"";
 
 		let result = qp_rusty_crystals_threshold::signing_protocol::run_local_signing(
-			signers, message, context,
+			signers, message, context, &seed,
 		);
 		assert!(result.is_ok(), "Signing should succeed: {:?}", result.err());
 
-		let signature = result.unwrap();
+		let (signature, _retry_count) = result.unwrap();
 		assert!(
 			verify_signature(&public_key, message, context, &signature),
 			"Signature should verify"
@@ -741,7 +742,8 @@ mod protocol_integration {
 	#[test]
 	fn test_full_signing_2_of_2() {
 		let config = ThresholdConfig::new(2, 2).expect("Valid config");
-		let (public_key, shares) = generate_with_dealer(&[42u8; 32], config).expect("Key gen");
+		let seed = [42u8; 32];
+		let (public_key, shares) = generate_with_dealer(&seed, config).expect("Key gen");
 
 		let signers: Vec<ThresholdSigner> = shares
 			.into_iter()
@@ -751,10 +753,10 @@ mod protocol_integration {
 		let message = b"test message for 2-of-2";
 		let context = b"";
 
-		let result = run_local_signing(signers, message, context);
+		let result = run_local_signing(signers, message, context, &seed);
 		assert!(result.is_ok(), "2-of-2 signing should succeed: {:?}", result.err());
 
-		let signature = result.unwrap();
+		let (signature, _retry_count) = result.unwrap();
 		assert!(
 			verify_signature(&public_key, message, context, &signature),
 			"Signature should verify"
@@ -765,7 +767,8 @@ mod protocol_integration {
 	#[test]
 	fn test_full_signing_t_equals_n() {
 		let config = ThresholdConfig::new(4, 4).expect("Valid config");
-		let (public_key, shares) = generate_with_dealer(&[42u8; 32], config).expect("Key gen");
+		let seed = [42u8; 32];
+		let (public_key, shares) = generate_with_dealer(&seed, config).expect("Key gen");
 
 		let signers: Vec<ThresholdSigner> = shares
 			.into_iter()
@@ -775,10 +778,10 @@ mod protocol_integration {
 		let message = b"test message for 4-of-4";
 		let context = b"test context";
 
-		let result = run_local_signing(signers, message, context);
+		let result = run_local_signing(signers, message, context, &seed);
 		assert!(result.is_ok(), "4-of-4 signing should succeed: {:?}", result.err());
 
-		let signature = result.unwrap();
+		let (signature, _retry_count) = result.unwrap();
 		assert!(
 			verify_signature(&public_key, message, context, &signature),
 			"Signature should verify"

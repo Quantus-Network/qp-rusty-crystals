@@ -1080,91 +1080,43 @@ impl DilithiumSignProtocol {
 // Helper function for running local simulations
 // ============================================================================
 
-/// Run a complete local signing protocol for testing.
+/// Derive a per-party seed from a session seed.
+/// Formula: `party_seed = SHAKE256("local-signing-party-seed" || session_seed || party_id)`
+fn derive_party_seed(session_seed: &[u8; 32], party_id: ParticipantId) -> [u8; 32] {
+	const DOMAIN: &[u8] = b"local-signing-party-seed";
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, DOMAIN, DOMAIN.len());
+	fips202::shake256_absorb(&mut state, session_seed, 32);
+	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
+	fips202::shake256_finalize(&mut state);
+	let mut derived = [0u8; 32];
+	fips202::shake256_squeeze(&mut derived, 32, &mut state);
+	derived
+}
+
+/// Run a complete local signing protocol, simulating all parties locally.
 ///
-/// This function simulates the signing protocol with all parties running locally.
-/// It's useful for testing but should not be used in production where parties
-/// are on separate machines.
+/// This function is useful for testing and benchmarking. In production,
+/// parties run on separate machines and communicate over a network.
 ///
 /// # Arguments
 ///
 /// * `signers` - Vector of threshold signers (one per participating party)
 /// * `message` - The message to sign
 /// * `context` - The context string
+/// * `session_seed` - A 32-byte seed used to derive per-party Round 1 seeds. For secure signing,
+///   this should be cryptographically random and unique per session. For deterministic tests, a
+///   fixed seed can be used.
 ///
 /// # Returns
 ///
-/// The final signature on success.
-///
-/// # Example
-///
-/// ```ignore
-/// use qp_rusty_crystals_threshold::signing_protocol::run_local_signing;
-/// use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig, ThresholdSigner};
-///
-/// let config = ThresholdConfig::new(2, 3)?;
-/// let (pk, shares) = generate_with_dealer(&[0u8; 32], config)?;
-///
-/// let signers: Vec<_> = shares.into_iter()
-///     .take(2)  // Only need threshold parties
-///     .map(|s| ThresholdSigner::new(s, pk.clone(), config).unwrap())
-///     .collect();
-///
-/// let signature = run_local_signing(signers, b"message", b"context")?;
-/// ```
+/// A tuple of (signature, retry_count) on success.
 pub fn run_local_signing(
 	signers: Vec<ThresholdSigner>,
 	message: &[u8],
 	context: &[u8],
-) -> Result<Signature, SignProtocolError> {
-	run_local_signing_with_stats(signers, message, context).map(|(sig, _)| sig)
-}
-
-/// Signing result with statistics about the protocol execution.
-#[derive(Debug, Clone)]
-pub struct SigningStats {
-	/// Number of retries that occurred during signing.
-	pub retry_count: u32,
-}
-
-/// Run a complete local signing protocol for testing, returning statistics.
-///
-/// This function simulates the signing protocol with all parties running locally.
-/// It's useful for testing but should not be used in production where parties
-/// are on separate machines.
-///
-/// # Arguments
-///
-/// * `signers` - Vector of threshold signers (one per participating party)
-/// * `message` - The message to sign
-/// * `context` - The context string
-///
-/// # Returns
-///
-/// A tuple of (signature, stats) on success, where stats contains retry count.
-///
-/// # Example
-///
-/// ```ignore
-/// use qp_rusty_crystals_threshold::signing_protocol::run_local_signing_with_stats;
-/// use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig, ThresholdSigner};
-///
-/// let config = ThresholdConfig::new(2, 3)?;
-/// let (pk, shares) = generate_with_dealer(&[0u8; 32], config)?;
-///
-/// let signers: Vec<_> = shares.into_iter()
-///     .take(2)  // Only need threshold parties
-///     .map(|s| ThresholdSigner::new(s, pk.clone(), config).unwrap())
-///     .collect();
-///
-/// let (signature, stats) = run_local_signing_with_stats(signers, b"message", b"context")?;
-/// println!("Signing completed with {} retries", stats.retry_count);
-/// ```
-pub fn run_local_signing_with_stats(
-	signers: Vec<ThresholdSigner>,
-	message: &[u8],
-	context: &[u8],
-) -> Result<(Signature, SigningStats), SignProtocolError> {
+	session_seed: &[u8; 32],
+) -> Result<(Signature, u32), SignProtocolError> {
 	let num_parties = signers.len();
 	if num_parties < 2 {
 		return Err(SignProtocolError::MissingData("Need at least 2 signers".to_string()));
@@ -1174,16 +1126,12 @@ pub fn run_local_signing_with_stats(
 	let participants: Vec<ParticipantId> = signers.iter().map(|s| s.party_id()).collect();
 	let leader_id = *participants.iter().min().unwrap();
 
-	// Create protocol instances with deterministic seeds for testing
+	// Create protocol instances with per-party seeds derived from session_seed
 	let mut protocols: Vec<DilithiumSignProtocol> = signers
 		.into_iter()
-		.enumerate()
-		.map(|(idx, signer)| {
+		.map(|signer| {
 			let my_id = signer.party_id();
-			// Deterministic seed for testing - each party gets a different seed
-			let mut round1_seed = [0u8; 32];
-			round1_seed[0] = idx as u8;
-			round1_seed[1] = 0xAB; // marker byte
+			let round1_seed = derive_party_seed(session_seed, my_id);
 			DilithiumSignProtocol::new(
 				signer,
 				message.to_vec(),
@@ -1234,17 +1182,15 @@ pub fn run_local_signing_with_stats(
 					}
 				},
 				Action::Return(signature) => {
-					// Get retry count from the leader (who tracks retries)
-					// Leader is always in participants since it came from participants.iter().min()
-					let leader_idx =
-						participants.iter().position(|&id| id == leader_id).ok_or_else(|| {
-							SignProtocolError::MissingData(
-								"Leader not found in participants (internal error)".to_string(),
-							)
-						})?;
-					let retry_count = protocols[leader_idx].retry_count();
-					let stats = SigningStats { retry_count };
-					return Ok((signature, stats));
+					// Get retry count from the leader
+					let retry_count = if let Some(leader_idx) =
+						participants.iter().position(|&id| id == leader_id)
+					{
+						protocols[leader_idx].retry_count()
+					} else {
+						0
+					};
+					return Ok((signature, retry_count));
 				},
 			}
 		}
@@ -1432,15 +1378,18 @@ mod tests {
 
 		// Try multiple times due to rejection sampling
 		let mut success = false;
-		for _ in 0..100 {
+		for i in 0..100 {
 			let signers: Vec<_> = shares
 				.iter()
 				.take(2)
 				.map(|s| ThresholdSigner::new(s.clone(), pk.clone(), config).unwrap())
 				.collect();
 
-			match run_local_signing(signers, message, context) {
-				Ok(signature) => {
+			// Use a different seed for each attempt
+			let mut session_seed = [0u8; 32];
+			session_seed[0] = i as u8;
+			match run_local_signing(signers, message, context, &session_seed) {
+				Ok((signature, _retry_count)) => {
 					// Verify the signature
 					assert!(
 						verify_signature(&pk, message, context, &signature),
@@ -1466,15 +1415,18 @@ mod tests {
 
 		// Try multiple times due to rejection sampling
 		let mut success = false;
-		for _ in 0..100 {
+		for i in 0..100 {
 			let signers: Vec<_> = shares
 				.iter()
 				.take(3)
 				.map(|s| ThresholdSigner::new(s.clone(), pk.clone(), config).unwrap())
 				.collect();
 
-			match run_local_signing(signers, message, context) {
-				Ok(signature) => {
+			// Use a different seed for each attempt
+			let mut session_seed = [0u8; 32];
+			session_seed[0] = i as u8;
+			match run_local_signing(signers, message, context, &session_seed) {
+				Ok((signature, _retry_count)) => {
 					assert!(
 						verify_signature(&pk, message, context, &signature),
 						"Signature should verify"

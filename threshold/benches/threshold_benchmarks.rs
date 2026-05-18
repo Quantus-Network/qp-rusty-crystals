@@ -165,7 +165,7 @@ fn bench_signing_4round(c: &mut Criterion) {
 							ThresholdSigner::new(s.clone(), public_key.clone(), *config).unwrap()
 						})
 						.collect();
-					run_local_signing(signers, message, context).unwrap()
+					run_local_signing(signers, message, context, &seed).unwrap().0
 				});
 			},
 		);
@@ -192,7 +192,7 @@ fn bench_verify(c: &mut Criterion) {
 		.map(|s| ThresholdSigner::new(s.clone(), public_key.clone(), config).unwrap())
 		.collect();
 
-	let signature = run_local_signing(signers, message, context).unwrap();
+	let (signature, _) = run_local_signing(signers, message, context, &seed).unwrap();
 
 	group.throughput(Throughput::Elements(1));
 	group.bench_function("dilithium_threshold", |b| {
@@ -263,7 +263,7 @@ fn bench_comparison(c: &mut Criterion) {
 				.take(2)
 				.map(|s| ThresholdSigner::new(s.clone(), pk_2_2.clone(), config_2_2).unwrap())
 				.collect();
-			run_local_signing(signers, message, context).unwrap()
+			run_local_signing(signers, message, context, &seed).unwrap().0
 		});
 	});
 
@@ -277,7 +277,7 @@ fn bench_comparison(c: &mut Criterion) {
 				.take(3)
 				.map(|s| ThresholdSigner::new(s.clone(), pk_3_5.clone(), config_3_5).unwrap())
 				.collect();
-			run_local_signing(signers, message, context).unwrap()
+			run_local_signing(signers, message, context, &seed).unwrap().0
 		});
 	});
 
