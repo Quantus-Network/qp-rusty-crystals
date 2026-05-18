@@ -17,6 +17,7 @@ use crate::{
 	config::ThresholdConfig,
 	keys::{PrivateKeyShare, PublicKey, SecretShareData},
 	participants::ParticipantList,
+	protocol::partial_pk::{compute_partial_pk_t, pack_combined_pk},
 };
 
 use super::{
@@ -1122,7 +1123,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 		)?;
 
 		// Combine partial PKs to get final public key
-		let public_key = combine_partial_pks(&rho, &all_partial_pks)?;
+		let public_key = pack_combined_pk(&rho, all_partial_pks.values().map(|pk| &pk.t));
 
 		// Build private key share
 		let private_share = build_private_share(config, my_contributions, &rho, &public_key)?;
@@ -1161,7 +1162,8 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 
 			// Verify the leader's commitment matches our expected value
 			if let Some(contribution) = my_contributions.get(&subset) {
-				let expected_pk = compute_partial_pk(&rho, contribution, subset);
+				let t = compute_partial_pk_t(&rho, &contribution.s1, &contribution.s2);
+				let expected_pk = PartialPublicKey { subset_mask: subset, t };
 				let expected_commitment = h_commit_pk(subset, &expected_pk);
 
 				let round3 = round3_broadcasts.get(&leader_id).ok_or_else(|| {
@@ -1274,7 +1276,8 @@ fn compute_my_contributions<S: TranscriptSigner>(
 		if let Some(&shared_secret) = shared_secrets.get(&subset) {
 			let seed = h_keygen(subset, &shared_secret, global_randomness);
 			let contribution = derive_subset_contribution(&seed);
-			let partial_pk = compute_partial_pk(rho, &contribution, subset);
+			let t = compute_partial_pk_t(rho, &contribution.s1, &contribution.s2);
+			let partial_pk = PartialPublicKey { subset_mask: subset, t };
 			let pk_commitment = h_commit_pk(subset, &partial_pk);
 
 			my_contributions.insert(subset, contribution);
@@ -1432,30 +1435,14 @@ fn verify_partial_pk_commitment(
 	if let Some(&shared_secret) = shared_secrets.get(&subset) {
 		let seed = h_keygen(subset, &shared_secret, global_randomness);
 		let expected_contribution = derive_subset_contribution(&seed);
-		let expected_pk = compute_partial_pk(rho, &expected_contribution, subset);
-		if pk.t != expected_pk.t {
+		let expected_t =
+			compute_partial_pk_t(rho, &expected_contribution.s1, &expected_contribution.s2);
+		if pk.t != expected_t {
 			return Err(MithrilDkgError::PkVerificationFailed { party_id, subset });
 		}
 	}
 
 	Ok(())
-}
-
-fn compute_partial_pk(
-	rho: &[u8; 32],
-	contribution: &SubsetContribution,
-	subset_mask: SubsetMask,
-) -> PartialPublicKey {
-	let t =
-		crate::protocol::partial_pk::compute_partial_pk_t(rho, &contribution.s1, &contribution.s2);
-	PartialPublicKey { subset_mask, t }
-}
-
-fn combine_partial_pks(
-	rho: &[u8; 32],
-	partial_pks: &BTreeMap<SubsetMask, PartialPublicKey>,
-) -> Result<PublicKey, MithrilDkgError> {
-	Ok(crate::protocol::partial_pk::pack_combined_pk(rho, partial_pks.values().map(|pk| &pk.t)))
 }
 
 fn build_private_share<S: TranscriptSigner>(

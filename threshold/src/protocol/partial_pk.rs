@@ -5,7 +5,7 @@
 //! partial contributions and pack them into the canonical ML-DSA-87 public-key
 //! encoding (`rho || t1`).
 
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 use qp_rusty_crystals_dilithium::{
 	fips202, packing,
@@ -20,11 +20,13 @@ use crate::keys::{PublicKey, PUBLIC_KEY_SIZE, TR_SIZE};
 /// `s1` must contain `L` polynomials and `s2` must contain `K` polynomials, each
 /// of length `N`. Coefficients of `s1` and `s2` need not be `eta`-bounded; they
 /// only need to live in `i32` and the final result is reduced into `[0, Q)`.
+///
+/// Returns a fixed-size array of K polynomials.
 pub fn compute_partial_pk_t(
 	rho: &[u8; 32],
 	s1: &[[i32; N as usize]],
 	s2: &[[i32; N as usize]],
-) -> Vec<[i32; N as usize]> {
+) -> [[i32; N as usize]; K] {
 	let mut mat: Vec<polyvec::Polyvecl> = (0..K).map(|_| polyvec::Polyvecl::default()).collect();
 	polyvec::matrix_expand(&mut mat, rho);
 
@@ -48,7 +50,7 @@ pub fn compute_partial_pk_t(
 	polyvec::k_reduce(&mut t);
 	polyvec::k_caddq(&mut t);
 
-	let mut t_coeffs = vec![[0i32; N as usize]; K];
+	let mut t_coeffs = [[0i32; N as usize]; K];
 	for (i, poly) in t.vec.iter().enumerate() {
 		t_coeffs[i].copy_from_slice(&poly.coeffs);
 	}
@@ -57,9 +59,12 @@ pub fn compute_partial_pk_t(
 
 /// Sum a collection of partial-PK polynomial vectors and pack into the canonical
 /// ML-DSA-87 public-key encoding (`rho || t1`).
+///
+/// Each partial PK is a fixed-size `[[i32; N]; K]` array, guaranteeing the correct
+/// shape at compile time.
 pub fn pack_combined_pk<'a, I>(rho: &[u8; 32], partial_ts: I) -> PublicKey
 where
-	I: IntoIterator<Item = &'a Vec<[i32; N as usize]>>,
+	I: IntoIterator<Item = &'a [[i32; N as usize]; K]>,
 {
 	let mut t = polyvec::Polyveck::default();
 	for partial in partial_ts {

@@ -537,7 +537,8 @@ impl ResharingProtocol {
 		// Store our own reveal
 		self.round2_entropy_reveals.insert(self.config.my_party_id(), entropy);
 
-		let broadcast = ResharingRound2EntropyReveal { party_id: self.config.my_party_id(), entropy };
+		let broadcast =
+			ResharingRound2EntropyReveal { party_id: self.config.my_party_id(), entropy };
 		let data = Self::serialize_message(&ResharingMessage::Round2(broadcast))?;
 		self.state = ResharingState::Round2Waiting;
 		Ok(Action::SendMany(data))
@@ -634,7 +635,8 @@ impl ResharingProtocol {
 		self.compute_my_subshares()?;
 		let commitments = self.commit_to_my_subshares();
 
-		let broadcast = ResharingRound3Broadcast { party_id: self.config.my_party_id(), commitments };
+		let broadcast =
+			ResharingRound3Broadcast { party_id: self.config.my_party_id(), commitments };
 		self.my_round3 = Some(broadcast.clone());
 		self.round3_broadcasts.insert(self.config.my_party_id(), broadcast.clone());
 
@@ -703,7 +705,8 @@ impl ResharingProtocol {
 
 	fn handle_round4_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
 		// Old-committee dealers continue to drain pending Round 4 messages.
-		if self.config.role().is_old_committee() && self.round4_sent_count < self.pending_round4.len()
+		if self.config.role().is_old_committee() &&
+			self.round4_sent_count < self.pending_round4.len()
 		{
 			return self.send_next_round4_message();
 		}
@@ -860,6 +863,7 @@ impl ResharingProtocol {
 		if self.round5_broadcasts.contains_key(&from) {
 			return;
 		}
+		// Note: partial_pks shape is validated during deserialization (BorshDeserialize impl)
 		self.round5_broadcasts.insert(from, broadcast);
 	}
 
@@ -1108,9 +1112,9 @@ impl ResharingProtocol {
 		&mut self,
 	) -> Result<BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>, ResharingProtocolError> {
 		let my_idx =
-			self.config.new_participants().index_of(self.config.my_party_id()).ok_or_else(|| {
-				ResharingProtocolError::InternalError("not in new committee".into())
-			})?;
+			self.config.new_participants().index_of(self.config.my_party_id()).ok_or_else(
+				|| ResharingProtocolError::InternalError("not in new committee".into()),
+			)?;
 
 		// Collect every (I, J, dealer, r) we expect to use.
 		let new_subsets = &self.new_subset_order;
@@ -1234,7 +1238,7 @@ impl ResharingProtocol {
 	}
 
 	/// Compute `t_J = A·s1_J^new + s2_J^new mod Q` for every new subset we hold.
-	fn compute_my_partial_pks(&self) -> BTreeMap<SubsetMask, Vec<[i32; N as usize]>> {
+	fn compute_my_partial_pks(&self) -> BTreeMap<SubsetMask, [[i32; N as usize]; K]> {
 		let rho = self.derive_rho();
 		self.new_shares
 			.iter()
@@ -1251,7 +1255,7 @@ impl ResharingProtocol {
 	///
 	/// Only accepts partial PK contributions from parties that are actually in the new subset.
 	fn verify_public_key_preservation(&self) -> Result<(), ResharingProtocolError> {
-		let mut canonical: BTreeMap<SubsetMask, Vec<[i32; N as usize]>> = BTreeMap::new();
+		let mut canonical: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
 		for (party, broadcast) in &self.round5_broadcasts {
 			for (j_mask, t_partial) in &broadcast.partial_pks {
 				// Only accept partial PKs from parties that are in this new subset
@@ -1266,7 +1270,7 @@ impl ResharingProtocol {
 				}
 				match canonical.get(j_mask) {
 					None => {
-						canonical.insert(*j_mask, t_partial.clone());
+						canonical.insert(*j_mask, *t_partial);
 					},
 					Some(existing) =>
 						if existing != t_partial {

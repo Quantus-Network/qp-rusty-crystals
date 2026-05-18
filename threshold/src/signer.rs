@@ -325,8 +325,9 @@ impl ThresholdSigner {
 	/// Passing broadcasts with unknown `party_id` values will cause `round3_respond()`
 	/// to fail with an `InvalidConfiguration` error during share recovery.
 	///
-	/// For network usage, use [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol)
-	/// which handles participant validation automatically.
+	/// For network usage, use
+	/// [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol) which handles
+	/// participant validation automatically.
 	///
 	/// # Errors
 	///
@@ -403,8 +404,9 @@ impl ThresholdSigner {
 	/// Broadcasts with unknown `party_id` values will cause share recovery to fail
 	/// with an `InvalidConfiguration` error.
 	///
-	/// For network usage, use [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol)
-	/// which handles participant validation automatically.
+	/// For network usage, use
+	/// [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol) which handles
+	/// participant validation automatically.
 	///
 	/// # Security
 	///
@@ -597,8 +599,9 @@ impl ThresholdSigner {
 	/// 1. Are part of the agreed signing set
 	/// 2. Participated in Round 1 and Round 2
 	///
-	/// For network usage, use [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol)
-	/// which handles participant validation automatically.
+	/// For network usage, use
+	/// [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol) which handles
+	/// participant validation automatically.
 	///
 	/// # Errors
 	///
@@ -646,8 +649,9 @@ impl ThresholdSigner {
 	/// authorized participants. The caller must ensure that `all_round3` contains only
 	/// broadcasts from parties that are part of the agreed signing set.
 	///
-	/// For network usage, use [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol)
-	/// which handles participant validation automatically.
+	/// For network usage, use
+	/// [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol) which handles
+	/// participant validation automatically.
 	///
 	/// # Errors
 	///

@@ -341,18 +341,22 @@ impl Default for SubsetContribution {
 }
 
 /// Partial public key for a single subset.
+///
+/// The partial public key `t = A·s1 + s2` has exactly `K` polynomials,
+/// each with `N` coefficients. The fixed-size array enforces this at compile time.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct PartialPublicKey {
 	/// The subset this partial public key corresponds to.
 	pub subset_mask: SubsetMask,
 	/// The partial public key t = A·s1 + s2.
-	pub t: Vec<[i32; N as usize]>,
+	/// Exactly K polynomials, each with N coefficients.
+	pub t: [[i32; N as usize]; K],
 }
 
 impl PartialPublicKey {
 	/// Create a new partial public key with zero coefficients.
 	pub fn new(subset_mask: SubsetMask) -> Self {
-		Self { subset_mask, t: vec![[0i32; N as usize]; K] }
+		Self { subset_mask, t: [[0i32; N as usize]; K] }
 	}
 }
 
@@ -743,5 +747,31 @@ mod tests {
 		let seed = [42u8; SUBSET_SEED_SIZE];
 		let contribution = derive_subset_contribution(&seed);
 		assert!(contribution.verify_bounds(2));
+	}
+
+	#[test]
+	fn test_partial_pk_serialization_roundtrip() {
+		use borsh::{BorshDeserialize, BorshSerialize};
+
+		// Create a partial PK with valid data
+		let mut pk = PartialPublicKey::new(0b011);
+		pk.t[0][0] = 42;
+		pk.t[K - 1][N as usize - 1] = 123;
+
+		// Serialize and deserialize
+		let mut data = Vec::new();
+		pk.serialize(&mut data).unwrap();
+		let pk2 = PartialPublicKey::try_from_slice(&data).unwrap();
+
+		assert_eq!(pk.subset_mask, pk2.subset_mask);
+		assert_eq!(pk.t, pk2.t);
+	}
+
+	#[test]
+	fn test_partial_pk_fixed_size() {
+		// Verify that PartialPublicKey.t has exactly K polynomials at compile time
+		let pk = PartialPublicKey::new(0b011);
+		assert_eq!(pk.t.len(), K);
+		assert_eq!(pk.t[0].len(), N as usize);
 	}
 }

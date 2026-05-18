@@ -217,10 +217,7 @@ impl ResharingConfig {
 		// This checks MAX_PARTIES, threshold bounds, and supported (t, n) combinations
 		if ThresholdConfig::new(old_threshold, old_n).is_err() {
 			return Err(if old_n > MAX_PARTIES {
-				ResharingConfigError::TooManyOldParties {
-					parties: old_n,
-					max: MAX_PARTIES,
-				}
+				ResharingConfigError::TooManyOldParties { parties: old_n, max: MAX_PARTIES }
 			} else {
 				ResharingConfigError::InvalidOldThreshold {
 					threshold: old_threshold,
@@ -232,10 +229,7 @@ impl ResharingConfig {
 		// Validate new committee against ThresholdConfig requirements
 		if ThresholdConfig::new(new_threshold, new_n).is_err() {
 			return Err(if new_n > MAX_PARTIES {
-				ResharingConfigError::TooManyNewParties {
-					parties: new_n,
-					max: MAX_PARTIES,
-				}
+				ResharingConfigError::TooManyNewParties { parties: new_n, max: MAX_PARTIES }
 			} else {
 				ResharingConfigError::InvalidNewThreshold {
 					threshold: new_threshold,
@@ -395,11 +389,7 @@ pub enum ResharingConfigError {
 	/// No existing share provided but party is in old committee.
 	MissingExistingShare,
 	/// Role field doesn't match actual committee membership.
-	RoleMismatch {
-		party_id: ParticipantId,
-		expected: ResharingRole,
-		actual: ResharingRole,
-	},
+	RoleMismatch { party_id: ParticipantId, expected: ResharingRole, actual: ResharingRole },
 }
 
 impl fmt::Display for ResharingConfigError {
@@ -677,7 +667,8 @@ pub struct ResharingRound5Broadcast {
 	pub share_commitments: BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>,
 	/// Partial public-key contributions `t_J^new = A·s1_J^new + s2_J^new mod Q`,
 	/// one entry per new subset `J` this party belongs to. Empty for old-only parties.
-	pub partial_pks: BTreeMap<SubsetMask, Vec<[i32; N as usize]>>,
+	/// Each entry has exactly `K` polynomials (enforced by the fixed-size array type).
+	pub partial_pks: BTreeMap<SubsetMask, [[i32; N as usize]; K]>,
 	/// Accusations against dealers whose broadcast commitments did not match
 	/// the sender's independent recomputation.
 	pub accusations: Vec<DealerAccusation>,
@@ -1143,5 +1134,52 @@ mod tests {
 			result,
 			Err(ResharingConfigError::TooManyNewParties { parties: 7, max: 6 })
 		));
+	}
+
+	#[test]
+	fn test_round5_broadcast_serialization_roundtrip() {
+		use borsh::{BorshDeserialize, BorshSerialize};
+
+		// Create a Round5 broadcast with valid data
+		let mut partial_pks: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
+		partial_pks.insert(0b011, [[42i32; N as usize]; K]);
+
+		let broadcast = ResharingRound5Broadcast {
+			party_id: 5,
+			share_commitments: BTreeMap::new(),
+			partial_pks,
+			accusations: Vec::new(),
+			success: true,
+			error_message: None,
+		};
+
+		// Serialize and deserialize
+		let mut data = Vec::new();
+		broadcast.serialize(&mut data).unwrap();
+		let broadcast2 = ResharingRound5Broadcast::try_from_slice(&data).unwrap();
+
+		assert_eq!(broadcast.party_id, broadcast2.party_id);
+		assert_eq!(broadcast.partial_pks.len(), broadcast2.partial_pks.len());
+		assert_eq!(broadcast.partial_pks.get(&0b011), broadcast2.partial_pks.get(&0b011));
+		assert_eq!(broadcast.success, broadcast2.success);
+	}
+
+	#[test]
+	fn test_round5_broadcast_partial_pk_fixed_size() {
+		// Verify that partial_pks entries have exactly K polynomials at compile time
+		let mut partial_pks: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
+		partial_pks.insert(0b011, [[0i32; N as usize]; K]);
+
+		let broadcast = ResharingRound5Broadcast {
+			party_id: 0,
+			share_commitments: BTreeMap::new(),
+			partial_pks,
+			accusations: Vec::new(),
+			success: true,
+			error_message: None,
+		};
+
+		// The fixed-size array type guarantees exactly K polynomials
+		assert_eq!(broadcast.partial_pks.get(&0b011).unwrap().len(), K);
 	}
 }
