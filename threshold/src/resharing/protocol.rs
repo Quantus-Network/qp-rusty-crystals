@@ -897,7 +897,7 @@ impl ResharingProtocol {
 		for (accuser, broadcast) in &self.round5_broadcasts {
 			for accusation in &broadcast.accusations {
 				// Validate: accuser must be in the old subset to have recomputed the commitment
-				if self.is_in_old_subset(*accuser, accusation.old_subset) {
+				if self.config.old_participants.is_in_mask(*accuser, accusation.old_subset) {
 					accused.insert(accusation.dealer);
 				} else {
 					log::warn!(
@@ -1034,18 +1034,6 @@ impl ResharingProtocol {
 			}
 		}
 		None
-	}
-
-	/// Check if a party is a member of an old subset.
-	///
-	/// Bit positions in `i_mask` correspond to indices in the (sorted)
-	/// `old_participants` list.
-	fn is_in_old_subset(&self, party: ParticipantId, i_mask: SubsetMask) -> bool {
-		if let Some(idx) = self.config.old_participants.index_of(party) {
-			(i_mask & (1 << idx)) != 0
-		} else {
-			false
-		}
 	}
 
 	/// Old committee post-Round-3 verification: re-derive sub-shares for every old
@@ -1196,12 +1184,24 @@ impl ResharingProtocol {
 
 	/// All members of new subset J must produce identical `s_J^new` (and thus identical
 	/// commitments). Cross-verify that.
+	///
+	/// Only accepts share commitments from parties that are actually in the new subset.
 	fn verify_new_share_consistency(&self) -> Result<(), ResharingProtocolError> {
 		let mut by_subset: BTreeMap<SubsetMask, Vec<(ParticipantId, [u8; COMMITMENT_HASH_SIZE])>> =
 			BTreeMap::new();
 		for (party, broadcast) in &self.round5_broadcasts {
 			for (j_mask, commit) in &broadcast.share_commitments {
-				by_subset.entry(*j_mask).or_default().push((*party, *commit));
+				// Only accept commitments from parties that are in this new subset
+				if self.config.new_participants.is_in_mask(*party, *j_mask) {
+					by_subset.entry(*j_mask).or_default().push((*party, *commit));
+				} else {
+					log::warn!(
+						"Ignoring share commitment from party {} for new_subset {:b}: \
+						 party not in subset",
+						party,
+						j_mask
+					);
+				}
 			}
 		}
 		for (j_mask, commits) in &by_subset {
@@ -1248,10 +1248,22 @@ impl ResharingProtocol {
 
 	/// Cross-check the broadcast partial PKs and sum them to confirm the
 	/// resharing reconstructs the original public key.
+	///
+	/// Only accepts partial PK contributions from parties that are actually in the new subset.
 	fn verify_public_key_preservation(&self) -> Result<(), ResharingProtocolError> {
 		let mut canonical: BTreeMap<SubsetMask, Vec<[i32; N as usize]>> = BTreeMap::new();
-		for broadcast in self.round5_broadcasts.values() {
+		for (party, broadcast) in &self.round5_broadcasts {
 			for (j_mask, t_partial) in &broadcast.partial_pks {
+				// Only accept partial PKs from parties that are in this new subset
+				if !self.config.new_participants.is_in_mask(*party, *j_mask) {
+					log::warn!(
+						"Ignoring partial PK from party {} for new_subset {:b}: \
+						 party not in subset",
+						party,
+						j_mask
+					);
+					continue;
+				}
 				match canonical.get(j_mask) {
 					None => {
 						canonical.insert(*j_mask, t_partial.clone());

@@ -268,6 +268,31 @@ impl ParticipantList {
 		mask
 	}
 
+	/// Check if a participant is included in a subset bitmask.
+	///
+	/// Returns `true` if the participant's index bit is set in the mask.
+	/// Returns `false` if the participant is not in this list or their bit is not set.
+	///
+	/// # Example
+	///
+	/// ```
+	/// use qp_rusty_crystals_threshold::participants::ParticipantList;
+	///
+	/// let list = ParticipantList::new(&[100, 200, 300]).unwrap();
+	/// // Bitmask 0b101 = indices 0 and 2 = participants 100 and 300
+	/// assert!(list.is_in_mask(100, 0b101));
+	/// assert!(!list.is_in_mask(200, 0b101));
+	/// assert!(list.is_in_mask(300, 0b101));
+	/// assert!(!list.is_in_mask(999, 0b101)); // not in list
+	/// ```
+	pub fn is_in_mask(&self, party: ParticipantId, mask: u16) -> bool {
+		if let Some(idx) = self.index_of(party) {
+			(mask & (1 << idx)) != 0
+		} else {
+			false
+		}
+	}
+
 	/// Check if this list contains all the given participant IDs.
 	pub fn contains_all(&self, ids: &[ParticipantId]) -> bool {
 		ids.iter().all(|id| self.contains(*id))
