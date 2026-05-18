@@ -513,6 +513,12 @@ impl ThresholdSigner {
 	/// Collect all Round 3 responses with duplicate detection.
 	///
 	/// This helper extracts the shared logic between `combine` and `combine_with_message`.
+	///
+	/// # Note
+	///
+	/// This method accepts any `party_id` in the broadcasts and does not validate
+	/// participant membership. The caller is responsible for filtering broadcasts
+	/// to include only authorized participants before calling `combine()`.
 	fn collect_responses(
 		&self,
 		my_responses: &[polyvec::Polyvecl],
@@ -555,7 +561,18 @@ impl ThresholdSigner {
 	/// # Arguments
 	///
 	/// * `_all_round2` - All Round 2 broadcasts (currently unused, kept for API compatibility)
-	/// * `all_round3` - All Round 3 broadcasts (including our own)
+	/// * `all_round3` - All Round 3 broadcasts from participating parties
+	///
+	/// # Caller Responsibility
+	///
+	/// **Important:** This method does not validate that Round 3 broadcasts come from
+	/// authorized participants. The caller must ensure that `all_round3` contains only
+	/// broadcasts from parties that:
+	/// 1. Are part of the agreed signing set
+	/// 2. Participated in Round 1 and Round 2
+	///
+	/// For network usage, use [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol)
+	/// which handles participant validation automatically.
 	///
 	/// # Errors
 	///
@@ -563,7 +580,7 @@ impl ThresholdSigner {
 	/// - The signer is not in the `AfterRound3` state
 	/// - Not enough valid responses
 	/// - Signature constraint validation fails
-	/// - Duplicate Round 3 broadcast from same party (M3)
+	/// - Duplicate Round 3 broadcast from same party
 	pub fn combine(
 		&self,
 		_all_round2: &[Round2Broadcast],
@@ -590,8 +607,29 @@ impl ThresholdSigner {
 	/// Use this version when you need to provide the message and context
 	/// again for the combine step.
 	///
+	/// # Arguments
+	///
+	/// * `message` - The message that was signed
+	/// * `context` - The context string used during signing
+	/// * `_all_round2` - All Round 2 broadcasts (currently unused, kept for API compatibility)
+	/// * `all_round3` - All Round 3 broadcasts from participating parties
+	///
+	/// # Caller Responsibility
+	///
+	/// **Important:** This method does not validate that Round 3 broadcasts come from
+	/// authorized participants. The caller must ensure that `all_round3` contains only
+	/// broadcasts from parties that are part of the agreed signing set.
+	///
+	/// For network usage, use [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol)
+	/// which handles participant validation automatically.
+	///
 	/// # Errors
-	/// - Duplicate Round 3 broadcast from same party (M3)
+	///
+	/// Returns an error if:
+	/// - The signer is not in the `AfterRound3` state
+	/// - Not enough valid responses
+	/// - Signature constraint validation fails
+	/// - Duplicate Round 3 broadcast from same party
 	pub fn combine_with_message(
 		&self,
 		message: &[u8],
