@@ -170,14 +170,17 @@ pub enum MithrilAction {
 ///
 /// This buffer stores messages for future rounds and processes them when
 /// the protocol transitions to the appropriate state.
+///
+/// Messages are keyed by sender to ensure only one message per sender is stored,
+/// preventing memory exhaustion from duplicate messages.
 #[derive(Debug, Default)]
 struct DkgMessageBuffer {
 	/// Round 2 broadcasts received while still in Round 1.
-	round2: Vec<MithrilRound2Broadcast>,
+	round2: BTreeMap<ParticipantId, MithrilRound2Broadcast>,
 	/// Round 3 broadcasts received while still in Round 1-2.
-	round3: Vec<MithrilRound3Broadcast>,
+	round3: BTreeMap<ParticipantId, MithrilRound3Broadcast>,
 	/// Round 4 broadcasts received while still in Round 1-3.
-	round4: Vec<MithrilRound4Broadcast>,
+	round4: BTreeMap<ParticipantId, MithrilRound4Broadcast>,
 }
 
 impl DkgMessageBuffer {
@@ -187,32 +190,35 @@ impl DkgMessageBuffer {
 	}
 
 	/// Buffer a Round 2 broadcast for later processing.
+	/// Only keeps the first message from each sender.
 	fn buffer_round2(&mut self, msg: MithrilRound2Broadcast) {
-		self.round2.push(msg);
+		self.round2.entry(msg.party_id).or_insert(msg);
 	}
 
 	/// Buffer a Round 3 broadcast for later processing.
+	/// Only keeps the first message from each sender.
 	fn buffer_round3(&mut self, msg: MithrilRound3Broadcast) {
-		self.round3.push(msg);
+		self.round3.entry(msg.party_id).or_insert(msg);
 	}
 
 	/// Buffer a Round 4 broadcast for later processing.
+	/// Only keeps the first message from each sender.
 	fn buffer_round4(&mut self, msg: MithrilRound4Broadcast) {
-		self.round4.push(msg);
+		self.round4.entry(msg.party_id).or_insert(msg);
 	}
 
 	/// Take all buffered Round 2 messages.
-	fn take_round2(&mut self) -> Vec<MithrilRound2Broadcast> {
+	fn take_round2(&mut self) -> BTreeMap<ParticipantId, MithrilRound2Broadcast> {
 		mem::take(&mut self.round2)
 	}
 
 	/// Take all buffered Round 3 messages.
-	fn take_round3(&mut self) -> Vec<MithrilRound3Broadcast> {
+	fn take_round3(&mut self) -> BTreeMap<ParticipantId, MithrilRound3Broadcast> {
 		mem::take(&mut self.round3)
 	}
 
 	/// Take all buffered Round 4 messages.
-	fn take_round4(&mut self) -> Vec<MithrilRound4Broadcast> {
+	fn take_round4(&mut self) -> BTreeMap<ParticipantId, MithrilRound4Broadcast> {
 		mem::take(&mut self.round4)
 	}
 }
@@ -634,12 +640,9 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	fn process_buffered_round2(&mut self) {
 		let buffered = self.message_buffer.take_round2();
 		if self.state.phase == DkgPhase::Round2 {
-			for r2 in buffered {
-				self.state
-					.round2_broadcasts
-					.get_or_insert_with(BTreeMap::new)
-					.entry(r2.party_id)
-					.or_insert(r2);
+			let broadcasts = self.state.round2_broadcasts.get_or_insert_with(BTreeMap::new);
+			for (party_id, r2) in buffered {
+				broadcasts.entry(party_id).or_insert(r2);
 			}
 		}
 	}
@@ -648,12 +651,9 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	fn process_buffered_round3(&mut self) {
 		let buffered = self.message_buffer.take_round3();
 		if self.state.phase == DkgPhase::Round3 {
-			for r3 in buffered {
-				self.state
-					.round3_broadcasts
-					.get_or_insert_with(BTreeMap::new)
-					.entry(r3.party_id)
-					.or_insert(r3);
+			let broadcasts = self.state.round3_broadcasts.get_or_insert_with(BTreeMap::new);
+			for (party_id, r3) in buffered {
+				broadcasts.entry(party_id).or_insert(r3);
 			}
 		}
 	}
@@ -662,12 +662,9 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	fn process_buffered_round4(&mut self) {
 		let buffered = self.message_buffer.take_round4();
 		if self.state.phase == DkgPhase::Round4 {
-			for r4 in buffered {
-				self.state
-					.round4_broadcasts
-					.get_or_insert_with(BTreeMap::new)
-					.entry(r4.party_id)
-					.or_insert(r4);
+			let broadcasts = self.state.round4_broadcasts.get_or_insert_with(BTreeMap::new);
+			for (party_id, r4) in buffered {
+				broadcasts.entry(party_id).or_insert(r4);
 			}
 		}
 	}
@@ -2457,7 +2454,7 @@ mod tests {
 
 		// Verify the message was buffered
 		assert_eq!(dkg0.message_buffer.round2.len(), 1);
-		assert_eq!(dkg0.message_buffer.round2[0].party_id, 1);
+		assert_eq!(dkg0.message_buffer.round2.get(&1).unwrap().party_id, 1);
 
 		// Similarly test Round 3 buffering
 		let round3_broadcast =
@@ -2467,7 +2464,7 @@ mod tests {
 
 		dkg0.message(2, round3_data).unwrap();
 		assert_eq!(dkg0.message_buffer.round3.len(), 1);
-		assert_eq!(dkg0.message_buffer.round3[0].party_id, 2);
+		assert_eq!(dkg0.message_buffer.round3.get(&2).unwrap().party_id, 2);
 
 		// And Round 4 buffering
 		let round4_broadcast = MithrilRound4Broadcast {
@@ -2480,7 +2477,7 @@ mod tests {
 
 		dkg0.message(1, round4_data).unwrap();
 		assert_eq!(dkg0.message_buffer.round4.len(), 1);
-		assert_eq!(dkg0.message_buffer.round4[0].party_id, 1);
+		assert_eq!(dkg0.message_buffer.round4.get(&1).unwrap().party_id, 1);
 	}
 
 	/// Test that sender mismatch messages are ignored.
@@ -2914,7 +2911,7 @@ mod tests {
 		dkg.message(2, round2_data2).unwrap();
 
 		// Now we should have messages from both parties
-		let party_ids: Vec<_> = dkg.message_buffer.round2.iter().map(|m| m.party_id).collect();
+		let party_ids: Vec<_> = dkg.message_buffer.round2.keys().copied().collect();
 		assert!(party_ids.contains(&1), "Should have message from party 1");
 		assert!(party_ids.contains(&2), "Should have message from party 2");
 	}
@@ -3085,7 +3082,7 @@ mod tests {
 			1,
 			"Round 4 message should be buffered when in Round 2"
 		);
-		assert_eq!(dkgs[0].message_buffer.round4[0].party_id, 1);
+		assert_eq!(dkgs[0].message_buffer.round4.get(&1).unwrap().party_id, 1);
 
 		// Also buffer a Round 3 message
 		let round3_broadcast =
