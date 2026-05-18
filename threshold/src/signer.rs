@@ -315,6 +315,19 @@ impl ThresholdSigner {
 	/// * `context` - Optional context string (max 255 bytes)
 	/// * `other_round1` - Round 1 broadcasts from other participating parties
 	///
+	/// # Caller Responsibility
+	///
+	/// **Important:** This method does not validate that Round 1 broadcasts come from
+	/// parties that participated in the original DKG. The caller must ensure that
+	/// `other_round1` contains only broadcasts from parties whose IDs exist in the
+	/// DKG participant set (i.e., parties that hold valid key shares).
+	///
+	/// Passing broadcasts with unknown `party_id` values will cause `round3_respond()`
+	/// to fail with an `InvalidConfiguration` error during share recovery.
+	///
+	/// For network usage, use [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol)
+	/// which handles participant validation automatically.
+	///
 	/// # Errors
 	///
 	/// Returns an error if:
@@ -381,6 +394,18 @@ impl ThresholdSigner {
 	/// * `other_round1` - Round 1 broadcasts from other parties (for commitment verification)
 	/// * `other_round2` - Round 2 broadcasts from other participating parties
 	///
+	/// # Caller Responsibility
+	///
+	/// **Important:** This method does not validate that broadcasts come from parties
+	/// that participated in the original DKG. The caller must ensure that all broadcasts
+	/// are from parties whose IDs exist in the DKG participant set.
+	///
+	/// Broadcasts with unknown `party_id` values will cause share recovery to fail
+	/// with an `InvalidConfiguration` error.
+	///
+	/// For network usage, use [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol)
+	/// which handles participant validation automatically.
+	///
 	/// # Security
 	///
 	/// This function verifies that each party's Round 2 commitment data matches their
@@ -392,6 +417,7 @@ impl ThresholdSigner {
 	/// - The signer is not in the `AfterRound2` state
 	/// - Response computation fails
 	/// - Any party's commitment verification fails
+	/// - Any party ID is not in the DKG participant set
 	///
 	/// # State Transition
 	///
