@@ -12,6 +12,12 @@ pub const PUBLICKEYBYTES: usize = crate::params::PUBLICKEYBYTES;
 pub const SIGNBYTES: usize = crate::params::SIGNBYTES;
 pub const KEYPAIRBYTES: usize = SECRETKEYBYTES + PUBLICKEYBYTES;
 
+/// Maximum message size for signing/verification (64 MiB).
+///
+/// This limit prevents denial-of-service attacks via memory exhaustion from
+/// oversized messages. The limit is generous enough for any legitimate use case.
+pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
 pub type Signature = [u8; SIGNBYTES];
 
 /// A pair of private and public keys.
@@ -137,17 +143,23 @@ impl SecretKey {
 	///
 	/// # Arguments
 	///
-	/// * 'msg' - message to sign
-	/// * 'ctx' - context string
+	/// * 'msg' - message to sign (max 64 MiB)
+	/// * 'ctx' - context string (max 255 bytes)
 	/// * 'hedged' - wether to use RNG or not
 	///
-	/// Returns Option<Signature>
+	/// # Errors
+	///
+	/// Returns `SignatureError::MessageTooLong` if the message exceeds 64 MiB.
+	/// Returns `SignatureError::ContextTooLong` if the context exceeds 255 bytes.
 	pub fn sign(
 		&self,
 		msg: &[u8],
 		ctx: Option<&[u8]>,
 		hedge: Option<[u8; params::SEEDBYTES]>,
 	) -> Result<Signature, SignatureError> {
+		if msg.len() > MAX_MESSAGE_SIZE {
+			return Err(SignatureError::MessageTooLong);
+		}
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
@@ -205,13 +217,17 @@ impl PublicKey {
 	///
 	/// # Arguments
 	///
-	/// * 'msg' - message that is claimed to be signed
+	/// * 'msg' - message that is claimed to be signed (max 64 MiB)
 	/// * 'sig' - signature to verify
-	/// * 'ctx' - context string
+	/// * 'ctx' - context string (max 255 bytes)
 	///
-	/// Returns 'true' if the verification process was successful, 'false' otherwise
+	/// Returns 'true' if the verification process was successful, 'false' otherwise.
+	/// Returns 'false' early if the message exceeds 64 MiB or context exceeds 255 bytes.
 	pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool {
 		if sig.len() != SIGNBYTES {
+			return false;
+		}
+		if msg.len() > MAX_MESSAGE_SIZE {
 			return false;
 		}
 		match ctx {
