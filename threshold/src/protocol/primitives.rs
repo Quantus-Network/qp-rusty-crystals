@@ -394,6 +394,11 @@ fn make_hint_single(z0: i32, r1: i32) -> i32 {
 // ============================================================================
 
 /// Pack a polynomial with coefficients < Q using 23-bit encoding.
+///
+/// # Panics
+///
+/// Debug builds will panic if any coefficient is >= Q, indicating a bug
+/// in the calling code's reduction logic.
 pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8]) {
 	// 23 bits per coefficient, 256 coefficients = 736 bytes
 	assert!(buf.len() >= 736);
@@ -430,8 +435,13 @@ pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8]) {
 }
 
 /// Unpack a polynomial with coefficients < Q from 23-bit encoding.
-pub(crate) fn poly_unpack_w(buf: &[u8]) -> poly::Poly {
-	assert!(buf.len() >= 736);
+///
+/// Returns an error if any coefficient is >= Q, which would indicate
+/// malformed or malicious input data.
+pub(crate) fn poly_unpack_w(buf: &[u8]) -> Result<poly::Poly, &'static str> {
+	if buf.len() < 736 {
+		return Err("buffer too short for poly_unpack_w");
+	}
 	let mut p = poly::Poly::default();
 
 	let mut bit_pos = 0usize;
@@ -460,22 +470,29 @@ pub(crate) fn poly_unpack_w(buf: &[u8]) -> poly::Poly {
 			current_offset = 0;
 		}
 
+		// Validate coefficient is in valid range [0, Q)
+		if val >= Q_U32 {
+			return Err("coefficient out of range (>= Q)");
+		}
+
 		p.coeffs[i] = val as i32;
 		bit_pos += 23;
 	}
 
-	p
+	Ok(p)
 }
 
 /// Unpack a Polyveck from 23-bit encoding.
-pub(crate) fn unpack_polyveck_w(buf: &[u8]) -> polyvec::Polyveck {
+///
+/// Returns an error if any coefficient is >= Q.
+pub(crate) fn unpack_polyveck_w(buf: &[u8]) -> Result<polyvec::Polyveck, &'static str> {
 	const POLY_W_SIZE: usize = 736;
 	let mut w = polyvec::Polyveck::default();
 	for i in 0..K {
 		let offset = i * POLY_W_SIZE;
-		w.vec[i] = poly_unpack_w(&buf[offset..offset + POLY_W_SIZE]);
+		w.vec[i] = poly_unpack_w(&buf[offset..offset + POLY_W_SIZE])?;
 	}
-	w
+	Ok(w)
 }
 
 // ============================================================================
@@ -564,10 +581,27 @@ mod tests {
 		let mut buf = vec![0u8; 736];
 		poly_pack_w(&p, &mut buf);
 
-		let p2 = poly_unpack_w(&buf);
+		let p2 = poly_unpack_w(&buf).expect("valid coefficients should unpack");
 
 		for i in 0..N as usize {
 			assert_eq!(p.coeffs[i], p2.coeffs[i], "Mismatch at index {}", i);
 		}
+	}
+
+	#[test]
+	fn test_poly_unpack_w_rejects_invalid_coefficients() {
+		// Create a buffer with a coefficient >= Q
+		let mut buf = vec![0u8; 736];
+		// Pack Q (which is invalid, should be < Q) into the first coefficient
+		// Q = 8380417 = 0x7FE001, which fits in 23 bits
+		let invalid_val = Q as u32;
+		// Pack 23 bits of invalid_val into buf[0..3]
+		buf[0] = (invalid_val & 0xFF) as u8;
+		buf[1] = ((invalid_val >> 8) & 0xFF) as u8;
+		buf[2] = ((invalid_val >> 16) & 0x7F) as u8; // only 7 bits of the third byte
+
+		let result = poly_unpack_w(&buf);
+		assert!(result.is_err());
+		assert!(matches!(result, Err("coefficient out of range (>= Q)")));
 	}
 }

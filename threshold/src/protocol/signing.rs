@@ -148,6 +148,9 @@ fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
 }
 
 /// Unpack a commitment from 23-bit packed format.
+///
+/// Returns an error if the commitment has an invalid size or contains
+/// coefficients >= Q (which would indicate malicious input).
 pub(crate) fn unpack_commitment_dilithium(commitment: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
 	let poly_q_size = ((N as usize) * 23).div_ceil(8); // 736 bytes per poly
 	let expected_len = K * poly_q_size;
@@ -159,7 +162,10 @@ pub(crate) fn unpack_commitment_dilithium(commitment: &[u8]) -> ThresholdResult<
 		});
 	}
 
-	Ok(unpack_polyveck_w(commitment))
+	unpack_polyveck_w(commitment).map_err(|e| ThresholdError::InvalidCommitmentData {
+		party_id: 0, // Caller will provide the actual party_id in the error context
+		reason: e.to_string(),
+	})
 }
 
 /// Aggregate commitment vectors.
