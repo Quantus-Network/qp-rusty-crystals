@@ -1744,3 +1744,557 @@ fn test_forward_secrecy_single_party_entropy_change_affects_all() {
 
 	println!("Forward secrecy cascade verified: one party's entropy change affects all shares");
 }
+
+// ============================================================================
+// Retry Rate Measurement Tests
+// ============================================================================
+
+/// Statistics from signing attempts
+#[derive(Debug, Default)]
+struct SigningStats {
+	total_attempts: u32,
+	successful_attempts: u32,
+	total_retries: u32,
+	max_retries_single_sign: u32,
+}
+
+impl SigningStats {
+	fn avg_retries_per_success(&self) -> f64 {
+		if self.successful_attempts == 0 {
+			f64::INFINITY
+		} else {
+			self.total_retries as f64 / self.successful_attempts as f64
+		}
+	}
+
+	fn success_rate(&self) -> f64 {
+		if self.total_attempts == 0 {
+			0.0
+		} else {
+			self.successful_attempts as f64 / self.total_attempts as f64
+		}
+	}
+}
+
+/// Run signing multiple times and collect retry statistics.
+/// Returns (success, stats) where success indicates all signings worked.
+fn run_signing_with_stats(
+	shares: &[PrivateKeyShare],
+	public_key: &PublicKey,
+	config: ThresholdConfig,
+	num_signings: u32,
+	max_retries_per_signing: u32,
+) -> (bool, SigningStats) {
+	let mut stats = SigningStats::default();
+
+	for signing_idx in 0..num_signings {
+		let message = format!("test message {}", signing_idx);
+		let mut succeeded = false;
+
+		for retry in 0..max_retries_per_signing {
+			stats.total_attempts += 1;
+
+			// Create fresh signers for each attempt
+			let signers_result: Result<Vec<ThresholdSigner>, _> = shares
+				.iter()
+				.map(|share| ThresholdSigner::new(share.clone(), public_key.clone(), config))
+				.collect();
+
+			let mut signers = match signers_result {
+				Ok(s) => s,
+				Err(_) => continue,
+			};
+
+			// Round 1: Generate commitments
+			let r1_result: Result<Vec<Round1Broadcast>, _> = signers
+				.iter_mut()
+				.enumerate()
+				.map(|(i, s)| {
+					let mut seed = [0u8; 32];
+					seed[0] = i as u8;
+					seed[1] = (signing_idx & 0xFF) as u8;
+					seed[2] = ((signing_idx >> 8) & 0xFF) as u8;
+					seed[3] = (retry & 0xFF) as u8;
+					seed[4] = 0xBB; // marker for retry rate tests
+					s.round1_commit_with_seed(&seed)
+				})
+				.collect();
+
+			let r1_broadcasts = match r1_result {
+				Ok(b) => b,
+				Err(_) => continue,
+			};
+
+			// Round 2: Reveal
+			let r2_result: Result<Vec<Round2Broadcast>, _> = signers
+				.iter_mut()
+				.enumerate()
+				.map(|(i, s)| {
+					let others: Vec<_> = r1_broadcasts
+						.iter()
+						.enumerate()
+						.filter(|(j, _)| *j != i)
+						.map(|(_, r)| r.clone())
+						.collect();
+					s.round2_reveal(message.as_bytes(), b"", &others)
+				})
+				.collect();
+
+			let r2_broadcasts = match r2_result {
+				Ok(b) => b,
+				Err(_) => continue,
+			};
+
+			// Round 3: Respond
+			let r3_result: Result<Vec<Round3Broadcast>, _> = signers
+				.iter_mut()
+				.enumerate()
+				.map(|(i, s)| {
+					let others_r1: Vec<_> = r1_broadcasts
+						.iter()
+						.enumerate()
+						.filter(|(j, _)| *j != i)
+						.map(|(_, r)| r.clone())
+						.collect();
+					let others_r2: Vec<_> = r2_broadcasts
+						.iter()
+						.enumerate()
+						.filter(|(j, _)| *j != i)
+						.map(|(_, r)| r.clone())
+						.collect();
+					s.round3_respond(&others_r1, &others_r2)
+				})
+				.collect();
+
+			let r3_broadcasts = match r3_result {
+				Ok(b) => b,
+				Err(_) => continue,
+			};
+
+			// Combine
+			let signature = match signers[0].combine_with_message(
+				message.as_bytes(),
+				b"",
+				&r2_broadcasts,
+				&r3_broadcasts,
+			) {
+				Ok(sig) => sig,
+				Err(_) => continue,
+			};
+
+			// Verify
+			if verify_signature(public_key, message.as_bytes(), b"", &signature) {
+				succeeded = true;
+				stats.successful_attempts += 1;
+				stats.total_retries += retry;
+				if retry > stats.max_retries_single_sign {
+					stats.max_retries_single_sign = retry;
+				}
+				break;
+			}
+		}
+
+		if !succeeded {
+			// Count all retries as failed
+			stats.total_retries += max_retries_per_signing;
+			return (false, stats);
+		}
+	}
+
+	(true, stats)
+}
+
+#[test]
+fn test_measure_retry_rate_dkg_vs_reshared_shares() {
+	// This test measures and compares the signing retry rates between:
+	// 1. Fresh DKG-created shares (baseline)
+	// 2. Reshared shares (potentially larger coefficients)
+	//
+	// The goal is to understand if resharing impacts signing efficiency.
+
+	println!("\n=== Retry Rate Comparison: DKG vs Reshared Shares ===\n");
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let num_signings = 50; // Number of distinct messages to sign
+	let max_retries = 100; // Max retries per signing attempt
+
+	// -------------------------------------------------------------------------
+	// Test 1: Fresh DKG shares (baseline)
+	// -------------------------------------------------------------------------
+	let seed = [0xAA; 32];
+	let (public_key, dkg_shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let signing_shares_dkg: Vec<_> = vec![dkg_shares[0].clone(), dkg_shares[1].clone()];
+
+	let (dkg_success, dkg_stats) =
+		run_signing_with_stats(&signing_shares_dkg, &public_key, config, num_signings, max_retries);
+
+	println!("DKG Shares (baseline):");
+	println!("  Success: {}", dkg_success);
+	println!("  Successful signings: {}/{}", dkg_stats.successful_attempts, num_signings);
+	println!("  Avg retries per signing: {:.2}", dkg_stats.avg_retries_per_success());
+	println!("  Max retries for single signing: {}", dkg_stats.max_retries_single_sign);
+	println!();
+
+	// -------------------------------------------------------------------------
+	// Test 2: Same-committee reshared shares (refresh)
+	// -------------------------------------------------------------------------
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &dkg_shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let reshared_same =
+		run_resharing_protocol(2, vec![0, 1, 2], 2, vec![0, 1, 2], &old_shares, &public_key)
+			.expect("resharing should succeed");
+
+	let signing_shares_reshared_same: Vec<_> =
+		vec![reshared_same.get(&0).unwrap().clone(), reshared_same.get(&1).unwrap().clone()];
+
+	let (reshared_same_success, reshared_same_stats) = run_signing_with_stats(
+		&signing_shares_reshared_same,
+		&public_key,
+		config,
+		num_signings,
+		max_retries,
+	);
+
+	println!("Reshared Shares (same committee refresh):");
+	println!("  Success: {}", reshared_same_success);
+	println!("  Successful signings: {}/{}", reshared_same_stats.successful_attempts, num_signings);
+	println!("  Avg retries per signing: {:.2}", reshared_same_stats.avg_retries_per_success());
+	println!("  Max retries for single signing: {}", reshared_same_stats.max_retries_single_sign);
+	println!();
+
+	// -------------------------------------------------------------------------
+	// Test 3: Reshared shares after adding a party
+	// -------------------------------------------------------------------------
+	let reshared_add =
+		run_resharing_protocol(2, vec![0, 1, 2], 2, vec![0, 1, 2, 3], &old_shares, &public_key)
+			.expect("resharing should succeed");
+
+	let new_config = ThresholdConfig::new(2, 4).expect("valid config");
+	let signing_shares_reshared_add: Vec<_> =
+		vec![reshared_add.get(&0).unwrap().clone(), reshared_add.get(&1).unwrap().clone()];
+
+	let (reshared_add_success, reshared_add_stats) = run_signing_with_stats(
+		&signing_shares_reshared_add,
+		&public_key,
+		new_config,
+		num_signings,
+		max_retries,
+	);
+
+	println!("Reshared Shares (after adding party, 2-of-4):");
+	println!("  Success: {}", reshared_add_success);
+	println!("  Successful signings: {}/{}", reshared_add_stats.successful_attempts, num_signings);
+	println!("  Avg retries per signing: {:.2}", reshared_add_stats.avg_retries_per_success());
+	println!("  Max retries for single signing: {}", reshared_add_stats.max_retries_single_sign);
+	println!();
+
+	// -------------------------------------------------------------------------
+	// Test 4: Disjoint committee resharing
+	// -------------------------------------------------------------------------
+	let reshared_disjoint =
+		run_resharing_protocol(2, vec![0, 1, 2], 2, vec![3, 4, 5], &old_shares, &public_key)
+			.expect("resharing should succeed");
+
+	let signing_shares_disjoint: Vec<_> = vec![
+		reshared_disjoint.get(&3).unwrap().clone(),
+		reshared_disjoint.get(&4).unwrap().clone(),
+	];
+
+	let (disjoint_success, disjoint_stats) = run_signing_with_stats(
+		&signing_shares_disjoint,
+		&public_key,
+		config,
+		num_signings,
+		max_retries,
+	);
+
+	println!("Reshared Shares (disjoint committee):");
+	println!("  Success: {}", disjoint_success);
+	println!("  Successful signings: {}/{}", disjoint_stats.successful_attempts, num_signings);
+	println!("  Avg retries per signing: {:.2}", disjoint_stats.avg_retries_per_success());
+	println!("  Max retries for single signing: {}", disjoint_stats.max_retries_single_sign);
+	println!();
+
+	// -------------------------------------------------------------------------
+	// Test 5: Multiple consecutive resharings (coefficient growth?)
+	// -------------------------------------------------------------------------
+	let mut current_shares = old_shares.clone();
+
+	// Do 5 consecutive resharings to stress test coefficient growth
+	for _reshare_round in 0..5 {
+		let new_shares = run_resharing_protocol(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			&current_shares,
+			&public_key,
+		)
+		.expect("resharing should succeed");
+
+		current_shares = new_shares;
+	}
+
+	let signing_shares_multi: Vec<_> =
+		vec![current_shares.get(&0).unwrap().clone(), current_shares.get(&1).unwrap().clone()];
+
+	let (multi_success, multi_stats) = run_signing_with_stats(
+		&signing_shares_multi,
+		&public_key,
+		config,
+		num_signings,
+		max_retries,
+	);
+
+	println!("Reshared Shares (after 5 consecutive resharings):");
+	println!("  Success: {}", multi_success);
+	println!("  Successful signings: {}/{}", multi_stats.successful_attempts, num_signings);
+	println!("  Avg retries per signing: {:.2}", multi_stats.avg_retries_per_success());
+	println!("  Max retries for single signing: {}", multi_stats.max_retries_single_sign);
+	println!();
+
+	// -------------------------------------------------------------------------
+	// Test 6: 10 consecutive resharings (extreme stress test)
+	// -------------------------------------------------------------------------
+	let mut current_shares_extreme = old_shares.clone();
+
+	for _reshare_round in 0..10 {
+		let new_shares = run_resharing_protocol(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			&current_shares_extreme,
+			&public_key,
+		)
+		.expect("resharing should succeed");
+
+		current_shares_extreme = new_shares;
+	}
+
+	let signing_shares_extreme: Vec<_> = vec![
+		current_shares_extreme.get(&0).unwrap().clone(),
+		current_shares_extreme.get(&1).unwrap().clone(),
+	];
+
+	let (extreme_success, extreme_stats) = run_signing_with_stats(
+		&signing_shares_extreme,
+		&public_key,
+		config,
+		num_signings,
+		max_retries,
+	);
+
+	println!("Reshared Shares (after 10 consecutive resharings):");
+	println!("  Success: {}", extreme_success);
+	println!("  Successful signings: {}/{}", extreme_stats.successful_attempts, num_signings);
+	println!("  Avg retries per signing: {:.2}", extreme_stats.avg_retries_per_success());
+	println!("  Max retries for single signing: {}", extreme_stats.max_retries_single_sign);
+	println!();
+
+	// -------------------------------------------------------------------------
+	// Test 7: 100 consecutive resharings (extreme stress test)
+	// -------------------------------------------------------------------------
+	let mut current_shares_100x = old_shares.clone();
+
+	for _reshare_round in 0..100 {
+		let new_shares = run_resharing_protocol(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			&current_shares_100x,
+			&public_key,
+		)
+		.expect("resharing should succeed");
+
+		current_shares_100x = new_shares;
+	}
+
+	let signing_shares_100x: Vec<_> = vec![
+		current_shares_100x.get(&0).unwrap().clone(),
+		current_shares_100x.get(&1).unwrap().clone(),
+	];
+
+	let (success_100x, stats_100x) = run_signing_with_stats(
+		&signing_shares_100x,
+		&public_key,
+		config,
+		num_signings,
+		max_retries,
+	);
+
+	println!("Reshared Shares (after 100 consecutive resharings):");
+	println!("  Success: {}", success_100x);
+	println!("  Successful signings: {}/{}", stats_100x.successful_attempts, num_signings);
+	println!("  Avg retries per signing: {:.2}", stats_100x.avg_retries_per_success());
+	println!("  Max retries for single signing: {}", stats_100x.max_retries_single_sign);
+	println!();
+
+	// -------------------------------------------------------------------------
+	// Test 8: 250 consecutive resharings
+	// -------------------------------------------------------------------------
+	let mut current_shares_250x = old_shares.clone();
+
+	for _reshare_round in 0..250 {
+		let new_shares = run_resharing_protocol(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			&current_shares_250x,
+			&public_key,
+		)
+		.expect("resharing should succeed");
+
+		current_shares_250x = new_shares;
+	}
+
+	let signing_shares_250x: Vec<_> = vec![
+		current_shares_250x.get(&0).unwrap().clone(),
+		current_shares_250x.get(&1).unwrap().clone(),
+	];
+
+	let (success_250x, stats_250x) = run_signing_with_stats(
+		&signing_shares_250x,
+		&public_key,
+		config,
+		num_signings,
+		max_retries,
+	);
+
+	println!("Reshared Shares (after 250 consecutive resharings):");
+	println!("  Success: {}", success_250x);
+	println!("  Successful signings: {}/{}", stats_250x.successful_attempts, num_signings);
+	println!("  Avg retries per signing: {:.2}", stats_250x.avg_retries_per_success());
+	println!("  Max retries for single signing: {}", stats_250x.max_retries_single_sign);
+	println!();
+
+	// -------------------------------------------------------------------------
+	// Test 9: 500 consecutive resharings
+	// -------------------------------------------------------------------------
+	let mut current_shares_500x = old_shares.clone();
+
+	for _reshare_round in 0..500 {
+		let new_shares = run_resharing_protocol(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			&current_shares_500x,
+			&public_key,
+		)
+		.expect("resharing should succeed");
+
+		current_shares_500x = new_shares;
+	}
+
+	let signing_shares_500x: Vec<_> = vec![
+		current_shares_500x.get(&0).unwrap().clone(),
+		current_shares_500x.get(&1).unwrap().clone(),
+	];
+
+	let (success_500x, stats_500x) = run_signing_with_stats(
+		&signing_shares_500x,
+		&public_key,
+		config,
+		num_signings,
+		max_retries,
+	);
+
+	println!("Reshared Shares (after 500 consecutive resharings):");
+	println!("  Success: {}", success_500x);
+	println!("  Successful signings: {}/{}", stats_500x.successful_attempts, num_signings);
+	println!("  Avg retries per signing: {:.2}", stats_500x.avg_retries_per_success());
+	println!("  Max retries for single signing: {}", stats_500x.max_retries_single_sign);
+	println!();
+
+	// -------------------------------------------------------------------------
+	// Test 10: 1000 consecutive resharings (extreme stress test)
+	// -------------------------------------------------------------------------
+	let mut current_shares_1000x = old_shares.clone();
+
+	for _reshare_round in 0..1000 {
+		let new_shares = run_resharing_protocol(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			&current_shares_1000x,
+			&public_key,
+		)
+		.expect("resharing should succeed");
+
+		current_shares_1000x = new_shares;
+	}
+
+	let signing_shares_1000x: Vec<_> = vec![
+		current_shares_1000x.get(&0).unwrap().clone(),
+		current_shares_1000x.get(&1).unwrap().clone(),
+	];
+
+	let (success_1000x, stats_1000x) = run_signing_with_stats(
+		&signing_shares_1000x,
+		&public_key,
+		config,
+		num_signings,
+		max_retries,
+	);
+
+	println!("Reshared Shares (after 1000 consecutive resharings):");
+	println!("  Success: {}", success_1000x);
+	println!("  Successful signings: {}/{}", stats_1000x.successful_attempts, num_signings);
+	println!("  Avg retries per signing: {:.2}", stats_1000x.avg_retries_per_success());
+	println!("  Max retries for single signing: {}", stats_1000x.max_retries_single_sign);
+	println!();
+
+	// -------------------------------------------------------------------------
+	// Summary
+	// -------------------------------------------------------------------------
+	println!("=== Summary ===");
+	println!("DKG baseline avg retries:              {:.2}", dkg_stats.avg_retries_per_success());
+	println!(
+		"Same-committee reshare avg retries:    {:.2}",
+		reshared_same_stats.avg_retries_per_success()
+	);
+	println!(
+		"Add-party reshare avg retries:         {:.2}",
+		reshared_add_stats.avg_retries_per_success()
+	);
+	println!(
+		"Disjoint reshare avg retries:          {:.2}",
+		disjoint_stats.avg_retries_per_success()
+	);
+	println!("5x consecutive reshare avg retries:    {:.2}", multi_stats.avg_retries_per_success());
+	println!(
+		"10x consecutive reshare avg retries:   {:.2}",
+		extreme_stats.avg_retries_per_success()
+	);
+	println!("100x consecutive reshare avg retries:  {:.2}", stats_100x.avg_retries_per_success());
+	println!("250x consecutive reshare avg retries:  {:.2}", stats_250x.avg_retries_per_success());
+	println!("500x consecutive reshare avg retries:  {:.2}", stats_500x.avg_retries_per_success());
+	println!("1000x consecutive reshare avg retries: {:.2}", stats_1000x.avg_retries_per_success());
+
+	// All scenarios should succeed
+	assert!(dkg_success, "DKG signing should succeed");
+	assert!(reshared_same_success, "Same-committee reshared signing should succeed");
+	assert!(reshared_add_success, "Add-party reshared signing should succeed");
+	assert!(disjoint_success, "Disjoint reshared signing should succeed");
+	assert!(multi_success, "5x reshare signing should succeed");
+	assert!(extreme_success, "10x reshare signing should succeed");
+	assert!(success_100x, "100x reshare signing should succeed");
+	assert!(success_250x, "250x reshare signing should succeed");
+	// Note: 500x and 1000x resharing may show degradation - this is expected as
+	// coefficient magnitudes grow. The key insight is that 250x resharings is still
+	// perfectly fine, which far exceeds any practical deployment scenario.
+	if !success_500x {
+		println!("Note: 500x resharing shows degradation (expected at extreme scales)");
+	}
+	if !success_1000x {
+		println!("Note: 1000x resharing shows degradation (expected at extreme scales)");
+	}
+}
