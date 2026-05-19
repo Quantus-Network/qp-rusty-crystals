@@ -11,9 +11,32 @@
 //! 3. **Round 3 (Response)**: Each party computes and broadcasts their signature share
 //!
 //! After Round 3, the leader attempts to combine the shares into a final signature.
-//! If combination fails (due to rejection sampling), the leader broadcasts a Retry
-//! message and all parties reset and try again. If combination succeeds, the leader
+//! If combination fails (due to rejection sampling), the leader broadcasts an `Abort`
+//! by returning `SignProtocolError::ProtocolFailed`; the caller (e.g. NEAR MPC) is
+//! expected to retry by constructing a fresh `DilithiumSignProtocol` instance with a
+//! new round1 seed and a new transport channel. If combination succeeds, the leader
 //! broadcasts the signature to all parties.
+//!
+//! # No in-protocol retries
+//!
+//! Earlier revisions of this protocol included a `Round4Retry` message that allowed
+//! the leader to silently reset all followers and re-run rounds 1-3 on the same
+//! protocol instance. That was removed because:
+//!
+//! 1. The Mithril paper (Section 2.2) defines threshold signatures *without* session identifiers,
+//!    relying on each honest party's local state to enforce per-attempt freshness. In-protocol
+//!    retries on a single instance violate that assumption because the receiver's state machine has
+//!    no way to bind incoming rounds to "the current attempt" without an explicit session id, which
+//!    the wire format does not carry.
+//! 2. NEAR MPC already drives retries externally by allocating a fresh `ChannelId`, a fresh
+//!    `round1_seed`, and a fresh `DilithiumSignProtocol` per attempt (up to
+//!    `MAX_ATTEMPTS_PER_REQUEST_AS_LEADER`). Stale messages from a previous attempt are silently
+//!    dropped at the transport layer because their `ChannelId` no longer routes anywhere.
+//! 3. Keeping in-protocol retries on a stable `ChannelId` was the root cause of an audited replay
+//!    vulnerability: replayed round 1/2 traffic from an earlier attempt could be `or_insert`ed into
+//!    the current attempt's broadcast maps and later consumed as if it belonged to the live
+//!    session, or a replayed `Round4Retry` could force followers to reset and exhaust the retry
+//!    budget.
 //!
 //! # Participant Set Requirement
 //!
@@ -33,16 +56,19 @@
 //!
 //! The protocol uses a leader-based approach for Round 4 (signature combination):
 //!
-//! - The **leader** (party with lowest ID among participants) combines signature shares and decides
-//!   whether to broadcast `Round4Complete(signature)` or `Round4Retry`.
+//! - The **leader** (party with lowest ID among participants) combines signature shares. On success
+//!   it broadcasts `Round4Complete(signature)`; on failure it returns
+//!   `SignProtocolError::ProtocolFailed`, ending the protocol instance. The caller is responsible
+//!   for starting a fresh attempt with new randomness.
 //! - **Followers** verify the leader's signature before accepting it. This removes the leader trust
 //!   assumption for signature validity (a malicious leader cannot send a forged signature).
 //!
 //! **Security properties:**
 //! - A malicious leader cannot forge signatures (requires threshold parties to collude).
 //! - A malicious leader cannot send invalid signatures (followers verify before accepting).
-//! - A malicious leader CAN cause denial-of-signature by falsely claiming combination failed,
-//!   triggering unnecessary retries.
+//! - A malicious leader CAN cause denial-of-signature by aborting; in that case the caller (e.g.
+//!   NEAR MPC) will retry with a fresh protocol instance, potentially with a different leader
+//!   selected by the application layer.
 //!
 //! ## Message Buffering
 //!
@@ -126,11 +152,6 @@ pub enum Action<T> {
 	Return(T),
 }
 
-/// Maximum number of retry attempts before giving up.
-/// With high k_iterations, retries should be rare, but we still need a limit
-/// to prevent infinite loops if something is fundamentally broken.
-pub const MAX_RETRY_ATTEMPTS: u32 = 100;
-
 /// Maximum signing message size in bytes (4 MB).
 /// This limits the size of serialized signing protocol messages.
 /// With high k_iterations (e.g., k=380 for 5-of-6), messages can exceed 2MB.
@@ -190,10 +211,27 @@ impl fmt::Display for SignProtocolError {
 // Message Types
 // ============================================================================
 
-/// Wrapper enum for all signing protocol messages.
 /// Message types for the signing protocol.
 ///
 /// These are serialized and sent over the network between parties.
+///
+/// # Replay safety
+///
+/// These messages intentionally carry no session identifier, attempt id, or
+/// freshness nonce. Per-attempt freshness is the responsibility of the transport
+/// layer (e.g. NEAR MPC's per-attempt `ChannelId`), and per-message integrity
+/// within an attempt is enforced by:
+///
+/// - A receiver only accepts `Round2` from peer `P` when it has already accepted a `Round1`
+///   broadcast from `P` in the same instance, and the round-2 reveal hashes back to the round-1
+///   commitment hash (see `message()`).
+/// - A receiver only accepts `Round3` from peer `P` when it has accepted that peer's `Round2`
+///   reveal, which was itself bound to the peer's `Round1` commitment.
+/// - `Round4Complete` is verified by the follower against the public key, message, and context for
+///   the current instance before being accepted as the output.
+///
+/// There is no `Round4Retry`: combination failure is a hard error and a fresh
+/// instance must be constructed for any retry. See the module-level docs.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum SigningMessage {
 	/// Round 1: Commitment hash.
@@ -204,8 +242,6 @@ pub enum SigningMessage {
 	Round3(Round3Broadcast),
 	/// Round 4: Leader's decision - signature combination succeeded.
 	Round4Complete(Vec<u8>),
-	/// Round 4: Leader's decision - combination failed, retry needed.
-	Round4Retry,
 }
 
 impl SigningMessage {
@@ -217,7 +253,6 @@ impl SigningMessage {
 			SigningMessage::Round2(r) => Some(r.party_id),
 			SigningMessage::Round3(r) => Some(r.party_id),
 			SigningMessage::Round4Complete(_) => None,
-			SigningMessage::Round4Retry => None,
 		}
 	}
 
@@ -228,13 +263,12 @@ impl SigningMessage {
 			SigningMessage::Round2(_) => 2,
 			SigningMessage::Round3(_) => 3,
 			SigningMessage::Round4Complete(_) => 4,
-			SigningMessage::Round4Retry => 4,
 		}
 	}
 
 	/// Check if this is a Round 4 message (leader decision).
 	pub fn is_round4(&self) -> bool {
-		matches!(self, SigningMessage::Round4Complete(_) | SigningMessage::Round4Retry)
+		matches!(self, SigningMessage::Round4Complete(_))
 	}
 }
 
@@ -260,14 +294,16 @@ pub enum SignProtocolState {
 	/// Waiting for Round 3 messages from other participants.
 	Round3Waiting,
 
-	/// Leader: Ready to attempt combining and decide (Complete or Retry).
+	/// Leader: Ready to attempt combining the signature shares.
+	/// On success the leader broadcasts `Round4Complete`; on failure the protocol
+	/// transitions to `Failed` and the caller must spawn a fresh instance to retry.
 	Round4Deciding,
 	/// Follower: Waiting for leader's Round 4 decision.
 	WaitingForLeaderDecision,
 
 	/// Protocol completed successfully.
 	Done,
-	/// Protocol failed after max retries.
+	/// Protocol failed.
 	Failed(String),
 }
 
@@ -401,8 +437,6 @@ pub struct DilithiumSignProtocol {
 	/// Buffer for messages that arrive before we're ready to process them.
 	message_buffer: SignMessageBuffer,
 
-	/// Number of retry attempts so far.
-	retry_count: u32,
 	/// Signature received from leader (for followers).
 	received_signature: Option<Signature>,
 }
@@ -499,7 +533,6 @@ impl DilithiumSignProtocol {
 			my_r2: None,
 			my_r3: None,
 			message_buffer: SignMessageBuffer::new(),
-			retry_count: 0,
 			received_signature: None,
 		})
 	}
@@ -527,29 +560,6 @@ impl DilithiumSignProtocol {
 	/// Check if this party is the leader.
 	pub fn is_leader(&self) -> bool {
 		self.my_participant_id == self.leader_id
-	}
-
-	/// Get the current retry count.
-	pub fn retry_count(&self) -> u32 {
-		self.retry_count
-	}
-
-	/// Derive a unique seed for the current retry attempt.
-	///
-	/// This ensures each retry uses different randomness, which is critical for
-	/// the rejection sampling to eventually succeed.
-	///
-	/// Formula: `derived_seed = SHAKE256(round1_seed || retry_count)`
-	fn derive_current_seed(&self) -> [u8; 32] {
-		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, &self.round1_seed, 32);
-		let retry_bytes = self.retry_count.to_le_bytes();
-		fips202::shake256_absorb(&mut state, &retry_bytes, 4);
-		fips202::shake256_finalize(&mut state);
-
-		let mut derived = [0u8; 32];
-		fips202::shake256_squeeze(&mut derived, 32, &mut state);
-		derived
 	}
 
 	/// Get the number of participants required (threshold).
@@ -660,14 +670,12 @@ impl DilithiumSignProtocol {
 	pub fn poke(&mut self) -> Result<Action<Signature>, SignProtocolError> {
 		match &self.state {
 			SignProtocolState::Round1Generate => {
-				// Derive a unique seed for this retry attempt
-				// This ensures each retry uses different randomness
-				let current_seed = self.derive_current_seed();
-
-				// Generate Round 1 commitment using the derived seed
+				// Generate Round 1 commitment using the round1 seed for this instance.
+				// Per-attempt seed freshness is the caller's responsibility: every new
+				// DilithiumSignProtocol instance is expected to receive a fresh seed.
 				let r1 = self
 					.signer
-					.round1_commit_with_seed(&current_seed)
+					.round1_commit_with_seed(&self.round1_seed)
 					.map_err(|e| SignProtocolError::SigningError(e.to_string()))?;
 
 				// Store our broadcast
@@ -789,11 +797,17 @@ impl DilithiumSignProtocol {
 			},
 
 			SignProtocolState::Round4Deciding => {
-				// Leader: attempt to combine and decide
+				// Leader: attempt to combine the signature shares.
+				//
+				// On success: broadcast Round4Complete and return the signature.
+				// On failure: this protocol instance is dead. The caller must spawn
+				// a fresh DilithiumSignProtocol with new randomness to retry.
+				// Rejection sampling failures are normal in ML-DSA and are handled
+				// by the application layer (e.g. NEAR MPC re-spawns with a new
+				// ChannelId and round1_seed).
 				let r2_vec: Vec<Round2Broadcast> = self.r2_broadcasts.values().cloned().collect();
 				let r3_vec: Vec<Round3Broadcast> = self.r3_broadcasts.values().cloned().collect();
 
-				// Attempt to combine
 				match self.signer.combine_with_message(
 					&self.message,
 					&self.context,
@@ -809,28 +823,13 @@ impl DilithiumSignProtocol {
 						self.received_signature = Some(signature);
 						Ok(Action::SendMany(data))
 					},
-					Err(_) => {
-						// Combination failed - check retry limit
-						self.retry_count += 1;
-						if self.retry_count >= MAX_RETRY_ATTEMPTS {
-							self.state = SignProtocolState::Failed(format!(
-								"Signature combination failed after {} attempts",
-								MAX_RETRY_ATTEMPTS
-							));
-							return Err(SignProtocolError::SigningError(format!(
-								"Exceeded maximum retry attempts ({})",
-								MAX_RETRY_ATTEMPTS
-							)));
-						}
-
-						// Broadcast retry request
-						let msg = SigningMessage::Round4Retry;
-						let data = self.serialize_message(&msg)?;
-
-						// Reset for next attempt
-						self.reset_for_retry();
-
-						Ok(Action::SendMany(data))
+					Err(e) => {
+						// Combination failed (most commonly: ML-DSA rejection sampling
+						// did not produce a valid signature this attempt). Terminate
+						// this instance; the caller will retry with a fresh one.
+						let msg = format!("Signature combination failed: {}", e);
+						self.state = SignProtocolState::Failed(msg.clone());
+						Err(SignProtocolError::SigningError(msg))
 					},
 				}
 			},
@@ -942,7 +941,11 @@ impl DilithiumSignProtocol {
 		// Route to appropriate collection or buffer for later
 		match msg {
 			SigningMessage::Round1(r1) => {
-				// Accept Round 1 messages during Round 1 waiting or earlier Round 2 states
+				// Accept Round 1 messages during Round 1 waiting or earlier Round 2 states.
+				// First-wins is safe here because Round 2 acceptance below requires the
+				// Round 2 reveal to hash back to this Round 1 commitment; a replayed or
+				// junk Round 1 will simply have no matching Round 2 and the session will
+				// eventually time out and be retried by the application layer.
 				if matches!(
 					self.state,
 					SignProtocolState::Round1Generate |
@@ -955,7 +958,14 @@ impl DilithiumSignProtocol {
 				// Round 1 messages don't need buffering - if we're past Round 1, they're late
 			},
 			SigningMessage::Round2(r2) => {
-				// Accept Round 2 messages during Round 2 or Round 3 states
+				// Per the Mithril paper (Fig. 6, ShareSign_3) Round 2 reveals must hash
+				// back to the Round 1 commitment from the same party. We enforce that
+				// check at receive time (rather than only later in round3_respond) so
+				// that a replayed or otherwise-stale Round 2 cannot occupy the slot for
+				// peer `r2.party_id` in `r2_broadcasts` and lock out the honest reveal.
+				//
+				// If the corresponding Round 1 has not been received yet, we buffer the
+				// Round 2 and re-verify when it's processed by process_buffered_round2.
 				if matches!(
 					self.state,
 					SignProtocolState::Round2Generate |
@@ -963,17 +973,33 @@ impl DilithiumSignProtocol {
 						SignProtocolState::Round3Generate |
 						SignProtocolState::Round3Waiting
 				) {
+					if !self.round2_matches_stored_round1(&r2) {
+						warn!(
+							"Signing: Rejecting Round 2 from party {} - commitment hash does not \
+							 match stored Round 1 (likely stale/replayed)",
+							r2.party_id
+						);
+						return Ok(());
+					}
 					self.r2_broadcasts.entry(r2.party_id).or_insert(r2);
 				} else if matches!(
 					self.state,
 					SignProtocolState::Round1Generate | SignProtocolState::Round1Waiting
 				) {
-					// Buffer Round 2 messages that arrive while we're still in Round 1
+					// Buffer Round 2 messages that arrive while we're still in Round 1.
+					// The commitment-hash check is deferred to process_buffered_round2,
+					// which runs after we transition to Round 2 and the corresponding
+					// Round 1 broadcasts are available.
 					self.message_buffer.buffer_round2(r2);
 				}
 			},
 			SigningMessage::Round3(r3) => {
-				// Accept Round 3 messages during Round 3 waiting or later
+				// Accept Round 3 messages during Round 3 waiting or later.
+				// The Round 3 response is implicitly bound to the same attempt's Round 1
+				// and Round 2 because it's verified during combine_with_message against
+				// the aggregated commitments (which only validate if r3 was computed
+				// from the same c = SampleInBall(H(mu || HighBits(w))) the honest party
+				// derived from the now-fixed r2_broadcasts in this instance).
 				if matches!(
 					self.state,
 					SignProtocolState::Round3Generate |
@@ -1003,30 +1029,53 @@ impl DilithiumSignProtocol {
 					}
 				}
 			},
-			SigningMessage::Round4Retry => {
-				// Only followers process Round4Retry
-				if !self.is_leader() {
-					// Reset for retry
-					self.retry_count += 1;
-					if self.retry_count >= MAX_RETRY_ATTEMPTS {
-						self.state = SignProtocolState::Failed(format!(
-							"Exceeded maximum retry attempts ({})",
-							MAX_RETRY_ATTEMPTS
-						));
-						return Ok(());
-					}
-					self.reset_for_retry();
-				}
-			},
 		}
 
 		Ok(())
 	}
 
+	/// Verify that a Round 2 reveal hashes back to the Round 1 commitment we
+	/// previously accepted from the same party.
+	///
+	/// Returns `false` (and the message should be dropped) if either:
+	/// - We have no Round 1 from the claimed party (replay before any Round 1, or Round 2 from a
+	///   non-participant — already filtered earlier, but cheap to re-verify), or
+	/// - The hash does not match (the reveal does not correspond to that commitment, most likely a
+	///   replay from an earlier protocol instance).
+	fn round2_matches_stored_round1(&self, r2: &Round2Broadcast) -> bool {
+		let Some(r1) = self.r1_broadcasts.get(&r2.party_id) else {
+			return false;
+		};
+		// Empty commitment_data is a legitimate "I have nothing to contribute" signal
+		// in some flows (matching the check in round3_respond at signer.rs), so allow it.
+		if r2.commitment_data.is_empty() {
+			return true;
+		}
+		let tr = self.signer.public_key().tr();
+		crate::protocol::signing::verify_commitment_hash(
+			tr,
+			r2.party_id,
+			&r2.commitment_data,
+			&r1.commitment_hash,
+		)
+	}
+
 	/// Process buffered Round 2 messages after transitioning to Round 2.
+	///
+	/// Buffered Round 2 messages still need the commitment-hash binding check
+	/// against the Round 1 broadcasts we have now accumulated; any that fail are
+	/// dropped here rather than poisoning `r2_broadcasts`.
 	fn process_buffered_round2(&mut self) {
 		let buffered = self.message_buffer.take_round2();
 		for r2 in buffered {
+			if !self.round2_matches_stored_round1(&r2) {
+				warn!(
+					"Signing: Dropping buffered Round 2 from party {} - commitment hash mismatch \
+					 (likely stale/replayed)",
+					r2.party_id
+				);
+				continue;
+			}
 			// Don't overwrite if we already have a message from this party
 			self.r2_broadcasts.entry(r2.party_id).or_insert(r2);
 		}
@@ -1041,28 +1090,21 @@ impl DilithiumSignProtocol {
 		}
 	}
 
-	/// Reset the protocol to start a new signing session.
+	/// Reset the protocol to start a new signing session on the *same* instance.
 	///
 	/// This clears all collected broadcasts and resets the state machine.
 	/// The signer is also reset to allow a fresh round of signing.
-	pub fn reset(&mut self) {
-		self.state = SignProtocolState::Round1Generate;
-		self.r1_broadcasts.clear();
-		self.r2_broadcasts.clear();
-		self.r3_broadcasts.clear();
-		self.my_r1 = None;
-		self.my_r2 = None;
-		self.my_r3 = None;
-		self.message_buffer.clear();
-		self.retry_count = 0;
-		self.received_signature = None;
-		self.signer.reset();
-	}
-
-	/// Reset the protocol for a retry attempt (keeps retry count).
 	///
-	/// This is called when the leader decides to retry after combination failure.
-	fn reset_for_retry(&mut self) {
+	/// # Warning
+	///
+	/// Prefer constructing a fresh `DilithiumSignProtocol` over calling `reset()`.
+	/// `reset()` keeps the same `round1_seed`, so a subsequent attempt on the same
+	/// instance will reuse identical Round 1 randomness — which is **only safe**
+	/// when the previous attempt never sent a Round 1 message on the wire. In
+	/// production (NEAR MPC) every retry constructs a new instance with a fresh
+	/// seed and a fresh transport channel, so this method exists primarily for
+	/// tests and for callers that abandon a protocol before its first poke.
+	pub fn reset(&mut self) {
 		self.state = SignProtocolState::Round1Generate;
 		self.r1_broadcasts.clear();
 		self.r2_broadcasts.clear();
@@ -1110,13 +1152,15 @@ fn derive_party_seed(session_seed: &[u8; 32], party_id: ParticipantId) -> [u8; 3
 ///
 /// # Returns
 ///
-/// A tuple of (signature, retry_count) on success.
+/// The produced signature on success. If the underlying ML-DSA rejection sampling
+/// happens to abort on this attempt, returns `Err(SignProtocolError::SigningError)`
+/// — callers should retry with a different `session_seed`.
 pub fn run_local_signing(
 	signers: Vec<ThresholdSigner>,
 	message: &[u8],
 	context: &[u8],
 	session_seed: &[u8; 32],
-) -> Result<(Signature, u32), SignProtocolError> {
+) -> Result<Signature, SignProtocolError> {
 	let num_parties = signers.len();
 	if num_parties < 2 {
 		return Err(SignProtocolError::MissingData("Need at least 2 signers".to_string()));
@@ -1182,15 +1226,7 @@ pub fn run_local_signing(
 					}
 				},
 				Action::Return(signature) => {
-					// Get retry count from the leader
-					let retry_count = if let Some(leader_idx) =
-						participants.iter().position(|&id| id == leader_id)
-					{
-						protocols[leader_idx].retry_count()
-					} else {
-						0
-					};
-					return Ok((signature, retry_count));
+					return Ok(signature);
 				},
 			}
 		}
@@ -1389,7 +1425,7 @@ mod tests {
 			let mut session_seed = [0u8; 32];
 			session_seed[0] = i as u8;
 			match run_local_signing(signers, message, context, &session_seed) {
-				Ok((signature, _retry_count)) => {
+				Ok(signature) => {
 					// Verify the signature
 					assert!(
 						verify_signature(&pk, message, context, &signature),
@@ -1426,7 +1462,7 @@ mod tests {
 			let mut session_seed = [0u8; 32];
 			session_seed[0] = i as u8;
 			match run_local_signing(signers, message, context, &session_seed) {
-				Ok((signature, _retry_count)) => {
+				Ok(signature) => {
 					assert!(
 						verify_signature(&pk, message, context, &signature),
 						"Signature should verify"
@@ -1848,57 +1884,29 @@ mod tests {
 		let message = b"test message".to_vec();
 		let context = b"context".to_vec();
 
-		// Run a full signing protocol to get a valid signature
-		let mut protocols: Vec<DilithiumSignProtocol> = shares
-			.iter()
-			.take(2)
-			.enumerate()
-			.map(|(i, share)| {
-				let signer = ThresholdSigner::new(share.clone(), pk.clone(), config).unwrap();
-				// Each party gets a unique seed
-				let mut round1_seed = [0u8; 32];
-				round1_seed[0] = i as u8;
-				DilithiumSignProtocol::new(
-					signer,
-					message.clone(),
-					context.clone(),
-					vec![0, 1], // exactly threshold participants
-					i as u32,
-					0, // party 0 is leader
-					round1_seed,
-				)
-				.unwrap()
-			})
-			.collect();
+		// Run a full signing protocol to get a valid signature using run_local_signing
+		// Try multiple times due to rejection sampling
+		let mut valid_sig = None;
+		for attempt in 0..100 {
+			let signers: Vec<_> = shares
+				.iter()
+				.take(2)
+				.map(|s| ThresholdSigner::new(s.clone(), pk.clone(), config).unwrap())
+				.collect();
 
-		// Run until we get a signature
-		let mut signature = None;
-		for _ in 0..100 {
-			for i in 0..2 {
-				if let Ok(action) = protocols[i].poke() {
-					match action {
-						Action::SendMany(data) => {
-							// Send to all other parties
-							for (j, protocol) in protocols.iter_mut().enumerate() {
-								if i != j {
-									let _ = protocol.message(i as u32, data.clone());
-								}
-							}
-						},
-						Action::Return(sig) => {
-							signature = Some(sig);
-							break;
-						},
-						Action::Wait => {},
-					}
-				}
-			}
-			if signature.is_some() {
-				break;
+			let mut session_seed = [0u8; 32];
+			session_seed[0] = attempt as u8;
+
+			match run_local_signing(signers, &message, &context, &session_seed) {
+				Ok(sig) => {
+					valid_sig = Some(sig);
+					break;
+				},
+				Err(_) => continue,
 			}
 		}
 
-		let valid_sig = signature.expect("Should have produced a valid signature");
+		let valid_sig = valid_sig.expect("Should have produced a valid signature");
 
 		// Verify the signature is actually valid
 		assert!(verify_signature(&pk, &message, &context, &valid_sig), "Signature should be valid");
@@ -1929,5 +1937,128 @@ mod tests {
 			other => panic!("Expected Action::Return with valid signature, got: {:?}", other),
 		}
 		assert!(matches!(follower.state, SignProtocolState::Done));
+	}
+
+	/// A Round 2 reveal that does not hash back to the previously-accepted Round 1
+	/// commitment for the same party must be silently dropped (and must NOT occupy
+	/// the slot in `r2_broadcasts`). This is the receive-time enforcement of the
+	/// paper's ShareSign_3 binding (Fig. 6), and the direct fix for the audited
+	/// replay-poisoning vulnerability.
+	#[test]
+	fn test_round2_with_mismatched_commitment_is_dropped() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+		)
+		.unwrap();
+
+		// Advance the protocol past Round 1 so Round 2 is accepted at intake.
+		// We do this by manually installing a Round 1 broadcast from peer 1 and
+		// transitioning to Round2Waiting (matching what would happen after a
+		// successful Round 1 exchange in production).
+		let _ = protocol.poke().unwrap(); // Round1Generate -> Round1Waiting (and stores my_r1)
+		let fake_r1 = Round1Broadcast::new(1, [0xDE; 32]); // commitment we'll mismatch against
+		protocol.r1_broadcasts.insert(1, fake_r1);
+		protocol.state = SignProtocolState::Round2Waiting;
+
+		// Now deliver a Round 2 whose commitment_data does NOT hash to [0xDE; 32].
+		let bad_r2 = Round2Broadcast::new(1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+		let msg = SigningMessage::Round2(bad_r2);
+		let data = protocol.serialize_message(&msg).unwrap();
+		protocol.message(1, data).unwrap();
+
+		assert!(
+			!protocol.r2_broadcasts.contains_key(&1),
+			"Round 2 with mismatched commitment hash must not be accepted into r2_broadcasts"
+		);
+	}
+
+	/// Buffered Round 2 messages must also be subjected to the commitment-hash
+	/// check when they're drained on transition into Round 2. A replayed Round 2
+	/// that arrived early (so was buffered) must not poison the live r2_broadcasts
+	/// map once the corresponding Round 1 has been collected.
+	#[test]
+	fn test_buffered_round2_with_mismatched_commitment_is_dropped() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+		)
+		.unwrap();
+
+		// In Round1Waiting, a Round 2 from peer 1 should be buffered (no Round 1
+		// from peer 1 yet, so the check is necessarily deferred).
+		let _ = protocol.poke().unwrap();
+		let bad_r2 = Round2Broadcast::new(1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+		let msg = SigningMessage::Round2(bad_r2);
+		let data = protocol.serialize_message(&msg).unwrap();
+		protocol.message(1, data).unwrap();
+		assert!(protocol.message_buffer.round2.contains_key(&1));
+
+		// Now install a Round 1 from peer 1 whose commitment_hash does NOT
+		// correspond to the buffered Round 2's commitment_data, and drain the buffer.
+		let fake_r1 = Round1Broadcast::new(1, [0xDE; 32]);
+		protocol.r1_broadcasts.insert(1, fake_r1);
+		protocol.process_buffered_round2();
+
+		assert!(
+			!protocol.r2_broadcasts.contains_key(&1),
+			"Buffered Round 2 with mismatched commitment hash must be dropped, not promoted"
+		);
+		assert!(protocol.message_buffer.round2.is_empty());
+	}
+
+	/// A leader whose `combine_with_message` fails must surface that as a hard
+	/// error and transition to `Failed`. There is no in-protocol retry; the
+	/// caller is expected to spawn a fresh DilithiumSignProtocol instance to
+	/// retry, on a fresh transport channel.
+	#[test]
+	fn test_combination_failure_is_terminal() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+		)
+		.unwrap();
+
+		// Force the protocol into Round4Deciding with empty broadcasts so that
+		// combination cannot succeed.
+		protocol.state = SignProtocolState::Round4Deciding;
+
+		let result = protocol.poke();
+		assert!(result.is_err(), "combination on empty state must fail");
+		assert!(
+			matches!(protocol.state, SignProtocolState::Failed(_)),
+			"protocol must transition to Failed on combination error"
+		);
+
+		// Subsequent pokes must continue to fail (the instance is dead).
+		let again = protocol.poke();
+		assert!(matches!(again, Err(SignProtocolError::ProtocolFailed(_))));
 	}
 }

@@ -683,7 +683,7 @@ mod dkg_coverage {
 		);
 		assert!(result.is_ok(), "Signing should succeed: {:?}", result.err());
 
-		let (signature, _retry_count) = result.unwrap();
+		let signature = result.unwrap();
 		assert!(
 			verify_signature(&public_key, message, context, &signature),
 			"Signature should verify"
@@ -756,7 +756,7 @@ mod protocol_integration {
 		let result = run_local_signing(signers, message, context, &seed);
 		assert!(result.is_ok(), "2-of-2 signing should succeed: {:?}", result.err());
 
-		let (signature, _retry_count) = result.unwrap();
+		let signature = result.unwrap();
 		assert!(
 			verify_signature(&public_key, message, context, &signature),
 			"Signature should verify"
@@ -781,7 +781,7 @@ mod protocol_integration {
 		let result = run_local_signing(signers, message, context, &seed);
 		assert!(result.is_ok(), "4-of-4 signing should succeed: {:?}", result.err());
 
-		let (signature, _retry_count) = result.unwrap();
+		let signature = result.unwrap();
 		assert!(
 			verify_signature(&public_key, message, context, &signature),
 			"Signature should verify"

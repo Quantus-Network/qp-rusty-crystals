@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use qp_rusty_crystals_threshold::{
 	generate_with_dealer,
 	keygen::dkg::{run_local_mithril_dkg, TranscriptSigner},
-	signing_protocol::{run_local_signing, DilithiumSignProtocol},
-	verify_signature, ParticipantId, ThresholdConfig, ThresholdSigner,
+	signing_protocol::{run_local_signing, DilithiumSignProtocol, SignProtocolError},
+	verify_signature, ParticipantId, Signature, ThresholdConfig, ThresholdSigner,
 };
 
 /// Helper to encode bytes as hex string
@@ -17,7 +17,15 @@ fn hex_encode(data: &[u8]) -> String {
 	data.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Run the complete threshold signing protocol using the 4-round protocol with leader-based retry.
+/// Run the complete threshold signing protocol using the 4-round protocol.
+///
+/// `run_local_signing` is a single attempt — it returns an error if ML-DSA
+/// rejection sampling happens to fail on that attempt. In production (NEAR MPC),
+/// the application layer retries with a fresh `DilithiumSignProtocol` on a fresh
+/// transport channel up to `MAX_ATTEMPTS_PER_REQUEST_AS_LEADER` times. We mirror
+/// that behaviour here so tests are not flaky on parameter sets that frequently
+/// abort on the first attempt.
+///
 /// Returns Ok(signature_bytes) on success or Err(message) on failure.
 fn run_threshold_protocol_4_round(
 	threshold: u32,
@@ -32,25 +40,47 @@ fn run_threshold_protocol_4_round(
 	let (public_key, shares) =
 		generate_with_dealer(seed, config).map_err(|e| format!("Key generation error: {:?}", e))?;
 
-	// Create signers for the first `threshold` parties (active signers)
-	let signers: Vec<ThresholdSigner> = shares
-		.into_iter()
-		.take(threshold as usize)
-		.map(|share| ThresholdSigner::new(share, public_key.clone(), config))
-		.collect::<Result<_, _>>()
-		.map_err(|e| format!("Signer creation error: {:?}", e))?;
+	// Retry with derived seeds — equivalent to NEAR MPC spawning a fresh
+	// DilithiumSignProtocol per attempt with a new round1_seed.
+	const MAX_EXTERNAL_ATTEMPTS: u32 = 100;
+	let mut last_err = String::new();
+	for attempt in 0..MAX_EXTERNAL_ATTEMPTS {
+		// Create signers for the first `threshold` parties (active signers).
+		// New ThresholdSigner instances per attempt mirror the "fresh protocol
+		// instance" pattern used by NEAR MPC.
+		let signers: Vec<ThresholdSigner> = shares
+			.iter()
+			.cloned()
+			.take(threshold as usize)
+			.map(|share| ThresholdSigner::new(share, public_key.clone(), config))
+			.collect::<Result<_, _>>()
+			.map_err(|e| format!("Signer creation error: {:?}", e))?;
 
-	// Run the 4-round signing protocol with leader-based retry
-	// Use the keygen seed as the session seed for deterministic tests
-	let (signature, _retry_count) = run_local_signing(signers, message, context, seed)
-		.map_err(|e| format!("Signing error: {:?}", e))?;
+		// Derive a per-attempt session seed from the base seed.
+		let mut attempt_seed = *seed;
+		let attempt_bytes = attempt.to_le_bytes();
+		for (i, b) in attempt_bytes.iter().enumerate() {
+			attempt_seed[i] ^= *b;
+		}
 
-	// Verify the signature
-	if !verify_signature(&public_key, message, context, &signature) {
-		return Err("Signature verification failed".to_string());
+		match run_local_signing(signers, message, context, &attempt_seed) {
+			Ok(signature) => {
+				if !verify_signature(&public_key, message, context, &signature) {
+					return Err("Signature verification failed".to_string());
+				}
+				return Ok(signature.as_bytes().to_vec());
+			},
+			Err(e) => {
+				last_err = format!("{:?}", e);
+				continue;
+			},
+		}
 	}
 
-	Ok(signature.as_bytes().to_vec())
+	Err(format!(
+		"Signing failed after {} attempts (last error: {})",
+		MAX_EXTERNAL_ATTEMPTS, last_err
+	))
 }
 
 // ============================================================================
@@ -438,28 +468,58 @@ fn test_threshold_matrix() {
 			},
 		};
 
-		// Create signers for threshold parties
-		let signers: Vec<ThresholdSigner> = match shares
-			.into_iter()
+		// Create signers for threshold parties (we'll re-create per attempt below
+		// so we keep the original Vec<PrivateKeyShare> handy here, not move it).
+		// Validate creation eagerly so we can fail fast with a nice message.
+		if let Err(e) = shares
+			.iter()
+			.cloned()
 			.take(*threshold as usize)
 			.map(|share| ThresholdSigner::new(share, public_key.clone(), config))
 			.collect::<Result<Vec<_>, _>>()
 		{
-			Ok(s) => s,
-			Err(e) => {
-				println!("❌ {}-of-{}: Signer creation error: {:?}", threshold, total_parties, e);
-				failed += 1;
-				continue;
-			},
-		};
+			println!("❌ {}-of-{}: Signer creation error: {:?}", threshold, total_parties, e);
+			failed += 1;
+			continue;
+		}
 
-		// Run the 4-round signing protocol with leader-based retry
-		match run_local_signing(signers, message, context, &seed) {
-			Ok((signature, retry_count)) => {
+		// Run the signing protocol, retrying with derived per-attempt seeds the
+		// same way NEAR MPC would re-spawn a fresh DilithiumSignProtocol per
+		// attempt. Each retry constructs new ThresholdSigner instances.
+		const MAX_EXTERNAL_ATTEMPTS: u32 = 100;
+		let mut sig_result: Result<Signature, SignProtocolError> =
+			Err(SignProtocolError::SigningError("no attempts made".into()));
+		for attempt in 0..MAX_EXTERNAL_ATTEMPTS {
+			let signers: Vec<ThresholdSigner> = shares
+				.iter()
+				.cloned()
+				.take(*threshold as usize)
+				.map(|share| ThresholdSigner::new(share, public_key.clone(), config).unwrap())
+				.collect();
+			let mut attempt_seed = seed;
+			let bytes = attempt.to_le_bytes();
+			for (i, b) in bytes.iter().enumerate() {
+				attempt_seed[i] ^= *b;
+			}
+			match run_local_signing(signers, message, context, &attempt_seed) {
+				Ok(s) => {
+					sig_result = Ok(s);
+					break;
+				},
+				Err(e) => sig_result = Err(e),
+			}
+		}
+
+		match sig_result {
+			Ok(signature) => {
 				// Verify the signature
 				if verify_signature(&public_key, message, context, &signature) {
 					let elapsed = start.elapsed();
 					total_time += elapsed;
+					// Retries are now driven externally by the caller (e.g. NEAR MPC
+					// spawning fresh instances); a successful signing has 0 in-protocol
+					// retries by construction.
+					let retry_count: u32 = 0;
 					total_retries += retry_count;
 					if retry_count > max_retries {
 						max_retries = retry_count;
@@ -629,32 +689,59 @@ fn test_threshold_matrix_dkg() {
 			},
 		};
 
-		// Create signers for threshold parties
-		let signers: Vec<ThresholdSigner> = match dkg_outputs
-			.into_iter()
-			.take(*threshold as usize)
+		// Create signers for threshold parties. We keep the DKG outputs in a Vec
+		// so we can re-create signers per attempt below (retries are external).
+		let dkg_outputs_taken: Vec<_> = dkg_outputs.into_iter().take(*threshold as usize).collect();
+		if let Err(e) = dkg_outputs_taken
+			.iter()
+			.cloned()
 			.map(|output| ThresholdSigner::new(output.private_share, public_key.clone(), config))
 			.collect::<Result<Vec<_>, _>>()
 		{
-			Ok(s) => s,
-			Err(e) => {
-				println!("❌ {}-of-{}: Signer creation error: {:?}", threshold, total_parties, e);
-				failed += 1;
-				continue;
-			},
-		};
+			println!("❌ {}-of-{}: Signer creation error: {:?}", threshold, total_parties, e);
+			failed += 1;
+			continue;
+		}
 
 		// Create a session seed from the DKG seed for signing
 		let mut session_seed = [0u8; 32];
 		session_seed[..8].copy_from_slice(&seed.to_le_bytes());
 
-		// Run the 4-round signing protocol with leader-based retry
-		match run_local_signing(signers, message, context, &session_seed) {
-			Ok((signature, retry_count)) => {
+		// Run the signing protocol, retrying with derived per-attempt seeds the
+		// same way NEAR MPC would re-spawn a fresh DilithiumSignProtocol per
+		// attempt.
+		const MAX_EXTERNAL_ATTEMPTS: u32 = 100;
+		let mut sig_result: Result<Signature, SignProtocolError> =
+			Err(SignProtocolError::SigningError("no attempts made".into()));
+		for attempt in 0..MAX_EXTERNAL_ATTEMPTS {
+			let signers: Vec<ThresholdSigner> = dkg_outputs_taken
+				.iter()
+				.cloned()
+				.map(|output| {
+					ThresholdSigner::new(output.private_share, public_key.clone(), config).unwrap()
+				})
+				.collect();
+			let mut attempt_seed = session_seed;
+			let bytes = attempt.to_le_bytes();
+			for (i, b) in bytes.iter().enumerate() {
+				attempt_seed[i] ^= *b;
+			}
+			match run_local_signing(signers, message, context, &attempt_seed) {
+				Ok(s) => {
+					sig_result = Ok(s);
+					break;
+				},
+				Err(e) => sig_result = Err(e),
+			}
+		}
+
+		match sig_result {
+			Ok(signature) => {
 				// Verify the signature
 				if verify_signature(&public_key, message, context, &signature) {
 					let elapsed = start.elapsed();
 					total_time += elapsed;
+					let retry_count: u32 = 0;
 					total_retries += retry_count;
 					if retry_count > max_retries {
 						max_retries = retry_count;
@@ -807,23 +894,49 @@ fn run_subset_signing_4_round(
 	let signing_shares: Vec<_> =
 		signing_parties.iter().map(|&id| all_shares[id as usize].clone()).collect();
 
-	// Create signers for the signing subset
-	let signers: Vec<ThresholdSigner> = signing_shares
-		.into_iter()
+	// Validate signers can be created at least once.
+	if let Err(e) = signing_shares
+		.iter()
+		.cloned()
 		.map(|share| ThresholdSigner::new(share, public_key.clone(), signing_config))
-		.collect::<Result<_, _>>()
-		.map_err(|e| format!("Signer creation error: {:?}", e))?;
-
-	// Run the 4-round signing protocol with leader-based retry
-	let (signature, _retry_count) = run_local_signing(signers, message, context, seed)
-		.map_err(|e| format!("Signing error: {:?}", e))?;
-
-	// Verify the signature
-	if !verify_signature(&public_key, message, context, &signature) {
-		return Err("Signature verification failed".to_string());
+		.collect::<Result<Vec<_>, _>>()
+	{
+		return Err(format!("Signer creation error: {:?}", e));
 	}
 
-	Ok(signature.as_bytes().to_vec())
+	// Retry with derived per-attempt seeds — equivalent to NEAR MPC spawning
+	// a fresh DilithiumSignProtocol per attempt with a fresh round1_seed.
+	const MAX_EXTERNAL_ATTEMPTS: u32 = 100;
+	let mut last_err = String::new();
+	for attempt in 0..MAX_EXTERNAL_ATTEMPTS {
+		let signers: Vec<ThresholdSigner> = signing_shares
+			.iter()
+			.cloned()
+			.map(|share| ThresholdSigner::new(share, public_key.clone(), signing_config).unwrap())
+			.collect();
+		let mut attempt_seed = *seed;
+		let bytes = attempt.to_le_bytes();
+		for (i, b) in bytes.iter().enumerate() {
+			attempt_seed[i] ^= *b;
+		}
+		match run_local_signing(signers, message, context, &attempt_seed) {
+			Ok(signature) => {
+				if !verify_signature(&public_key, message, context, &signature) {
+					return Err("Signature verification failed".to_string());
+				}
+				return Ok(signature.as_bytes().to_vec());
+			},
+			Err(e) => {
+				last_err = format!("{:?}", e);
+				continue;
+			},
+		}
+	}
+
+	Err(format!(
+		"Signing failed after {} attempts (last error: {})",
+		MAX_EXTERNAL_ATTEMPTS, last_err
+	))
 }
 
 /// Test subset signing: 3 parties sign from 4-party DKG (parties 0, 1, 2)
