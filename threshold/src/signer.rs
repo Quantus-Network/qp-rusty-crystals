@@ -357,9 +357,12 @@ impl ThresholdSigner {
 		other_round1: &[Round1Broadcast],
 	) -> ThresholdResult<Round2Broadcast> {
 		// Validate inputs first (before state check to give better errors)
+		// The Mithril scheme requires EXACTLY threshold parties (not more, not fewer).
+		// See signing_protocol.rs documentation for details.
 		let total_parties = other_round1.len() + 1; // +1 for ourselves
-		if total_parties < self.config.threshold() as usize {
-			return Err(ThresholdError::InsufficientParties {
+		let threshold = self.config.threshold() as usize;
+		if total_parties != threshold {
+			return Err(ThresholdError::WrongPartyCount {
 				provided: total_parties,
 				required: self.config.threshold(),
 			});

@@ -25,11 +25,11 @@ pub enum ThresholdError {
 		/// Maximum valid party ID.
 		max_id: u32,
 	},
-	/// Insufficient number of parties for threshold.
-	InsufficientParties {
+	/// Wrong number of parties (Mithril requires exactly threshold).
+	WrongPartyCount {
 		/// Number of parties provided.
 		provided: usize,
-		/// Required threshold.
+		/// Required threshold (exact).
 		required: u32,
 	},
 	/// Invalid signature share.
@@ -188,8 +188,12 @@ impl fmt::Display for ThresholdError {
 			ThresholdError::InvalidPartyId { party_id, max_id } => {
 				write!(f, "Invalid party ID: {} (max: {})", party_id, max_id)
 			},
-			ThresholdError::InsufficientParties { provided, required } => {
-				write!(f, "Insufficient parties: provided {}, required {}", provided, required)
+			ThresholdError::WrongPartyCount { provided, required } => {
+				write!(
+					f,
+					"Wrong party count: provided {}, but Mithril requires exactly {} (threshold)",
+					provided, required
+				)
 			},
 			ThresholdError::InvalidSignatureShare { party_id, reason } => {
 				write!(f, "Invalid signature share from party {}: {}", party_id, reason)
