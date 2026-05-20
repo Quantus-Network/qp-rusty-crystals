@@ -8,12 +8,12 @@
 use alloc::vec::Vec;
 
 use qp_rusty_crystals_dilithium::{
-	fips202, packing,
+	packing,
 	params::{K, N, Q},
 	polyvec,
 };
 
-use crate::keys::{PublicKey, PUBLIC_KEY_SIZE, TR_SIZE};
+use crate::keys::{PublicKey, PUBLIC_KEY_SIZE};
 
 /// Compute the unrounded partial PK polynomial vector `t = A·s1 + s2 mod Q`.
 ///
@@ -84,13 +84,7 @@ where
 	let mut pk_packed = [0u8; PUBLIC_KEY_SIZE];
 	packing::pack_pk(&mut pk_packed, rho, &t1);
 
-	let mut tr = [0u8; TR_SIZE];
-	let mut h_tr = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut h_tr, &pk_packed, pk_packed.len());
-	fips202::shake256_finalize(&mut h_tr);
-	fips202::shake256_squeeze(&mut tr, TR_SIZE, &mut h_tr);
-
-	PublicKey::new(pk_packed, tr)
+	PublicKey::new(pk_packed)
 }
 
 #[cfg(test)]

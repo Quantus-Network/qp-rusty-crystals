@@ -19,23 +19,58 @@ pub const PUBLIC_KEY_SIZE: usize = 2592;
 /// Size of the TR hash (public key hash) in bytes.
 pub const TR_SIZE: usize = 64;
 
+/// Compute TR = SHAKE256(pk_bytes).
+fn compute_tr(bytes: &[u8; PUBLIC_KEY_SIZE]) -> [u8; TR_SIZE] {
+	let mut tr = [0u8; TR_SIZE];
+	let mut state = qp_rusty_crystals_dilithium::fips202::KeccakState::default();
+	qp_rusty_crystals_dilithium::fips202::shake256_absorb(&mut state, bytes, bytes.len());
+	qp_rusty_crystals_dilithium::fips202::shake256_finalize(&mut state);
+	qp_rusty_crystals_dilithium::fips202::shake256_squeeze(&mut tr, TR_SIZE, &mut state);
+	tr
+}
+
 /// Public key for threshold ML-DSA-87.
 ///
 /// This key is shared among all parties and is used for signature verification.
 /// It can be freely distributed - there is no secret material here.
 ///
 /// The public key is compatible with standard ML-DSA-87 verification.
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+///
+/// # Serialization
+///
+/// Only the public key bytes are serialized. The TR hash (used internally for
+/// signing) is recomputed from bytes during deserialization. This eliminates
+/// the possibility of "poisoned" public keys with mismatched TR values.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicKey {
 	/// Packed public key bytes (standard ML-DSA-87 format).
 	bytes: [u8; PUBLIC_KEY_SIZE],
-	/// Public key hash (TR), used in signing.
+	/// Public key hash (TR), used in signing. Always equals SHAKE256(bytes).
+	/// Cached for performance since it's used in hot paths during signing.
 	tr: [u8; TR_SIZE],
 }
 
+impl BorshSerialize for PublicKey {
+	fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+		// Only serialize bytes; tr is recomputed on deserialize
+		self.bytes.serialize(writer)
+	}
+}
+
+impl BorshDeserialize for PublicKey {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let bytes = <[u8; PUBLIC_KEY_SIZE]>::deserialize_reader(reader)?;
+		let tr = compute_tr(&bytes);
+		Ok(Self { bytes, tr })
+	}
+}
+
 impl PublicKey {
-	/// Create a new public key from its components.
-	pub(crate) fn new(bytes: [u8; PUBLIC_KEY_SIZE], tr: [u8; TR_SIZE]) -> Self {
+	/// Create a new public key from packed bytes.
+	///
+	/// TR is computed automatically as `SHAKE256(bytes)`.
+	pub(crate) fn new(bytes: [u8; PUBLIC_KEY_SIZE]) -> Self {
+		let tr = compute_tr(&bytes);
 		Self { bytes, tr }
 	}
 
@@ -54,7 +89,7 @@ impl PublicKey {
 
 	/// Create a public key from bytes.
 	///
-	/// This recomputes the TR hash from the public key bytes.
+	/// This computes the TR hash from the public key bytes.
 	pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
 		if bytes.len() != PUBLIC_KEY_SIZE {
 			return Err("invalid public key length");
@@ -63,13 +98,7 @@ impl PublicKey {
 		let mut pk_bytes = [0u8; PUBLIC_KEY_SIZE];
 		pk_bytes.copy_from_slice(bytes);
 
-		// Compute TR = SHAKE256(pk)
-		let mut tr = [0u8; TR_SIZE];
-		let mut state = qp_rusty_crystals_dilithium::fips202::KeccakState::default();
-		qp_rusty_crystals_dilithium::fips202::shake256_absorb(&mut state, bytes, bytes.len());
-		qp_rusty_crystals_dilithium::fips202::shake256_finalize(&mut state);
-		qp_rusty_crystals_dilithium::fips202::shake256_squeeze(&mut tr, TR_SIZE, &mut state);
-
+		let tr = compute_tr(&pk_bytes);
 		Ok(Self { bytes: pk_bytes, tr })
 	}
 }
@@ -269,5 +298,41 @@ mod tests {
 		assert_eq!(pk_share.key, [0u8; 32]);
 		assert_eq!(pk_share.rho, [0u8; 32]);
 		assert_eq!(pk_share.tr, [0u8; TR_SIZE]);
+	}
+
+	#[test]
+	fn test_public_key_borsh_roundtrip() {
+		// Valid public key should serialize and deserialize correctly
+		let bytes = [0x42u8; PUBLIC_KEY_SIZE];
+		let pk = PublicKey::from_bytes(&bytes).unwrap();
+
+		let serialized = borsh::to_vec(&pk).unwrap();
+		let deserialized: PublicKey = borsh::from_slice(&serialized).unwrap();
+
+		assert_eq!(pk, deserialized);
+		assert_eq!(pk.as_bytes(), deserialized.as_bytes());
+		assert_eq!(pk.tr(), deserialized.tr());
+	}
+
+	#[test]
+	fn test_public_key_serialization_only_includes_bytes() {
+		// Verify that only the public key bytes are serialized (not TR)
+		let bytes = [0x42u8; PUBLIC_KEY_SIZE];
+		let pk = PublicKey::from_bytes(&bytes).unwrap();
+
+		let serialized = borsh::to_vec(&pk).unwrap();
+
+		// Serialized size should be exactly PUBLIC_KEY_SIZE (no TR)
+		assert_eq!(serialized.len(), PUBLIC_KEY_SIZE);
+
+		// TR is recomputed on deserialize, so any modification to the
+		// serialized bytes will result in a different (but consistent) TR
+		let mut modified = serialized.clone();
+		modified[0] ^= 0xFF;
+		let deserialized: PublicKey = borsh::from_slice(&modified).unwrap();
+
+		// The deserialized key should have different bytes AND different TR
+		assert_ne!(deserialized.as_bytes(), pk.as_bytes());
+		assert_ne!(deserialized.tr(), pk.tr());
 	}
 }

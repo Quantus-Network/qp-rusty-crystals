@@ -203,12 +203,23 @@ impl ThresholdSigner {
 	///
 	/// # Errors
 	///
-	/// Returns an error if the private key share is not compatible with the config.
+	/// Returns an error if the private key share is not compatible with the config,
+	/// or if the public key's TR does not match the private key's TR.
 	pub fn new(
 		private_key: PrivateKeyShare,
 		public_key: PublicKey,
 		config: ThresholdConfig,
 	) -> ThresholdResult<Self> {
+		// Validate public key TR matches private key TR.
+		// This prevents "poisoned" public keys from causing commitment hash mismatches
+		// during threshold signing (Round 1 uses private_key.tr(), verification uses
+		// public_key.tr()).
+		if public_key.tr() != private_key.tr() {
+			return Err(ThresholdError::InvalidConfiguration(
+				"Public key TR does not match private key TR - possible key mismatch or corrupted public key".to_string()
+			));
+		}
+
 		// Validate that the config is compatible with the private key for subset signing.
 		//
 		// For subset signing (t-of-n threshold), we allow:
@@ -699,6 +710,7 @@ impl ZeroizeOnDrop for ThresholdSigner {}
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::participants::ParticipantList;
 
 	#[test]
 	fn test_signer_state_transitions() {
@@ -706,5 +718,45 @@ mod tests {
 		// For now, just test that the phase names are correct
 		let state = SignerState::default();
 		assert!(matches!(state.phase, SigningPhase::Fresh));
+	}
+
+	#[test]
+	fn test_signer_rejects_mismatched_public_key_tr() {
+		use crate::keys::{PrivateKeyShare, PublicKey, PUBLIC_KEY_SIZE, TR_SIZE};
+		use alloc::collections::BTreeMap;
+
+		// Create a private key share with a specific TR
+		let private_tr = [0x42u8; TR_SIZE];
+		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
+		let private_key = PrivateKeyShare::new(
+			0,         // party_id
+			3,         // total_parties
+			2,         // threshold
+			[0u8; 32], // key
+			[0u8; 32], // rho
+			private_tr,
+			BTreeMap::new(), // shares (empty is fine for this test)
+			dkg_participants,
+		);
+
+		// Create a public key - from_bytes computes TR = SHAKE256(bytes),
+		// which will NOT match our private key's TR (0x42 repeated)
+		let pk_bytes = [0u8; PUBLIC_KEY_SIZE];
+		let public_key = PublicKey::from_bytes(&pk_bytes).unwrap();
+
+		// The public key's TR is SHAKE256([0u8; PUBLIC_KEY_SIZE]), not [0x42; TR_SIZE]
+		assert_ne!(public_key.tr(), &private_tr);
+
+		// ThresholdSigner::new should reject this mismatched key pair
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let result = ThresholdSigner::new(private_key, public_key, config);
+
+		match result {
+			Err(ThresholdError::InvalidConfiguration(msg)) => {
+				assert!(msg.contains("TR"), "Error should mention TR mismatch, got: {}", msg);
+			},
+			Err(e) => panic!("Expected InvalidConfiguration error, got: {:?}", e),
+			Ok(_) => panic!("Should reject public key with TR not matching private key TR"),
+		}
 	}
 }

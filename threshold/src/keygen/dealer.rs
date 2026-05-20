@@ -15,7 +15,7 @@ use qp_rusty_crystals_dilithium::{
 use crate::{
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
-	keys::{PrivateKeyShare, PublicKey, SecretShareData, PUBLIC_KEY_SIZE, TR_SIZE},
+	keys::{PrivateKeyShare, PublicKey, SecretShareData, PUBLIC_KEY_SIZE},
 	participants::{ParticipantId, ParticipantList},
 	protocol::primitives::{mod_q, NttAccumulatorL},
 };
@@ -147,15 +147,11 @@ pub fn generate_with_dealer(
 	let mut pk_packed = [0u8; PUBLIC_KEY_SIZE];
 	packing::pack_pk(&mut pk_packed, &rho, &t1);
 
-	// 8. Compute TR = SHAKE256(pk)
-	let mut tr = [0u8; TR_SIZE];
-	let mut h_tr = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut h_tr, &pk_packed, pk_packed.len());
-	fips202::shake256_finalize(&mut h_tr);
-	fips202::shake256_squeeze(&mut tr, TR_SIZE, &mut h_tr);
+	// Create public key (TR is computed internally)
+	let public_key = PublicKey::new(pk_packed);
 
-	// Create public key
-	let public_key = PublicKey::new(pk_packed, tr);
+	// 8. Compute TR = SHAKE256(pk) for private key shares
+	let tr = *public_key.tr();
 
 	// 9. Create private key shares
 	let mut private_keys = Vec::with_capacity(parties as usize);
