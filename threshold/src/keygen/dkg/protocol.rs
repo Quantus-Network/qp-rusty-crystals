@@ -42,7 +42,12 @@ use qp_rusty_crystals_dilithium::{
 };
 
 /// Maximum DKG message size in bytes (256 KB).
-/// This limits the size of serialized DKG protocol messages.
+/// Maximum size of a serialized DKG message (256 KB).
+///
+/// This limits total memory allocation from any single message. Borsh validates
+/// that internal length prefixes don't exceed remaining input before allocating,
+/// so the packet size check is sufficient to prevent memory exhaustion attacks
+/// from malicious length prefixes. See `test_malicious_length_prefix_rejected`.
 pub const MAX_DKG_MESSAGE_SIZE: usize = 256 * 1024;
 
 // ============================================================================
@@ -50,6 +55,13 @@ pub const MAX_DKG_MESSAGE_SIZE: usize = 256 * 1024;
 // ============================================================================
 
 /// Deserialize a DKG message with size limits to prevent resource exhaustion.
+///
+/// # Security
+///
+/// The packet size check combined with borsh's length validation ensures that:
+/// 1. Total allocation is bounded by `MAX_DKG_MESSAGE_SIZE`
+/// 2. Malicious length prefixes claiming more bytes than available are rejected
+///    with an error (not OOM)
 fn deserialize_message(data: &[u8]) -> Result<MithrilDkgMessage, String> {
 	if data.len() > MAX_DKG_MESSAGE_SIZE {
 		return Err(format!("Message size {} exceeds maximum {}", data.len(), MAX_DKG_MESSAGE_SIZE));
@@ -3674,6 +3686,54 @@ mod tests {
 			err_msg.contains("too large") || err_msg.contains("Message"),
 			"Error should mention size limit, got: {}",
 			err_msg
+		);
+	}
+
+	#[test]
+	fn test_malicious_length_prefix_rejected() {
+		// Test that a packet with a malicious internal length prefix is rejected.
+		// This verifies that borsh validates length prefixes against remaining data
+		// before allocating, preventing memory exhaustion attacks.
+		//
+		// Attack scenario: attacker sends a small packet (passes MAX_MESSAGE_SIZE check)
+		// but with an internal Vec length prefix claiming a huge size (e.g., 1GB).
+		// Expected: borsh rejects with "Unexpected length of input", NOT OOM.
+
+		// Craft a malicious packet:
+		// - Enum variant tag for Round4Broadcast (has Vec<u8> for transcript_signature)
+		// - Valid party_id
+		// - Empty BTreeMap for partial_public_keys
+		// - Vec<u8> with huge length prefix but insufficient data
+
+		let mut malicious: Vec<u8> = Vec::new();
+
+		// MithrilDkgMessage enum tag for Round4Broadcast = 4
+		malicious.push(4);
+
+		// party_id: u32
+		malicious.extend_from_slice(&1u32.to_le_bytes());
+
+		// partial_public_keys: BTreeMap - empty (length = 0)
+		malicious.extend_from_slice(&0u32.to_le_bytes());
+
+		// transcript_signature: Vec<u8> - malicious length prefix claiming 1GB
+		malicious.extend_from_slice(&1_000_000_000u32.to_le_bytes());
+		// Only add 10 bytes of actual data (not 1GB)
+		malicious.extend_from_slice(&[0u8; 10]);
+
+		// Total packet size is small (~23 bytes), passes MAX_MESSAGE_SIZE check
+		assert!(malicious.len() < MAX_DKG_MESSAGE_SIZE);
+
+		// Deserialize should fail with a borsh error, NOT allocate 1GB
+		let result = deserialize_message(&malicious);
+		assert!(result.is_err(), "Malicious length prefix should be rejected");
+
+		// Verify we got a deserialization error, not OOM
+		let err = result.unwrap_err();
+		assert!(
+			err.contains("length") || err.contains("input") || err.contains("Unexpected"),
+			"Should fail with length/input error, got: {}",
+			err
 		);
 	}
 }
