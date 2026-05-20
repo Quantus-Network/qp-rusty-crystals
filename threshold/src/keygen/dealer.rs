@@ -17,7 +17,7 @@ use crate::{
 	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey, SecretShareData, PUBLIC_KEY_SIZE, TR_SIZE},
 	participants::{ParticipantId, ParticipantList},
-	protocol::primitives::mod_q,
+	protocol::primitives::{mod_q, NttAccumulatorL},
 };
 
 /// Generate threshold keys using a trusted dealer.
@@ -235,10 +235,12 @@ fn generate_threshold_shares(
 		party_shares.insert(i, BTreeMap::new());
 	}
 
-	// Total secrets
+	// Total secrets (η-bounded, safe with i32)
 	let mut s1_total = polyvec::Polyvecl::default();
 	let mut s2_total = polyvec::Polyveck::default();
-	let mut s1h_total = polyvec::Polyvecl::default();
+
+	// NTT-domain accumulator uses u64 to avoid overflow for large configurations.
+	let mut s1h_acc = NttAccumulatorL::new();
 
 	// Generate shares for all possible "honest signer" combinations
 	// Use u16 to support up to 16 parties
@@ -262,11 +264,12 @@ fn generate_threshold_shares(
 			poly::uniform_eta(s2_poly, &share_seed, (L + j) as u16);
 		}
 
-		// Compute NTT of s1 share
+		// Compute NTT of s1 share and accumulate
 		let mut s1h_share = s1_share.clone();
 		for s1h_poly in s1h_share.vec.iter_mut().take(L) {
 			crate::circl_ntt::ntt(s1h_poly);
 		}
+		s1h_acc.add_polyvecl(&s1h_share);
 
 		// Create share object
 		let share = SecretShare { s1_share: s1_share.clone(), s2_share: s2_share.clone() };
@@ -280,22 +283,14 @@ fn generate_threshold_shares(
 			}
 		}
 
-		// Add to total
-		for ((total_poly, share_poly), (totalh_poly, shareh_poly)) in s1_total
-			.vec
-			.iter_mut()
-			.zip(s1_share.vec.iter())
-			.zip(s1h_total.vec.iter_mut().zip(s1h_share.vec.iter()))
-			.take(L)
-		{
-			for ((total_coeff, share_coeff), (totalh_coeff, shareh_coeff)) in total_poly
-				.coeffs
-				.iter_mut()
-				.zip(share_poly.coeffs.iter())
-				.zip(totalh_poly.coeffs.iter_mut().zip(shareh_poly.coeffs.iter()))
+		// Add η-bounded shares to totals.
+		// η-bounded coefficients are in [-2, 2], so even with 6435 subsets (max for 15 parties),
+		// the sum is bounded by ±12870, well within i32 range.
+		for (total_poly, share_poly) in s1_total.vec.iter_mut().zip(s1_share.vec.iter()).take(L) {
+			for (total_coeff, share_coeff) in
+				total_poly.coeffs.iter_mut().zip(share_poly.coeffs.iter())
 			{
-				*total_coeff = total_coeff.wrapping_add(*share_coeff);
-				*totalh_coeff = totalh_coeff.wrapping_add(*shareh_coeff);
+				*total_coeff += *share_coeff;
 			}
 		}
 
@@ -303,7 +298,7 @@ fn generate_threshold_shares(
 			for (total_coeff, share_coeff) in
 				total_poly.coeffs.iter_mut().zip(share_poly.coeffs.iter())
 			{
-				*total_coeff = total_coeff.wrapping_add(*share_coeff);
+				*total_coeff += *share_coeff;
 			}
 		}
 
@@ -313,21 +308,19 @@ fn generate_threshold_shares(
 		honest_signers = (((r ^ honest_signers) >> 2) / c) | r;
 	}
 
-	// Normalize totals
-	for (total_poly, totalh_poly) in s1_total.vec.iter_mut().zip(s1h_total.vec.iter_mut()).take(L) {
-		for (total_coeff, totalh_coeff) in
-			total_poly.coeffs.iter_mut().zip(totalh_poly.coeffs.iter_mut())
-		{
+	// Finalize NTT accumulator (reduces mod Q)
+	let s1h_total = s1h_acc.finalize();
+
+	// Normalize s1_total (η-bounded sums)
+	for total_poly in s1_total.vec.iter_mut().take(L) {
+		for total_coeff in total_poly.coeffs.iter_mut() {
 			let coeff_u32 =
 				if *total_coeff < 0 { (*total_coeff + Q) as u32 } else { *total_coeff as u32 };
 			*total_coeff = mod_q(coeff_u32) as i32;
-
-			let coeff_h_u32 =
-				if *totalh_coeff < 0 { (*totalh_coeff + Q) as u32 } else { *totalh_coeff as u32 };
-			*totalh_coeff = mod_q(coeff_h_u32) as i32;
 		}
 	}
 
+	// Normalize s2_total (η-bounded sums)
 	for total_poly in s2_total.vec.iter_mut().take(K) {
 		for total_coeff in total_poly.coeffs.iter_mut() {
 			let coeff_u32 =

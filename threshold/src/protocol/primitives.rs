@@ -66,6 +66,117 @@ pub(crate) fn normalize_assuming_le2q(poly: &mut poly::Poly) {
 }
 
 // ============================================================================
+// NTT Accumulator
+// ============================================================================
+
+/// Number of coefficients per polynomial.
+const N_COEFFS: usize = N as usize;
+
+/// Accumulator for summing NTT-domain polynomials without overflow.
+///
+/// After NTT, coefficients are bounded by 18*Q ≈ 150M. When summing many
+/// polynomials (e.g., C(n,k) subsets for large configurations), the sum can
+/// exceed `i32::MAX` (~2.1B). This accumulator uses `u64` internally and
+/// reduces mod Q on finalization.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut acc = NttAccumulator::<L>::new();
+/// for poly in ntt_polys {
+///     acc.add(&poly);
+/// }
+/// let result: Polyvecl = acc.finalize();
+/// ```
+pub struct NttAccumulator<const VECS: usize> {
+	coeffs: [[u64; N_COEFFS]; VECS],
+}
+
+impl<const VECS: usize> NttAccumulator<VECS> {
+	/// Create a new zeroed accumulator.
+	pub fn new() -> Self {
+		Self { coeffs: [[0u64; N_COEFFS]; VECS] }
+	}
+
+	/// Add a polynomial's coefficients to the accumulator.
+	///
+	/// The polynomial is assumed to be in NTT domain with non-negative
+	/// coefficients (or signed coefficients that should be normalized).
+	#[inline]
+	pub fn add_poly(&mut self, vec_idx: usize, poly: &poly::Poly) {
+		debug_assert!(vec_idx < VECS);
+		for (j, &coeff) in poly.coeffs.iter().enumerate() {
+			// NTT output should be non-negative, but handle signed just in case
+			let coeff_u64 = if coeff < 0 { (coeff as i64 + Q as i64) as u64 } else { coeff as u64 };
+			self.coeffs[vec_idx][j] += coeff_u64;
+		}
+	}
+
+	/// Finalize the accumulator, reducing all coefficients mod Q.
+	///
+	/// Returns an array of polynomials with coefficients in [0, Q).
+	pub fn finalize_to_polys(self) -> [poly::Poly; VECS] {
+		core::array::from_fn(|i| {
+			let mut poly = poly::Poly::default();
+			for (j, &acc) in self.coeffs[i].iter().enumerate() {
+				poly.coeffs[j] = (acc % (Q as u64)) as i32;
+			}
+			poly
+		})
+	}
+}
+
+impl<const VECS: usize> Default for NttAccumulator<VECS> {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+/// Accumulator specialized for Polyvecl (L polynomials).
+pub type NttAccumulatorL = NttAccumulator<L>;
+
+/// Accumulator specialized for Polyveck (K polynomials).
+pub type NttAccumulatorK = NttAccumulator<K>;
+
+impl NttAccumulatorL {
+	/// Add all polynomials from a Polyvecl.
+	pub fn add_polyvecl(&mut self, vec: &polyvec::Polyvecl) {
+		for (i, poly) in vec.vec.iter().enumerate().take(L) {
+			self.add_poly(i, poly);
+		}
+	}
+
+	/// Finalize to a Polyvecl.
+	pub fn finalize(self) -> polyvec::Polyvecl {
+		let polys = self.finalize_to_polys();
+		let mut result = polyvec::Polyvecl::default();
+		for (i, poly) in polys.into_iter().enumerate() {
+			result.vec[i] = poly;
+		}
+		result
+	}
+}
+
+impl NttAccumulatorK {
+	/// Add all polynomials from a Polyveck.
+	pub fn add_polyveck(&mut self, vec: &polyvec::Polyveck) {
+		for (i, poly) in vec.vec.iter().enumerate().take(K) {
+			self.add_poly(i, poly);
+		}
+	}
+
+	/// Finalize to a Polyveck.
+	pub fn finalize(self) -> polyvec::Polyveck {
+		let polys = self.finalize_to_polys();
+		let mut result = polyvec::Polyveck::default();
+		for (i, poly) in polys.into_iter().enumerate() {
+			result.vec[i] = poly;
+		}
+		result
+	}
+}
+
+// ============================================================================
 // Decomposition Functions (Go-compatible)
 // ============================================================================
 

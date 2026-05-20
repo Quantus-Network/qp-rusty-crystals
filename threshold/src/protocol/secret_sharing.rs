@@ -15,14 +15,14 @@ use alloc::{
 };
 
 use qp_rusty_crystals_dilithium::{
-	params::{K, L, Q},
+	params::{K, L},
 	polyvec,
 };
 
 use crate::{
 	error::{ThresholdError, ThresholdResult},
 	participants::{ParticipantId, ParticipantList},
-	protocol::primitives::mod_q,
+	protocol::primitives::{NttAccumulatorK, NttAccumulatorL},
 };
 
 /// Secret share for a single party.
@@ -204,9 +204,11 @@ pub fn recover_share(
 		));
 	}
 
-	// Combine shares according to the hardcoded pattern
-	let mut s1_combined = polyvec::Polyvecl::default();
-	let mut s2_combined = polyvec::Polyveck::default();
+	// Use NTT accumulators to avoid i32 overflow for large configurations.
+	// After NTT, coefficients are bounded by 18*Q. For large subset counts,
+	// the sum can exceed i32::MAX.
+	let mut s1_acc = NttAccumulatorL::new();
+	let mut s2_acc = NttAccumulatorK::new();
 
 	for &pattern_u in &sharing_patterns[current_i] {
 		// Translate the share index u to the share index u_ by applying the permutation
@@ -237,39 +239,14 @@ pub fn recover_share(
 			crate::circl_ntt::ntt(s2_poly);
 		}
 
-		// Add in NTT domain (pointwise addition)
-		// Use wrapping_add to handle overflow for large configurations
-		for (combined_poly, ntt_poly) in s1_combined.vec.iter_mut().zip(s1_ntt.vec.iter()).take(L) {
-			for (combined_coeff, ntt_coeff) in
-				combined_poly.coeffs.iter_mut().zip(ntt_poly.coeffs.iter())
-			{
-				*combined_coeff = combined_coeff.wrapping_add(*ntt_coeff);
-			}
-		}
-
-		for (combined_poly, ntt_poly) in s2_combined.vec.iter_mut().zip(s2_ntt.vec.iter()).take(K) {
-			for (combined_coeff, ntt_coeff) in
-				combined_poly.coeffs.iter_mut().zip(ntt_poly.coeffs.iter())
-			{
-				*combined_coeff = combined_coeff.wrapping_add(*ntt_coeff);
-			}
-		}
+		// Accumulate in u64 to avoid overflow
+		s1_acc.add_polyvecl(&s1_ntt);
+		s2_acc.add_polyveck(&s2_ntt);
 	}
 
-	// Normalize accumulated NTT values (can exceed 2Q after addition)
-	for combined_poly in s1_combined.vec.iter_mut().take(L) {
-		for coeff in combined_poly.coeffs.iter_mut() {
-			let coeff_u32 = if *coeff < 0 { (*coeff + Q) as u32 } else { *coeff as u32 };
-			*coeff = mod_q(coeff_u32) as i32;
-		}
-	}
-
-	for combined_poly in s2_combined.vec.iter_mut().take(K) {
-		for coeff in combined_poly.coeffs.iter_mut() {
-			let coeff_u32 = if *coeff < 0 { (*coeff + Q) as u32 } else { *coeff as u32 };
-			*coeff = mod_q(coeff_u32) as i32;
-		}
-	}
+	// Finalize accumulators (reduces mod Q)
+	let s1_combined = s1_acc.finalize();
+	let s2_combined = s2_acc.finalize();
 
 	Ok((s1_combined, s2_combined))
 }

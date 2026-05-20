@@ -1597,14 +1597,15 @@ fn commit_new_share(j_mask: SubsetMask, share: &NewShareData) -> [u8; COMMITMENT
 }
 
 fn add_share_into(acc: &mut NewShareData, r: &NewShareData) {
+	// Sub-shares are η-bounded, so accumulation cannot overflow i32.
 	for (a, b) in acc.s1.iter_mut().zip(r.s1.iter()) {
 		for (ac, bc) in a.iter_mut().zip(b.iter()) {
-			*ac = ac.wrapping_add(*bc);
+			*ac += *bc;
 		}
 	}
 	for (a, b) in acc.s2.iter_mut().zip(r.s2.iter()) {
 		for (ac, bc) in a.iter_mut().zip(b.iter()) {
-			*ac = ac.wrapping_add(*bc);
+			*ac += *bc;
 		}
 	}
 }
@@ -1614,14 +1615,15 @@ fn add_share_into_sum(
 	sum_s2: &mut [[i32; N as usize]],
 	r: &NewShareData,
 ) {
+	// Sub-shares are η-bounded, so accumulation cannot overflow i32.
 	for (a, b) in sum_s1.iter_mut().zip(r.s1.iter()) {
 		for (ac, bc) in a.iter_mut().zip(b.iter()) {
-			*ac = ac.wrapping_add(*bc);
+			*ac += *bc;
 		}
 	}
 	for (a, b) in sum_s2.iter_mut().zip(r.s2.iter()) {
 		for (ac, bc) in a.iter_mut().zip(b.iter()) {
-			*ac = ac.wrapping_add(*bc);
+			*ac += *bc;
 		}
 	}
 }
