@@ -60,8 +60,8 @@ pub const MAX_DKG_MESSAGE_SIZE: usize = 256 * 1024;
 ///
 /// The packet size check combined with borsh's length validation ensures that:
 /// 1. Total allocation is bounded by `MAX_DKG_MESSAGE_SIZE`
-/// 2. Malicious length prefixes claiming more bytes than available are rejected
-///    with an error (not OOM)
+/// 2. Malicious length prefixes claiming more bytes than available are rejected with an error (not
+///    OOM)
 fn deserialize_message(data: &[u8]) -> Result<MithrilDkgMessage, String> {
 	if data.len() > MAX_DKG_MESSAGE_SIZE {
 		return Err(format!("Message size {} exceeds maximum {}", data.len(), MAX_DKG_MESSAGE_SIZE));
@@ -190,6 +190,11 @@ pub enum MithrilAction {
 /// preventing memory exhaustion from duplicate messages.
 #[derive(Debug, Default)]
 struct DkgMessageBuffer {
+	/// Round 1 broadcasts received while still in Initialized phase.
+	round1_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
+	/// Round 1 private messages received while still in Initialized phase.
+	/// Key is (from_party_id, subset_mask) to allow multiple subsets per sender.
+	round1_privates: BTreeMap<(ParticipantId, SubsetMask), MithrilRound1Private>,
 	/// Round 2 broadcasts received while still in Round 1.
 	round2: BTreeMap<ParticipantId, MithrilRound2Broadcast>,
 	/// Round 3 broadcasts received while still in Round 1-2.
@@ -202,6 +207,18 @@ impl DkgMessageBuffer {
 	/// Create a new empty message buffer.
 	fn new() -> Self {
 		Self::default()
+	}
+
+	/// Buffer a Round 1 broadcast for later processing.
+	/// Only keeps the first message from each sender.
+	fn buffer_round1_broadcast(&mut self, msg: MithrilRound1Broadcast) {
+		self.round1_broadcasts.entry(msg.party_id).or_insert(msg);
+	}
+
+	/// Buffer a Round 1 private message for later processing.
+	/// Only keeps the first message per (sender, subset) pair.
+	fn buffer_round1_private(&mut self, msg: MithrilRound1Private) {
+		self.round1_privates.entry((msg.from_party_id, msg.subset_mask)).or_insert(msg);
 	}
 
 	/// Buffer a Round 2 broadcast for later processing.
@@ -220,6 +237,18 @@ impl DkgMessageBuffer {
 	/// Only keeps the first message from each sender.
 	fn buffer_round4(&mut self, msg: MithrilRound4Broadcast) {
 		self.round4.entry(msg.party_id).or_insert(msg);
+	}
+
+	/// Take all buffered Round 1 broadcasts.
+	fn take_round1_broadcasts(&mut self) -> BTreeMap<ParticipantId, MithrilRound1Broadcast> {
+		mem::take(&mut self.round1_broadcasts)
+	}
+
+	/// Take all buffered Round 1 private messages.
+	fn take_round1_privates(
+		&mut self,
+	) -> BTreeMap<(ParticipantId, SubsetMask), MithrilRound1Private> {
+		mem::take(&mut self.round1_privates)
 	}
 
 	/// Take all buffered Round 2 messages.
@@ -458,7 +487,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 
 		match msg {
 			MithrilDkgMessage::Round1Broadcast(broadcast) => {
-				// Round 1 broadcasts: accept during Round 1 or early Round 2
+				// Round 1 broadcasts: accept during Initialized, Round 1, or early Round 2
 				if broadcast.party_id != from {
 					warn!(
 						"DKG: Round1Broadcast sender mismatch: envelope from {} but message claims party {}",
@@ -467,6 +496,10 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					return Ok(()); // Sender mismatch, ignore
 				}
 				match self.state.phase {
+					DkgPhase::Initialized => {
+						// Early message, buffer for when we enter Round 1
+						self.message_buffer.buffer_round1_broadcast(broadcast);
+					},
 					DkgPhase::Round1 => {
 						self.state
 							.round1_broadcasts
@@ -491,7 +524,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 				}
 			},
 			MithrilDkgMessage::Round1Private(private) => {
-				// Round 1 private messages: only accept during Round 1
+				// Round 1 private messages: accept during Initialized (buffered) or Round 1
 				// M2: Validate sender is the legitimate leader for this subset
 				if private.from_party_id != from {
 					warn!(
@@ -500,48 +533,62 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					);
 					return Ok(()); // Sender mismatch, ignore
 				}
-				if self.state.phase == DkgPhase::Round1 {
-					let config = self.state.config.as_ref().ok_or_else(|| {
-						MithrilDkgError::InvalidState("Round1 but no config".into())
-					})?;
 
-					// Verify subset_mask is a valid subset for this threshold config
-					// (prevents attacker from using fake subset masks)
-					if !config.is_valid_subset(private.subset_mask) {
+				match self.state.phase {
+					DkgPhase::Initialized => {
+						// Early message, buffer for when we enter Round 1.
+						// Validation will happen when draining the buffer.
+						self.message_buffer.buffer_round1_private(private);
+					},
+					DkgPhase::Round1 => {
+						let config = self.state.config.as_ref().ok_or_else(|| {
+							MithrilDkgError::InvalidState("Round1 but no config".into())
+						})?;
+
+						// Verify subset_mask is a valid subset for this threshold config
+						// (prevents attacker from using fake subset masks)
+						if !config.is_valid_subset(private.subset_mask) {
+							warn!(
+								"DKG: Round1Private with invalid subset {:b} (from party {})",
+								private.subset_mask, from
+							);
+							return Ok(()); // Invalid subset, ignore
+						}
+
+						// M2: Verify sender is the leader for this subset
+						let expected_leader = config.get_leader(private.subset_mask);
+						if expected_leader != Some(from) {
+							warn!(
+								"DKG: Round1Private from non-leader: party {} sent for subset {:b} but leader is {:?}",
+								from, private.subset_mask, expected_leader
+							);
+							return Ok(()); // Not the leader, ignore
+						}
+
+						// M2: Verify we are actually a member of this subset
+						// (prevents malicious leader from sending K_S to non-member parties)
+						if !config.is_in_subset(private.subset_mask) {
+							warn!(
+								"DKG: Round1Private for subset {:b} but we are not a member (from party {})",
+								private.subset_mask, from
+							);
+							return Ok(()); // Not in subset, ignore
+						}
+
+						self.state
+							.received_shared_secrets
+							.get_or_insert_with(BTreeMap::new)
+							.entry(private.subset_mask)
+							.or_insert(private.shared_secret);
+					},
+					_ => {
+						// Past Round 1, ignore late private messages
 						warn!(
-							"DKG: Round1Private with invalid subset {:b} (from party {})",
-							private.subset_mask, from
+							"DKG: Ignoring late Round1Private from party {} (already past Round 1)",
+							from
 						);
-						return Ok(()); // Invalid subset, ignore
-					}
-
-					// M2: Verify sender is the leader for this subset
-					let expected_leader = config.get_leader(private.subset_mask);
-					if expected_leader != Some(from) {
-						warn!(
-							"DKG: Round1Private from non-leader: party {} sent for subset {:b} but leader is {:?}",
-							from, private.subset_mask, expected_leader
-						);
-						return Ok(()); // Not the leader, ignore
-					}
-
-					// M2: Verify we are actually a member of this subset
-					// (prevents malicious leader from sending K_S to non-member parties)
-					if !config.is_in_subset(private.subset_mask) {
-						warn!(
-							"DKG: Round1Private for subset {:b} but we are not a member (from party {})",
-							private.subset_mask, from
-						);
-						return Ok(()); // Not in subset, ignore
-					}
-
-					self.state
-						.received_shared_secrets
-						.get_or_insert_with(BTreeMap::new)
-						.entry(private.subset_mask)
-						.or_insert(private.shared_secret);
+					},
 				}
-				// Private messages don't need buffering - they're only relevant in Round 1
 			},
 			MithrilDkgMessage::Round2Broadcast(broadcast) => {
 				if broadcast.party_id != from {
@@ -708,7 +755,71 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 		self.state.broadcast_sent = false;
 		self.state.privates_sent = false;
 
+		// Drain any Round 1 messages that arrived before we entered Round 1
+		self.drain_round1_buffer()?;
+
 		self.poke()
+	}
+
+	/// Drain buffered Round 1 messages into the protocol state.
+	/// Called after transitioning from Initialized to Round1.
+	fn drain_round1_buffer(&mut self) -> Result<(), MithrilDkgError> {
+		let config = self.state.config.as_ref().ok_or_else(|| {
+			MithrilDkgError::InvalidState("drain_round1_buffer but no config".into())
+		})?;
+
+		// Drain buffered Round 1 broadcasts
+		let buffered_broadcasts = self.message_buffer.take_round1_broadcasts();
+		for (party_id, broadcast) in buffered_broadcasts {
+			// Re-validate party_id matches (should always match due to buffer logic)
+			if broadcast.party_id == party_id {
+				self.state
+					.round1_broadcasts
+					.get_or_insert_with(BTreeMap::new)
+					.entry(party_id)
+					.or_insert(broadcast);
+			}
+		}
+
+		// Drain buffered Round 1 private messages with validation
+		let buffered_privates = self.message_buffer.take_round1_privates();
+		for ((from_party_id, subset_mask), private) in buffered_privates {
+			// Validate subset_mask is valid
+			if !config.is_valid_subset(subset_mask) {
+				warn!(
+					"DKG: Discarding buffered Round1Private with invalid subset {:b} (from party {})",
+					subset_mask, from_party_id
+				);
+				continue;
+			}
+
+			// Validate sender is the leader for this subset
+			let expected_leader = config.get_leader(subset_mask);
+			if expected_leader != Some(from_party_id) {
+				warn!(
+					"DKG: Discarding buffered Round1Private from non-leader: party {} sent for subset {:b} but leader is {:?}",
+					from_party_id, subset_mask, expected_leader
+				);
+				continue;
+			}
+
+			// Validate we are a member of this subset
+			if !config.is_in_subset(subset_mask) {
+				warn!(
+					"DKG: Discarding buffered Round1Private for subset {:b} but we are not a member (from party {})",
+					subset_mask, from_party_id
+				);
+				continue;
+			}
+
+			self.state
+				.received_shared_secrets
+				.get_or_insert_with(BTreeMap::new)
+				.entry(subset_mask)
+				.or_insert(private.shared_secret);
+		}
+
+		Ok(())
 	}
 
 	fn process_round1(&mut self) -> Result<MithrilAction, MithrilDkgError> {
@@ -3734,6 +3845,170 @@ mod tests {
 			err.contains("length") || err.contains("input") || err.contains("Unexpected"),
 			"Should fail with length/input error, got: {}",
 			err
+		);
+	}
+
+	#[test]
+	fn test_round1_messages_buffered_before_poke() {
+		// Test that Round 1 messages received before the first poke() are buffered
+		// and processed correctly. This prevents a race condition where a faster
+		// peer's messages could be lost.
+
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let seed = [42u8; 32];
+
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = (0..3).collect();
+
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
+		for (i, pk) in public_keys.into_iter().enumerate() {
+			pk_map.insert(i as ParticipantId, pk);
+		}
+
+		// Create DKG for party 0 - starts in Initialized state
+		let config = MithrilDkgConfig::new(
+			threshold_config.clone(),
+			0,
+			participants.clone(),
+			signers[0].clone(),
+			pk_map.clone(),
+		)
+		.unwrap();
+		let mut dkg0: MithrilDkg<TestSigner> = MithrilDkg::new(config, seed);
+
+		// Create DKG for party 1
+		let config1 = MithrilDkgConfig::new(
+			threshold_config.clone(),
+			1,
+			participants.clone(),
+			signers[1].clone(),
+			pk_map.clone(),
+		)
+		.unwrap();
+		let mut dkg1: MithrilDkg<TestSigner> = MithrilDkg::new(config1, seed);
+
+		// Party 1 starts first and sends messages
+		let action1 = dkg1.poke().unwrap();
+		let round1_data = match action1 {
+			MithrilAction::SendMany(data) => data,
+			_ => panic!("Expected SendMany"),
+		};
+
+		// Party 0 receives Party 1's Round 1 broadcast BEFORE calling poke()
+		// This should be buffered, not dropped
+		assert_eq!(dkg0.state.phase, DkgPhase::Initialized);
+		let result = dkg0.message(1, round1_data.clone());
+		assert!(result.is_ok(), "Message should be accepted for buffering");
+
+		// Verify the message was buffered
+		assert!(
+			!dkg0.message_buffer.round1_broadcasts.is_empty(),
+			"Round 1 broadcast should be buffered"
+		);
+
+		// Now party 0 calls poke() - this should drain the buffer
+		let _action0 = dkg0.poke().unwrap();
+
+		// Verify we're now in Round 1 and the buffered message was processed
+		assert_eq!(dkg0.state.phase, DkgPhase::Round1);
+		let round1_broadcasts = dkg0.state.round1_broadcasts.as_ref().unwrap();
+		assert!(
+			round1_broadcasts.contains_key(&1),
+			"Buffered broadcast from party 1 should now be in state"
+		);
+
+		// Verify the buffer was drained
+		assert!(
+			dkg0.message_buffer.round1_broadcasts.is_empty(),
+			"Buffer should be empty after draining"
+		);
+	}
+
+	#[test]
+	fn test_round1_private_messages_buffered_before_poke() {
+		// Test that Round 1 private messages are also buffered when received
+		// before poke() is called.
+		//
+		// We manually construct a valid Round1Private message to avoid the
+		// complexity of running two DKG instances.
+
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let seed = [42u8; 32];
+
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = (0..3).collect();
+
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
+		for (i, pk) in public_keys.into_iter().enumerate() {
+			pk_map.insert(i as ParticipantId, pk);
+		}
+
+		// Create DKG for party 1 - starts in Initialized state
+		let config = MithrilDkgConfig::new(
+			threshold_config.clone(),
+			1,
+			participants.clone(),
+			signers[1].clone(),
+			pk_map.clone(),
+		)
+		.unwrap();
+		let mut dkg1: MithrilDkg<TestSigner> = MithrilDkg::new(config.clone(), seed);
+
+		// For a 2-of-3 threshold, subset size = n - t + 1 = 3 - 2 + 1 = 2
+		// Subsets are: {0,1}=0b011, {0,2}=0b101, {1,2}=0b110
+		// Party 1 is in subsets 0b011 and 0b110
+		// For subset 0b011, leader is party 0 (lowest index in subset)
+		// For subset 0b110, leader is party 1
+
+		// Party 0 should send private message to party 1 for subset 0b011
+		let subset_mask: SubsetMask = 0b011; // {0, 1}
+		let private = MithrilRound1Private {
+			from_party_id: 0,
+			subset_mask,
+			shared_secret: [0xAB; SHARED_SECRET_SIZE],
+		};
+		let msg = MithrilDkgMessage::Round1Private(private);
+		let data = borsh::to_vec(&msg).unwrap();
+
+		// Party 1 receives the private message BEFORE calling poke()
+		assert_eq!(dkg1.state.phase, DkgPhase::Initialized);
+		let result = dkg1.message(0, data);
+		assert!(result.is_ok(), "Private message should be accepted for buffering");
+
+		// Verify the message was buffered
+		assert!(
+			!dkg1.message_buffer.round1_privates.is_empty(),
+			"Round 1 private message should be buffered"
+		);
+		assert!(
+			dkg1.message_buffer.round1_privates.contains_key(&(0, subset_mask)),
+			"Buffer should contain message from party 0 for subset 0b011"
+		);
+
+		// Now party 1 calls poke() - this should drain the buffer
+		let _action1 = dkg1.poke().unwrap();
+
+		// Verify we're now in Round 1 and the buffered message was processed
+		assert_eq!(dkg1.state.phase, DkgPhase::Round1);
+		let received_secrets = dkg1.state.received_shared_secrets.as_ref().unwrap();
+
+		// We should have the secret for subset 0b011 from the buffered message
+		assert!(
+			received_secrets.contains_key(&subset_mask),
+			"Buffered private message should have been processed into received_shared_secrets"
+		);
+		assert_eq!(
+			received_secrets.get(&subset_mask).unwrap(),
+			&[0xAB; SHARED_SECRET_SIZE],
+			"Secret should match what was buffered"
+		);
+
+		// Verify the buffer was drained
+		assert!(
+			dkg1.message_buffer.round1_privates.is_empty(),
+			"Buffer should be empty after draining"
 		);
 	}
 }
