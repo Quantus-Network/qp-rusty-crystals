@@ -48,6 +48,11 @@ pub type ParticipantId = u32;
 /// this constant ensures bitmask operations are always valid.
 pub const MAX_PARTICIPANTS: usize = 16;
 
+/// Build the index map from a sorted participants vector.
+fn build_indices(participants: &[ParticipantId]) -> BTreeMap<ParticipantId, usize> {
+	participants.iter().enumerate().map(|(idx, &id)| (id, idx)).collect()
+}
+
 /// A sorted list of participants with efficient ID-to-index mapping.
 ///
 /// This structure maintains a sorted list of participant IDs and provides
@@ -61,12 +66,54 @@ pub const MAX_PARTICIPANTS: usize = 16;
 /// - Participants are always stored in sorted order
 /// - No duplicate participant IDs
 /// - Index mapping is consistent: `index_of(get(i)) == Some(i)`
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+/// - Length is at most `MAX_PARTICIPANTS` (16)
+///
+/// # Serialization
+///
+/// Only the `participants` vector is serialized. The `indices` map is
+/// recomputed during deserialization to prevent malformed indices from
+/// being injected via untrusted serialized data.
+#[derive(Debug, Clone)]
 pub struct ParticipantList {
 	/// Sorted list of participant IDs
 	participants: Vec<ParticipantId>,
-	/// Maps participant ID to index in the sorted list
+	/// Maps participant ID to index in the sorted list (cached, not serialized)
 	indices: BTreeMap<ParticipantId, usize>,
+}
+
+impl BorshSerialize for ParticipantList {
+	fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+		// Only serialize participants; indices is recomputed on deserialize
+		self.participants.serialize(writer)
+	}
+}
+
+impl BorshDeserialize for ParticipantList {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let participants = Vec::<ParticipantId>::deserialize_reader(reader)?;
+
+		// Validate invariants
+		if participants.len() > MAX_PARTICIPANTS {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ParticipantList exceeds MAX_PARTICIPANTS",
+			));
+		}
+
+		// Verify sorted and unique (strictly increasing)
+		for i in 1..participants.len() {
+			if participants[i] <= participants[i - 1] {
+				return Err(borsh::io::Error::new(
+					borsh::io::ErrorKind::InvalidData,
+					"ParticipantList is not sorted or contains duplicates",
+				));
+			}
+		}
+
+		// Build indices from validated participants
+		let indices = build_indices(&participants);
+		Ok(Self { participants, indices })
+	}
 }
 
 impl Zeroize for ParticipantList {
@@ -109,8 +156,7 @@ impl ParticipantList {
 		sorted.sort();
 
 		// Build index mapping
-		let indices: BTreeMap<_, _> =
-			sorted.iter().enumerate().map(|(idx, &id)| (id, idx)).collect();
+		let indices = build_indices(&sorted);
 
 		// Check for duplicates (BTreeMap will have fewer entries if duplicates exist)
 		if indices.len() != sorted.len() {
@@ -143,9 +189,7 @@ impl ParticipantList {
 			}
 		}
 
-		let indices: BTreeMap<_, _> =
-			sorted_participants.iter().enumerate().map(|(idx, &id)| (id, idx)).collect();
-
+		let indices = build_indices(&sorted_participants);
 		Some(Self { participants: sorted_participants, indices })
 	}
 
@@ -565,5 +609,59 @@ mod tests {
 
 		let exactly_max: Vec<ParticipantId> = (0..16).collect();
 		assert!(ParticipantList::from_sorted(exactly_max).is_some());
+	}
+
+	#[test]
+	fn test_borsh_roundtrip() {
+		let list = ParticipantList::new(&[300, 100, 200]).unwrap();
+		let serialized = borsh::to_vec(&list).unwrap();
+		let deserialized: ParticipantList = borsh::from_slice(&serialized).unwrap();
+		assert_eq!(list, deserialized);
+	}
+
+	#[test]
+	fn test_borsh_rejects_unsorted() {
+		// Manually craft a serialized unsorted list
+		// Vec<u32> serialization: 4-byte length prefix + 4 bytes per element
+		let unsorted: Vec<ParticipantId> = vec![200, 100, 300];
+		let serialized = borsh::to_vec(&unsorted).unwrap();
+
+		let result: Result<ParticipantList, _> = borsh::from_slice(&serialized);
+		assert!(result.is_err(), "Should reject unsorted participants");
+	}
+
+	#[test]
+	fn test_borsh_rejects_duplicates() {
+		// Manually craft a serialized list with duplicates
+		let with_dups: Vec<ParticipantId> = vec![100, 100, 200];
+		let serialized = borsh::to_vec(&with_dups).unwrap();
+
+		let result: Result<ParticipantList, _> = borsh::from_slice(&serialized);
+		assert!(result.is_err(), "Should reject duplicate participants");
+	}
+
+	#[test]
+	fn test_borsh_rejects_too_many() {
+		// Manually craft a serialized list with too many participants
+		let too_many: Vec<ParticipantId> = (0..17).collect();
+		let serialized = borsh::to_vec(&too_many).unwrap();
+
+		let result: Result<ParticipantList, _> = borsh::from_slice(&serialized);
+		assert!(result.is_err(), "Should reject too many participants");
+	}
+
+	#[test]
+	fn test_serialization_only_includes_participants() {
+		// Verify that only the participants vector is serialized (not indices)
+		let list = ParticipantList::new(&[100, 200, 300]).unwrap();
+		let serialized = borsh::to_vec(&list).unwrap();
+
+		// A Vec<u32> with 3 elements: 4 bytes length + 3*4 bytes = 16 bytes
+		assert_eq!(serialized.len(), 16);
+
+		// Should match serialization of just the participants vector
+		let just_vec: Vec<ParticipantId> = vec![100, 200, 300];
+		let vec_serialized = borsh::to_vec(&just_vec).unwrap();
+		assert_eq!(serialized, vec_serialized);
 	}
 }
