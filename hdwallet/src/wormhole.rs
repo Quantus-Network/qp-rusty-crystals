@@ -39,7 +39,12 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 pub const ADDRESS_SALT: &str = "wormhole";
 
 /// A struct representing a wormhole identity pair: address + secret.
-#[derive(Clone, Eq, PartialEq, ZeroizeOnDrop)]
+///
+/// `Clone` is intentionally not derived because `secret` is sensitive. Callers
+/// who genuinely need a second instance must construct one explicitly from the
+/// public fields, making the duplication of secret material visible at the call
+/// site. Prefer passing `&WormholePair` instead.
+#[derive(Eq, PartialEq, ZeroizeOnDrop)]
 pub struct WormholePair {
 	/// Deterministic Poseidon-derived address.
 	pub address: [u8; 32],

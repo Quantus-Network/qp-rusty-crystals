@@ -139,6 +139,7 @@ fn main() {
 	// Pre-generate test data for all variants
 	let entropy = get_random_bytes();
 	let ml87_keypair = ml_dsa_87::Keypair::generate(entropy);
+	let ml87_keypair_bytes = ml87_keypair.to_bytes();
 
 	let test_msg = b"stack usage test message";
 
@@ -169,16 +170,18 @@ fn main() {
 			true
 		});
 
-		let ml87_keypair_clone = ml87_keypair.clone();
 		let ml87_sign = test_sign_with_stack_size(size_kb, "ml-dsa-87", move || {
-			let _sig = ml87_keypair_clone.sign(test_msg, None, None);
+			let kp = ml_dsa_87::Keypair::from_bytes(&ml87_keypair_bytes)
+				.expect("from_bytes must succeed for known-good bytes");
+			let _sig = kp.sign(test_msg, None, None);
 			true
 		});
 
-		let ml87_keypair_clone2 = ml87_keypair.clone();
 		let ml87_sig_clone = ml87_sig;
 		let ml87_verify = test_verify_with_stack_size(size_kb, "ml-dsa-87", move || {
-			ml87_keypair_clone2.verify(test_msg, &ml87_sig_clone, None)
+			let kp = ml_dsa_87::Keypair::from_bytes(&ml87_keypair_bytes)
+				.expect("from_bytes must succeed for known-good bytes");
+			kp.verify(test_msg, &ml87_sig_clone, None)
 		});
 
 		println!(

@@ -6,12 +6,12 @@ This workspace provides post-quantum cryptographic primitives and HD wallet func
 
 ## Security Features
 
-This implementation provides enterprise-grade memory security through `SensitiveBytes*` wrapper types that:
+This implementation provides enterprise-grade memory security:
 
-- **Prevent accidental copying** - Compile-time enforcement ensures sensitive data can only be moved, never copied
-- **Automatic memory zeroization** - Both source arrays and wrapper contents are automatically cleared when dropped
-- **Explicit sensitive data handling** - API requires `(&mut entropy).into()` syntax, making sensitive operations obvious
-- **Move-only semantics** - Functions take `SensitiveBytes32`/`SensitiveBytes64` directly, preventing silent reference copying
+- **Compile-time copy prevention on secrets** - `SensitiveBytes32`, `SensitiveBytes64`, `Keypair`, `SecretKey`, `ExtendedPrivKey`, and `WormholePair` deliberately do **not** implement `Clone`. Secret material can only be moved. Any duplication must be explicit via `to_bytes()`/`from_bytes()` round-trips, making the copy visible at the call site.
+- **Automatic memory zeroization** - Source arrays passed to constructors and all wrapper contents are zeroed on drop (`ZeroizeOnDrop`). Mnemonic strings passed to `mnemonic_to_seed` are wrapped in `Zeroizing<String>` and scrubbed on **every** exit path, including parse failure and panic unwind.
+- **Explicit sensitive data handling** - APIs require `(&mut entropy).into()` syntax, making sensitive operations obvious and zeroing the caller's buffer at the point of transfer.
+- **Bounded derivation paths** - `derive_key_from_seed` and `generate_wormhole_from_seed` reject paths whose byte length exceeds `MAX_DERIVATION_PATH_BYTES` (256) or whose segment count exceeds `MAX_DERIVATION_DEPTH` (16) **before** any allocation or HMAC work, preventing DoS via attacker-controlled deep paths.
 
 ```rust
 // Secure by design - entropy is zeroized after conversion
@@ -19,6 +19,11 @@ let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).unwrap();
 let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
 // entropy is now [0,0,0,...] - no sensitive data left in memory
+
+// If you genuinely need a second copy of a keypair, you must opt in explicitly:
+let kp_bytes = keypair.to_bytes();
+let keypair2 = ml_dsa_87::Keypair::from_bytes(&kp_bytes)?;
+// Prefer passing &Keypair instead of duplicating secrets.
 ```
 
 This eliminates entire classes of security vulnerabilities related to sensitive data handling in cryptographic applications.
