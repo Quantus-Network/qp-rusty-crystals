@@ -455,7 +455,9 @@ impl ThresholdSigner {
 			if r2.commitment_data.is_empty() {
 				return Err(ThresholdError::InvalidCommitmentData {
 					party_id: r2.party_id,
-					reason: "Empty commitment data is not allowed - every participant must contribute".to_string(),
+					reason:
+						"Empty commitment data is not allowed - every participant must contribute"
+							.to_string(),
 				});
 			}
 
@@ -466,12 +468,7 @@ impl ThresholdSigner {
 				.ok_or(ThresholdError::MissingBroadcast { party_id: r2.party_id })?;
 
 			// Verify commitment hash
-			if !verify_commitment_hash(
-				tr,
-				r2.party_id,
-				&r2.commitment_data,
-				&r1.commitment_hash,
-			) {
+			if !verify_commitment_hash(tr, r2.party_id, &r2.commitment_data, &r1.commitment_hash) {
 				return Err(ThresholdError::CommitmentMismatch {
 					party_id: r2.party_id,
 					message: "Round 2 commitment data does not match Round 1 commitment hash"
@@ -522,10 +519,7 @@ impl ThresholdSigner {
 								k_idx, e
 							),
 						})?;
-					aggregate_commitments_dilithium(
-						&mut round2_data.w_aggregated[k_idx],
-						&w_other,
-					);
+					aggregate_commitments_dilithium(&mut round2_data.w_aggregated[k_idx], &w_other);
 				}
 			}
 		}
