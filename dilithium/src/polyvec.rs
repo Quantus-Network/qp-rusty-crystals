@@ -29,8 +29,8 @@ impl Default for Polyvecl {
 
 /// Implementation of ExpandA. Generates matrix A with uniformly random coefficients a_{i,j} by
 /// performing rejection sampling on the output stream of SHAKE128(rho|j|i).
-pub fn matrix_expand(mat: &mut [Polyvecl], rho: &[u8; params::SEEDBYTES]) {
-	for (i, mat_i) in mat.iter_mut().enumerate().take(K) {
+pub fn matrix_expand(mat: &mut [Polyvecl; K], rho: &[u8; params::SEEDBYTES]) {
+	for (i, mat_i) in mat.iter_mut().enumerate() {
 		for j in 0..L {
 			poly::uniform(&mut mat_i.vec[j], rho, ((i << 8) + j) as u16);
 		}
@@ -49,8 +49,8 @@ pub fn l_pointwise_acc_montgomery(w: &mut Poly, u: &Polyvecl, v: &Polyvecl) {
 	}
 }
 
-pub fn matrix_pointwise_montgomery(t: &mut Polyveck, mat: &[Polyvecl], v: &Polyvecl) {
-	for (i, t_i) in t.vec.iter_mut().enumerate().take(K) {
+pub fn matrix_pointwise_montgomery(t: &mut Polyveck, mat: &[Polyvecl; K], v: &Polyvecl) {
+	for (i, t_i) in t.vec.iter_mut().enumerate() {
 		l_pointwise_acc_montgomery(t_i, &mat[i], v);
 	}
 }
@@ -237,6 +237,7 @@ pub fn k_use_hint(a: &mut Polyveck, hint: &Polyveck) {
 	}
 }
 
+/// Pack polynomial vector w1 into byte array. Output buffer must be at least K * POLYW1_PACKEDBYTES bytes.
 pub fn k_pack_w1(r: &mut [u8], a: &Polyveck) {
 	for i in 0..K {
 		poly::w1_pack(&mut r[i * params::POLYW1_PACKEDBYTES..], &a.vec[i]);
