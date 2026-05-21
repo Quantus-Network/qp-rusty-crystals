@@ -300,7 +300,7 @@ where
 // ============================================================================
 
 /// Contribution for a single subset (η-bounded secret polynomials).
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
 pub struct SubsetContribution {
 	/// Share of s1 polynomial vector.
 	pub s1: Vec<[i32; N as usize]>,
@@ -374,7 +374,7 @@ pub struct MithrilRound1Broadcast {
 }
 
 /// Round 1 private: Shared secret K_S (leader to subset members).
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, BorshSerialize, BorshDeserialize)]
 pub struct MithrilRound1Private {
 	/// The party sending this message.
 	pub from_party_id: ParticipantId,
@@ -414,7 +414,7 @@ pub struct MithrilRound4Broadcast {
 }
 
 /// Message wrapper enum.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, BorshSerialize, BorshDeserialize)]
 pub enum MithrilDkgMessage {
 	/// Round 1 broadcast.
 	Round1Broadcast(MithrilRound1Broadcast),

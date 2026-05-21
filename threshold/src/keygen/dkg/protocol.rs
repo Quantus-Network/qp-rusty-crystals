@@ -197,7 +197,7 @@ pub enum MithrilAction {
 /// - `subset_mask` is valid for the threshold config
 /// - Sender is the legitimate leader for the subset
 /// - Receiver is a member of the subset
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct DkgMessageBuffer {
 	/// Round 1 broadcasts received while still in Initialized phase.
 	round1_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
@@ -4063,15 +4063,18 @@ mod tests {
 
 		// Deserialize should fail with a borsh error, NOT allocate 1GB
 		let result = deserialize_message(&malicious);
-		assert!(result.is_err(), "Malicious length prefix should be rejected");
 
 		// Verify we got a deserialization error, not OOM
-		let err = result.unwrap_err();
-		assert!(
-			err.contains("length") || err.contains("input") || err.contains("Unexpected"),
-			"Should fail with length/input error, got: {}",
-			err
-		);
+		match result {
+			Ok(_) => panic!("Malicious length prefix should be rejected"),
+			Err(err) => {
+				assert!(
+					err.contains("length") || err.contains("input") || err.contains("Unexpected"),
+					"Should fail with length/input error, got: {}",
+					err
+				);
+			},
+		}
 	}
 
 	#[test]
