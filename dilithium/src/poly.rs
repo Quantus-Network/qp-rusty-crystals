@@ -36,22 +36,6 @@ pub fn caddq(a: &mut Poly) {
 	}
 }
 
-/// Add polynomials. No modular reduction is performed.
-///
-/// # Arguments
-///
-/// * 'a' - 1st input polynomial
-/// * 'b' - 2nd input polynomial
-///
-/// Returns coefficient wise a + b
-pub fn add(a: &Poly, b: &Poly) -> Poly {
-	let mut c = Poly::default();
-	for i in 0..N {
-		c.coeffs[i] = a.coeffs[i] + b.coeffs[i];
-	}
-	c
-}
-
 /// Add polynomials in place. No modular reduction is performed.
 ///
 /// # Arguments
@@ -62,22 +46,6 @@ pub fn add_ip(a: &mut Poly, b: &Poly) {
 	for i in 0..N {
 		a.coeffs[i] += b.coeffs[i];
 	}
-}
-
-/// Subtract polynomials. No modular reduction is performed.
-///
-/// # Arguments
-///
-/// * 'a' - 1st input polynomial
-/// * 'b' - 2nd input polynomial
-///
-/// Returns coefficient wise a - b
-pub fn sub(a: &Poly, b: &Poly) -> Poly {
-	let mut c = Poly::default();
-	for i in 0..N {
-		c.coeffs[i] = a.coeffs[i] - b.coeffs[i];
-	}
-	c
 }
 
 /// Subtract polynomials in place. No modular reduction is performed.
@@ -381,21 +349,7 @@ pub fn make_hint(h: &mut Poly, a0: &Poly, a1: &Poly) -> i32 {
 ///
 /// * 'a' - input polynomial
 /// * 'hint' - hint polynomial
-///
-/// Returns polynomial with corrected high bits
 pub fn use_hint(a: &mut Poly, hint: &Poly) {
-	for i in 0..N {
-		a.coeffs[i] = rounding::use_hint(a.coeffs[i], hint.coeffs[i]);
-	}
-}
-
-/// Use hint polynomial to correct the high bits of a polynomial in place.
-///
-/// # Arguments
-///
-/// * 'a' - input polynomial to have high bits corrected
-/// * 'hint' - hint polynomial
-pub fn use_hint_ip(a: &mut Poly, hint: &Poly) {
 	for i in 0..N {
 		a.coeffs[i] = rounding::use_hint(a.coeffs[i], hint.coeffs[i]);
 	}
@@ -680,23 +634,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_add() {
-		let mut a = Poly::default();
-		let mut b = Poly::default();
-
-		for i in 0..N {
-			a.coeffs[i] = i as i32;
-			b.coeffs[i] = (i * 2) as i32;
-		}
-
-		let c = add(&a, &b);
-
-		for i in 0..N {
-			assert_eq!(c.coeffs[i], a.coeffs[i] + b.coeffs[i]);
-		}
-	}
-
-	#[test]
 	fn test_add_ip() {
 		let mut a = Poly::default();
 		let mut b = Poly::default();
@@ -711,23 +648,6 @@ mod tests {
 
 		for i in 0..N {
 			assert_eq!(a.coeffs[i], original_a.coeffs[i] + b.coeffs[i]);
-		}
-	}
-
-	#[test]
-	fn test_sub() {
-		let mut a = Poly::default();
-		let mut b = Poly::default();
-
-		for i in 0..N {
-			a.coeffs[i] = (i * 10) as i32;
-			b.coeffs[i] = (i * 3) as i32;
-		}
-
-		let c = sub(&a, &b);
-
-		for i in 0..N {
-			assert_eq!(c.coeffs[i], a.coeffs[i] - b.coeffs[i]);
 		}
 	}
 
