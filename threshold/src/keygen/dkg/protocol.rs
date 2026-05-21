@@ -1515,7 +1515,9 @@ fn verify_party_broadcast<S: TranscriptSigner>(
 	broadcast: &MithrilRound4Broadcast,
 	transcript_hash: &[u8; 32],
 ) -> Result<(), MithrilDkgError> {
-	// Verify transcript signature
+	// Verify transcript signature using OUR transcript_hash.
+	// If the other party signed a different transcript, this verification will fail,
+	// ensuring all parties that complete DKG have the same view of Round 1-3 messages.
 	let partial_output_hash = compute_partial_output_hash(&broadcast.partial_public_keys);
 	let signing_message = compute_signing_message(transcript_hash, &partial_output_hash);
 
