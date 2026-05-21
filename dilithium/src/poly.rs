@@ -201,7 +201,7 @@ pub fn rej_uniform(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usi
 
 /// Sample polynomial with uniformly random coefficients in [0, Q-1] by performing rejection
 /// sampling using the output stream of SHAKE128(seed|nonce).
-pub fn uniform(a: &mut Poly, seed: &[u8], nonce: u16) {
+pub fn uniform(a: &mut Poly, seed: &[u8; params::SEEDBYTES], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake128_stream_init(&mut state, seed, nonce);
 
@@ -429,7 +429,7 @@ pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
 
 /// Sample polynomial with uniformly random coefficients in [-ETA,ETA] by performing rejection
 /// sampling using the output stream from SHAKE256(seed|nonce).
-pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
+pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8; params::CRHBYTES], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
@@ -466,7 +466,7 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
 
 /// Sample polynomial with uniformly random coefficients in [-(GAMMA1 - 1), GAMMA1] by
 /// performing rejection sampling on output stream of SHAKE256(seed|nonce).
-pub fn uniform_gamma1(a: &mut Poly, seed: &[u8], nonce: u16) {
+pub fn uniform_gamma1(a: &mut Poly, seed: &[u8; params::CRHBYTES], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
@@ -481,7 +481,7 @@ pub fn uniform_gamma1(a: &mut Poly, seed: &[u8], nonce: u16) {
 /// Includes timing countermeasures using dummy operations to reduce side-channel leakage
 pub fn challenge(c: &mut Poly, seed: &[u8]) {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, seed, params::C_DASH_BYTES);
+	fips202::shake256_absorb(&mut state, seed);
 	fips202::shake256_finalize(&mut state);
 
 	let mut buf = [0u8; fips202::SHAKE256_RATE];

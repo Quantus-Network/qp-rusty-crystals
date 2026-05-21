@@ -31,19 +31,15 @@ fn rol(a: u64, offset: u64) -> u64 {
 }
 
 /// Load 8 bytes into uint64_t in little-endian order
-pub fn load64(x: &[u8]) -> u64 {
-	let mut r = 0u64;
-	for i in 0..8 {
-		r |= (x[i] as u64) << (8 * i);
-	}
-	r
+#[inline]
+fn load64(x: &[u8; 8]) -> u64 {
+	u64::from_le_bytes(*x)
 }
 
 /// Store a 64-bit integer to array of 8 bytes in little-endian order
-pub fn store64(x: &mut [u8], u: u64) {
-	for i in 0..8 {
-		x[i] = (u >> 8 * i) as u8;
-	}
+#[inline]
+fn store64(x: &mut [u8; 8], u: u64) {
+	*x = u.to_le_bytes();
 }
 
 /// Keccak round constants
@@ -75,7 +71,7 @@ const KECCAKF_ROUNDCONSTANTS: [u64; NROUNDS] = [
 ];
 
 /// The Keccak F1600 Permutation
-pub fn keccakf1600_statepermute(state: &mut [u64]) {
+fn keccakf1600_statepermute(state: &mut [u64; 25]) {
 	let mut aba = state[0];
 	let mut abe = state[1];
 	let mut abi = state[2];
@@ -318,7 +314,8 @@ pub fn keccakf1600_statepermute(state: &mut [u64]) {
 }
 
 /// Absorb step of Keccak; incremental.
-fn keccak_absorb(state: &mut KeccakState, r: usize, input: &[u8], mut inlen: usize) {
+fn keccak_absorb(state: &mut KeccakState, r: usize, input: &[u8]) {
+	let mut inlen = input.len();
 	let mut idx = 0;
 	let mut pos = state.pos;
 	while pos + inlen >= r {
@@ -351,24 +348,21 @@ fn keccak_finalize(s: &mut [u64; 25], pos: usize, r: usize, p: u8) {
 /// Returns new position pos in current block
 fn keccak_squeeze(
 	out: &mut [u8],
-	mut outlen: usize,
 	s: &mut [u64; 25],
 	mut pos: usize,
 	r: usize,
 ) -> usize {
+	let mut outlen = out.len();
+	let mut out_idx = 0;
 	while outlen != 0 {
 		if pos == r {
 			keccakf1600_statepermute(s);
 			pos = 0;
 		}
 		let mut i = pos;
-		let mut idx = 0;
 		while i < r && i < pos + outlen {
-			// println!("i = {}", i);
-			// println!("out[idx] przed przypisaniem: {}", out[idx]);
-			out[idx] = (s[i / 8] >> 8 * (i % 8)) as u8;
-			// println!("out[idx] po przypisaniu: {}", out[idx]);
-			idx += 1;
+			out[out_idx] = (s[i / 8] >> 8 * (i % 8)) as u8;
+			out_idx += 1;
 			i += 1;
 		}
 		outlen -= i - pos;
@@ -379,12 +373,14 @@ fn keccak_squeeze(
 }
 
 /// Absorb step of Keccak; non-incremental, starts by zeroeing the state.
-fn keccak_absorb_once(s: &mut [u64; 25], r: usize, input: &[u8], mut inlen: usize, p: u8) {
+fn keccak_absorb_once(s: &mut [u64; 25], r: usize, input: &[u8], p: u8) {
+	let mut inlen = input.len();
 	s.fill(0);
 	let mut idx = 0;
 	while inlen >= r {
 		for i in 0..r / 8 {
-			s[i] ^= load64(&input[idx + 8 * i..]);
+			let bytes: &[u8; 8] = input[idx + 8 * i..idx + 8 * i + 8].try_into().unwrap();
+			s[i] ^= load64(bytes);
 		}
 		idx += r;
 		inlen -= r;
@@ -402,12 +398,13 @@ fn keccak_absorb_once(s: &mut [u64; 25], r: usize, input: &[u8], mut inlen: usiz
 /// Squeeze step of Keccak. Squeezes full blocks of r bytes each.
 /// Modifies the state. Can be called multiple times to keep squeezing, i.e., is incremental.
 /// Assumes zero bytes of current block have already been squeezed.
-fn keccak_squeezeblocks(out: &mut [u8], mut nblocks: usize, s: &mut [u64], r: usize) {
+fn keccak_squeezeblocks(out: &mut [u8], mut nblocks: usize, s: &mut [u64; 25], r: usize) {
 	let mut idx = 0usize;
 	while nblocks > 0 {
 		keccakf1600_statepermute(s);
 		for i in 0..(r >> 3) {
-			store64(&mut out[idx + 8 * i..], s[i])
+			let bytes: &mut [u8; 8] = (&mut out[idx + 8 * i..idx + 8 * i + 8]).try_into().unwrap();
+			store64(bytes, s[i]);
 		}
 		idx += r;
 		nblocks -= 1;
@@ -415,8 +412,8 @@ fn keccak_squeezeblocks(out: &mut [u8], mut nblocks: usize, s: &mut [u64], r: us
 }
 
 /// Absorb step of the SHAKE128 XOF; incremental.
-pub fn shake128_absorb(state: &mut KeccakState, input: &[u8], inlen: usize) {
-	keccak_absorb(state, SHAKE128_RATE, input, inlen);
+pub fn shake128_absorb(state: &mut KeccakState, input: &[u8]) {
+	keccak_absorb(state, SHAKE128_RATE, input);
 }
 
 /// Finalize absorb step of the SHAKE128 XOF.
@@ -433,8 +430,8 @@ pub fn shake128_squeezeblocks(output: &mut [u8], nblocks: usize, s: &mut KeccakS
 }
 
 /// Absorb step of the SHAKE256 XOF; incremental.
-pub fn shake256_absorb(state: &mut KeccakState, input: &[u8], inlen: usize) {
-	keccak_absorb(state, SHAKE256_RATE, input, inlen);
+pub fn shake256_absorb(state: &mut KeccakState, input: &[u8]) {
+	keccak_absorb(state, SHAKE256_RATE, input);
 }
 
 /// Finalize absorb step of the SHAKE256 XOF.
@@ -445,13 +442,13 @@ pub fn shake256_finalize(state: &mut KeccakState) {
 
 /// Squeeze step of SHAKE256 XOF. Squeezes arbitraily many bytes.
 /// Can be called multiple times to keep squeezing.
-pub fn shake256_squeeze(out: &mut [u8], outlen: usize, state: &mut KeccakState) {
-	state.pos = keccak_squeeze(out, outlen, &mut state.s, state.pos, SHAKE256_RATE);
+pub fn shake256_squeeze(out: &mut [u8], state: &mut KeccakState) {
+	state.pos = keccak_squeeze(out, &mut state.s, state.pos, SHAKE256_RATE);
 }
 
 /// Initialize, absorb into and finalize SHAKE256 XOF; non-incremental.
-pub fn shake256_absorb_once(state: &mut KeccakState, input: &[u8], inlen: usize) {
-	keccak_absorb_once(&mut state.s, SHAKE256_RATE, input, inlen, 0x1F);
+pub fn shake256_absorb_once(state: &mut KeccakState, input: &[u8]) {
+	keccak_absorb_once(&mut state.s, SHAKE256_RATE, input, 0x1F);
 	state.pos = SHAKE256_RATE;
 }
 
@@ -463,29 +460,31 @@ pub fn shake256_squeezeblocks(out: &mut [u8], nblocks: usize, state: &mut Keccak
 }
 
 /// SHAKE256 XOF with non-incremental API
-pub fn shake256(output: &mut [u8], mut outlen: usize, input: &[u8], inlen: usize) {
+pub fn shake256(output: &mut [u8], input: &[u8]) {
 	let mut state = KeccakState::default();
+	let outlen = output.len();
 
-	shake256_absorb_once(&mut state, input, inlen);
+	shake256_absorb_once(&mut state, input);
 	let nblocks = outlen / SHAKE256_RATE;
 	shake256_squeezeblocks(output, nblocks, &mut state);
-	outlen -= nblocks * SHAKE256_RATE;
 	let idx = nblocks * SHAKE256_RATE;
-	shake256_squeeze(&mut output[idx..], outlen, &mut state);
+	shake256_squeeze(&mut output[idx..], &mut state);
 }
 
-pub fn shake128_stream_init(state: &mut KeccakState, seed: &[u8], nonce: u16) {
+/// Initialize SHAKE128 stream with a fixed-size seed and nonce.
+pub fn shake128_stream_init(state: &mut KeccakState, seed: &[u8; crate::params::SEEDBYTES], nonce: u16) {
 	let t = [nonce as u8, (nonce >> 8) as u8];
 	state.init();
-	shake128_absorb(state, seed, crate::params::SEEDBYTES);
-	shake128_absorb(state, &t, 2);
+	shake128_absorb(state, seed);
+	shake128_absorb(state, &t);
 	shake128_finalize(state);
 }
 
-pub fn shake256_stream_init(state: &mut KeccakState, seed: &[u8], nonce: u16) {
+/// Initialize SHAKE256 stream with a fixed-size seed and nonce.
+pub fn shake256_stream_init(state: &mut KeccakState, seed: &[u8; crate::params::CRHBYTES], nonce: u16) {
 	let t = [nonce as u8, (nonce >> 8) as u8];
 	state.init();
-	shake256_absorb(state, seed, crate::params::CRHBYTES);
-	shake256_absorb(state, &t, 2);
+	shake256_absorb(state, seed);
+	shake256_absorb(state, &t);
 	shake256_finalize(state);
 }

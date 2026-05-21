@@ -29,7 +29,7 @@ impl Default for Polyvecl {
 
 /// Implementation of ExpandA. Generates matrix A with uniformly random coefficients a_{i,j} by
 /// performing rejection sampling on the output stream of SHAKE128(rho|j|i).
-pub fn matrix_expand(mat: &mut [Polyvecl], rho: &[u8]) {
+pub fn matrix_expand(mat: &mut [Polyvecl], rho: &[u8; params::SEEDBYTES]) {
 	for (i, mat_i) in mat.iter_mut().enumerate().take(K) {
 		for j in 0..L {
 			poly::uniform(&mut mat_i.vec[j], rho, ((i << 8) + j) as u16);
@@ -55,14 +55,14 @@ pub fn matrix_pointwise_montgomery(t: &mut Polyveck, mat: &[Polyvecl], v: &Polyv
 	}
 }
 
-pub fn l_uniform_eta(v: &mut Polyvecl, seed: &[u8], mut nonce: u16) {
+pub fn l_uniform_eta(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], mut nonce: u16) {
 	for i in 0..L {
 		poly::uniform_eta(&mut v.vec[i], seed, nonce);
 		nonce += 1;
 	}
 }
 
-pub fn l_uniform_gamma1(v: &mut Polyvecl, seed: &[u8], nonce: u16) {
+pub fn l_uniform_gamma1(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], nonce: u16) {
 	for i in 0..L {
 		poly::uniform_gamma1(&mut v.vec[i], seed, L as u16 * nonce + i as u16);
 	}
@@ -121,7 +121,7 @@ pub fn polyvecl_is_norm_within_bound(v: &Polyvecl, bound: i32) -> bool {
 
 //---------------------------------
 
-pub fn k_uniform_eta(v: &mut Polyveck, seed: &[u8], mut nonce: u16) {
+pub fn k_uniform_eta(v: &mut Polyveck, seed: &[u8; params::CRHBYTES], mut nonce: u16) {
 	for i in 0..K {
 		poly::uniform_eta(&mut v.vec[i], seed, nonce);
 		nonce += 1
