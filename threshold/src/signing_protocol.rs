@@ -17,6 +17,18 @@
 //! new round1 seed and a new transport channel. If combination succeeds, the leader
 //! broadcasts the signature to all parties.
 //!
+//! # Session Isolation (Caller Responsibility)
+//!
+//! This protocol follows the Mithril paper's security model which does **not** include
+//! cryptographic session identifiers. Instead, session isolation is the caller's responsibility:
+//!
+//! - **Fresh randomness**: Each signing attempt MUST use a fresh `round1_seed`
+//! - **Transport isolation**: Messages from different sessions must not be mixed (e.g., via ChannelId)
+//! - **No instance reuse**: Create a new `DilithiumSignProtocol` for each signing attempt
+//!
+//! NEAR MPC satisfies these requirements by generating `round1_seed` via `rand::random()` and
+//! using unique `ChannelId`s per attempt.
+//!
 //! # No in-protocol retries
 //!
 //! Earlier revisions of this protocol included a `Round4Retry` message that allowed
@@ -1089,33 +1101,6 @@ impl DilithiumSignProtocol {
 			self.r3_broadcasts.entry(r3.party_id).or_insert(r3);
 		}
 	}
-
-	/// Reset the protocol to start a new signing session on the *same* instance.
-	///
-	/// This clears all collected broadcasts and resets the state machine.
-	/// The signer is also reset to allow a fresh round of signing.
-	///
-	/// # Warning
-	///
-	/// Prefer constructing a fresh `DilithiumSignProtocol` over calling `reset()`.
-	/// `reset()` keeps the same `round1_seed`, so a subsequent attempt on the same
-	/// instance will reuse identical Round 1 randomness — which is **only safe**
-	/// when the previous attempt never sent a Round 1 message on the wire. In
-	/// production (NEAR MPC) every retry constructs a new instance with a fresh
-	/// seed and a fresh transport channel, so this method exists primarily for
-	/// tests and for callers that abandon a protocol before its first poke.
-	pub fn reset(&mut self) {
-		self.state = SignProtocolState::Round1Generate;
-		self.r1_broadcasts.clear();
-		self.r2_broadcasts.clear();
-		self.r3_broadcasts.clear();
-		self.my_r1 = None;
-		self.my_r2 = None;
-		self.my_r3 = None;
-		self.message_buffer.clear();
-		self.received_signature = None;
-		self.signer.reset();
-	}
 }
 
 // ============================================================================
@@ -1508,33 +1493,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_protocol_reset() {
-		let config = ThresholdConfig::new(2, 3).unwrap();
-		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
-
-		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
-		let mut protocol = DilithiumSignProtocol::new(
-			signer,
-			b"test".to_vec(),
-			b"ctx".to_vec(),
-			vec![0, 1],
-			0,
-			0,
-			[0xAA; 32],
-		)
-		.unwrap();
-
-		// Advance state
-		let _ = protocol.poke().unwrap();
-		assert_eq!(*protocol.state(), SignProtocolState::Round1Waiting);
-
-		// Reset
-		protocol.reset();
-		assert_eq!(*protocol.state(), SignProtocolState::Round1Generate);
-		assert!(protocol.r1_broadcasts.is_empty());
-	}
-
-	#[test]
 	fn test_message_from_self_ignored() {
 		let config = ThresholdConfig::new(2, 3).unwrap();
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
@@ -1797,39 +1755,6 @@ mod tests {
 		assert!(protocol0.message_buffer.round2.is_empty());
 		// And the Round 2 message from party 1 should now be in r2_broadcasts
 		assert!(protocol0.r2_broadcasts.contains_key(&1));
-	}
-
-	#[test]
-	fn test_protocol_reset_clears_buffer() {
-		let config = ThresholdConfig::new(2, 3).unwrap();
-		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
-
-		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
-		let mut protocol = DilithiumSignProtocol::new(
-			signer,
-			b"test".to_vec(),
-			b"ctx".to_vec(),
-			vec![0, 1],
-			0,
-			0,
-			[0xAA; 32],
-		)
-		.unwrap();
-
-		// Start Round 1
-		let _ = protocol.poke().unwrap();
-
-		// Buffer some messages
-		let r2 = Round2Broadcast::new(1, vec![1, 2, 3, 4]);
-		let msg = SigningMessage::Round2(r2);
-		let data = protocol.serialize_message(&msg).unwrap();
-		protocol.message(1, data).unwrap();
-
-		assert!(!protocol.message_buffer.is_empty());
-
-		// Reset should clear the buffer
-		protocol.reset();
-		assert!(protocol.message_buffer.is_empty());
 	}
 
 	#[test]

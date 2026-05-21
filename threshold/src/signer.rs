@@ -696,14 +696,6 @@ impl ThresholdSigner {
 
 		Ok(Signature::from_vec(signature_bytes))
 	}
-
-	/// Reset the signer to start a new signing session.
-	///
-	/// This clears all internal state and returns the signer to the `Fresh` state.
-	/// Call this after completing a signing session or to abort a session in progress.
-	pub fn reset(&mut self) {
-		self.state = SignerState::default();
-	}
 }
 
 // `state` (SignerState) and `private_key` (PrivateKeyShare) both implement
