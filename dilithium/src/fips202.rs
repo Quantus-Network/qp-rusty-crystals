@@ -346,12 +346,7 @@ fn keccak_finalize(s: &mut [u64; 25], pos: usize, r: usize, p: u8) {
 /// Modifies the state. Can be called multiple times to keep squeezing, i.e., is incremental.
 ///
 /// Returns new position pos in current block
-fn keccak_squeeze(
-	out: &mut [u8],
-	s: &mut [u64; 25],
-	mut pos: usize,
-	r: usize,
-) -> usize {
+fn keccak_squeeze(out: &mut [u8], s: &mut [u64; 25], mut pos: usize, r: usize) -> usize {
 	let mut outlen = out.len();
 	let mut out_idx = 0;
 	while outlen != 0 {
@@ -472,7 +467,11 @@ pub fn shake256(output: &mut [u8], input: &[u8]) {
 }
 
 /// Initialize SHAKE128 stream with a fixed-size seed and nonce.
-pub fn shake128_stream_init(state: &mut KeccakState, seed: &[u8; crate::params::SEEDBYTES], nonce: u16) {
+pub fn shake128_stream_init(
+	state: &mut KeccakState,
+	seed: &[u8; crate::params::SEEDBYTES],
+	nonce: u16,
+) {
 	let t = [nonce as u8, (nonce >> 8) as u8];
 	state.init();
 	shake128_absorb(state, seed);
@@ -481,7 +480,11 @@ pub fn shake128_stream_init(state: &mut KeccakState, seed: &[u8; crate::params::
 }
 
 /// Initialize SHAKE256 stream with a fixed-size seed and nonce.
-pub fn shake256_stream_init(state: &mut KeccakState, seed: &[u8; crate::params::CRHBYTES], nonce: u16) {
+pub fn shake256_stream_init(
+	state: &mut KeccakState,
+	seed: &[u8; crate::params::CRHBYTES],
+	nonce: u16,
+) {
 	let t = [nonce as u8, (nonce >> 8) as u8];
 	state.init();
 	shake256_absorb(state, seed);

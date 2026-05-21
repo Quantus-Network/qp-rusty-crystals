@@ -358,8 +358,8 @@ pub fn use_hint(a: &mut Poly, hint: &Poly) {
 /// Sample uniformly random coefficients in [-ETA, ETA] by performing rejection sampling using array
 /// of random bytes.
 ///
-/// Returns number of sampled coefficients. Can be smaller than a.len() if not enough random bytes were
-/// given.
+/// Returns number of sampled coefficients. Can be smaller than a.len() if not enough random bytes
+/// were given.
 pub fn rej_eta(a: &mut [i32], buf: &[u8]) -> usize {
 	let alen = a.len();
 	let buflen = buf.len();

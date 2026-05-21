@@ -292,7 +292,10 @@ fn generate_challenge_polynomial(
 
 	let mut keccak_state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut keccak_state, message_hash_mu);
-	fips202::shake256_absorb(&mut keccak_state, &signature_buffer[..K * params::POLYW1_PACKEDBYTES]);
+	fips202::shake256_absorb(
+		&mut keccak_state,
+		&signature_buffer[..K * params::POLYW1_PACKEDBYTES],
+	);
 	fips202::shake256_finalize(&mut keccak_state);
 	fips202::shake256_squeeze(&mut signature_buffer[..params::C_DASH_BYTES], &mut keccak_state);
 

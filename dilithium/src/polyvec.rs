@@ -237,7 +237,8 @@ pub fn k_use_hint(a: &mut Polyveck, hint: &Polyveck) {
 	}
 }
 
-/// Pack polynomial vector w1 into byte array. Output buffer must be at least K * POLYW1_PACKEDBYTES bytes.
+/// Pack polynomial vector w1 into byte array. Output buffer must be at least K * POLYW1_PACKEDBYTES
+/// bytes.
 pub fn k_pack_w1(r: &mut [u8], a: &Polyveck) {
 	for i in 0..K {
 		poly::w1_pack(&mut r[i * params::POLYW1_PACKEDBYTES..], &a.vec[i]);
