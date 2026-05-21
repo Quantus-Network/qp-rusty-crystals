@@ -85,14 +85,21 @@ impl BorshSerialize for ParticipantList {
 
 impl BorshDeserialize for ParticipantList {
 	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-		let participants = Vec::<ParticipantId>::deserialize_reader(reader)?;
+		// Read length prefix first and validate BEFORE allocating
+		// This prevents DoS via oversized length prefix causing memory exhaustion
+		let len = u32::deserialize_reader(reader)? as usize;
 
-		// Validate invariants - use MAX_PARTIES to match protocol limits
-		if participants.len() > MAX_PARTIES as usize {
+		if len > MAX_PARTIES as usize {
 			return Err(borsh::io::Error::new(
 				borsh::io::ErrorKind::InvalidData,
 				"ParticipantList exceeds MAX_PARTIES",
 			));
+		}
+
+		// Now safe to allocate and read elements
+		let mut participants = Vec::with_capacity(len);
+		for _ in 0..len {
+			participants.push(ParticipantId::deserialize_reader(reader)?);
 		}
 
 		// Verify sorted and unique (strictly increasing)
@@ -662,5 +669,24 @@ mod tests {
 		let just_vec: Vec<ParticipantId> = vec![100, 200, 300];
 		let vec_serialized = borsh::to_vec(&just_vec).unwrap();
 		assert_eq!(serialized, vec_serialized);
+	}
+
+	#[test]
+	fn test_borsh_rejects_oversized_length_prefix_without_allocation() {
+		// DoS prevention test: a malicious payload with a huge length prefix
+		// should be rejected BEFORE allocating memory, not after.
+		//
+		// Craft a malicious payload: length prefix claiming 1 billion elements,
+		// but only provide a few bytes of actual data.
+		let malicious_len: u32 = 1_000_000_000; // 1 billion
+		let mut malicious = Vec::new();
+		malicious.extend_from_slice(&malicious_len.to_le_bytes());
+		// Only add a few bytes of "data" (not 4GB)
+		malicious.extend_from_slice(&[0u8; 16]);
+
+		// This should fail fast with an error about exceeding MAX_PARTIES,
+		// NOT cause OOM trying to allocate 4GB (1B * 4 bytes per u32)
+		let result: Result<ParticipantList, _> = borsh::from_slice(&malicious);
+		assert!(result.is_err(), "Should reject oversized length prefix");
 	}
 }
