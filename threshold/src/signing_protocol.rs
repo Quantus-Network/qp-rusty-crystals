@@ -23,7 +23,8 @@
 //! cryptographic session identifiers. Instead, session isolation is the caller's responsibility:
 //!
 //! - **Fresh randomness**: Each signing attempt MUST use a fresh `round1_seed`
-//! - **Transport isolation**: Messages from different sessions must not be mixed (e.g., via ChannelId)
+//! - **Transport isolation**: Messages from different sessions must not be mixed (e.g., via
+//!   ChannelId)
 //! - **No instance reuse**: Create a new `DilithiumSignProtocol` for each signing attempt
 //!
 //! NEAR MPC satisfies these requirements by generating `round1_seed` via `rand::random()` and

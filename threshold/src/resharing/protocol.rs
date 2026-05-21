@@ -1755,8 +1755,8 @@ mod tests {
 
 	#[test]
 	fn test_commit_subshare_distinguishes_inputs() {
-		let r1 = NewShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[2i32; N as usize]; K] };
-		let r2 = NewShareData { s1: vec![[1i32; N as usize]; L], s2: vec![[3i32; N as usize]; K] };
+		let r1 = NewShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
+		let r2 = NewShareData { s1: [[1i32; N as usize]; L], s2: [[3i32; N as usize]; K] };
 		let c1 = commit_subshare(0b011, 0b101, &r1);
 		let c2 = commit_subshare(0b011, 0b101, &r2);
 		assert_ne!(c1, c2);

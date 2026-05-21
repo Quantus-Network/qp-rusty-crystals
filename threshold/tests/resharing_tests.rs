@@ -1251,7 +1251,7 @@ fn test_resharing_detects_round2_payload_mismatch() {
 	}
 
 	let target_pair = (0b011u16, 0b011u16);
-	let bogus_r = NewShareData { s1: vec![[99i32; N]; L], s2: vec![[13i32; N]; K] };
+	let bogus_r = NewShareData { s1: [[99i32; N]; L], s2: [[13i32; N]; K] };
 
 	let bogus_r_capt = bogus_r.clone();
 	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
@@ -1318,7 +1318,7 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 		old_shares.insert(share.party_id(), share.clone());
 	}
 
-	let bogus_r = NewShareData { s1: vec![[42i32; N]; L], s2: vec![[7i32; N]; K] };
+	let bogus_r = NewShareData { s1: [[42i32; N]; L], s2: [[7i32; N]; K] };
 	let target_pair = (0b01u16, 0b10u16);
 	let bogus_commit = forge_consistent_commitment(target_pair.0, target_pair.1, &bogus_r);
 

@@ -4,7 +4,7 @@
 //! for the resharing protocol that enables changing the participant set while
 //! preserving the same public key.
 
-use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::fmt;
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -630,16 +630,16 @@ pub struct ResharingRound4Message {
 /// New share data for a specific subset.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct NewShareData {
-	/// Share of s1 polynomial vector (L polynomials).
-	pub s1: Vec<[i32; N as usize]>,
-	/// Share of s2 polynomial vector (K polynomials).
-	pub s2: Vec<[i32; N as usize]>,
+	/// Share of s1 polynomial vector (exactly L polynomials).
+	pub s1: [[i32; N as usize]; L],
+	/// Share of s2 polynomial vector (exactly K polynomials).
+	pub s2: [[i32; N as usize]; K],
 }
 
 impl NewShareData {
-	/// Create a new empty share data.
+	/// Create a new empty share data (all zeros).
 	pub fn new() -> Self {
-		Self { s1: vec![[0i32; N as usize]; L], s2: vec![[0i32; N as usize]; K] }
+		Self { s1: [[0i32; N as usize]; L], s2: [[0i32; N as usize]; K] }
 	}
 }
 
@@ -1196,5 +1196,48 @@ mod tests {
 
 		// The fixed-size array type guarantees exactly K polynomials
 		assert_eq!(broadcast.partial_pks.get(&0b011).unwrap().len(), K);
+	}
+
+	#[test]
+	fn test_new_share_data_borsh_roundtrip() {
+		// Valid NewShareData should round-trip successfully
+		let share_data = NewShareData::new();
+		assert_eq!(share_data.s1.len(), L);
+		assert_eq!(share_data.s2.len(), K);
+
+		let serialized = borsh::to_vec(&share_data).unwrap();
+		let deserialized: NewShareData = borsh::from_slice(&serialized).unwrap();
+		assert_eq!(deserialized.s1.len(), L);
+		assert_eq!(deserialized.s2.len(), K);
+	}
+
+	#[test]
+	fn test_new_share_data_fixed_size_compile_time() {
+		// This test verifies that NewShareData uses fixed-size arrays.
+		// The type system enforces exact dimensions at compile time,
+		// preventing truncation attacks (cf. WSTS PR #88 vulnerability pattern).
+		//
+		// If someone tried to change s1 to Vec<[i32; N]>, this test would fail to compile.
+		let share_data = NewShareData::new();
+
+		// These assertions are compile-time guarantees via the array type
+		let _s1: &[[i32; N as usize]; L] = &share_data.s1;
+		let _s2: &[[i32; N as usize]; K] = &share_data.s2;
+
+		// Runtime verification (redundant but documents the invariant)
+		assert_eq!(core::mem::size_of_val(&share_data.s1), L * N as usize * 4);
+		assert_eq!(core::mem::size_of_val(&share_data.s2), K * N as usize * 4);
+	}
+
+	#[test]
+	fn test_new_share_data_rejects_truncated_serialization() {
+		// Manually craft truncated serialized data - should fail deserialization
+		let share_data = NewShareData::new();
+		let serialized = borsh::to_vec(&share_data).unwrap();
+
+		// Truncate to half - should fail
+		let truncated = &serialized[..serialized.len() / 2];
+		let result: Result<NewShareData, _> = borsh::from_slice(truncated);
+		assert!(result.is_err(), "Should reject truncated data");
 	}
 }
