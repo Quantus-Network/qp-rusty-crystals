@@ -3,16 +3,31 @@ use core::{ops::Deref, str::FromStr};
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
 
-use crate::SensitiveBytes32;
+use crate::{SensitiveBytes32, MAX_DERIVATION_DEPTH, MAX_DERIVATION_PATH_BYTES};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Error {
 	InvalidChildNumber,
 	InvalidDerivationPath,
 	NotHardened,
+	PathTooLong(usize),
+	PathTooDeep(usize),
 }
 
 const HARDENED_BIT: u32 = 1 << 31;
+
+/// Reject paths whose raw byte length or `/`-segment count exceed the workspace caps.
+/// Runs before any allocation so attacker-controlled paths cannot drive memory or CPU.
+pub(crate) fn check_path_bounds(path: &str) -> Result<(), Error> {
+	if path.len() > MAX_DERIVATION_PATH_BYTES {
+		return Err(Error::PathTooLong(path.len()));
+	}
+	let depth = path.bytes().filter(|b| *b == b'/').count();
+	if depth > MAX_DERIVATION_DEPTH {
+		return Err(Error::PathTooDeep(depth));
+	}
+	Ok(())
+}
 
 /// A child number for a derived key
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -50,14 +65,16 @@ impl FromStr for DerivationPath {
 	type Err = Error;
 
 	fn from_str(path: &str) -> Result<DerivationPath, Error> {
-		let mut path = path.split('/');
+		check_path_bounds(path)?;
 
-		if path.next() != Some("m") {
+		let mut parts = path.split('/');
+
+		if parts.next() != Some("m") {
 			return Err(Error::InvalidDerivationPath);
 		}
 
 		Ok(DerivationPath {
-			path: path.map(str::parse).collect::<Result<Vec<ChildNumber>, Error>>()?,
+			path: parts.map(str::parse).collect::<Result<Vec<ChildNumber>, Error>>()?,
 		})
 	}
 }
@@ -101,9 +118,9 @@ impl IntoDerivationPath for &str {
 		self.parse()
 	}
 }
-#[derive(Clone)]
 pub struct ExtendedPrivKey {
-	// Debug intentionally omitted to avoid leaking key material
+	// Debug intentionally omitted to avoid leaking key material.
+	// Clone intentionally omitted: the embedded SensitiveBytes32 fields are move-only.
 	secret_key: SensitiveBytes32,
 	chain_code: SensitiveBytes32,
 }

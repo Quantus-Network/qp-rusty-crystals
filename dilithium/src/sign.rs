@@ -700,17 +700,16 @@ mod tests {
 
 	#[test]
 	fn test_fixed_seed_keypair() {
-		let seed = get_random_bytes();
+		let seed_bytes = [0x55u8; crate::params::SEEDBYTES];
 
 		let mut pk1 = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk1 = [0u8; crate::params::SECRETKEYBYTES];
 		let mut pk2 = [0u8; crate::params::PUBLICKEYBYTES];
 		let mut sk2 = [0u8; crate::params::SECRETKEYBYTES];
 
-		super::keypair(&mut pk1, &mut sk1, seed.clone());
-		super::keypair(&mut pk2, &mut sk2, seed);
+		super::keypair(&mut pk1, &mut sk1, (&mut seed_bytes.clone()).into());
+		super::keypair(&mut pk2, &mut sk2, (&mut seed_bytes.clone()).into());
 
-		// Same seed should produce same keypair
 		assert_eq!(pk1, pk2);
 		assert_eq!(sk1, sk2);
 	}

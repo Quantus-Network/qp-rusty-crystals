@@ -14,7 +14,7 @@ use bip39::{Language, Mnemonic};
 use core::str::FromStr;
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 #[cfg(test)]
 mod test_vectors;
@@ -43,6 +43,10 @@ pub enum HDLatticeError {
 	InvalidWormholePath(String),
 	#[error("Invalid BIP44 path: {0}")]
 	InvalidPath(String),
+	#[error("Derivation path too long: {0} bytes")]
+	PathTooLong(usize),
+	#[error("Derivation path too deep: {0} segments")]
+	PathTooDeep(usize),
 	#[error("hderive error: {0:?}")]
 	GenericError(hderive::Error),
 }
@@ -51,6 +55,15 @@ pub const ROOT_PATH: &str = "m";
 pub const PURPOSE: &str = "44'";
 pub const QUANTUS_DILITHIUM_CHAIN_ID: &str = "189189'";
 pub const QUANTUS_WORMHOLE_CHAIN_ID: &str = "189189189'";
+
+/// Maximum number of `/`-separated segments allowed in a derivation path
+/// (counts the leading `m/` separator too, so legitimate BIP44 paths sit well below).
+/// Bounded to prevent DoS via attacker-controlled deep paths.
+pub const MAX_DERIVATION_DEPTH: usize = 16;
+
+/// Maximum raw byte length of an accepted derivation path string.
+/// Sized for 16 segments of up to ~14 chars plus the `m/` prefix.
+pub const MAX_DERIVATION_PATH_BYTES: usize = 256;
 
 /// Convert a BIP39 mnemonic phrase to a seed
 ///
@@ -77,20 +90,14 @@ pub const QUANTUS_WORMHOLE_CHAIN_ID: &str = "189189189'";
 /// The returned seed contains sensitive cryptographic material and should be
 /// zeroized when no longer needed.
 pub fn mnemonic_to_seed(
-	mut mnemonic: String,
+	mnemonic: String,
 	passphrase: Option<&str>,
 ) -> Result<[u8; 64], HDLatticeError> {
-	// Parse the mnemonic
-	let parsed_mnemonic = Mnemonic::parse_in_normalized(Language::English, &mnemonic)
+	// Drop guard: zeroizes the mnemonic on every exit path (success, parse error, unwind).
+	let mnemonic = Zeroizing::new(mnemonic);
+	let parsed_mnemonic = Mnemonic::parse_in_normalized(Language::English, mnemonic.as_str())
 		.map_err(|e| HDLatticeError::Bip39Error(e.to_string()))?;
-
-	// Generate seed from mnemonic (expensive PBKDF2 operation)
-	let seed: [u8; 64] = parsed_mnemonic.to_seed_normalized(passphrase.unwrap_or(""));
-
-	// Zeroize the mnemonic string
-	mnemonic.zeroize();
-
-	Ok(seed)
+	Ok(parsed_mnemonic.to_seed_normalized(passphrase.unwrap_or("")))
 }
 
 /// Derive a Dilithium keypair from a seed at the given BIP44 path
@@ -145,13 +152,11 @@ pub fn generate_wormhole_from_seed(
 	seed: SensitiveBytes64,
 	path: &str,
 ) -> Result<WormholePair, HDLatticeError> {
-	// Validate wormhole path
+	check_derivation_path(path)?;
+
 	if path.split("/").nth(2) != Some(QUANTUS_WORMHOLE_CHAIN_ID) {
 		return Err(HDLatticeError::InvalidWormholePath(path.to_string()));
 	}
-
-	// Validate the derivation path
-	check_derivation_path(path)?;
 
 	// Derive entropy at the specified path
 	let xpriv = ExtendedPrivKey::derive(seed.as_bytes(), path)
@@ -167,9 +172,13 @@ pub fn generate_wormhole_from_seed(
 	Ok(wormhole_pair)
 }
 
-/// Validate a derivation path — parsing itself enforces hardened-only.
+/// Validate a derivation path — bounds first, then hardened-only syntax via parsing.
 fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
-	crate::hderive::DerivationPath::from_str(path).map_err(HDLatticeError::GenericError)?;
+	crate::hderive::DerivationPath::from_str(path).map_err(|e| match e {
+		hderive::Error::PathTooLong(n) => HDLatticeError::PathTooLong(n),
+		hderive::Error::PathTooDeep(n) => HDLatticeError::PathTooDeep(n),
+		other => HDLatticeError::GenericError(other),
+	})?;
 	Ok(())
 }
 
