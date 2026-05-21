@@ -1090,16 +1090,20 @@ impl DilithiumSignProtocol {
 	/// Returns `false` (and the message should be dropped) if either:
 	/// - We have no Round 1 from the claimed party (replay before any Round 1, or Round 2 from a
 	///   non-participant — already filtered earlier, but cheap to re-verify), or
+	/// - The commitment_data is empty (every participant must contribute), or
 	/// - The hash does not match (the reveal does not correspond to that commitment, most likely a
 	///   replay from an earlier protocol instance).
 	fn round2_matches_stored_round1(&self, r2: &Round2Broadcast) -> bool {
 		let Some(r1) = self.r1_broadcasts.get(&r2.party_id) else {
 			return false;
 		};
-		// Empty commitment_data is a legitimate "I have nothing to contribute" signal
-		// in some flows (matching the check in round3_respond at signer.rs), so allow it.
+		// Empty commitment_data is NOT allowed - every participant must contribute.
+		// Allowing empty data would let an attacker bypass commitment binding by:
+		// 1. Sending a legitimate Round 1 commitment hash
+		// 2. Observing other parties' Round 2 reveals
+		// 3. Sending empty Round 2 to bypass hash verification while still counting as participant
 		if r2.commitment_data.is_empty() {
-			return true;
+			return false;
 		}
 		let tr = self.signer.public_key().tr();
 		crate::protocol::signing::verify_commitment_hash(
@@ -2086,6 +2090,47 @@ mod tests {
 			"Buffered Round 2 with mismatched commitment hash must be dropped, not promoted"
 		);
 		assert!(protocol.message_buffer.round2.is_empty());
+	}
+
+	/// Empty commitment_data in Round 2 must be rejected.
+	/// This prevents an attacker from bypassing commitment binding by:
+	/// 1. Sending a legitimate Round 1 commitment hash
+	/// 2. Observing other parties' Round 2 reveals
+	/// 3. Sending empty Round 2 to bypass hash verification while still counting as participant
+	#[test]
+	fn test_empty_commitment_data_rejected() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+		)
+		.unwrap();
+
+		// Advance to Round2Waiting
+		let _ = protocol.poke().unwrap();
+		let legitimate_r1 = Round1Broadcast::new(1, [0xAB; 32]);
+		protocol.r1_broadcasts.insert(1, legitimate_r1);
+		protocol.state = SignProtocolState::Round2Waiting;
+
+		// Send an EMPTY Round 2 - this should be rejected
+		let empty_r2 = Round2Broadcast::new(1, vec![]); // Empty commitment_data
+		let msg = SigningMessage::Round2(empty_r2);
+		let data = protocol.serialize_message(&msg).unwrap();
+		protocol.message(1, data).unwrap();
+
+		// Empty Round 2 must NOT be accepted
+		assert!(
+			!protocol.r2_broadcasts.contains_key(&1),
+			"Empty commitment_data must be rejected - attacker cannot bypass commitment binding"
+		);
 	}
 
 	/// A leader whose `combine_with_message` fails must surface that as a hard

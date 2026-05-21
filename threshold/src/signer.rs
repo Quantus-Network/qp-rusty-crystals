@@ -450,39 +450,46 @@ impl ThresholdSigner {
 		let tr = self.public_key.tr();
 
 		for r2 in other_round2 {
-			if !r2.commitment_data.is_empty() {
-				// Find matching Round 1 broadcast
-				let r1 = other_round1
-					.iter()
-					.find(|r1| r1.party_id == r2.party_id)
-					.ok_or(ThresholdError::MissingBroadcast { party_id: r2.party_id })?;
+			// Empty commitment_data is NOT allowed - every participant must contribute.
+			// Allowing empty data would let an attacker bypass commitment binding.
+			if r2.commitment_data.is_empty() {
+				return Err(ThresholdError::InvalidCommitmentData {
+					party_id: r2.party_id,
+					reason: "Empty commitment data is not allowed - every participant must contribute".to_string(),
+				});
+			}
 
-				// Verify commitment hash
-				if !verify_commitment_hash(
-					tr,
-					r2.party_id,
-					&r2.commitment_data,
-					&r1.commitment_hash,
-				) {
-					return Err(ThresholdError::CommitmentMismatch {
-						party_id: r2.party_id,
-						message: "Round 2 commitment data does not match Round 1 commitment hash"
-							.to_string(),
-					});
-				}
+			// Find matching Round 1 broadcast
+			let r1 = other_round1
+				.iter()
+				.find(|r1| r1.party_id == r2.party_id)
+				.ok_or(ThresholdError::MissingBroadcast { party_id: r2.party_id })?;
 
-				// Validate data length
-				if r2.commitment_data.len() != expected_len {
-					return Err(ThresholdError::InvalidCommitmentData {
-						party_id: r2.party_id,
-						reason: format!(
-							"Commitment data length {} does not match expected {} for k={}",
-							r2.commitment_data.len(),
-							expected_len,
-							k
-						),
-					});
-				}
+			// Verify commitment hash
+			if !verify_commitment_hash(
+				tr,
+				r2.party_id,
+				&r2.commitment_data,
+				&r1.commitment_hash,
+			) {
+				return Err(ThresholdError::CommitmentMismatch {
+					party_id: r2.party_id,
+					message: "Round 2 commitment data does not match Round 1 commitment hash"
+						.to_string(),
+				});
+			}
+
+			// Validate data length
+			if r2.commitment_data.len() != expected_len {
+				return Err(ThresholdError::InvalidCommitmentData {
+					party_id: r2.party_id,
+					reason: format!(
+						"Commitment data length {} does not match expected {} for k={}",
+						r2.commitment_data.len(),
+						expected_len,
+						k
+					),
+				});
 			}
 		}
 
@@ -503,24 +510,22 @@ impl ThresholdSigner {
 				})?;
 
 			for r2 in other_round2 {
-				if !r2.commitment_data.is_empty() {
-					for k_idx in 0..k {
-						let start = k_idx * single_commitment_size;
-						let end = start + single_commitment_size;
+				for k_idx in 0..k {
+					let start = k_idx * single_commitment_size;
+					let end = start + single_commitment_size;
 
-						let w_other = unpack_commitment_dilithium(&r2.commitment_data[start..end])
-							.map_err(|e| ThresholdError::InvalidCommitmentData {
-								party_id: r2.party_id,
-								reason: format!(
-									"Commitment passed hash check but failed to unpack (k={}): {}",
-									k_idx, e
-								),
-							})?;
-						aggregate_commitments_dilithium(
-							&mut round2_data.w_aggregated[k_idx],
-							&w_other,
-						);
-					}
+					let w_other = unpack_commitment_dilithium(&r2.commitment_data[start..end])
+						.map_err(|e| ThresholdError::InvalidCommitmentData {
+							party_id: r2.party_id,
+							reason: format!(
+								"Commitment passed hash check but failed to unpack (k={}): {}",
+								k_idx, e
+							),
+						})?;
+					aggregate_commitments_dilithium(
+						&mut round2_data.w_aggregated[k_idx],
+						&w_other,
+					);
 				}
 			}
 		}
