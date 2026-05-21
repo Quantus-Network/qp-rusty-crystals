@@ -1905,6 +1905,7 @@ fn run_signing_with_stats(
 }
 
 #[test]
+#[ignore] // Long-running benchmark test - run with `cargo test -- --ignored`
 fn test_measure_retry_rate_dkg_vs_reshared_shares() {
 	// This test measures and compares the signing retry rates between:
 	// 1. Fresh DKG-created shares (baseline)

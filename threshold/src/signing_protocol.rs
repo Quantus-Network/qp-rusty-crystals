@@ -1797,10 +1797,7 @@ mod tests {
 			follower.message_buffer.round4_complete.is_some(),
 			"Round4Complete should be buffered when follower is in early state"
 		);
-		assert!(
-			follower.received_signature.is_none(),
-			"Signature should not be set yet"
-		);
+		assert!(follower.received_signature.is_none(), "Signature should not be set yet");
 
 		// Now manually advance the follower to WaitingForLeaderDecision
 		// (simulating normal protocol progression)

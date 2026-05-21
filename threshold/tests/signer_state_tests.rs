@@ -59,16 +59,17 @@ fn test_commitment_tampering_detected() {
 	let seed = [42u8; 32];
 	let (public_key, shares) = generate_with_dealer(&seed, config).expect("key generation");
 
-	// Create signers for all 3 parties
+	// Create signers for exactly threshold (2) parties - parties 0 and 1
 	let mut signers: Vec<_> = shares
 		.iter()
+		.take(2) // Only use threshold parties
 		.map(|share| ThresholdSigner::new(share.clone(), public_key.clone(), config).unwrap())
 		.collect();
 
 	let message = b"test message";
 	let context = b"test context";
 
-	// Round 1: All parties generate commitments (each with unique seed)
+	// Round 1: Both parties generate commitments (each with unique seed)
 	let r1_broadcasts: Vec<Round1Broadcast> = signers
 		.iter_mut()
 		.enumerate()
@@ -79,7 +80,8 @@ fn test_commitment_tampering_detected() {
 		})
 		.collect();
 
-	// Round 2: All parties reveal commitments
+	// Round 2: Both parties reveal commitments
+	// Each party receives only the other party's R1 broadcast (threshold - 1 = 1)
 	let mut r2_broadcasts: Vec<Round2Broadcast> = signers
 		.iter_mut()
 		.enumerate()
