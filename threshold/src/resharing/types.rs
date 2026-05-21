@@ -156,6 +156,7 @@ impl ResharingConfig {
 	/// - `existing_share` is missing but party is in old committee
 	/// - Threshold configurations are invalid or unsupported
 	/// - Duplicate participant IDs in either committee
+	/// - Either committee exceeds MAX_PARTIES
 	pub fn new(
 		old_threshold: u32,
 		old_participants: Vec<ParticipantId>,
@@ -165,7 +166,21 @@ impl ResharingConfig {
 		existing_share: Option<PrivateKeyShare>,
 		public_key: PublicKey,
 	) -> Result<Self, ResharingConfigError> {
-		// Create participant lists (validates no duplicates)
+		// Check party counts first to give appropriate error messages
+		if old_participants.len() > MAX_PARTIES as usize {
+			return Err(ResharingConfigError::TooManyOldParties {
+				parties: old_participants.len() as u32,
+				max: MAX_PARTIES,
+			});
+		}
+		if new_participants.len() > MAX_PARTIES as usize {
+			return Err(ResharingConfigError::TooManyNewParties {
+				parties: new_participants.len() as u32,
+				max: MAX_PARTIES,
+			});
+		}
+
+		// Create participant lists (validates no duplicates, sorted)
 		let old_participant_list = ParticipantList::new(&old_participants)
 			.ok_or(ResharingConfigError::DuplicateParticipant)?;
 

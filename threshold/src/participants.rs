@@ -35,18 +35,13 @@ use core::iter;
 use borsh::{BorshDeserialize, BorshSerialize};
 use zeroize::Zeroize;
 
+use crate::error::MAX_PARTIES;
+
 /// Type alias for participant identifiers.
 ///
 /// This is a u32 to match NEAR's `ParticipantId` type directly.
 /// The actual values can be arbitrary (not necessarily sequential).
 pub type ParticipantId = u32;
-
-/// Maximum number of participants supported by bitmask operations.
-///
-/// This limit is derived from the `u16` bitmask type used for subset
-/// operations. While the protocol's `MAX_PARTIES` (6) is more restrictive,
-/// this constant ensures bitmask operations are always valid.
-pub const MAX_PARTICIPANTS: usize = 16;
 
 /// Build the index map from a sorted participants vector.
 fn build_indices(participants: &[ParticipantId]) -> BTreeMap<ParticipantId, usize> {
@@ -66,7 +61,7 @@ fn build_indices(participants: &[ParticipantId]) -> BTreeMap<ParticipantId, usiz
 /// - Participants are always stored in sorted order
 /// - No duplicate participant IDs
 /// - Index mapping is consistent: `index_of(get(i)) == Some(i)`
-/// - Length is at most `MAX_PARTICIPANTS` (16)
+/// - Length is at most `MAX_PARTIES` (6)
 ///
 /// # Serialization
 ///
@@ -92,11 +87,11 @@ impl BorshDeserialize for ParticipantList {
 	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
 		let participants = Vec::<ParticipantId>::deserialize_reader(reader)?;
 
-		// Validate invariants
-		if participants.len() > MAX_PARTICIPANTS {
+		// Validate invariants - use MAX_PARTIES to match protocol limits
+		if participants.len() > MAX_PARTIES as usize {
 			return Err(borsh::io::Error::new(
 				borsh::io::ErrorKind::InvalidData,
-				"ParticipantList exceeds MAX_PARTICIPANTS",
+				"ParticipantList exceeds MAX_PARTIES",
 			));
 		}
 
@@ -135,7 +130,8 @@ impl ParticipantList {
 	///
 	/// # Returns
 	///
-	/// `Some(ParticipantList)` if all IDs are unique, `None` if duplicates exist.
+	/// `Some(ParticipantList)` if all IDs are unique, `None` if duplicates exist
+	/// or if there are more than `MAX_PARTIES` (6) participants.
 	///
 	/// # Example
 	///
@@ -147,8 +143,8 @@ impl ParticipantList {
 	/// assert_eq!(list.get(0), Some(100)); // sorted order
 	/// ```
 	pub fn new(participants: &[ParticipantId]) -> Option<Self> {
-		// Check participant count limit (for bitmask operations)
-		if participants.len() > MAX_PARTICIPANTS {
+		// Check participant count limit (matches protocol's MAX_PARTIES)
+		if participants.len() > MAX_PARTIES as usize {
 			return None;
 		}
 
@@ -176,9 +172,12 @@ impl ParticipantList {
 	/// The caller must ensure that `sorted_participants` is sorted and
 	/// contains no duplicates. If these invariants are violated, the
 	/// behavior is unspecified but not unsafe in the memory sense.
+	///
+	/// Returns `None` if there are more than `MAX_PARTIES` (6) participants
+	/// or if the list is not sorted/unique.
 	pub fn from_sorted(sorted_participants: Vec<ParticipantId>) -> Option<Self> {
-		// Check participant count limit (for bitmask operations)
-		if sorted_participants.len() > MAX_PARTICIPANTS {
+		// Check participant count limit (matches protocol's MAX_PARTIES)
+		if sorted_participants.len() > MAX_PARTIES as usize {
 			return None;
 		}
 
@@ -593,21 +592,21 @@ mod tests {
 
 	#[test]
 	fn test_rejects_too_many_participants() {
-		// MAX_PARTICIPANTS is 16 (for u16 bitmask)
-		let too_many: Vec<ParticipantId> = (0..17).collect();
+		// MAX_PARTIES is 6 - the protocol limit
+		let too_many: Vec<ParticipantId> = (0..7).collect();
 		assert!(ParticipantList::new(&too_many).is_none());
 
-		// Exactly 16 should work
-		let exactly_max: Vec<ParticipantId> = (0..16).collect();
+		// Exactly 6 should work
+		let exactly_max: Vec<ParticipantId> = (0..6).collect();
 		assert!(ParticipantList::new(&exactly_max).is_some());
 	}
 
 	#[test]
 	fn test_from_sorted_rejects_too_many_participants() {
-		let too_many: Vec<ParticipantId> = (0..17).collect();
+		let too_many: Vec<ParticipantId> = (0..7).collect();
 		assert!(ParticipantList::from_sorted(too_many).is_none());
 
-		let exactly_max: Vec<ParticipantId> = (0..16).collect();
+		let exactly_max: Vec<ParticipantId> = (0..6).collect();
 		assert!(ParticipantList::from_sorted(exactly_max).is_some());
 	}
 
