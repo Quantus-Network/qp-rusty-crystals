@@ -74,8 +74,8 @@ fn run_resharing_protocol_with_tamper(
 		seed[0..4].copy_from_slice(&party_id.to_le_bytes());
 		seed[4..8].copy_from_slice(&(old_threshold + new_threshold).to_le_bytes());
 		// Fill rest with a pattern based on party_id
-		for i in 8..32 {
-			seed[i] = ((party_id as u8).wrapping_mul(i as u8)).wrapping_add(0x42);
+		for (i, byte) in seed.iter_mut().enumerate().skip(8) {
+			*byte = ((party_id as u8).wrapping_mul(i as u8)).wrapping_add(0x42);
 		}
 
 		let protocol = ResharingProtocol::new(config, seed);
@@ -1764,14 +1764,6 @@ impl SigningStats {
 			f64::INFINITY
 		} else {
 			self.total_retries as f64 / self.successful_attempts as f64
-		}
-	}
-
-	fn success_rate(&self) -> f64 {
-		if self.total_attempts == 0 {
-			0.0
-		} else {
-			self.successful_attempts as f64 / self.total_attempts as f64
 		}
 	}
 }

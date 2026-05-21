@@ -50,8 +50,8 @@ fn run_threshold_protocol_4_round(
 		// instance" pattern used by NEAR MPC.
 		let signers: Vec<ThresholdSigner> = shares
 			.iter()
-			.cloned()
 			.take(threshold as usize)
+			.cloned()
 			.map(|share| ThresholdSigner::new(share, public_key.clone(), config))
 			.collect::<Result<_, _>>()
 			.map_err(|e| format!("Signer creation error: {:?}", e))?;
@@ -473,8 +473,8 @@ fn test_threshold_matrix() {
 		// Validate creation eagerly so we can fail fast with a nice message.
 		if let Err(e) = shares
 			.iter()
-			.cloned()
 			.take(*threshold as usize)
+			.cloned()
 			.map(|share| ThresholdSigner::new(share, public_key.clone(), config))
 			.collect::<Result<Vec<_>, _>>()
 		{
@@ -492,8 +492,8 @@ fn test_threshold_matrix() {
 		for attempt in 0..MAX_EXTERNAL_ATTEMPTS {
 			let signers: Vec<ThresholdSigner> = shares
 				.iter()
-				.cloned()
 				.take(*threshold as usize)
+				.cloned()
 				.map(|share| ThresholdSigner::new(share, public_key.clone(), config).unwrap())
 				.collect();
 			let mut attempt_seed = seed;

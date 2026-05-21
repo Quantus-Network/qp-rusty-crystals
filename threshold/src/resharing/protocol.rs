@@ -1228,7 +1228,7 @@ impl ResharingProtocol {
 	/// Extract `rho` (matrix-A seed). Old/Both parties take it from their existing
 	/// share; NewOnly parties extract it from the public key prefix.
 	fn derive_rho(&self) -> [u8; 32] {
-		if let Some(ref existing) = self.config.existing_share() {
+		if let Some(existing) = self.config.existing_share() {
 			*existing.rho()
 		} else {
 			let mut rho = [0u8; 32];
@@ -1334,7 +1334,7 @@ impl ResharingProtocol {
 		}
 
 		let rho = self.derive_rho();
-		let tr = if let Some(ref existing) = self.config.existing_share() {
+		let tr = if let Some(existing) = self.config.existing_share() {
 			*existing.tr()
 		} else {
 			*self.config.public_key().tr()

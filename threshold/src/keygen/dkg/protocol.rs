@@ -3746,15 +3746,15 @@ mod tests {
 
 		// Run until all parties are in Round 4 and have sent their broadcasts
 		for _ in 0..100 {
-			for party_id in 0..3 {
+			for (party_id, dkg) in dkgs.iter_mut().enumerate() {
 				let messages = mem::take(&mut pending_messages[party_id]);
 				for (from, data) in messages {
-					dkgs[party_id].message(from, data).unwrap();
+					dkg.message(from, data).unwrap();
 				}
 			}
 
-			for party_id in 0..3 {
-				match dkgs[party_id].poke().unwrap() {
+			for (party_id, dkg) in dkgs.iter_mut().enumerate() {
+				match dkg.poke().unwrap() {
 					MithrilAction::SendMany(data) => {
 						for (other, pending) in pending_messages.iter_mut().enumerate() {
 							if other != party_id {
@@ -4094,7 +4094,7 @@ mod tests {
 
 		// Create DKG for party 0 - starts in Initialized state
 		let config = MithrilDkgConfig::new(
-			threshold_config.clone(),
+			threshold_config,
 			0,
 			participants.clone(),
 			signers[0].clone(),
@@ -4105,7 +4105,7 @@ mod tests {
 
 		// Create DKG for party 1
 		let config1 = MithrilDkgConfig::new(
-			threshold_config.clone(),
+			threshold_config,
 			1,
 			participants.clone(),
 			signers[1].clone(),
@@ -4173,7 +4173,7 @@ mod tests {
 
 		// Create DKG for party 1 - starts in Initialized state
 		let config = MithrilDkgConfig::new(
-			threshold_config.clone(),
+			threshold_config,
 			1,
 			participants.clone(),
 			signers[1].clone(),
@@ -4259,7 +4259,7 @@ mod tests {
 
 		// Create DKG for party 1 - starts in Initialized state
 		let config = MithrilDkgConfig::new(
-			threshold_config.clone(),
+			threshold_config,
 			1,
 			participants.clone(),
 			signers[1].clone(),

@@ -1242,18 +1242,18 @@ pub fn run_local_signing(
 		}
 
 		// Deliver pending messages
-		for party_idx in 0..num_parties {
+		for (party_idx, protocol) in protocols.iter_mut().enumerate() {
 			let messages = mem::take(&mut pending_messages[party_idx]);
 			for (from, data) in messages {
-				protocols[party_idx].message(from, data)?;
+				protocol.message(from, data)?;
 			}
 		}
 
 		// Poke each party
-		for party_idx in 0..num_parties {
-			let my_id = protocols[party_idx].my_participant_id();
+		for protocol in protocols.iter_mut() {
+			let my_id = protocol.my_participant_id();
 
-			match protocols[party_idx].poke()? {
+			match protocol.poke()? {
 				Action::Wait => {},
 				Action::SendMany(data) => {
 					// Broadcast to all other parties

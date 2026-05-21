@@ -167,13 +167,13 @@ pub fn generate_with_dealer(
 		let mut shares_data: BTreeMap<u16, SecretShareData> = BTreeMap::new();
 		for (subset_id, share) in party_shares_map {
 			let mut s1_data = [[0i32; 256]; L];
-			for i in 0..L {
-				s1_data[i].copy_from_slice(&share.s1_share.vec[i].coeffs);
+			for (i, s1_item) in s1_data.iter_mut().enumerate() {
+				s1_item.copy_from_slice(&share.s1_share.vec[i].coeffs);
 			}
 
 			let mut s2_data = [[0i32; 256]; K];
-			for i in 0..K {
-				s2_data[i].copy_from_slice(&share.s2_share.vec[i].coeffs);
+			for (i, s2_item) in s2_data.iter_mut().enumerate() {
+				s2_item.copy_from_slice(&share.s2_share.vec[i].coeffs);
 			}
 
 			shares_data.insert(subset_id, SecretShareData { s1: s1_data, s2: s2_data });
