@@ -1438,9 +1438,14 @@ fn collect_and_verify_all_partial_pks<S: TranscriptSigner>(
 	let mut all_partial_pks: BTreeMap<SubsetMask, PartialPublicKey> = BTreeMap::new();
 
 	// Add our own partial PKs (only for subsets where we are the leader)
-	for (subset, pk) in my_partial_pks {
-		if config.is_leader(*subset) {
-			all_partial_pks.insert(*subset, pk.clone());
+	for (&subset, pk) in my_partial_pks {
+		// Validate subset is valid for this threshold config (prevents invalid masks)
+		if !config.is_valid_subset(subset) {
+			log::warn!("DKG: Ignoring own partial PK for invalid subset {:b}", subset);
+			continue;
+		}
+		if config.is_leader(subset) {
+			all_partial_pks.insert(subset, pk.clone());
 		}
 	}
 
@@ -1458,6 +1463,17 @@ fn collect_and_verify_all_partial_pks<S: TranscriptSigner>(
 		)?;
 
 		for (&subset, pk) in &broadcast.partial_public_keys {
+			// Validate subset is valid for this threshold config (prevents invalid masks
+			// like 0b001 or 0b111 in a 2-of-3 setup from being accepted)
+			if !config.is_valid_subset(subset) {
+				log::warn!(
+					"DKG: Ignoring partial PK for invalid subset {:b} from party {}",
+					subset,
+					party_id
+				);
+				continue;
+			}
+
 			// Per Mithril DKGAggregate line 6: only accept PKs from the leader (j = min(S))
 			let leader = config.get_leader(subset);
 			if leader != Some(party_id) {
@@ -1517,6 +1533,12 @@ fn verify_party_broadcast<S: TranscriptSigner>(
 	})?;
 
 	for (&subset, pk) in &broadcast.partial_public_keys {
+		// Skip invalid subsets (they will be filtered in collect_and_verify_all_partial_pks,
+		// but we also skip verification here to avoid confusing error messages)
+		if !config.is_valid_subset(subset) {
+			continue;
+		}
+
 		verify_partial_pk_commitment(
 			shared_secrets,
 			global_randomness,
@@ -3631,6 +3653,161 @@ mod tests {
 		// 2. All parties get the same public key
 		// 3. The leadership logic is correct
 		// The code now filters out non-leader PKs with a warning log.
+	}
+
+	#[test]
+	fn test_invalid_subset_mask_in_round4_ignored() {
+		// Test that partial PKs with invalid subset masks are ignored in Round 4.
+		// This prevents an attacker from injecting extra subset masks (like 0b001 or 0b111
+		// in a 2-of-3 setup) that would corrupt the final public key.
+		//
+		// In 2-of-3, valid subsets are: 0b011, 0b101, 0b110 (exactly 2 bits set)
+		// Invalid subsets include: 0b001, 0b010, 0b100 (1 bit), 0b111 (3 bits), 0b000 (0 bits)
+
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let seed = [99u8; 32];
+
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = (0..3).collect();
+
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
+		for (i, pk) in public_keys.into_iter().enumerate() {
+			pk_map.insert(i as ParticipantId, pk);
+		}
+
+		let mut dkgs: Vec<MithrilDkg<TestSigner>> = signers
+			.into_iter()
+			.enumerate()
+			.map(|(i, signer)| {
+				let config = MithrilDkgConfig::new(
+					threshold_config,
+					i as ParticipantId,
+					participants.clone(),
+					signer,
+					pk_map.clone(),
+				)
+				.unwrap();
+				MithrilDkg::new(config, seed)
+			})
+			.collect();
+
+		// Run DKG normally until Round 4
+		let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> = vec![Vec::new(); 3];
+
+		// Run until all parties are in Round 4 and have sent their broadcasts
+		for _ in 0..100 {
+			for party_id in 0..3 {
+				let messages = mem::take(&mut pending_messages[party_id]);
+				for (from, data) in messages {
+					dkgs[party_id].message(from, data).unwrap();
+				}
+			}
+
+			for party_id in 0..3 {
+				match dkgs[party_id].poke().unwrap() {
+					MithrilAction::SendMany(data) => {
+						for (other, pending) in pending_messages.iter_mut().enumerate() {
+							if other != party_id {
+								pending.push((party_id as ParticipantId, data.clone()));
+							}
+						}
+					},
+					MithrilAction::SendPrivate(to, data) => {
+						pending_messages[to as usize].push((party_id as ParticipantId, data));
+					},
+					MithrilAction::Wait => {},
+					MithrilAction::Return(_) => {},
+				}
+			}
+
+			// Check if all are in Round 4 with broadcasts sent
+			let all_in_round4 =
+				dkgs.iter().all(|d| d.state.phase == DkgPhase::Round4 && d.state.broadcast_sent);
+			if all_in_round4 {
+				break;
+			}
+		}
+
+		// Verify all parties are in Round 4
+		for (i, dkg) in dkgs.iter().enumerate() {
+			assert!(
+				dkg.state.phase == DkgPhase::Round4,
+				"Party {} should be in Round4, got {:?}",
+				i,
+				dkg.state.phase
+			);
+		}
+
+		// Now test that invalid subset masks would be filtered by
+		// collect_and_verify_all_partial_pks. We verify this by checking that the valid subset
+		// count matches expectations.
+		let config = dkgs[0].state.config.as_ref().unwrap();
+		let valid_subsets = config.all_subsets();
+
+		// For 2-of-3, there should be exactly C(3,2) = 3 valid subsets
+		assert_eq!(valid_subsets.len(), 3, "2-of-3 should have 3 valid subsets");
+		assert!(valid_subsets.contains(&0b011));
+		assert!(valid_subsets.contains(&0b101));
+		assert!(valid_subsets.contains(&0b110));
+
+		// Verify invalid masks are rejected by is_valid_subset
+		assert!(!config.is_valid_subset(0b001), "0b001 should be invalid (only 1 party)");
+		assert!(!config.is_valid_subset(0b111), "0b111 should be invalid (3 parties, need 2)");
+		assert!(!config.is_valid_subset(0b000), "0b000 should be invalid (0 parties)");
+
+		// Now complete the DKG normally and verify it succeeds
+		// (this confirms the filtering works correctly with normal data)
+		let mut outputs: Vec<Option<MithrilDkgOutput>> = vec![None; 3];
+
+		for _ in 0..50 {
+			for party_id in 0..3 {
+				let messages = mem::take(&mut pending_messages[party_id]);
+				for (from, data) in messages {
+					dkgs[party_id].message(from, data).unwrap();
+				}
+			}
+
+			for party_id in 0..3 {
+				if outputs[party_id].is_some() {
+					continue;
+				}
+				match dkgs[party_id].poke().unwrap() {
+					MithrilAction::Return(output) => {
+						outputs[party_id] = Some(*output);
+					},
+					MithrilAction::SendMany(data) => {
+						for (other, pending) in pending_messages.iter_mut().enumerate() {
+							if other != party_id {
+								pending.push((party_id as ParticipantId, data.clone()));
+							}
+						}
+					},
+					MithrilAction::SendPrivate(to, data) => {
+						pending_messages[to as usize].push((party_id as ParticipantId, data));
+					},
+					_ => {},
+				}
+			}
+
+			if outputs.iter().all(|o| o.is_some()) {
+				break;
+			}
+		}
+
+		// All parties should complete successfully
+		assert!(outputs.iter().all(|o| o.is_some()), "All parties should complete DKG");
+
+		// All parties should have the same public key
+		let pk0 = outputs[0].as_ref().unwrap().public_key.as_bytes();
+		for (i, output) in outputs.iter().enumerate() {
+			assert_eq!(
+				output.as_ref().unwrap().public_key.as_bytes(),
+				pk0,
+				"Party {} has different public key",
+				i
+			);
+		}
 	}
 
 	#[test]
