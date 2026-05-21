@@ -188,12 +188,22 @@ pub enum MithrilAction {
 ///
 /// Messages are keyed by sender to ensure only one message per sender is stored,
 /// preventing memory exhaustion from duplicate messages.
+///
+/// # Security: Round 1 Private Message Validation
+///
+/// Round 1 private messages are validated before buffering to prevent DoS attacks.
+/// A malicious sender could otherwise send messages with many different invalid
+/// `subset_mask` values to exhaust memory. Validation checks:
+/// - `subset_mask` is valid for the threshold config
+/// - Sender is the legitimate leader for the subset
+/// - Receiver is a member of the subset
 #[derive(Debug, Default)]
 struct DkgMessageBuffer {
 	/// Round 1 broadcasts received while still in Initialized phase.
 	round1_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
 	/// Round 1 private messages received while still in Initialized phase.
 	/// Key is (from_party_id, subset_mask) to allow multiple subsets per sender.
+	/// Messages are validated before buffering to prevent DoS via invalid subset masks.
 	round1_privates: BTreeMap<(ParticipantId, SubsetMask), MithrilRound1Private>,
 	/// Round 2 broadcasts received while still in Round 1.
 	round2: BTreeMap<ParticipantId, MithrilRound2Broadcast>,
@@ -217,6 +227,10 @@ impl DkgMessageBuffer {
 
 	/// Buffer a Round 1 private message for later processing.
 	/// Only keeps the first message per (sender, subset) pair.
+	///
+	/// # Security
+	/// Callers MUST validate the message before buffering (subset_mask validity,
+	/// sender is leader, receiver is member). This function does not validate.
 	fn buffer_round1_private(&mut self, msg: MithrilRound1Private) {
 		self.round1_privates.entry((msg.from_party_id, msg.subset_mask)).or_insert(msg);
 	}
@@ -536,8 +550,41 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 
 				match self.state.phase {
 					DkgPhase::Initialized => {
-						// Early message, buffer for when we enter Round 1.
-						// Validation will happen when draining the buffer.
+						// Early message - validate before buffering to prevent DoS.
+						// Config is available during Initialized phase.
+						let config = self.state.config.as_ref().ok_or_else(|| {
+							MithrilDkgError::InvalidState("Initialized but no config".into())
+						})?;
+
+						// Verify subset_mask is a valid subset for this threshold config
+						if !config.is_valid_subset(private.subset_mask) {
+							warn!(
+								"DKG: Buffering rejected - Round1Private with invalid subset {:b} (from party {})",
+								private.subset_mask, from
+							);
+							return Ok(()); // Invalid subset, ignore
+						}
+
+						// Verify sender is the leader for this subset
+						let expected_leader = config.get_leader(private.subset_mask);
+						if expected_leader != Some(from) {
+							warn!(
+								"DKG: Buffering rejected - Round1Private from non-leader: party {} sent for subset {:b} but leader is {:?}",
+								from, private.subset_mask, expected_leader
+							);
+							return Ok(()); // Not the leader, ignore
+						}
+
+						// Verify we are actually a member of this subset
+						if !config.is_in_subset(private.subset_mask) {
+							warn!(
+								"DKG: Buffering rejected - Round1Private for subset {:b} but we are not a member (from party {})",
+								private.subset_mask, from
+							);
+							return Ok(()); // Not in subset, ignore
+						}
+
+						// All validations passed - buffer for processing after Round 1 starts
 						self.message_buffer.buffer_round1_private(private);
 					},
 					DkgPhase::Round1 => {
@@ -4188,6 +4235,93 @@ mod tests {
 		assert!(
 			dkg1.message_buffer.round1_privates.is_empty(),
 			"Buffer should be empty after draining"
+		);
+	}
+
+	/// Test that Round1Private messages with invalid subset masks are rejected during buffering.
+	///
+	/// A malicious party could try to send many messages with different invalid subset masks
+	/// to exhaust memory. Now we validate subset_mask before buffering, so invalid messages
+	/// are rejected immediately. The buffer size limit remains as defense in depth.
+	#[test]
+	fn test_round1_private_invalid_subset_rejected_during_buffering() {
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let seed = [42u8; 32];
+
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = (0..3).collect();
+
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
+		for (i, pk) in public_keys.into_iter().enumerate() {
+			pk_map.insert(i as ParticipantId, pk);
+		}
+
+		// Create DKG for party 1 - starts in Initialized state
+		let config = MithrilDkgConfig::new(
+			threshold_config.clone(),
+			1,
+			participants.clone(),
+			signers[1].clone(),
+			pk_map.clone(),
+		)
+		.unwrap();
+		let mut dkg1: MithrilDkg<TestSigner> = MithrilDkg::new(config.clone(), seed);
+
+		assert_eq!(dkg1.state.phase, DkgPhase::Initialized);
+
+		// Attacker (party 0) sends many messages with INVALID subset masks
+		// These should all be rejected because:
+		// - 0b000 (0): invalid - no bits set
+		// - 0b001 (1): invalid - only 1 bit set (need threshold=2)
+		// - 0b010 (2): invalid - only 1 bit set
+		// - 0b100 (4): invalid - only 1 bit set
+		// - 0b111 (7): invalid - 3 bits set (too many)
+		// - etc.
+		for invalid_subset in [0u16, 1, 2, 4, 7, 8, 15, 16, 100, 0xFFFF] {
+			let private = MithrilRound1Private {
+				from_party_id: 0,
+				subset_mask: invalid_subset,
+				shared_secret: [0xDE; SHARED_SECRET_SIZE],
+			};
+			let msg = MithrilDkgMessage::Round1Private(private);
+			let data = borsh::to_vec(&msg).unwrap();
+
+			// Message should be accepted (no protocol error) but not buffered
+			let result = dkg1.message(0, data);
+			assert!(result.is_ok(), "Message should be accepted without protocol error");
+		}
+
+		// Buffer should be empty - all invalid subset masks were rejected
+		assert!(
+			dkg1.message_buffer.round1_privates.is_empty(),
+			"Buffer should be empty - all invalid subset masks were rejected"
+		);
+
+		// Now send a VALID subset mask from the correct leader
+		// For 2-of-3: valid subsets are 0b011, 0b101, 0b110 (exactly 2 bits set)
+		// Party 0 is leader for subset 0b011 (contains parties 0 and 1, leader = min = 0)
+		let valid_subset = 0b011u16;
+		let private = MithrilRound1Private {
+			from_party_id: 0,
+			subset_mask: valid_subset,
+			shared_secret: [0xAB; SHARED_SECRET_SIZE],
+		};
+		let msg = MithrilDkgMessage::Round1Private(private);
+		let data = borsh::to_vec(&msg).unwrap();
+
+		let result = dkg1.message(0, data);
+		assert!(result.is_ok(), "Valid message should be accepted");
+
+		// Buffer should now have exactly 1 entry
+		assert_eq!(
+			dkg1.message_buffer.round1_privates.len(),
+			1,
+			"Buffer should have exactly 1 valid entry"
+		);
+		assert!(
+			dkg1.message_buffer.round1_privates.contains_key(&(0, valid_subset)),
+			"Buffer should contain the valid message"
 		);
 	}
 }
