@@ -339,18 +339,24 @@ pub enum SignProtocolState {
 /// The buffer uses `BTreeMap` keyed by party_id to:
 /// 1. **Deduplicate**: Only one message per party is stored (later messages ignored)
 /// 2. **Bound memory**: At most MAX_PARTIES entries per round
+///
+/// Round4Complete is buffered separately since only the leader sends it and followers
+/// may receive it before transitioning to `WaitingForLeaderDecision` state.
 #[derive(Debug, Clone, Default)]
 pub struct SignMessageBuffer {
 	/// Buffered Round 2 messages, keyed by party_id.
 	round2: BTreeMap<ParticipantId, Round2Broadcast>,
 	/// Buffered Round 3 messages, keyed by party_id.
 	round3: BTreeMap<ParticipantId, Round3Broadcast>,
+	/// Buffered Round4Complete signature bytes from the leader.
+	/// Only one is stored (first arrival); subsequent ones are ignored.
+	round4_complete: Option<Vec<u8>>,
 }
 
 impl SignMessageBuffer {
 	/// Create a new empty message buffer.
 	pub fn new() -> Self {
-		Self { round2: BTreeMap::new(), round3: BTreeMap::new() }
+		Self { round2: BTreeMap::new(), round3: BTreeMap::new(), round4_complete: None }
 	}
 
 	/// Buffer a Round 2 message for later processing.
@@ -365,6 +371,14 @@ impl SignMessageBuffer {
 		self.round3.entry(msg.party_id).or_insert(msg);
 	}
 
+	/// Buffer a Round4Complete signature for later processing.
+	/// Only the first one is stored; subsequent ones are ignored.
+	pub fn buffer_round4_complete(&mut self, sig_bytes: Vec<u8>) {
+		if self.round4_complete.is_none() {
+			self.round4_complete = Some(sig_bytes);
+		}
+	}
+
 	/// Take all buffered Round 2 messages.
 	pub fn take_round2(&mut self) -> Vec<Round2Broadcast> {
 		mem::take(&mut self.round2).into_values().collect()
@@ -375,15 +389,21 @@ impl SignMessageBuffer {
 		mem::take(&mut self.round3).into_values().collect()
 	}
 
+	/// Take the buffered Round4Complete signature, if any.
+	pub fn take_round4_complete(&mut self) -> Option<Vec<u8>> {
+		self.round4_complete.take()
+	}
+
 	/// Check if the buffer is empty.
 	pub fn is_empty(&self) -> bool {
-		self.round2.is_empty() && self.round3.is_empty()
+		self.round2.is_empty() && self.round3.is_empty() && self.round4_complete.is_none()
 	}
 
 	/// Clear all buffered messages.
 	pub fn clear(&mut self) {
 		self.round2.clear();
 		self.round3.clear();
+		self.round4_complete = None;
 	}
 }
 
@@ -802,6 +822,8 @@ impl DilithiumSignProtocol {
 						self.state = SignProtocolState::Round4Deciding;
 					} else {
 						self.state = SignProtocolState::WaitingForLeaderDecision;
+						// Process any Round4Complete that arrived before we were ready
+						self.process_buffered_round4_complete();
 					}
 					self.poke()
 				} else {
@@ -1034,12 +1056,27 @@ impl DilithiumSignProtocol {
 			},
 			SigningMessage::Round4Complete(sig_bytes) => {
 				// Only followers process Round4Complete
-				if !self.is_leader() &&
-					matches!(self.state, SignProtocolState::WaitingForLeaderDecision)
-				{
+				if self.is_leader() {
+					return Ok(());
+				}
+
+				if matches!(self.state, SignProtocolState::WaitingForLeaderDecision) {
+					// We're ready for it - process immediately
 					if let Some(signature) = Signature::from_bytes(&sig_bytes) {
 						self.received_signature = Some(signature);
 					}
+				} else if matches!(
+					self.state,
+					SignProtocolState::Round1Generate |
+						SignProtocolState::Round1Waiting |
+						SignProtocolState::Round2Generate |
+						SignProtocolState::Round2Waiting |
+						SignProtocolState::Round3Generate |
+						SignProtocolState::Round3Waiting
+				) {
+					// Buffer Round4Complete that arrives before we're ready
+					// (can happen if leader receives all Round 3 faster than we do)
+					self.message_buffer.buffer_round4_complete(sig_bytes);
 				}
 			},
 		}
@@ -1100,6 +1137,17 @@ impl DilithiumSignProtocol {
 		for r3 in buffered {
 			// Don't overwrite if we already have a message from this party
 			self.r3_broadcasts.entry(r3.party_id).or_insert(r3);
+		}
+	}
+
+	/// Process buffered Round4Complete after transitioning to WaitingForLeaderDecision.
+	/// This handles the case where the leader's Round4Complete arrives before we've
+	/// collected all Round 3 messages (possible when network ordering is not guaranteed).
+	fn process_buffered_round4_complete(&mut self) {
+		if let Some(sig_bytes) = self.message_buffer.take_round4_complete() {
+			if let Some(signature) = Signature::from_bytes(&sig_bytes) {
+				self.received_signature = Some(signature);
+			}
 		}
 	}
 }
@@ -1685,6 +1733,98 @@ mod tests {
 		assert!(protocol.message_buffer.round3.contains_key(&1));
 		// Should NOT be in r3_broadcasts yet
 		assert!(!protocol.r3_broadcasts.contains_key(&1));
+	}
+
+	/// Round4Complete messages that arrive before a follower reaches WaitingForLeaderDecision
+	/// should be buffered and processed when the follower transitions. This prevents
+	/// deadlock when the leader finishes faster than followers (e.g., due to network delays
+	/// in receiving other parties' Round 3 messages).
+	#[test]
+	fn test_out_of_order_round4_complete_buffering() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let message = b"test message".to_vec();
+		let context = b"context".to_vec();
+
+		// Run a full signing protocol to get a valid signature
+		let mut valid_sig = None;
+		for attempt in 0..100 {
+			let signers: Vec<_> = shares
+				.iter()
+				.take(2)
+				.map(|s| ThresholdSigner::new(s.clone(), pk.clone(), config).unwrap())
+				.collect();
+
+			let mut session_seed = [0u8; 32];
+			session_seed[0] = attempt as u8;
+
+			match run_local_signing(signers, &message, &context, &session_seed) {
+				Ok(sig) => {
+					valid_sig = Some(sig);
+					break;
+				},
+				Err(_) => continue,
+			}
+		}
+		let valid_sig = valid_sig.expect("Should have produced a valid signature");
+
+		// Create a follower protocol (party 1 with party 0 as leader)
+		let signer = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
+		let mut follower = DilithiumSignProtocol::new(
+			signer,
+			message.clone(),
+			context.clone(),
+			vec![0, 1],
+			1, // follower
+			0, // leader is party 0
+			[0xDD; 32],
+		)
+		.unwrap();
+
+		// Start the follower - it's in Round1Waiting
+		let _ = follower.poke().unwrap();
+		assert!(matches!(follower.state(), SignProtocolState::Round1Waiting));
+
+		// Simulate receiving Round4Complete from leader BEFORE follower is ready
+		// (this can happen if leader finishes all rounds faster)
+		let round4_msg = SigningMessage::Round4Complete(valid_sig.as_bytes().to_vec());
+		let round4_data = follower.serialize_message(&round4_msg).unwrap();
+		follower.message(0, round4_data).unwrap();
+
+		// Verify the message was buffered (not processed yet)
+		assert!(
+			follower.message_buffer.round4_complete.is_some(),
+			"Round4Complete should be buffered when follower is in early state"
+		);
+		assert!(
+			follower.received_signature.is_none(),
+			"Signature should not be set yet"
+		);
+
+		// Now manually advance the follower to WaitingForLeaderDecision
+		// (simulating normal protocol progression)
+		follower.state = SignProtocolState::Round3Waiting;
+		// Pretend we have enough Round 3 messages by setting threshold
+		follower.r3_broadcasts.insert(0, Round3Broadcast::new(0, vec![1, 2, 3]));
+		follower.r3_broadcasts.insert(1, Round3Broadcast::new(1, vec![4, 5, 6]));
+
+		// Poke should transition to WaitingForLeaderDecision, process buffered Round4Complete,
+		// verify the signature, and return it - all in one shot since poke() recurses
+		let result = follower.poke();
+		match result {
+			Ok(Action::Return(sig)) => {
+				assert_eq!(sig.as_bytes(), valid_sig.as_bytes());
+			},
+			other => panic!("Expected Action::Return with valid signature, got: {:?}", other),
+		}
+		assert!(matches!(follower.state, SignProtocolState::Done));
+
+		// Verify the buffer was cleared
+		assert!(
+			follower.message_buffer.round4_complete.is_none(),
+			"Buffer should be cleared after processing"
+		);
 	}
 
 	#[test]
