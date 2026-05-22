@@ -95,7 +95,18 @@ pub fn mnemonic_to_seed(
 ) -> Result<[u8; 64], HDLatticeError> {
 	// Drop guard: zeroizes the mnemonic on every exit path (success, parse error, unwind).
 	let mnemonic = Zeroizing::new(mnemonic);
-	let parsed_mnemonic = Mnemonic::parse_in_normalized(Language::English, mnemonic.as_str())
+	parse_mnemonic_to_seed(mnemonic.as_str(), passphrase)
+}
+
+/// Shared parser that does not take ownership of the mnemonic.
+/// Used by both `mnemonic_to_seed` (which owns and zeroizes the String) and the
+/// `derive_*_from_mnemonic` helpers (which borrow the caller's `&str` and avoid
+/// the redundant heap copy a `to_string()` would create).
+fn parse_mnemonic_to_seed(
+	mnemonic: &str,
+	passphrase: Option<&str>,
+) -> Result<[u8; 64], HDLatticeError> {
+	let parsed_mnemonic = Mnemonic::parse_in_normalized(Language::English, mnemonic)
 		.map_err(|e| HDLatticeError::Bip39Error(e.to_string()))?;
 	Ok(parsed_mnemonic.to_seed_normalized(passphrase.unwrap_or("")))
 }
@@ -123,23 +134,33 @@ pub fn derive_key_from_seed(seed: SensitiveBytes64, path: &str) -> Result<Keypai
 	Ok(keypair)
 }
 
-/// Keypair derivation from mnemonic with passphrase
+/// Keypair derivation from mnemonic with passphrase.
+///
+/// # Security Note
+/// Takes the mnemonic by reference and does not copy it into a heap buffer,
+/// avoiding a redundant duplicate of the secret. The caller retains ownership
+/// of the `&str` and is responsible for zeroizing the source buffer itself.
 pub fn derive_key_from_mnemonic(
 	mnemonic: &str,
 	passphrase: Option<&str>,
 	path: &str,
 ) -> Result<Keypair, HDLatticeError> {
-	let mut seed = mnemonic_to_seed(mnemonic.to_string(), passphrase)?;
+	let mut seed = parse_mnemonic_to_seed(mnemonic, passphrase)?;
 	derive_key_from_seed(SensitiveBytes64::from(&mut seed), path)
 }
 
-/// Wormhole pair derivation from mnemonic with passphrase
+/// Wormhole pair derivation from mnemonic with passphrase.
+///
+/// # Security Note
+/// Takes the mnemonic by reference and does not copy it into a heap buffer,
+/// avoiding a redundant duplicate of the secret. The caller retains ownership
+/// of the `&str` and is responsible for zeroizing the source buffer itself.
 pub fn derive_wormhole_from_mnemonic(
 	mnemonic: &str,
 	passphrase: Option<&str>,
 	path: &str,
 ) -> Result<WormholePair, HDLatticeError> {
-	let mut seed = mnemonic_to_seed(mnemonic.to_string(), passphrase)?;
+	let mut seed = parse_mnemonic_to_seed(mnemonic, passphrase)?;
 	generate_wormhole_from_seed(SensitiveBytes64::from(&mut seed), path)
 }
 
