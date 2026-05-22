@@ -21,7 +21,11 @@ pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 pub type Signature = [u8; SIGNBYTES];
 
 /// A pair of private and public keys.
-#[derive(Clone)]
+///
+/// `Clone` is intentionally not derived because the embedded `SecretKey` is sensitive.
+/// To explicitly copy a keypair (e.g. to move it into a closure), serialize and
+/// reconstruct: `Keypair::from_bytes(&keypair.to_bytes())?`. This forces the
+/// duplication of secret material to be visible at every call site.
 pub struct Keypair {
 	pub secret: SecretKey,
 	pub public: PublicKey,
@@ -121,7 +125,11 @@ impl fmt::Debug for Keypair {
 }
 
 /// Private key.
-#[derive(Clone, ZeroizeOnDrop)]
+///
+/// `Clone` is intentionally not derived because the underlying bytes are sensitive.
+/// To explicitly copy a secret key, use `SecretKey::from_bytes(&sk.to_bytes())?`,
+/// which makes the duplication of secret material visible at every call site.
+#[derive(ZeroizeOnDrop)]
 pub struct SecretKey {
 	pub bytes: [u8; SECRETKEYBYTES],
 }
