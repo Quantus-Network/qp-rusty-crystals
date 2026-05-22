@@ -544,9 +544,7 @@ mod tests {
 					assert_eq!(expected.len(), OUTPUT_LENGTH);
 
 					let mut output = [0; OUTPUT_LENGTH];
-					for i in 0..OUTPUT_LENGTH {
-						output[i] = expected[i];
-					}
+					output.copy_from_slice(&expected);
 
 					let vec = KeccakTest {
 						input: current_msg.take().expect("the message is missing"),
