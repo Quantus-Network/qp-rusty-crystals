@@ -360,6 +360,9 @@ pub fn use_hint(a: &mut Poly, hint: &Poly) {
 ///
 /// Returns number of sampled coefficients. Can be smaller than a.len() if not enough random bytes
 /// were given.
+///
+/// Note: Returns immediately if output slice is empty. For non-empty output, always processes
+/// all input bytes to maintain constant-time behavior.
 pub fn rej_eta(a: &mut [i32], buf: &[u8]) -> usize {
 	let alen = a.len();
 	let buflen = buf.len();
@@ -371,7 +374,7 @@ pub fn rej_eta(a: &mut [i32], buf: &[u8]) -> usize {
 
 	let mut ctr = 0usize;
 
-	// Always process exactly buflen bytes
+	// Always process exactly buflen bytes (constant-time for non-empty output)
 	for pos in 0..buflen {
 		let lower_nibble = (buf[pos] & 0x0F) as u32;
 		let upper_nibble = (buf[pos] >> 4) as u32;

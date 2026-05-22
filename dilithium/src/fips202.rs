@@ -36,12 +36,6 @@ fn load64(x: &[u8; 8]) -> u64 {
 	u64::from_le_bytes(*x)
 }
 
-/// Store a 64-bit integer to array of 8 bytes in little-endian order
-#[inline]
-fn store64(x: &mut [u8; 8], u: u64) {
-	*x = u.to_le_bytes();
-}
-
 /// Keccak round constants
 const KECCAKF_ROUNDCONSTANTS: [u64; NROUNDS] = [
 	0x0000000000000001u64,
@@ -369,40 +363,41 @@ fn keccak_squeeze(out: &mut [u8], s: &mut [u64; 25], mut pos: usize, r: usize) -
 
 /// Absorb step of Keccak; non-incremental, starts by zeroeing the state.
 fn keccak_absorb_once(s: &mut [u64; 25], r: usize, input: &[u8], p: u8) {
-	let mut inlen = input.len();
 	s.fill(0);
-	let mut idx = 0;
-	while inlen >= r {
-		for i in 0..r / 8 {
-			let bytes: &[u8; 8] = input[idx + 8 * i..idx + 8 * i + 8].try_into().unwrap();
-			s[i] ^= load64(bytes);
+
+	// Process full blocks using chunks_exact for safe iteration
+	let mut chunks = input.chunks_exact(r);
+	for block in chunks.by_ref() {
+		for (i, chunk) in block.chunks_exact(8).enumerate() {
+			// SAFETY: chunks_exact(8) guarantees exactly 8 bytes, so this indexing is safe
+			let bytes = [chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]];
+			s[i] ^= load64(&bytes);
 		}
-		idx += r;
-		inlen -= r;
 		keccakf1600_statepermute(s);
 	}
 
-	for i in 0..inlen {
-		s[i / 8] ^= (input[idx + i] as u64) << 8 * (i % 8);
+	// Handle remaining bytes
+	let remainder = chunks.remainder();
+	for (i, &byte) in remainder.iter().enumerate() {
+		s[i / 8] ^= (byte as u64) << (8 * (i % 8));
 	}
 
-	s[inlen / 8] ^= (p as u64) << 8 * (inlen % 8);
+	s[remainder.len() / 8] ^= (p as u64) << (8 * (remainder.len() % 8));
 	s[(r - 1) / 8] ^= 1u64 << 63;
 }
 
 /// Squeeze step of Keccak. Squeezes full blocks of r bytes each.
 /// Modifies the state. Can be called multiple times to keep squeezing, i.e., is incremental.
 /// Assumes zero bytes of current block have already been squeezed.
-fn keccak_squeezeblocks(out: &mut [u8], mut nblocks: usize, s: &mut [u64; 25], r: usize) {
-	let mut idx = 0usize;
-	while nblocks > 0 {
+fn keccak_squeezeblocks(out: &mut [u8], nblocks: usize, s: &mut [u64; 25], r: usize) {
+	// Process exactly nblocks blocks using chunks_exact_mut for safe iteration
+	for block in out.chunks_exact_mut(r).take(nblocks) {
 		keccakf1600_statepermute(s);
-		for i in 0..(r >> 3) {
-			let bytes: &mut [u8; 8] = (&mut out[idx + 8 * i..idx + 8 * i + 8]).try_into().unwrap();
-			store64(bytes, s[i]);
+		for (i, chunk) in block.chunks_exact_mut(8).enumerate() {
+			// chunks_exact_mut(8) guarantees exactly 8 bytes
+			let bytes = s[i].to_le_bytes();
+			chunk.copy_from_slice(&bytes);
 		}
-		idx += r;
-		nblocks -= 1;
 	}
 }
 
