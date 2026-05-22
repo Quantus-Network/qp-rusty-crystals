@@ -370,7 +370,8 @@ fn keccak_absorb_once(s: &mut [u64; 25], r: usize, input: &[u8], p: u8) {
 	for block in chunks.by_ref() {
 		for (i, chunk) in block.chunks_exact(8).enumerate() {
 			// SAFETY: chunks_exact(8) guarantees exactly 8 bytes, so this indexing is safe
-			let bytes = [chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]];
+			let bytes =
+				[chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]];
 			s[i] ^= load64(&bytes);
 		}
 		keccakf1600_statepermute(s);
