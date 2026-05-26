@@ -132,6 +132,7 @@ pub use state::{
 	MithrilDkgState,
 };
 pub use types::{
+	compute_dkg_ssid,
 	compute_partial_output_hash,
 	compute_signing_message,
 	compute_transcript_hash,
@@ -158,6 +159,8 @@ pub use types::{
 	TranscriptSigner,
 	// Constants
 	COMMITMENT_HASH_SIZE,
+	// Constants
+	DKG_SSID_SIZE,
 	DOMAIN_COMMIT,
 	DOMAIN_KEYGEN,
 	DOMAIN_PK_COMMIT,
@@ -172,6 +175,9 @@ pub use types::{
 mod tests {
 	use super::*;
 	use alloc::{vec, vec::Vec};
+
+	/// Test session nonce for DKG tests.
+	const TEST_SESSION_NONCE: [u8; 32] = [0xDF; 32];
 
 	#[derive(Clone, Debug)]
 	struct TestSigner {
@@ -212,7 +218,7 @@ mod tests {
 		let public_keys: Vec<u32> = (0..3).collect();
 		let seed = [42u8; 32];
 
-		let result = run_local_mithril_dkg(2, 3, signers, public_keys, seed);
+		let result = run_local_mithril_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE);
 
 		match &result {
 			Ok(outputs) => {
@@ -239,7 +245,8 @@ mod tests {
 		let public_keys: Vec<u32> = (0..3).collect();
 		let seed = [123u8; 32];
 
-		let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, seed).unwrap();
+		let outputs =
+			run_local_mithril_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		for (party_id, output) in outputs.iter().enumerate() {
 			let shares = output.private_share.shares();
@@ -286,7 +293,8 @@ mod tests {
 		let public_keys: Vec<u32> = (0..3).collect();
 		let seed = [99u8; 32];
 
-		let dkg_outputs = run_local_mithril_dkg(2, 3, signers, public_keys, seed).unwrap();
+		let dkg_outputs =
+			run_local_mithril_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		// All parties should have the same public key
 		let public_key = dkg_outputs[0].public_key.clone();

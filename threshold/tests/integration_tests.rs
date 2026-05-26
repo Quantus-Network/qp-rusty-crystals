@@ -662,6 +662,9 @@ fn test_threshold_matrix_dkg() {
 		let config_id = seed + *threshold as u64 * 100 + *total_parties as u64;
 		dkg_seed[..8].copy_from_slice(&config_id.to_le_bytes());
 
+		// Session nonce for SSID computation
+		let session_nonce = [0x42u8; 32];
+
 		// Run DKG to generate keys
 		let dkg_outputs = match run_local_mithril_dkg(
 			*threshold,
@@ -669,6 +672,7 @@ fn test_threshold_matrix_dkg() {
 			dkg_signers,
 			dkg_public_keys,
 			dkg_seed,
+			&session_nonce,
 		) {
 			Ok(outputs) => outputs,
 			Err(e) => {

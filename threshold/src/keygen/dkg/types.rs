@@ -112,6 +112,12 @@ pub const DOMAIN_PK_COMMIT: &[u8] = b"MITHRIL_DKG_PK_COMMIT_V1";
 /// Domain separator for transcript hash.
 pub const DOMAIN_TRANSCRIPT: &[u8] = b"MITHRIL_DKG_TRANSCRIPT_V1";
 
+/// Domain separator for DKG session identifier.
+pub const DOMAIN_DKG_SSID: &[u8] = b"MITHRIL_DKG_SSID_V1";
+
+/// Size of the DKG session identifier in bytes.
+pub const DKG_SSID_SIZE: usize = 32;
+
 use qp_rusty_crystals_dilithium::{
 	params::{K, L, N},
 	poly,
@@ -367,15 +373,19 @@ impl PartialPublicKey {
 /// Round 1 broadcast: Commitment to randomness.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct MithrilRound1Broadcast {
+	/// Session identifier binding this message to a specific DKG session.
+	pub ssid: [u8; DKG_SSID_SIZE],
 	/// The party sending this message.
 	pub party_id: ParticipantId,
-	/// Commitment c_i = H(i, r_i).
+	/// Commitment c_i = H(ssid, i, r_i).
 	pub commitment: [u8; COMMITMENT_HASH_SIZE],
 }
 
 /// Round 1 private: Shared secret K_S (leader to subset members).
 #[derive(Clone, BorshSerialize, BorshDeserialize)]
 pub struct MithrilRound1Private {
+	/// Session identifier binding this message to a specific DKG session.
+	pub ssid: [u8; DKG_SSID_SIZE],
 	/// The party sending this message.
 	pub from_party_id: ParticipantId,
 	/// The subset this shared secret is for.
@@ -387,6 +397,8 @@ pub struct MithrilRound1Private {
 /// Round 2 broadcast: Reveal randomness.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct MithrilRound2Broadcast {
+	/// Session identifier binding this message to a specific DKG session.
+	pub ssid: [u8; DKG_SSID_SIZE],
 	/// The party sending this message.
 	pub party_id: ParticipantId,
 	/// The revealed randomness r_i.
@@ -396,6 +408,8 @@ pub struct MithrilRound2Broadcast {
 /// Round 3 broadcast: Commitment to partial PKs (leaders only).
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct MithrilRound3Broadcast {
+	/// Session identifier binding this message to a specific DKG session.
+	pub ssid: [u8; DKG_SSID_SIZE],
 	/// The party sending this message.
 	pub party_id: ParticipantId,
 	/// Commitments to partial public keys.
@@ -405,6 +419,8 @@ pub struct MithrilRound3Broadcast {
 /// Round 4 broadcast: Reveal partial PKs + transcript signature.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct MithrilRound4Broadcast {
+	/// Session identifier binding this message to a specific DKG session.
+	pub ssid: [u8; DKG_SSID_SIZE],
 	/// The party sending this message.
 	pub party_id: ParticipantId,
 	/// Partial public keys for subsets where this party is leader.
@@ -428,14 +444,102 @@ pub enum MithrilDkgMessage {
 	Round4Broadcast(MithrilRound4Broadcast),
 }
 
+impl MithrilDkgMessage {
+	/// Get the SSID from any message type.
+	pub fn ssid(&self) -> &[u8; DKG_SSID_SIZE] {
+		match self {
+			MithrilDkgMessage::Round1Broadcast(msg) => &msg.ssid,
+			MithrilDkgMessage::Round1Private(msg) => &msg.ssid,
+			MithrilDkgMessage::Round2Broadcast(msg) => &msg.ssid,
+			MithrilDkgMessage::Round3Broadcast(msg) => &msg.ssid,
+			MithrilDkgMessage::Round4Broadcast(msg) => &msg.ssid,
+		}
+	}
+
+	/// Get the party ID from any message type.
+	pub fn party_id(&self) -> ParticipantId {
+		match self {
+			MithrilDkgMessage::Round1Broadcast(msg) => msg.party_id,
+			MithrilDkgMessage::Round1Private(msg) => msg.from_party_id,
+			MithrilDkgMessage::Round2Broadcast(msg) => msg.party_id,
+			MithrilDkgMessage::Round3Broadcast(msg) => msg.party_id,
+			MithrilDkgMessage::Round4Broadcast(msg) => msg.party_id,
+		}
+	}
+}
+
 // ============================================================================
 // Hash Functions
 // ============================================================================
 
-/// Compute commitment hash: H_commit(party_id, data).
-pub fn h_commit(party_id: ParticipantId, data: &[u8]) -> [u8; COMMITMENT_HASH_SIZE] {
+/// Compute the DKG session identifier (SSID).
+///
+/// The SSID binds:
+/// - The threshold configuration (t, n)
+/// - All participant IDs (sorted)
+/// - A session nonce (caller-provided, e.g., from transport layer)
+///
+/// This prevents cross-session replay attacks where messages from one DKG
+/// session could be replayed into another session with different parameters.
+///
+/// ```text
+/// ssid = SHAKE256(
+///     "MITHRIL_DKG_SSID_V1" ||
+///     threshold (u32 LE) ||
+///     total_parties (u32 LE) ||
+///     num_participants (u32 LE) ||
+///     sorted_participant_ids (each u32 LE) ||
+///     session_nonce[32]
+/// )
+/// ```
+pub fn compute_dkg_ssid(
+	threshold: u32,
+	total_parties: u32,
+	participants: &[ParticipantId],
+	session_nonce: &[u8; 32],
+) -> [u8; DKG_SSID_SIZE] {
+	let mut ssid = [0u8; DKG_SSID_SIZE];
+	let mut state = fips202::KeccakState::default();
+
+	// Domain separator
+	fips202::shake256_absorb(&mut state, DOMAIN_DKG_SSID, DOMAIN_DKG_SSID.len());
+
+	// Threshold configuration
+	fips202::shake256_absorb(&mut state, &threshold.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, &total_parties.to_le_bytes(), 4);
+
+	// Number of participants
+	let num_participants = participants.len() as u32;
+	fips202::shake256_absorb(&mut state, &num_participants.to_le_bytes(), 4);
+
+	// Sorted participant IDs (caller should ensure sorted order)
+	let mut sorted_participants = participants.to_vec();
+	sorted_participants.sort();
+	for participant_id in &sorted_participants {
+		fips202::shake256_absorb(&mut state, &participant_id.to_le_bytes(), 4);
+	}
+
+	// Session nonce
+	fips202::shake256_absorb(&mut state, session_nonce, 32);
+
+	fips202::shake256_finalize(&mut state);
+	fips202::shake256_squeeze(&mut ssid, DKG_SSID_SIZE, &mut state);
+
+	ssid
+}
+
+/// Compute commitment hash: H_commit(ssid, party_id, data).
+///
+/// The SSID binds this commitment to the specific DKG session, preventing
+/// cross-session replay attacks (CVE-2022-47930 class vulnerabilities).
+pub fn h_commit(
+	ssid: &[u8; DKG_SSID_SIZE],
+	party_id: ParticipantId,
+	data: &[u8],
+) -> [u8; COMMITMENT_HASH_SIZE] {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, DOMAIN_COMMIT, DOMAIN_COMMIT.len());
+	fips202::shake256_absorb(&mut state, ssid, DKG_SSID_SIZE);
 	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
 	fips202::shake256_absorb(&mut state, data, data.len());
 	fips202::shake256_finalize(&mut state);
@@ -446,12 +550,19 @@ pub fn h_commit(party_id: ParticipantId, data: &[u8]) -> [u8; COMMITMENT_HASH_SI
 }
 
 /// Compute commitment hash for partial PK.
+///
+/// The SSID and party_id bind this commitment to the specific DKG session
+/// and the party producing it, preventing cross-session replay attacks.
 pub fn h_commit_pk(
+	ssid: &[u8; DKG_SSID_SIZE],
+	party_id: ParticipantId,
 	subset_mask: SubsetMask,
 	partial_pk: &PartialPublicKey,
 ) -> [u8; COMMITMENT_HASH_SIZE] {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, DOMAIN_PK_COMMIT, DOMAIN_PK_COMMIT.len());
+	fips202::shake256_absorb(&mut state, ssid, DKG_SSID_SIZE);
+	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
 	fips202::shake256_absorb(&mut state, &subset_mask.to_le_bytes(), 2);
 
 	for poly in &partial_pk.t {
@@ -498,13 +609,19 @@ pub fn h_keygen(
 }
 
 /// Compute transcript hash from rounds 1-3.
+///
+/// The SSID is included to bind the transcript to the specific DKG session,
+/// preventing cross-session replay attacks where transcript signatures from
+/// one DKG session could be replayed into another.
 pub fn compute_transcript_hash(
+	ssid: &[u8; DKG_SSID_SIZE],
 	round1_broadcasts: &BTreeMap<ParticipantId, MithrilRound1Broadcast>,
 	round2_broadcasts: &BTreeMap<ParticipantId, MithrilRound2Broadcast>,
 	round3_broadcasts: &BTreeMap<ParticipantId, MithrilRound3Broadcast>,
 ) -> [u8; 32] {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, DOMAIN_TRANSCRIPT, DOMAIN_TRANSCRIPT.len());
+	fips202::shake256_absorb(&mut state, ssid, DKG_SSID_SIZE);
 
 	// BTreeMap iterates in sorted order, so no need to sort
 	for (party_id, msg) in round1_broadcasts {
@@ -596,6 +713,9 @@ pub fn derive_subset_contribution(combined_seed: &[u8; SUBSET_SEED_SIZE]) -> Sub
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Test SSID for DKG type tests.
+	const TEST_SSID: [u8; DKG_SSID_SIZE] = [0xDD; DKG_SSID_SIZE];
 
 	#[derive(Clone, Debug)]
 	struct TestSigner {
@@ -737,8 +857,8 @@ mod tests {
 
 	#[test]
 	fn test_h_commit_deterministic() {
-		let hash1 = h_commit(42, b"test");
-		let hash2 = h_commit(42, b"test");
+		let hash1 = h_commit(&TEST_SSID, 42, b"test");
+		let hash2 = h_commit(&TEST_SSID, 42, b"test");
 		assert_eq!(hash1, hash2);
 	}
 
