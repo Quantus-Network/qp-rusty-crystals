@@ -196,6 +196,11 @@ fn test_derived_key_generation_and_signing() {
 	let message = b"Hello from derived key!";
 	let context = b"test-context";
 
+	// Compute SSID for signing session (participants 0 and 1)
+	let participants = vec![0u32, 1u32];
+	let participant_list =
+		qp_rusty_crystals_threshold::ParticipantList::new(&participants).unwrap();
+
 	let mut signature = None;
 	for attempt in 0..100u8 {
 		// Create signers for threshold subset (2 of 3)
@@ -207,6 +212,18 @@ fn test_derived_key_generation_and_signing() {
 			})
 			.collect();
 
+		// Compute SSID for this attempt
+		let mut attempt_nonce = [0u8; 32];
+		attempt_nonce[0] = attempt;
+		attempt_nonce[1] = 0xDF; // marker
+		let ssid = qp_rusty_crystals_threshold::compute_ssid(
+			&derived_pubkey,
+			2,
+			3,
+			&participant_list,
+			&attempt_nonce,
+		);
+
 		// Round 1: Generate commitments using deterministic seeds
 		let r1_broadcasts: Vec<_> = signers
 			.iter_mut()
@@ -217,7 +234,7 @@ fn test_derived_key_generation_and_signing() {
 				seed[0] = i as u8;
 				seed[1] = attempt;
 				seed[2] = 0xDE; // marker
-				s.round1_commit_with_seed(&seed).unwrap()
+				s.round1_commit_with_seed(&ssid, &seed).unwrap()
 			})
 			.collect();
 
@@ -228,7 +245,7 @@ fn test_derived_key_generation_and_signing() {
 			.map(|(i, s)| {
 				let others: Vec<_> =
 					r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-				s.round2_reveal(message, context, &others).unwrap()
+				s.round2_reveal(&ssid, message, context, &others).unwrap()
 			})
 			.collect();
 
@@ -241,7 +258,7 @@ fn test_derived_key_generation_and_signing() {
 					r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
 				let others_r2: Vec<_> =
 					r2_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-				s.round3_respond(&others_r1, &others_r2).unwrap()
+				s.round3_respond(&ssid, &others_r1, &others_r2).unwrap()
 			})
 			.collect();
 

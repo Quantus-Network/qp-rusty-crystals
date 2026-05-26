@@ -165,7 +165,7 @@ pub use keys::{PrivateKeyShare, PublicKey};
 // Broadcast message types
 pub use broadcast::{
 	Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature, MAX_COMMITMENT_DATA_SIZE,
-	MAX_RESPONSE_SIZE, SIGNATURE_SIZE,
+	MAX_RESPONSE_SIZE, SIGNATURE_SIZE, SSID_SIZE,
 };
 
 // The main signer
@@ -179,6 +179,9 @@ pub use derivation::{derive_dkg_contribution, DerivedKeyId};
 
 // Verification
 pub use verification::verify_signature;
+
+// SSID computation (for tests and advanced use cases)
+pub use protocol::signing::compute_ssid;
 
 /// Signature verification.
 mod verification {

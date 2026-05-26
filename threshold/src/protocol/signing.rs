@@ -62,6 +62,72 @@ pub(crate) struct Round2Data {
 }
 
 // ============================================================================
+// Session Identifier (SSID)
+// ============================================================================
+
+/// Size of the session identifier in bytes.
+pub const SSID_SIZE: usize = 32;
+
+/// Compute the session identifier (SSID) for a signing session.
+///
+/// The SSID binds:
+/// - The public key (prevents cross-key replay)
+/// - The threshold configuration (t, n)
+/// - The signing participant set (prevents cross-session replay with different participants)
+/// - An attempt nonce (prevents replay across signing attempts for the same message)
+///
+/// ```text
+/// ssid = SHAKE256(
+///     "dilithium-threshold-ssid-v1" ||
+///     pubkey_bytes[2592] ||
+///     threshold (u32 LE) ||
+///     total_parties (u32 LE) ||
+///     num_participants (u32 LE) ||
+///     sorted_participant_ids (each u32 LE) ||
+///     attempt_nonce[32]
+/// )
+/// ```
+pub fn compute_ssid(
+	public_key: &PublicKey,
+	threshold: u32,
+	total_parties: u32,
+	participants: &ParticipantList,
+	attempt_nonce: &[u8; 32],
+) -> [u8; SSID_SIZE] {
+	const DOMAIN_SEPARATOR: &[u8] = b"dilithium-threshold-ssid-v1";
+
+	let mut ssid = [0u8; SSID_SIZE];
+	let mut state = fips202::KeccakState::default();
+
+	// Domain separator
+	fips202::shake256_absorb(&mut state, DOMAIN_SEPARATOR, DOMAIN_SEPARATOR.len());
+
+	// Public key bytes
+	fips202::shake256_absorb(&mut state, public_key.as_bytes(), public_key.as_bytes().len());
+
+	// Threshold configuration
+	fips202::shake256_absorb(&mut state, &threshold.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, &total_parties.to_le_bytes(), 4);
+
+	// Number of participants
+	let num_participants = participants.len() as u32;
+	fips202::shake256_absorb(&mut state, &num_participants.to_le_bytes(), 4);
+
+	// Sorted participant IDs (ParticipantList maintains sorted order internally)
+	for participant_id in participants.iter() {
+		fips202::shake256_absorb(&mut state, &participant_id.to_le_bytes(), 4);
+	}
+
+	// Attempt nonce
+	fips202::shake256_absorb(&mut state, attempt_nonce, 32);
+
+	fips202::shake256_finalize(&mut state);
+	fips202::shake256_squeeze(&mut ssid, SSID_SIZE, &mut state);
+
+	ssid
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -86,19 +152,22 @@ pub(crate) fn compute_mu(tr: &[u8; 64], message: &[u8], context: &[u8]) -> [u8; 
 
 /// Compute the commitment hash for Round 1.
 ///
-/// The hash is computed as: SHAKE256(tr || party_id || commitment_data)
+/// The hash is computed as: SHAKE256(ssid || party_id || commitment_data)
 /// where commitment_data is the packed w polynomials.
+///
+/// The SSID binds the commitment to this specific signing session, preventing
+/// cross-session replay attacks (CVE-2022-47930 class vulnerabilities).
 ///
 /// This function is used both when generating the commitment (Round 1) and
 /// when verifying it (before Round 3) to ensure consistency.
 pub(crate) fn compute_commitment_hash(
-	tr: &[u8; 64],
+	ssid: &[u8; SSID_SIZE],
 	party_id: ParticipantId,
 	commitment_data: &[u8],
 ) -> [u8; 32] {
 	let mut hash = [0u8; 32];
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, tr, 64);
+	fips202::shake256_absorb(&mut state, ssid, SSID_SIZE);
 	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
 	fips202::shake256_absorb(&mut state, commitment_data, commitment_data.len());
 	fips202::shake256_finalize(&mut state);
@@ -111,12 +180,12 @@ pub(crate) fn compute_commitment_hash(
 /// This prevents rushing adversary attacks where a malicious party could
 /// adaptively choose their w_i values after seeing other parties' commitments.
 pub(crate) fn verify_commitment_hash(
-	tr: &[u8; 64],
+	ssid: &[u8; SSID_SIZE],
 	party_id: ParticipantId,
 	commitment_data: &[u8],
 	expected_hash: &[u8; 32],
 ) -> bool {
-	let computed_hash = compute_commitment_hash(tr, party_id, commitment_data);
+	let computed_hash = compute_commitment_hash(ssid, party_id, commitment_data);
 	computed_hash == *expected_hash
 }
 
@@ -180,7 +249,15 @@ pub(crate) fn aggregate_commitments_dilithium(
 // ============================================================================
 
 /// Generate Round 1 commitment data.
+///
+/// # Arguments
+///
+/// * `ssid` - Session identifier binding this commitment to the current signing session
+/// * `private_key` - This party's private key share
+/// * `config` - Threshold configuration
+/// * `seed` - Random seed for commitment generation
 pub(crate) fn generate_round1(
+	ssid: &[u8; SSID_SIZE],
 	private_key: &PrivateKeyShare,
 	config: &ThresholdConfig,
 	seed: &[u8; 32],
@@ -289,8 +366,8 @@ pub(crate) fn generate_round1(
 	}
 
 	// Generate commitment hash using the shared function to ensure consistency with verification
-	let commitment_hash =
-		compute_commitment_hash(private_key.tr(), private_key.party_id(), &w_packed);
+	// The SSID binds this commitment to the specific signing session
+	let commitment_hash = compute_commitment_hash(ssid, private_key.party_id(), &w_packed);
 
 	Ok(Round1Data { w_commitments, hyperball_samples, commitment_hash, rho_prime })
 }
@@ -416,6 +493,14 @@ pub(crate) fn process_round2(
 
 /// Generate Round 3 response.
 ///
+/// # Arguments
+///
+/// * `ssid` - Session identifier binding this response to the current signing session
+/// * `private_key` - This party's private key share
+/// * `config` - Threshold configuration
+/// * `round1` - This party's Round 1 data
+/// * `round2` - Aggregated Round 2 data
+///
 /// # Errors
 ///
 /// Returns an error if internal data structures have inconsistent lengths.
@@ -473,6 +558,9 @@ pub(crate) fn generate_round3_response(
 		decompose_polyveck(&round2.w_aggregated[i], &mut w0, &mut w1);
 
 		// Compute challenge: c~ = H(μ || w1)
+		// Note: SSID is NOT included in the challenge to maintain compatibility
+		// with standard ML-DSA verification. Cross-session replay protection is
+		// provided by SSID binding in commitment hashes and message validation.
 		let mut w1_packed = vec![0u8; K * POLYW1_PACKEDBYTES];
 		polyvec::k_pack_w1(&mut w1_packed, &w1);
 
@@ -743,6 +831,9 @@ pub(crate) fn combine_signature(
 		}
 
 		// Compute challenge: c~ = H(μ || w1)
+		// Note: SSID is NOT included in the challenge to maintain compatibility
+		// with standard ML-DSA verification. Cross-session replay protection is
+		// provided by SSID binding in commitment hashes and message validation.
 		let mut w1_packed = vec![0u8; K * POLYW1_PACKEDBYTES];
 		polyvec::k_pack_w1(&mut w1_packed, &w1);
 

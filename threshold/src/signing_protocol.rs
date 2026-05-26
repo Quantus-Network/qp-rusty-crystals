@@ -142,8 +142,9 @@ use log::warn;
 use qp_rusty_crystals_dilithium::fips202;
 
 use crate::{
-	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature},
+	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature, SSID_SIZE},
 	participants::{ParticipantId, ParticipantList},
+	protocol::signing::compute_ssid,
 	signer::ThresholdSigner,
 };
 
@@ -224,24 +225,53 @@ impl fmt::Display for SignProtocolError {
 // Message Types
 // ============================================================================
 
+/// Round 4 broadcast message: signature from leader.
+///
+/// In Round 4, the leader broadcasts the combined signature to all parties.
+///
+/// # Security
+///
+/// The SSID binds this message to the current signing session, preventing
+/// a malicious leader from replaying a valid signature from a previous session.
+/// Followers MUST verify both the SSID and the signature itself.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct Round4Broadcast {
+	/// Session identifier binding this message to a specific signing session.
+	pub ssid: [u8; SSID_SIZE],
+	/// The combined signature bytes.
+	pub signature: Vec<u8>,
+}
+
+impl Round4Broadcast {
+	/// Create a new Round 4 broadcast.
+	pub fn new(ssid: [u8; SSID_SIZE], signature: Vec<u8>) -> Self {
+		Self { ssid, signature }
+	}
+}
+
 /// Message types for the signing protocol.
 ///
 /// These are serialized and sent over the network between parties.
 ///
+/// # Session Identifier (SSID)
+///
+/// All messages include a session identifier (SSID) that binds the message to
+/// a specific signing session. This prevents cross-session replay attacks where
+/// an attacker could reuse messages from a previous session. Receivers MUST
+/// verify that the SSID matches their expected value before processing.
+///
 /// # Replay safety
 ///
-/// These messages intentionally carry no session identifier, attempt id, or
-/// freshness nonce. Per-attempt freshness is the responsibility of the transport
-/// layer (e.g. NEAR MPC's per-attempt `ChannelId`), and per-message integrity
-/// within an attempt is enforced by:
+/// Per-message integrity within an attempt is enforced by:
 ///
+/// - All messages contain an SSID that is verified against the expected value.
 /// - A receiver only accepts `Round2` from peer `P` when it has already accepted a `Round1`
 ///   broadcast from `P` in the same instance, and the round-2 reveal hashes back to the round-1
 ///   commitment hash (see `message()`).
 /// - A receiver only accepts `Round3` from peer `P` when it has accepted that peer's `Round2`
 ///   reveal, which was itself bound to the peer's `Round1` commitment.
-/// - `Round4Complete` is verified by the follower against the public key, message, and context for
-///   the current instance before being accepted as the output.
+/// - `Round4Complete` is verified by the follower against the public key, message, context, and
+///   SSID for the current instance before being accepted as the output.
 ///
 /// There is no `Round4Retry`: combination failure is a hard error and a fresh
 /// instance must be constructed for any retry. See the module-level docs.
@@ -254,10 +284,20 @@ pub enum SigningMessage {
 	/// Round 3: Signature response.
 	Round3(Round3Broadcast),
 	/// Round 4: Leader's decision - signature combination succeeded.
-	Round4Complete(Vec<u8>),
+	Round4Complete(Round4Broadcast),
 }
 
 impl SigningMessage {
+	/// Get the session identifier (SSID) from the message.
+	pub fn ssid(&self) -> &[u8; SSID_SIZE] {
+		match self {
+			SigningMessage::Round1(r) => &r.ssid,
+			SigningMessage::Round2(r) => &r.ssid,
+			SigningMessage::Round3(r) => &r.ssid,
+			SigningMessage::Round4Complete(r) => &r.ssid,
+		}
+	}
+
 	/// Get the party ID of the sender (for Round 1-3 messages).
 	/// Returns None for Round 4 messages (which come from leader).
 	pub fn party_id(&self) -> Option<ParticipantId> {
@@ -348,9 +388,9 @@ pub struct SignMessageBuffer {
 	round2: BTreeMap<ParticipantId, Round2Broadcast>,
 	/// Buffered Round 3 messages, keyed by party_id.
 	round3: BTreeMap<ParticipantId, Round3Broadcast>,
-	/// Buffered Round4Complete signature bytes from the leader.
+	/// Buffered Round4Complete from the leader.
 	/// Only one is stored (first arrival); subsequent ones are ignored.
-	round4_complete: Option<Vec<u8>>,
+	round4_complete: Option<Round4Broadcast>,
 }
 
 impl SignMessageBuffer {
@@ -371,11 +411,11 @@ impl SignMessageBuffer {
 		self.round3.entry(msg.party_id).or_insert(msg);
 	}
 
-	/// Buffer a Round4Complete signature for later processing.
+	/// Buffer a Round4Complete for later processing.
 	/// Only the first one is stored; subsequent ones are ignored.
-	pub fn buffer_round4_complete(&mut self, sig_bytes: Vec<u8>) {
+	pub fn buffer_round4_complete(&mut self, msg: Round4Broadcast) {
 		if self.round4_complete.is_none() {
-			self.round4_complete = Some(sig_bytes);
+			self.round4_complete = Some(msg);
 		}
 	}
 
@@ -389,8 +429,8 @@ impl SignMessageBuffer {
 		mem::take(&mut self.round3).into_values().collect()
 	}
 
-	/// Take the buffered Round4Complete signature, if any.
-	pub fn take_round4_complete(&mut self) -> Option<Vec<u8>> {
+	/// Take the buffered Round4Complete, if any.
+	pub fn take_round4_complete(&mut self) -> Option<Round4Broadcast> {
 		self.round4_complete.take()
 	}
 
@@ -452,6 +492,8 @@ pub struct DilithiumSignProtocol {
 	context: Vec<u8>,
 	/// Random seed for Round 1 commitment (32 bytes, cryptographically random).
 	round1_seed: [u8; 32],
+	/// Session identifier binding all protocol messages to this signing session.
+	ssid: [u8; SSID_SIZE],
 
 	/// Collected Round 1 broadcasts from other parties.
 	r1_broadcasts: BTreeMap<ParticipantId, Round1Broadcast>,
@@ -486,6 +528,8 @@ impl DilithiumSignProtocol {
 	/// * `my_participant_id` - This party's identifier
 	/// * `leader_id` - The leader's identifier (responsible for combine/retry decisions)
 	/// * `round1_seed` - A 32-byte cryptographically random seed for Round 1
+	/// * `attempt_nonce` - A 32-byte nonce unique to this signing attempt (must be agreed upon by
+	///   all participants, e.g., derived from the transport layer's session/channel ID)
 	///
 	/// # Errors
 	///
@@ -497,8 +541,10 @@ impl DilithiumSignProtocol {
 	///
 	/// # Security Warning
 	///
-	/// The `round1_seed` MUST be generated from a cryptographically secure source
-	/// and MUST be unique for each signing session. Reusing seeds compromises security.
+	/// - The `round1_seed` MUST be generated from a cryptographically secure source and MUST be
+	///   unique for each signing session. Reusing seeds compromises security.
+	/// - The `attempt_nonce` MUST be agreed upon by all participants BEFORE the protocol starts.
+	///   Using different nonces will cause SSID mismatch and message rejection.
 	pub fn new(
 		signer: ThresholdSigner,
 		message: Vec<u8>,
@@ -507,6 +553,7 @@ impl DilithiumSignProtocol {
 		my_participant_id: ParticipantId,
 		leader_id: ParticipantId,
 		round1_seed: [u8; 32],
+		attempt_nonce: [u8; 32],
 	) -> Result<Self, SignProtocolError> {
 		let participant_list = ParticipantList::new(&participants).ok_or_else(|| {
 			SignProtocolError::InvalidConfig("participants contains duplicates".to_string())
@@ -550,6 +597,15 @@ impl DilithiumSignProtocol {
 			)));
 		}
 
+		// Compute session identifier (SSID) that binds all messages to this session
+		let ssid = compute_ssid(
+			signer.public_key(),
+			signer.config().threshold(),
+			signer.config().total_parties(),
+			&participant_list,
+			&attempt_nonce,
+		);
+
 		Ok(Self {
 			signer,
 			state: SignProtocolState::Round1Generate,
@@ -559,6 +615,7 @@ impl DilithiumSignProtocol {
 			message,
 			context,
 			round1_seed,
+			ssid,
 			r1_broadcasts: BTreeMap::new(),
 			r2_broadcasts: BTreeMap::new(),
 			r3_broadcasts: BTreeMap::new(),
@@ -588,6 +645,14 @@ impl DilithiumSignProtocol {
 	/// Get the leader's identifier.
 	pub fn leader_id(&self) -> ParticipantId {
 		self.leader_id
+	}
+
+	/// Get the session identifier (SSID) for this protocol instance.
+	///
+	/// The SSID uniquely identifies this signing session and is included in all
+	/// broadcast messages to prevent cross-session replay attacks.
+	pub fn ssid(&self) -> &[u8; SSID_SIZE] {
+		&self.ssid
 	}
 
 	/// Check if this party is the leader.
@@ -708,7 +773,7 @@ impl DilithiumSignProtocol {
 				// DilithiumSignProtocol instance is expected to receive a fresh seed.
 				let r1 = self
 					.signer
-					.round1_commit_with_seed(&self.round1_seed)
+					.round1_commit_with_seed(&self.ssid, &self.round1_seed)
 					.map_err(|e| SignProtocolError::SigningError(e.to_string()))?;
 
 				// Store our broadcast
@@ -749,7 +814,7 @@ impl DilithiumSignProtocol {
 				// Generate Round 2 reveal
 				let r2 = self
 					.signer
-					.round2_reveal(&self.message, &self.context, &others)
+					.round2_reveal(&self.ssid, &self.message, &self.context, &others)
 					.map_err(|e| SignProtocolError::SigningError(e.to_string()))?;
 
 				// Store our broadcast
@@ -798,7 +863,7 @@ impl DilithiumSignProtocol {
 				// Generate Round 3 response
 				let r3 = self
 					.signer
-					.round3_respond(&others_r1, &others_r2)
+					.round3_respond(&self.ssid, &others_r1, &others_r2)
 					.map_err(|e| SignProtocolError::SigningError(e.to_string()))?;
 
 				// Store our broadcast
@@ -851,7 +916,11 @@ impl DilithiumSignProtocol {
 				) {
 					Ok(signature) => {
 						// Success! Broadcast signature to all parties
-						let msg = SigningMessage::Round4Complete(signature.as_bytes().to_vec());
+						let r4 = Round4Broadcast {
+							ssid: self.ssid,
+							signature: signature.as_bytes().to_vec(),
+						};
+						let msg = SigningMessage::Round4Complete(r4);
 						let data = self.serialize_message(&msg)?;
 						self.state = SignProtocolState::Done;
 						// Store signature for return after sending
@@ -952,6 +1021,16 @@ impl DilithiumSignProtocol {
 				return Err(SignProtocolError::MalformedMessage { from, reason: e.to_string() });
 			},
 		};
+
+		// Verify SSID matches for all message types
+		let msg_ssid = msg.ssid();
+		if *msg_ssid != self.ssid {
+			warn!(
+				"Signing: Rejecting message from {} - SSID mismatch (cross-session replay attempt?)",
+				from
+			);
+			return Ok(()); // SSID mismatch, ignore (not an error, likely cross-session replay)
+		}
 
 		// For Round 1-3 messages, verify the claimed sender matches
 		if let Some(party_id) = msg.party_id() {
@@ -1054,7 +1133,7 @@ impl DilithiumSignProtocol {
 					self.message_buffer.buffer_round3(r3);
 				}
 			},
-			SigningMessage::Round4Complete(sig_bytes) => {
+			SigningMessage::Round4Complete(r4) => {
 				// Only followers process Round4Complete
 				if self.is_leader() {
 					return Ok(());
@@ -1062,7 +1141,7 @@ impl DilithiumSignProtocol {
 
 				if matches!(self.state, SignProtocolState::WaitingForLeaderDecision) {
 					// We're ready for it - process immediately
-					if let Some(signature) = Signature::from_bytes(&sig_bytes) {
+					if let Some(signature) = Signature::from_bytes(&r4.signature) {
 						self.received_signature = Some(signature);
 					}
 				} else if matches!(
@@ -1076,7 +1155,7 @@ impl DilithiumSignProtocol {
 				) {
 					// Buffer Round4Complete that arrives before we're ready
 					// (can happen if leader receives all Round 3 faster than we do)
-					self.message_buffer.buffer_round4_complete(sig_bytes);
+					self.message_buffer.buffer_round4_complete(r4);
 				}
 			},
 		}
@@ -1105,9 +1184,8 @@ impl DilithiumSignProtocol {
 		if r2.commitment_data.is_empty() {
 			return false;
 		}
-		let tr = self.signer.public_key().tr();
 		crate::protocol::signing::verify_commitment_hash(
-			tr,
+			&self.ssid,
 			r2.party_id,
 			&r2.commitment_data,
 			&r1.commitment_hash,
@@ -1148,8 +1226,9 @@ impl DilithiumSignProtocol {
 	/// This handles the case where the leader's Round4Complete arrives before we've
 	/// collected all Round 3 messages (possible when network ordering is not guaranteed).
 	fn process_buffered_round4_complete(&mut self) {
-		if let Some(sig_bytes) = self.message_buffer.take_round4_complete() {
-			if let Some(signature) = Signature::from_bytes(&sig_bytes) {
+		if let Some(r4) = self.message_buffer.take_round4_complete() {
+			// SSID already verified when the message was received
+			if let Some(signature) = Signature::from_bytes(&r4.signature) {
 				self.received_signature = Some(signature);
 			}
 		}
@@ -1168,6 +1247,20 @@ fn derive_party_seed(session_seed: &[u8; 32], party_id: ParticipantId) -> [u8; 3
 	fips202::shake256_absorb(&mut state, DOMAIN, DOMAIN.len());
 	fips202::shake256_absorb(&mut state, session_seed, 32);
 	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
+	fips202::shake256_finalize(&mut state);
+	let mut derived = [0u8; 32];
+	fips202::shake256_squeeze(&mut derived, 32, &mut state);
+	derived
+}
+
+/// Derive an attempt nonce from a session seed for SSID computation.
+/// All parties must derive this from the same session seed to get matching SSIDs.
+/// Formula: `attempt_nonce = SHAKE256("local-signing-attempt-nonce" || session_seed)`
+fn derive_attempt_nonce(session_seed: &[u8; 32]) -> [u8; 32] {
+	const DOMAIN: &[u8] = b"local-signing-attempt-nonce";
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, DOMAIN, DOMAIN.len());
+	fips202::shake256_absorb(&mut state, session_seed, 32);
 	fips202::shake256_finalize(&mut state);
 	let mut derived = [0u8; 32];
 	fips202::shake256_squeeze(&mut derived, 32, &mut state);
@@ -1208,6 +1301,10 @@ pub fn run_local_signing(
 	let participants: Vec<ParticipantId> = signers.iter().map(|s| s.party_id()).collect();
 	let leader_id = *participants.iter().min().unwrap();
 
+	// Derive attempt_nonce from session_seed for SSID computation
+	// All parties must use the same attempt_nonce
+	let attempt_nonce = derive_attempt_nonce(session_seed);
+
 	// Create protocol instances with per-party seeds derived from session_seed
 	let mut protocols: Vec<DilithiumSignProtocol> = signers
 		.into_iter()
@@ -1222,6 +1319,7 @@ pub fn run_local_signing(
 				my_id,
 				leader_id,
 				round1_seed,
+				attempt_nonce,
 			)
 		})
 		.collect::<Result<Vec<_>, _>>()?;
@@ -1295,6 +1393,7 @@ mod tests {
 			0,
 			0,          // leader_id
 			[0xAA; 32], // round1_seed
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 
@@ -1318,6 +1417,7 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		);
 
 		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
@@ -1337,6 +1437,7 @@ mod tests {
 			99, // not in participants!
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		);
 
 		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
@@ -1356,6 +1457,7 @@ mod tests {
 			0,
 			99, // leader not in participants!
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		);
 
 		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
@@ -1375,6 +1477,7 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		);
 
 		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
@@ -1394,10 +1497,11 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 
-		let r2 = Round2Broadcast::new(2, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+		let r2 = Round2Broadcast::new(*protocol.ssid(), 2, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 		let msg = SigningMessage::Round2(r2.clone());
 		let serialized = protocol.serialize_message(&msg).unwrap();
 		let deserialized = protocol.deserialize_message(&serialized).unwrap();
@@ -1425,10 +1529,11 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 
-		let r3 = Round3Broadcast::new(3, vec![10, 20, 30, 40, 50]);
+		let r3 = Round3Broadcast::new(*protocol.ssid(), 3, vec![10, 20, 30, 40, 50]);
 		let msg = SigningMessage::Round3(r3.clone());
 		let serialized = protocol.serialize_message(&msg).unwrap();
 		let deserialized = protocol.deserialize_message(&serialized).unwrap();
@@ -1529,6 +1634,7 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 
@@ -1559,6 +1665,7 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 
@@ -1589,6 +1696,7 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 
@@ -1596,7 +1704,8 @@ mod tests {
 		let _ = protocol.poke().unwrap();
 
 		// Create a message from party 99 (not a participant)
-		let r1 = Round1Broadcast::new(99, [0x42u8; 32]);
+		// Use our SSID so the message passes SSID check but fails participant check
+		let r1 = Round1Broadcast::new(*protocol.ssid(), 99, [0x42u8; 32]);
 		let msg = SigningMessage::Round1(r1);
 		let data = protocol.serialize_message(&msg).unwrap();
 
@@ -1617,7 +1726,8 @@ mod tests {
 		let mut buffer = SignMessageBuffer::new();
 		assert!(buffer.is_empty());
 
-		let msg = Round2Broadcast::new(1, vec![1, 2, 3, 4]);
+		let ssid = [0xCC; SSID_SIZE];
+		let msg = Round2Broadcast::new(ssid, 1, vec![1, 2, 3, 4]);
 		buffer.buffer_round2(msg);
 
 		assert!(!buffer.is_empty());
@@ -1631,17 +1741,18 @@ mod tests {
 	#[test]
 	fn test_message_buffer_deduplication() {
 		let mut buffer = SignMessageBuffer::new();
+		let ssid = [0xCC; SSID_SIZE];
 
 		// Buffer first message from party 1
-		let msg1 = Round2Broadcast::new(1, vec![1, 2, 3, 4]);
+		let msg1 = Round2Broadcast::new(ssid, 1, vec![1, 2, 3, 4]);
 		buffer.buffer_round2(msg1);
 
 		// Try to buffer duplicate from party 1 - should be ignored
-		let msg1_dup = Round2Broadcast::new(1, vec![5, 6, 7, 8]);
+		let msg1_dup = Round2Broadcast::new(ssid, 1, vec![5, 6, 7, 8]);
 		buffer.buffer_round2(msg1_dup);
 
 		// Buffer message from party 2
-		let msg2 = Round2Broadcast::new(2, vec![9, 10, 11, 12]);
+		let msg2 = Round2Broadcast::new(ssid, 2, vec![9, 10, 11, 12]);
 		buffer.buffer_round2(msg2);
 
 		let taken = buffer.take_round2();
@@ -1654,8 +1765,9 @@ mod tests {
 	#[test]
 	fn test_message_buffer_round3() {
 		let mut buffer = SignMessageBuffer::new();
+		let ssid = [0xCC; SSID_SIZE];
 
-		let msg = Round3Broadcast::new(2, vec![5, 6, 7, 8]);
+		let msg = Round3Broadcast::new(ssid, 2, vec![5, 6, 7, 8]);
 		buffer.buffer_round3(msg);
 
 		assert!(!buffer.is_empty());
@@ -1680,6 +1792,7 @@ mod tests {
 			0,
 			0, // leader_id
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 
@@ -1689,7 +1802,7 @@ mod tests {
 
 		// Now simulate receiving a Round 2 message BEFORE we've received all Round 1 messages
 		// This is what happens in distributed systems with network delays
-		let r2 = Round2Broadcast::new(1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+		let r2 = Round2Broadcast::new(*protocol.ssid(), 1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 		let msg = SigningMessage::Round2(r2);
 		let data = protocol.serialize_message(&msg).unwrap();
 
@@ -1717,6 +1830,7 @@ mod tests {
 			0,
 			0, // leader_id
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 
@@ -1725,7 +1839,7 @@ mod tests {
 		assert!(matches!(protocol.state(), SignProtocolState::Round1Waiting));
 
 		// Simulate receiving a Round 3 message while still in Round 1
-		let r3 = Round3Broadcast::new(1, vec![10, 20, 30, 40]);
+		let r3 = Round3Broadcast::new(*protocol.ssid(), 1, vec![10, 20, 30, 40]);
 		let msg = SigningMessage::Round3(r3);
 		let data = protocol.serialize_message(&msg).unwrap();
 
@@ -1783,6 +1897,7 @@ mod tests {
 			1, // follower
 			0, // leader is party 0
 			[0xDD; 32],
+			[0xEE; 32], // attempt_nonce
 		)
 		.unwrap();
 
@@ -1792,7 +1907,10 @@ mod tests {
 
 		// Simulate receiving Round4Complete from leader BEFORE follower is ready
 		// (this can happen if leader finishes all rounds faster)
-		let round4_msg = SigningMessage::Round4Complete(valid_sig.as_bytes().to_vec());
+		let round4_msg = SigningMessage::Round4Complete(Round4Broadcast {
+			ssid: *follower.ssid(),
+			signature: valid_sig.as_bytes().to_vec(),
+		});
 		let round4_data = follower.serialize_message(&round4_msg).unwrap();
 		follower.message(0, round4_data).unwrap();
 
@@ -1807,8 +1925,9 @@ mod tests {
 		// (simulating normal protocol progression)
 		follower.state = SignProtocolState::Round3Waiting;
 		// Pretend we have enough Round 3 messages by setting threshold
-		follower.r3_broadcasts.insert(0, Round3Broadcast::new(0, vec![1, 2, 3]));
-		follower.r3_broadcasts.insert(1, Round3Broadcast::new(1, vec![4, 5, 6]));
+		let ssid = *follower.ssid();
+		follower.r3_broadcasts.insert(0, Round3Broadcast::new(ssid, 0, vec![1, 2, 3]));
+		follower.r3_broadcasts.insert(1, Round3Broadcast::new(ssid, 1, vec![4, 5, 6]));
 
 		// Poke should transition to WaitingForLeaderDecision, process buffered Round4Complete,
 		// verify the signature, and return it - all in one shot since poke() recurses
@@ -1843,6 +1962,7 @@ mod tests {
 			0,
 			0, // leader_id
 			[0xAA; 32],
+			[0xCC; 32], // attempt_nonce
 		)
 		.unwrap();
 
@@ -1856,6 +1976,7 @@ mod tests {
 			1,
 			0,          // leader_id
 			[0xBB; 32], // Different seed for party 1
+			[0xCC; 32], // Same attempt_nonce for both parties
 		)
 		.unwrap();
 
@@ -1916,6 +2037,7 @@ mod tests {
 			1,          // follower
 			0,          // leader is party 0
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 
@@ -1988,6 +2110,7 @@ mod tests {
 			1,          // follower
 			0,          // leader is party 0
 			[0xCC; 32],
+			[0xDD; 32], // attempt_nonce
 		)
 		.unwrap();
 
@@ -2025,6 +2148,7 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 
@@ -2033,12 +2157,13 @@ mod tests {
 		// transitioning to Round2Waiting (matching what would happen after a
 		// successful Round 1 exchange in production).
 		let _ = protocol.poke().unwrap(); // Round1Generate -> Round1Waiting (and stores my_r1)
-		let fake_r1 = Round1Broadcast::new(1, [0xDE; 32]); // commitment we'll mismatch against
+		let ssid = *protocol.ssid();
+		let fake_r1 = Round1Broadcast::new(ssid, 1, [0xDE; 32]); // commitment we'll mismatch against
 		protocol.r1_broadcasts.insert(1, fake_r1);
 		protocol.state = SignProtocolState::Round2Waiting;
 
 		// Now deliver a Round 2 whose commitment_data does NOT hash to [0xDE; 32].
-		let bad_r2 = Round2Broadcast::new(1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+		let bad_r2 = Round2Broadcast::new(ssid, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 		let msg = SigningMessage::Round2(bad_r2);
 		let data = protocol.serialize_message(&msg).unwrap();
 		protocol.message(1, data).unwrap();
@@ -2067,13 +2192,15 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 
 		// In Round1Waiting, a Round 2 from peer 1 should be buffered (no Round 1
 		// from peer 1 yet, so the check is necessarily deferred).
 		let _ = protocol.poke().unwrap();
-		let bad_r2 = Round2Broadcast::new(1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+		let ssid = *protocol.ssid();
+		let bad_r2 = Round2Broadcast::new(ssid, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 		let msg = SigningMessage::Round2(bad_r2);
 		let data = protocol.serialize_message(&msg).unwrap();
 		protocol.message(1, data).unwrap();
@@ -2081,7 +2208,7 @@ mod tests {
 
 		// Now install a Round 1 from peer 1 whose commitment_hash does NOT
 		// correspond to the buffered Round 2's commitment_data, and drain the buffer.
-		let fake_r1 = Round1Broadcast::new(1, [0xDE; 32]);
+		let fake_r1 = Round1Broadcast::new(ssid, 1, [0xDE; 32]);
 		protocol.r1_broadcasts.insert(1, fake_r1);
 		protocol.process_buffered_round2();
 
@@ -2111,17 +2238,19 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 
 		// Advance to Round2Waiting
 		let _ = protocol.poke().unwrap();
-		let legitimate_r1 = Round1Broadcast::new(1, [0xAB; 32]);
+		let ssid = *protocol.ssid();
+		let legitimate_r1 = Round1Broadcast::new(ssid, 1, [0xAB; 32]);
 		protocol.r1_broadcasts.insert(1, legitimate_r1);
 		protocol.state = SignProtocolState::Round2Waiting;
 
 		// Send an EMPTY Round 2 - this should be rejected
-		let empty_r2 = Round2Broadcast::new(1, vec![]); // Empty commitment_data
+		let empty_r2 = Round2Broadcast::new(ssid, 1, vec![]); // Empty commitment_data
 		let msg = SigningMessage::Round2(empty_r2);
 		let data = protocol.serialize_message(&msg).unwrap();
 		protocol.message(1, data).unwrap();
@@ -2151,6 +2280,7 @@ mod tests {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.unwrap();
 

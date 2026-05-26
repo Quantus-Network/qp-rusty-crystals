@@ -38,6 +38,7 @@ mod participant_count_validation {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		);
 
 		assert!(result.is_err(), "Should reject fewer than threshold participants");
@@ -69,6 +70,7 @@ mod participant_count_validation {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		);
 
 		assert!(result.is_ok(), "Should accept exactly threshold participants");
@@ -95,6 +97,7 @@ mod malformed_message_handling {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.expect("Valid protocol");
 
@@ -123,6 +126,7 @@ mod malformed_message_handling {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.expect("Valid protocol");
 
@@ -158,6 +162,7 @@ mod malformed_message_handling {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.expect("Valid protocol");
 
@@ -173,11 +178,14 @@ mod malformed_message_handling {
 
 mod borsh_serialization_validation {
 	use super::*;
+	use qp_rusty_crystals_threshold::SSID_SIZE;
+
+	const TEST_SSID: [u8; SSID_SIZE] = [0xCC; SSID_SIZE];
 
 	/// Test that corrupted Round1Broadcast borsh data is rejected.
 	#[test]
 	fn test_corrupted_round1_broadcast_rejected() {
-		let broadcast = Round1Broadcast::new(0, [0x42u8; 32]);
+		let broadcast = Round1Broadcast::new(TEST_SSID, 0, [0x42u8; 32]);
 		let mut serialized = borsh::to_vec(&broadcast).expect("serialize");
 
 		// Corrupt the data
@@ -194,7 +202,7 @@ mod borsh_serialization_validation {
 	/// Test that corrupted Round2Broadcast borsh data is rejected.
 	#[test]
 	fn test_corrupted_round2_broadcast_rejected() {
-		let broadcast = Round2Broadcast::new(0, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+		let broadcast = Round2Broadcast::new(TEST_SSID, 0, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 		let mut serialized = borsh::to_vec(&broadcast).expect("serialize");
 
 		// Corrupt length field area
@@ -209,7 +217,7 @@ mod borsh_serialization_validation {
 	/// Test that corrupted Round3Broadcast borsh data is rejected.
 	#[test]
 	fn test_corrupted_round3_broadcast_rejected() {
-		let broadcast = Round3Broadcast::new(0, vec![10, 20, 30, 40]);
+		let broadcast = Round3Broadcast::new(TEST_SSID, 0, vec![10, 20, 30, 40]);
 		let mut serialized = borsh::to_vec(&broadcast).expect("serialize");
 
 		// Corrupt the data
@@ -224,7 +232,7 @@ mod borsh_serialization_validation {
 	/// Test that truncated borsh data is rejected.
 	#[test]
 	fn test_truncated_borsh_rejected() {
-		let broadcast = Round1Broadcast::new(0, [0x42u8; 32]);
+		let broadcast = Round1Broadcast::new(TEST_SSID, 0, [0x42u8; 32]);
 		let serialized = borsh::to_vec(&broadcast).expect("serialize");
 
 		// Truncate to half length
@@ -297,6 +305,7 @@ mod edge_cases {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		);
 
 		assert!(result.is_err(), "3-of-3 should require all 3 parties");
@@ -320,6 +329,7 @@ mod edge_cases {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		);
 
 		assert!(protocol.is_ok(), "Context of exactly 255 bytes should be accepted");
@@ -344,6 +354,7 @@ mod edge_cases {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		);
 
 		assert!(protocol.is_ok(), "2-of-2 protocol should initialize");
@@ -384,6 +395,7 @@ mod message_buffering {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.expect("Valid protocol");
 
@@ -391,7 +403,7 @@ mod message_buffering {
 		let _ = protocol.poke().expect("poke");
 
 		// Create and send a Round 3 message while in Round 1
-		let r3 = Round3Broadcast::new(1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+		let r3 = Round3Broadcast::new(*protocol.ssid(), 1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 		let msg = SigningMessage::Round3(r3);
 		let data = borsh::to_vec(&msg).expect("serialize");
 
@@ -421,6 +433,7 @@ mod sender_validation {
 			0, // my_id is 0
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.expect("Valid protocol");
 
@@ -428,7 +441,7 @@ mod sender_validation {
 		let _ = protocol.poke().expect("poke");
 
 		// Send a message claiming to be from self
-		let r1 = Round1Broadcast::new(0, [0x42u8; 32]);
+		let r1 = Round1Broadcast::new(*protocol.ssid(), 0, [0x42u8; 32]);
 		let msg = SigningMessage::Round1(r1);
 		let data = borsh::to_vec(&msg).expect("serialize");
 
@@ -454,6 +467,7 @@ mod sender_validation {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.expect("Valid protocol");
 
@@ -461,7 +475,8 @@ mod sender_validation {
 		let _ = protocol.poke().expect("poke");
 
 		// Send a message from party 2 (not a participant)
-		let r1 = Round1Broadcast::new(2, [0x42u8; 32]);
+		// Note: must use protocol's SSID to pass SSID check, then fail participant check
+		let r1 = Round1Broadcast::new(*protocol.ssid(), 2, [0x42u8; 32]);
 		let msg = SigningMessage::Round1(r1);
 		let data = borsh::to_vec(&msg).expect("serialize");
 
@@ -488,6 +503,7 @@ mod sender_validation {
 			0,
 			0,
 			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
 		)
 		.expect("Valid protocol");
 
@@ -495,7 +511,7 @@ mod sender_validation {
 		let _ = protocol.poke().expect("poke");
 
 		// Create message claiming to be from party 0 (inner party_id)
-		let r1 = Round1Broadcast::new(0, [0x42u8; 32]);
+		let r1 = Round1Broadcast::new(*protocol.ssid(), 0, [0x42u8; 32]);
 		let msg = SigningMessage::Round1(r1);
 		let data = borsh::to_vec(&msg).expect("serialize");
 

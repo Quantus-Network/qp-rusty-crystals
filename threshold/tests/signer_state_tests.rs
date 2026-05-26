@@ -5,8 +5,12 @@
 //! Key generation tests are in the `keygen/dealer.rs` module.
 
 use qp_rusty_crystals_threshold::{
-	generate_with_dealer, Round1Broadcast, Round2Broadcast, ThresholdConfig, ThresholdSigner,
+	compute_ssid, generate_with_dealer, ParticipantList, Round1Broadcast, Round2Broadcast,
+	ThresholdConfig, ThresholdSigner,
 };
+
+/// Test SSID for state machine tests (all parties use same SSID).
+const TEST_SSID: [u8; 32] = [0xCC; 32];
 
 /// Helper to create test signers for state machine tests.
 fn create_test_signer() -> ThresholdSigner {
@@ -22,7 +26,7 @@ fn test_round1_commit() {
 	let mut signer = create_test_signer();
 	let seed = [0xAAu8; 32];
 
-	let r1 = signer.round1_commit_with_seed(&seed).expect("round1");
+	let r1 = signer.round1_commit_with_seed(&seed, &TEST_SSID).expect("round1");
 
 	assert_eq!(r1.party_id, 0);
 	assert_eq!(r1.commitment_hash.len(), 32);
@@ -33,7 +37,7 @@ fn test_round1_commit() {
 fn test_state_machine_round2_before_round1() {
 	let mut signer = create_test_signer();
 
-	let result = signer.round2_reveal(b"message", b"context", &[]);
+	let result = signer.round2_reveal(&TEST_SSID, b"message", b"context", &[]);
 	assert!(result.is_err(), "round2 should fail without prior round1");
 }
 
@@ -43,9 +47,9 @@ fn test_state_machine_round1_twice() {
 	let mut signer = create_test_signer();
 	let seed = [0xAAu8; 32];
 
-	let _r1 = signer.round1_commit_with_seed(&seed).expect("round1");
+	let _r1 = signer.round1_commit_with_seed(&seed, &TEST_SSID).expect("round1");
 
-	let result = signer.round1_commit_with_seed(&seed);
+	let result = signer.round1_commit_with_seed(&seed, &TEST_SSID);
 	assert!(result.is_err(), "round1 should fail when called twice");
 }
 
@@ -69,6 +73,12 @@ fn test_commitment_tampering_detected() {
 	let message = b"test message";
 	let context = b"test context";
 
+	// Compute SSID for this signing session
+	let participants = vec![0u32, 1u32];
+	let participant_list = ParticipantList::new(&participants).unwrap();
+	let attempt_nonce = [0xDD; 32];
+	let ssid = compute_ssid(&public_key, 2, 3, &participant_list, &attempt_nonce);
+
 	// Round 1: Both parties generate commitments (each with unique seed)
 	let r1_broadcasts: Vec<Round1Broadcast> = signers
 		.iter_mut()
@@ -76,7 +86,7 @@ fn test_commitment_tampering_detected() {
 		.map(|(i, s)| {
 			let mut party_seed = [0u8; 32];
 			party_seed[0] = i as u8;
-			s.round1_commit_with_seed(&party_seed).unwrap()
+			s.round1_commit_with_seed(&party_seed, &ssid).unwrap()
 		})
 		.collect();
 
@@ -88,7 +98,7 @@ fn test_commitment_tampering_detected() {
 		.map(|(i, s)| {
 			let others: Vec<_> =
 				r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-			s.round2_reveal(message, context, &others).unwrap()
+			s.round2_reveal(&ssid, message, context, &others).unwrap()
 		})
 		.collect();
 
@@ -105,7 +115,7 @@ fn test_commitment_tampering_detected() {
 	let others_r1: Vec<_> = r1_broadcasts.iter().filter(|r| r.party_id != 0).cloned().collect();
 	let others_r2: Vec<_> = r2_broadcasts.iter().filter(|r| r.party_id != 0).cloned().collect();
 
-	let result = signers[0].round3_respond(&others_r1, &others_r2);
+	let result = signers[0].round3_respond(&ssid, &others_r1, &others_r2);
 
 	assert!(result.is_err(), "round3_respond should detect tampered commitment data");
 
@@ -125,9 +135,9 @@ fn test_state_machine_round3_before_round2() {
 	let mut signer = create_test_signer();
 	let seed = [0xAAu8; 32];
 
-	let _r1 = signer.round1_commit_with_seed(&seed).expect("round1");
+	let _r1 = signer.round1_commit_with_seed(&seed, &TEST_SSID).expect("round1");
 
-	let result = signer.round3_respond(&[], &[]);
+	let result = signer.round3_respond(&TEST_SSID, &[], &[]);
 	assert!(result.is_err(), "round3 should fail without prior round2");
 }
 
@@ -137,7 +147,7 @@ fn test_state_machine_combine_before_round3() {
 	let mut signer = create_test_signer();
 	let seed = [0xAAu8; 32];
 
-	let _r1 = signer.round1_commit_with_seed(&seed).expect("round1");
+	let _r1 = signer.round1_commit_with_seed(&seed, &TEST_SSID).expect("round1");
 
 	let result = signer.combine(&[], &[]);
 	assert!(result.is_err(), "combine should fail without completing round3");
@@ -147,9 +157,11 @@ mod borsh_tests {
 	use super::*;
 	use qp_rusty_crystals_threshold::{Round1Broadcast, Round2Broadcast, Round3Broadcast};
 
+	const BORSH_TEST_SSID: [u8; 32] = [0xEE; 32];
+
 	#[test]
 	fn test_round1_broadcast_serialization() {
-		let broadcast = Round1Broadcast::new(0, [42u8; 32]);
+		let broadcast = Round1Broadcast::new(BORSH_TEST_SSID, 0, [42u8; 32]);
 		let bytes = borsh::to_vec(&broadcast).expect("serialize");
 		let recovered: Round1Broadcast = borsh::from_slice(&bytes).expect("deserialize");
 		assert_eq!(broadcast, recovered);
@@ -157,7 +169,7 @@ mod borsh_tests {
 
 	#[test]
 	fn test_round2_broadcast_serialization() {
-		let broadcast = Round2Broadcast::new(1, vec![1, 2, 3, 4, 5]);
+		let broadcast = Round2Broadcast::new(BORSH_TEST_SSID, 1, vec![1, 2, 3, 4, 5]);
 		let bytes = borsh::to_vec(&broadcast).expect("serialize");
 		let recovered: Round2Broadcast = borsh::from_slice(&bytes).expect("deserialize");
 		assert_eq!(broadcast, recovered);
@@ -165,7 +177,7 @@ mod borsh_tests {
 
 	#[test]
 	fn test_round3_broadcast_serialization() {
-		let broadcast = Round3Broadcast::new(2, vec![6, 7, 8, 9, 10]);
+		let broadcast = Round3Broadcast::new(BORSH_TEST_SSID, 2, vec![6, 7, 8, 9, 10]);
 		let bytes = borsh::to_vec(&broadcast).expect("serialize");
 		let recovered: Round3Broadcast = borsh::from_slice(&bytes).expect("deserialize");
 		assert_eq!(broadcast, recovered);
@@ -207,6 +219,7 @@ mod party_management_tests {
 			0,          // my_id
 			0,          // leader_id
 			[0xAA; 32], // round1_seed
+			[0xBB; 32], // attempt_nonce
 		)
 		.expect("protocol");
 
@@ -231,15 +244,15 @@ fn test_round2_preserves_state_on_insufficient_parties() {
 	let seed = [0xAAu8; 32];
 
 	// Complete round 1
-	let _r1 = signer.round1_commit_with_seed(&seed).expect("round1");
+	let _r1 = signer.round1_commit_with_seed(&seed, &TEST_SSID).expect("round1");
 
 	// Call round2 with no other parties (threshold is 2, so this should fail)
-	let result = signer.round2_reveal(b"message", b"context", &[]);
+	let result = signer.round2_reveal(&TEST_SSID, b"message", b"context", &[]);
 	assert!(result.is_err(), "round2 should fail with insufficient parties");
 
 	// Key test: the signer should still be in AfterRound1 state, not Fresh
 	// If state was lost, this second call would fail with "expected AfterRound1, got Fresh"
-	let result2 = signer.round2_reveal(b"message", b"context", &[]);
+	let result2 = signer.round2_reveal(&TEST_SSID, b"message", b"context", &[]);
 	assert!(result2.is_err(), "round2 should still fail");
 
 	// Verify it's the same error (WrongPartyCount), not InvalidState

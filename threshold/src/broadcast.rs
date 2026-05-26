@@ -9,12 +9,20 @@
 //! using borsh and sends them over the network.
 //!
 //! ```text
-//! Round 1: Each party broadcasts Round1Broadcast (commitment hash)
-//! Round 2: Each party broadcasts Round2Broadcast (commitment reveal)
-//! Round 3: Each party broadcasts Round3Broadcast (signature response)
+//! Round 1: Each party broadcasts Round1Broadcast (commitment hash + ssid)
+//! Round 2: Each party broadcasts Round2Broadcast (commitment reveal + ssid)
+//! Round 3: Each party broadcasts Round3Broadcast (signature response + ssid)
 //! ```
 //!
 //! After Round 3, any party can combine the broadcasts into a final `Signature`.
+//!
+//! # Session Identifier (SSID)
+//!
+//! All broadcast messages include a session identifier (SSID) that binds the
+//! message to a specific signing session. This prevents cross-session replay
+//! attacks where an attacker could reuse messages from a previous session.
+//! Receivers MUST verify that the SSID matches their expected value before
+//! processing any message.
 //!
 //! # Security
 //!
@@ -24,6 +32,9 @@
 use alloc::{vec, vec::Vec};
 
 use borsh::{BorshDeserialize, BorshSerialize};
+
+/// Size of the session identifier (SSID) in bytes.
+pub const SSID_SIZE: usize = 32;
 
 /// Size of the ML-DSA-87 signature in bytes.
 pub const SIGNATURE_SIZE: usize = 4627;
@@ -50,8 +61,13 @@ pub const MAX_RESPONSE_SIZE: usize = 2_000_000;
 ///
 /// The commitment hash prevents parties from changing their random values
 /// after seeing other parties' values (which would enable certain attacks).
+///
+/// The SSID binds this message to the current signing session, preventing
+/// cross-session replay attacks.
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Round1Broadcast {
+	/// Session identifier binding this message to a specific signing session.
+	pub ssid: [u8; SSID_SIZE],
 	/// The party ID that generated this broadcast.
 	pub party_id: u32,
 	/// Hash of the commitment (SHAKE256 output).
@@ -60,8 +76,8 @@ pub struct Round1Broadcast {
 
 impl Round1Broadcast {
 	/// Create a new Round 1 broadcast.
-	pub fn new(party_id: u32, commitment_hash: [u8; 32]) -> Self {
-		Self { party_id, commitment_hash }
+	pub fn new(ssid: [u8; SSID_SIZE], party_id: u32, commitment_hash: [u8; 32]) -> Self {
+		Self { ssid, party_id, commitment_hash }
 	}
 }
 
@@ -75,12 +91,19 @@ impl Round1Broadcast {
 /// The `commitment_data` contains K iterations of packed polynomial vectors,
 /// where K depends on the threshold configuration.
 ///
+/// # Security
+///
+/// The SSID binds this message to the current signing session, preventing
+/// cross-session replay attacks.
+///
 /// # Deserialization Limits
 ///
 /// When deserializing from untrusted input, `commitment_data` is limited to
 /// [`MAX_COMMITMENT_DATA_SIZE`] bytes to prevent memory exhaustion attacks.
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize)]
 pub struct Round2Broadcast {
+	/// Session identifier binding this message to a specific signing session.
+	pub ssid: [u8; SSID_SIZE],
 	/// The party ID that generated this broadcast.
 	pub party_id: u32,
 	/// Packed commitment polynomials (K iterations of w values).
@@ -89,6 +112,10 @@ pub struct Round2Broadcast {
 
 impl BorshDeserialize for Round2Broadcast {
 	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		// Read SSID
+		let mut ssid = [0u8; SSID_SIZE];
+		reader.read_exact(&mut ssid)?;
+
 		let party_id = u32::deserialize_reader(reader)?;
 
 		// Read the length prefix for the Vec
@@ -106,14 +133,14 @@ impl BorshDeserialize for Round2Broadcast {
 		let mut commitment_data = vec![0u8; len];
 		reader.read_exact(&mut commitment_data)?;
 
-		Ok(Self { party_id, commitment_data })
+		Ok(Self { ssid, party_id, commitment_data })
 	}
 }
 
 impl Round2Broadcast {
 	/// Create a new Round 2 broadcast.
-	pub fn new(party_id: u32, commitment_data: Vec<u8>) -> Self {
-		Self { party_id, commitment_data }
+	pub fn new(ssid: [u8; SSID_SIZE], party_id: u32, commitment_data: Vec<u8>) -> Self {
+		Self { ssid, party_id, commitment_data }
 	}
 }
 
@@ -128,12 +155,19 @@ impl Round2Broadcast {
 ///
 /// The `response` contains K iterations of packed response polynomials.
 ///
+/// # Security
+///
+/// The SSID binds this message to the current signing session, preventing
+/// cross-session replay attacks.
+///
 /// # Deserialization Limits
 ///
 /// When deserializing from untrusted input, `response` is limited to
 /// [`MAX_RESPONSE_SIZE`] bytes to prevent memory exhaustion attacks.
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize)]
 pub struct Round3Broadcast {
+	/// Session identifier binding this message to a specific signing session.
+	pub ssid: [u8; SSID_SIZE],
 	/// The party ID that generated this broadcast.
 	pub party_id: u32,
 	/// Packed response polynomials (K iterations of z values).
@@ -142,6 +176,10 @@ pub struct Round3Broadcast {
 
 impl BorshDeserialize for Round3Broadcast {
 	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		// Read SSID
+		let mut ssid = [0u8; SSID_SIZE];
+		reader.read_exact(&mut ssid)?;
+
 		let party_id = u32::deserialize_reader(reader)?;
 
 		// Read the length prefix for the Vec
@@ -159,14 +197,14 @@ impl BorshDeserialize for Round3Broadcast {
 		let mut response = vec![0u8; len];
 		reader.read_exact(&mut response)?;
 
-		Ok(Self { party_id, response })
+		Ok(Self { ssid, party_id, response })
 	}
 }
 
 impl Round3Broadcast {
 	/// Create a new Round 3 broadcast.
-	pub fn new(party_id: u32, response: Vec<u8>) -> Self {
-		Self { party_id, response }
+	pub fn new(ssid: [u8; SSID_SIZE], party_id: u32, response: Vec<u8>) -> Self {
+		Self { ssid, party_id, response }
 	}
 }
 
@@ -266,10 +304,13 @@ mod tests {
 	use super::*;
 	use alloc::vec;
 
+	const TEST_SSID: [u8; SSID_SIZE] = [0xAA; SSID_SIZE];
+
 	#[test]
 	fn test_round1_broadcast() {
 		let hash = [0x42u8; 32];
-		let broadcast = Round1Broadcast::new(0, hash);
+		let broadcast = Round1Broadcast::new(TEST_SSID, 0, hash);
+		assert_eq!(broadcast.ssid, TEST_SSID);
 		assert_eq!(broadcast.party_id, 0);
 		assert_eq!(broadcast.commitment_hash, hash);
 	}
@@ -277,7 +318,8 @@ mod tests {
 	#[test]
 	fn test_round2_broadcast() {
 		let data = vec![1, 2, 3, 4, 5];
-		let broadcast = Round2Broadcast::new(1, data.clone());
+		let broadcast = Round2Broadcast::new(TEST_SSID, 1, data.clone());
+		assert_eq!(broadcast.ssid, TEST_SSID);
 		assert_eq!(broadcast.party_id, 1);
 		assert_eq!(broadcast.commitment_data, data);
 	}
@@ -285,7 +327,8 @@ mod tests {
 	#[test]
 	fn test_round3_broadcast() {
 		let response = vec![6, 7, 8, 9, 10];
-		let broadcast = Round3Broadcast::new(2, response.clone());
+		let broadcast = Round3Broadcast::new(TEST_SSID, 2, response.clone());
+		assert_eq!(broadcast.ssid, TEST_SSID);
 		assert_eq!(broadcast.party_id, 2);
 		assert_eq!(broadcast.response, response);
 	}
@@ -319,6 +362,8 @@ mod tests {
 	fn test_round2_deserialize_rejects_oversized_commitment() {
 		// Craft a malicious payload with a huge length prefix
 		let mut malicious_payload = Vec::new();
+		// ssid
+		malicious_payload.extend_from_slice(&TEST_SSID);
 		// party_id (u32, little-endian)
 		malicious_payload.extend_from_slice(&1u32.to_le_bytes());
 		// length prefix claiming 100 MB (way over the 2.5 MB limit)
@@ -331,7 +376,7 @@ mod tests {
 
 	#[test]
 	fn test_round2_deserialize_accepts_valid_size() {
-		let broadcast = Round2Broadcast::new(1, vec![0u8; 1000]);
+		let broadcast = Round2Broadcast::new(TEST_SSID, 1, vec![0u8; 1000]);
 		let serialized = borsh::to_vec(&broadcast).unwrap();
 		let recovered: Round2Broadcast = borsh::from_slice(&serialized).unwrap();
 		assert_eq!(recovered, broadcast);
@@ -341,6 +386,8 @@ mod tests {
 	fn test_round3_deserialize_rejects_oversized_response() {
 		// Craft a malicious payload with a huge length prefix
 		let mut malicious_payload = Vec::new();
+		// ssid
+		malicious_payload.extend_from_slice(&TEST_SSID);
 		// party_id (u32, little-endian)
 		malicious_payload.extend_from_slice(&1u32.to_le_bytes());
 		// length prefix claiming 100 MB (way over the 2 MB limit)
@@ -352,7 +399,7 @@ mod tests {
 
 	#[test]
 	fn test_round3_deserialize_accepts_valid_size() {
-		let broadcast = Round3Broadcast::new(2, vec![0u8; 1000]);
+		let broadcast = Round3Broadcast::new(TEST_SSID, 2, vec![0u8; 1000]);
 		let serialized = borsh::to_vec(&broadcast).unwrap();
 		let recovered: Round3Broadcast = borsh::from_slice(&serialized).unwrap();
 		assert_eq!(recovered, broadcast);

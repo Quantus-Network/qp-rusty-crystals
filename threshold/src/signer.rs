@@ -299,14 +299,18 @@ impl ThresholdSigner {
 	///
 	/// The seed MUST be generated from a cryptographically secure source.
 	/// Reusing seeds across signing sessions will compromise security.
-	pub fn round1_commit_with_seed(&mut self, seed: &[u8; 32]) -> ThresholdResult<Round1Broadcast> {
+	pub fn round1_commit_with_seed(
+		&mut self,
+		ssid: &[u8; 32],
+		seed: &[u8; 32],
+	) -> ThresholdResult<Round1Broadcast> {
 		self.state.expect_fresh()?;
 
 		// Generate Round 1 data
-		let round1_data = generate_round1(&self.private_key, &self.config, seed)?;
+		let round1_data = generate_round1(ssid, &self.private_key, &self.config, seed)?;
 
 		let broadcast =
-			Round1Broadcast::new(self.private_key.party_id(), round1_data.commitment_hash);
+			Round1Broadcast::new(*ssid, self.private_key.party_id(), round1_data.commitment_hash);
 
 		// Update state
 		self.state.round1_data = Some(round1_data);
@@ -352,6 +356,7 @@ impl ThresholdSigner {
 	/// `AfterRound1` → `AfterRound2`
 	pub fn round2_reveal(
 		&mut self,
+		ssid: &[u8; 32],
 		message: &[u8],
 		context: &[u8],
 		other_round1: &[Round1Broadcast],
@@ -388,7 +393,7 @@ impl ThresholdSigner {
 			&other_party_ids,
 		)?;
 
-		let broadcast = Round2Broadcast::new(self.private_key.party_id(), commitment_data);
+		let broadcast = Round2Broadcast::new(*ssid, self.private_key.party_id(), commitment_data);
 
 		// Update state
 		self.state.round2_data = Some(round2_data);
@@ -440,6 +445,7 @@ impl ThresholdSigner {
 	/// `AfterRound2` → `AfterRound3`
 	pub fn round3_respond(
 		&mut self,
+		ssid: &[u8; 32],
 		other_round1: &[Round1Broadcast],
 		other_round2: &[Round2Broadcast],
 	) -> ThresholdResult<Round3Broadcast> {
@@ -447,7 +453,6 @@ impl ThresholdSigner {
 		let k = self.config.k_iterations() as usize;
 		let single_commitment_size = 8 * 736; // K * POLY_Q_SIZE
 		let expected_len = k * single_commitment_size;
-		let tr = self.public_key.tr();
 
 		for r2 in other_round2 {
 			// Empty commitment_data is NOT allowed - every participant must contribute.
@@ -467,8 +472,9 @@ impl ThresholdSigner {
 				.find(|r1| r1.party_id == r2.party_id)
 				.ok_or(ThresholdError::MissingBroadcast { party_id: r2.party_id })?;
 
-			// Verify commitment hash
-			if !verify_commitment_hash(tr, r2.party_id, &r2.commitment_data, &r1.commitment_hash) {
+			// Verify commitment hash (using SSID instead of tr)
+			if !verify_commitment_hash(ssid, r2.party_id, &r2.commitment_data, &r1.commitment_hash)
+			{
 				return Err(ThresholdError::CommitmentMismatch {
 					party_id: r2.party_id,
 					message: "Round 2 commitment data does not match Round 1 commitment hash"
@@ -540,7 +546,7 @@ impl ThresholdSigner {
 
 		// Pack responses for broadcast
 		let packed_response = pack_responses(&responses);
-		let broadcast = Round3Broadcast::new(self.private_key.party_id(), packed_response);
+		let broadcast = Round3Broadcast::new(*ssid, self.private_key.party_id(), packed_response);
 
 		// Update state - clear round1_data as it's no longer needed
 		// (dropping the Option zeroizes its contents via ZeroizeOnDrop).
@@ -601,6 +607,7 @@ impl ThresholdSigner {
 	///
 	/// # Arguments
 	///
+	/// * `ssid` - Session identifier for this signing session
 	/// * `_all_round2` - All Round 2 broadcasts (currently unused, kept for API compatibility)
 	/// * `all_round3` - All Round 3 broadcasts from participating parties
 	///

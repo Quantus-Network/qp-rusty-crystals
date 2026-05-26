@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use qp_rusty_crystals_threshold::{
-	generate_with_dealer, verify_signature, PrivateKeyShare, PublicKey, Round1Broadcast,
-	Round2Broadcast, Round3Broadcast, ThresholdConfig, ThresholdSigner,
+	compute_ssid, generate_with_dealer, verify_signature, ParticipantList, PrivateKeyShare,
+	PublicKey, Round1Broadcast, Round2Broadcast, Round3Broadcast, ThresholdConfig, ThresholdSigner,
 };
 
 use qp_rusty_crystals_threshold::resharing::{
@@ -217,6 +217,10 @@ fn run_signing_and_verify_with_retries(
 	context: &[u8],
 	max_attempts: u32,
 ) -> bool {
+	// Build participant list for SSID computation
+	let participants: Vec<u32> = shares.iter().map(|s| s.party_id()).collect();
+	let participant_list = ParticipantList::new(&participants).unwrap();
+
 	for attempt in 0..max_attempts {
 		// Create fresh signers for each attempt
 		let signers_result: Result<Vec<ThresholdSigner>, _> = shares
@@ -229,6 +233,19 @@ fn run_signing_and_verify_with_retries(
 			Err(_) => continue,
 		};
 
+		// Compute SSID for this attempt
+		let mut attempt_nonce = [0u8; 32];
+		attempt_nonce[0] = (attempt & 0xFF) as u8;
+		attempt_nonce[1] = ((attempt >> 8) & 0xFF) as u8;
+		attempt_nonce[2] = 0xAF; // marker for resharing tests
+		let ssid = compute_ssid(
+			public_key,
+			config.threshold(),
+			config.total_parties(),
+			&participant_list,
+			&attempt_nonce,
+		);
+
 		// Round 1: Generate commitments using deterministic seeds
 		let r1_result: Result<Vec<Round1Broadcast>, _> = signers
 			.iter_mut()
@@ -240,7 +257,7 @@ fn run_signing_and_verify_with_retries(
 				seed[1] = (attempt & 0xFF) as u8;
 				seed[2] = ((attempt >> 8) & 0xFF) as u8;
 				seed[3] = 0xAE; // marker for resharing tests
-				s.round1_commit_with_seed(&seed)
+				s.round1_commit_with_seed(&ssid, &seed)
 			})
 			.collect();
 
@@ -260,7 +277,7 @@ fn run_signing_and_verify_with_retries(
 					.filter(|(j, _)| *j != i)
 					.map(|(_, r)| r.clone())
 					.collect();
-				s.round2_reveal(message, context, &others)
+				s.round2_reveal(&ssid, message, context, &others)
 			})
 			.collect();
 
@@ -286,7 +303,7 @@ fn run_signing_and_verify_with_retries(
 					.filter(|(j, _)| *j != i)
 					.map(|(_, r)| r.clone())
 					.collect();
-				s.round3_respond(&others_r1, &others_r2)
+				s.round3_respond(&ssid, &others_r1, &others_r2)
 			})
 			.collect();
 
@@ -1779,6 +1796,10 @@ fn run_signing_with_stats(
 ) -> (bool, SigningStats) {
 	let mut stats = SigningStats::default();
 
+	// Build participant list for SSID computation
+	let participants: Vec<u32> = shares.iter().map(|s| s.party_id()).collect();
+	let participant_list = ParticipantList::new(&participants).unwrap();
+
 	for signing_idx in 0..num_signings {
 		let message = format!("test message {}", signing_idx);
 		let mut succeeded = false;
@@ -1797,6 +1818,20 @@ fn run_signing_with_stats(
 				Err(_) => continue,
 			};
 
+			// Compute SSID for this attempt
+			let mut attempt_nonce = [0u8; 32];
+			attempt_nonce[0] = (signing_idx & 0xFF) as u8;
+			attempt_nonce[1] = ((signing_idx >> 8) & 0xFF) as u8;
+			attempt_nonce[2] = (retry & 0xFF) as u8;
+			attempt_nonce[3] = 0xBC; // marker for stats tests
+			let ssid = compute_ssid(
+				public_key,
+				config.threshold(),
+				config.total_parties(),
+				&participant_list,
+				&attempt_nonce,
+			);
+
 			// Round 1: Generate commitments
 			let r1_result: Result<Vec<Round1Broadcast>, _> = signers
 				.iter_mut()
@@ -1808,7 +1843,7 @@ fn run_signing_with_stats(
 					seed[2] = ((signing_idx >> 8) & 0xFF) as u8;
 					seed[3] = (retry & 0xFF) as u8;
 					seed[4] = 0xBB; // marker for retry rate tests
-					s.round1_commit_with_seed(&seed)
+					s.round1_commit_with_seed(&ssid, &seed)
 				})
 				.collect();
 
@@ -1828,7 +1863,7 @@ fn run_signing_with_stats(
 						.filter(|(j, _)| *j != i)
 						.map(|(_, r)| r.clone())
 						.collect();
-					s.round2_reveal(message.as_bytes(), b"", &others)
+					s.round2_reveal(&ssid, message.as_bytes(), b"", &others)
 				})
 				.collect();
 
@@ -1854,7 +1889,7 @@ fn run_signing_with_stats(
 						.filter(|(j, _)| *j != i)
 						.map(|(_, r)| r.clone())
 						.collect();
-					s.round3_respond(&others_r1, &others_r2)
+					s.round3_respond(&ssid, &others_r1, &others_r2)
 				})
 				.collect();
 

@@ -277,7 +277,10 @@ mod tests {
 	/// Test that DKG-generated keys work with ThresholdSigner for signing
 	#[test]
 	fn test_dkg_signing_integration() {
-		use crate::{verify_signature, ThresholdConfig, ThresholdSigner};
+		use crate::{
+			participants::ParticipantList, protocol::signing::compute_ssid, verify_signature,
+			ThresholdConfig, ThresholdSigner,
+		};
 
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
@@ -295,6 +298,10 @@ mod tests {
 		let message = b"Test message for DKG signing";
 		let context = b"test-context";
 
+		// Signing participants: first 2 parties
+		let signing_participants = vec![0u32, 1u32];
+		let participant_list = ParticipantList::new(&signing_participants).unwrap();
+
 		// Retry signing up to 100 times (rejection sampling may fail)
 		let mut success = false;
 		for attempt in 0u8..100 {
@@ -308,6 +315,12 @@ mod tests {
 				})
 				.collect();
 
+			// Compute SSID for this attempt
+			let mut attempt_nonce = [0u8; 32];
+			attempt_nonce[0] = attempt;
+			attempt_nonce[1] = 0xD2; // marker for dkg tests
+			let ssid = compute_ssid(&public_key, 2, 3, &participant_list, &attempt_nonce);
+
 			// Round 1: Generate commitments using deterministic seeds
 			let r1_broadcasts: Vec<_> = signers
 				.iter_mut()
@@ -318,7 +331,7 @@ mod tests {
 					seed[0] = i as u8;
 					seed[1] = attempt;
 					seed[2] = 0xD1; // marker for dkg tests
-					s.round1_commit_with_seed(&seed).unwrap()
+					s.round1_commit_with_seed(&ssid, &seed).unwrap()
 				})
 				.collect();
 
@@ -329,7 +342,7 @@ mod tests {
 				.map(|(i, s)| {
 					let others: Vec<_> =
 						r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-					s.round2_reveal(message, context, &others).unwrap()
+					s.round2_reveal(&ssid, message, context, &others).unwrap()
 				})
 				.collect();
 
@@ -342,7 +355,7 @@ mod tests {
 						r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
 					let others_r2: Vec<_> =
 						r2_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
-					s.round3_respond(&others_r1, &others_r2).unwrap()
+					s.round3_respond(&ssid, &others_r1, &others_r2).unwrap()
 				})
 				.collect();
 
