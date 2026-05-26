@@ -43,10 +43,10 @@ use crate::{
 };
 
 use super::types::{
-	DealerAccusation, NewShareData, ResharingConfig, ResharingMessage, ResharingOutput,
-	ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal, ResharingRound3Broadcast,
-	ResharingRound4Message, ResharingRound5Broadcast, SubsetMask, SubsetPair, COMMITMENT_HASH_SIZE,
-	ENTROPY_SIZE,
+	compute_resharing_ssid, DealerAccusation, NewShareData, ResharingConfig, ResharingMessage,
+	ResharingOutput, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
+	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast, SubsetMask,
+	SubsetPair, COMMITMENT_HASH_SIZE, ENTROPY_SIZE, RESHARING_SSID_SIZE,
 };
 
 /// Domain separator for the per-subset PRF seed (includes session seed for forward secrecy).
@@ -221,6 +221,11 @@ pub struct ResharingProtocol {
 	config: ResharingConfig,
 	state: ResharingState,
 
+	/// Session identifier (SSID) for this resharing session.
+	/// Computed from old/new committee configs + public key + session nonce.
+	/// Included in all messages to prevent cross-session replay attacks.
+	ssid: [u8; RESHARING_SSID_SIZE],
+
 	/// Seed for entropy generation (provided by caller).
 	seed: [u8; 32],
 
@@ -284,6 +289,8 @@ impl ResharingProtocol {
 	/// * `seed` - 32 bytes of entropy for generating this party's random contribution to the
 	///   session seed. Must be cryptographically random (e.g., from `OsRng`). Each party must
 	///   provide independent entropy; using the same seed across parties breaks forward secrecy.
+	/// * `session_nonce` - A unique nonce for this resharing session (e.g., from transport layer).
+	///   Used to compute the SSID that binds all messages to this session.
 	///
 	/// # Forward Secrecy
 	///
@@ -291,12 +298,32 @@ impl ResharingProtocol {
 	/// new shares includes fresh entropy from all old committee members. Even if old shares are
 	/// later compromised, an attacker cannot reconstruct the specific randomness used in this
 	/// resharing session.
-	pub fn new(config: ResharingConfig, seed: [u8; 32]) -> Self {
+	///
+	/// # Session Binding (SSID)
+	///
+	/// The `session_nonce` is combined with the committee configurations and public key to compute
+	/// a Session Identifier (SSID). This SSID is included in all protocol messages to prevent
+	/// cross-session replay attacks (CVE-2022-47930 class vulnerabilities).
+	pub fn new(config: ResharingConfig, seed: [u8; 32], session_nonce: &[u8; 32]) -> Self {
+		// Compute SSID from configuration + session nonce
+		let old_participants: Vec<_> = config.old_participants().iter().collect();
+		let new_participants: Vec<_> = config.new_participants().iter().collect();
+		let ssid = compute_resharing_ssid(
+			config.old_threshold(),
+			config.old_participants().len() as u32,
+			&old_participants,
+			config.new_threshold(),
+			config.new_participants().len() as u32,
+			&new_participants,
+			config.public_key(),
+			session_nonce,
+		);
 		let old_subset_order = compute_old_subset_order(&config);
 		let new_subset_order = compute_new_subset_order(&config);
 		Self {
 			config,
 			state: ResharingState::Round1Generate,
+			ssid,
 			seed,
 			old_subset_order,
 			new_subset_order,
@@ -314,6 +341,14 @@ impl ResharingProtocol {
 			new_shares: BTreeMap::new(),
 			completed_output: None,
 		}
+	}
+
+	/// Get the session identifier (SSID) for this resharing session.
+	///
+	/// The SSID uniquely identifies this session and is included in all messages
+	/// to prevent cross-session replay attacks.
+	pub fn ssid(&self) -> &[u8; RESHARING_SSID_SIZE] {
+		&self.ssid
 	}
 
 	/// Get the current protocol state.
@@ -422,6 +457,15 @@ impl ResharingProtocol {
 				return Err(ResharingProtocolError::MalformedMessage { from, reason: e.to_string() }),
 		};
 
+		// Verify SSID matches for all message types to prevent cross-session replay
+		if msg.ssid() != &self.ssid {
+			log::warn!(
+				"Resharing: Rejecting message from {} - SSID mismatch (cross-session replay attempt?)",
+				from
+			);
+			return Ok(()); // SSID mismatch, silently ignore (not an error, likely cross-session)
+		}
+
 		if msg.party_id() != from {
 			return Ok(());
 		}
@@ -459,8 +503,11 @@ impl ResharingProtocol {
 		let commitment = commit_entropy(&entropy);
 		self.round1_entropy_commits.insert(self.config.my_party_id(), commitment);
 
-		let broadcast =
-			ResharingRound1EntropyCommitment { party_id: self.config.my_party_id(), commitment };
+		let broadcast = ResharingRound1EntropyCommitment {
+			ssid: self.ssid,
+			party_id: self.config.my_party_id(),
+			commitment,
+		};
 		let data = Self::serialize_message(&ResharingMessage::Round1(broadcast))?;
 		self.state = ResharingState::Round1Waiting;
 		Ok(Action::SendMany(data))
@@ -539,8 +586,11 @@ impl ResharingProtocol {
 		// Store our own reveal
 		self.round2_entropy_reveals.insert(self.config.my_party_id(), entropy);
 
-		let broadcast =
-			ResharingRound2EntropyReveal { party_id: self.config.my_party_id(), entropy };
+		let broadcast = ResharingRound2EntropyReveal {
+			ssid: self.ssid,
+			party_id: self.config.my_party_id(),
+			entropy,
+		};
 		let data = Self::serialize_message(&ResharingMessage::Round2(broadcast))?;
 		self.state = ResharingState::Round2Waiting;
 		Ok(Action::SendMany(data))
@@ -637,8 +687,11 @@ impl ResharingProtocol {
 		self.compute_my_subshares()?;
 		let commitments = self.commit_to_my_subshares();
 
-		let broadcast =
-			ResharingRound3Broadcast { party_id: self.config.my_party_id(), commitments };
+		let broadcast = ResharingRound3Broadcast {
+			ssid: self.ssid,
+			party_id: self.config.my_party_id(),
+			commitments,
+		};
 		self.my_round3 = Some(broadcast.clone());
 		self.round3_broadcasts.insert(self.config.my_party_id(), broadcast.clone());
 
@@ -833,6 +886,7 @@ impl ResharingProtocol {
 		};
 
 		let broadcast = ResharingRound5Broadcast {
+			ssid: self.ssid,
 			party_id: self.config.my_party_id(),
 			share_commitments,
 			partial_pks,
@@ -1010,8 +1064,12 @@ impl ResharingProtocol {
 		}
 		let me = self.config.my_party_id();
 		for (recipient, contributions) in by_recipient {
-			let msg =
-				ResharingRound4Message { from_party_id: me, to_party_id: recipient, contributions };
+			let msg = ResharingRound4Message {
+				ssid: self.ssid,
+				from_party_id: me,
+				to_party_id: recipient,
+				contributions,
+			};
 			if recipient == me {
 				self.round4_messages.insert(me, msg);
 			} else {
@@ -1701,6 +1759,9 @@ fn mod_q(x: i32) -> i32 {
 mod tests {
 	use super::*;
 
+	/// Test SSID for use in unit tests.
+	const TEST_SSID: [u8; RESHARING_SSID_SIZE] = [0xABu8; RESHARING_SSID_SIZE];
+
 	#[test]
 	fn test_generate_subset_masks() {
 		let s = generate_subset_masks(3, 2);
@@ -1949,8 +2010,8 @@ mod tests {
 		// In particular it must not contain any plaintext NewShareData fields.
 		let mut commitments = BTreeMap::new();
 		commitments.insert((0b011u16, 0b101u16), [9u8; COMMITMENT_HASH_SIZE]);
-		let r3 = ResharingRound3Broadcast { party_id: 7, commitments };
-		// The struct only has `party_id` (u32) and `commitments` (BTreeMap of hashes).
+		let r3 = ResharingRound3Broadcast { ssid: TEST_SSID, party_id: 7, commitments };
+		// The struct only has `ssid`, `party_id` (u32) and `commitments` (BTreeMap of hashes).
 		// If anyone ever adds back leaky plaintext fields, this test should be
 		// updated alongside the security review.
 		assert_eq!(r3.party_id, 7);

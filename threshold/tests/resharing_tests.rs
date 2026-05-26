@@ -52,6 +52,9 @@ fn run_resharing_protocol_with_tamper(
 	all_parties.sort();
 	all_parties.dedup();
 
+	// Session nonce for SSID computation (shared by all parties in this resharing)
+	let session_nonce = [0x99u8; 32];
+
 	// Create protocol instances for each party
 	let mut protocols: HashMap<u32, ResharingProtocol> = HashMap::new();
 
@@ -78,7 +81,7 @@ fn run_resharing_protocol_with_tamper(
 			*byte = ((party_id as u8).wrapping_mul(i as u8)).wrapping_add(0x42);
 		}
 
-		let protocol = ResharingProtocol::new(config, seed);
+		let protocol = ResharingProtocol::new(config, seed, &session_nonce);
 		protocols.insert(party_id, protocol);
 	}
 
@@ -428,7 +431,8 @@ fn test_resharing_protocol_creation() {
 	.expect("valid config");
 
 	let protocol_seed = [42u8; 32];
-	let protocol = ResharingProtocol::new(resharing_config, protocol_seed);
+	let session_nonce = [0x88u8; 32];
+	let protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
 	assert_eq!(*protocol.state(), ResharingState::Round1Generate);
 }
 
@@ -450,7 +454,8 @@ fn test_resharing_protocol_round1_generation() {
 	.expect("valid config");
 
 	let protocol_seed = [42u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed);
+	let session_nonce = [0x55u8; 32];
+	let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
 
 	// First poke should generate Round 1 message (entropy commitment)
 	let action = protocol.poke().expect("poke should succeed");
@@ -486,7 +491,8 @@ fn test_resharing_new_party_skips_round1() {
 			.expect("valid config");
 
 	let protocol_seed = [42u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed);
+	let session_nonce = [0x66u8; 32];
+	let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
 
 	// New party should skip Round 1-2 (entropy commit-reveal) and wait
 	let action = protocol.poke().expect("poke should succeed");
@@ -791,7 +797,8 @@ fn test_resharing_round1_message_from_non_member_ignored() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32]);
+	let session_nonce = [0x44u8; 32];
+	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
 
 	// Generate Round 1 message first
 	let _ = protocol.poke().expect("poke should succeed");
@@ -838,8 +845,9 @@ fn test_resharing_duplicate_message_ignored() {
 	)
 	.expect("valid config");
 
-	let mut protocol0 = ResharingProtocol::new(config0, [0u8; 32]);
-	let mut protocol1 = ResharingProtocol::new(config1, [1u8; 32]);
+	let session_nonce = [0x33u8; 32];
+	let mut protocol0 = ResharingProtocol::new(config0, [0u8; 32], &session_nonce);
+	let mut protocol1 = ResharingProtocol::new(config1, [1u8; 32], &session_nonce);
 
 	// Generate Round 0 messages
 	let msg0 = match protocol0.poke().expect("poke should succeed") {
@@ -903,7 +911,8 @@ fn test_old_only_party_behavior() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32]);
+	let session_nonce = [0x22u8; 32];
+	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
 
 	// Party should participate in Round 0 (entropy commitment)
 	let action = protocol.poke().expect("poke should succeed");
@@ -933,7 +942,8 @@ fn test_new_only_party_behavior() {
 	)
 	.expect("valid config");
 
-	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32]);
+	let session_nonce = [0x11u8; 32];
+	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
 
 	// New party should skip Round 1-2 (entropy commit-reveal) and wait
 	let action = protocol.poke().expect("poke should succeed");
@@ -1410,6 +1420,9 @@ fn run_resharing_protocol_with_seeds(
 	all_parties.sort();
 	all_parties.dedup();
 
+	// Session nonce for SSID computation (shared by all parties in this resharing)
+	let session_nonce = [0xCCu8; 32];
+
 	// Create protocol instances for each party with the provided seeds
 	let mut protocols: HashMap<u32, ResharingProtocol> = HashMap::new();
 
@@ -1429,7 +1442,7 @@ fn run_resharing_protocol_with_seeds(
 
 		// Use the provided seed for this party
 		let seed = party_seeds.get(&party_id).copied().unwrap_or([0u8; 32]);
-		let protocol = ResharingProtocol::new(config, seed);
+		let protocol = ResharingProtocol::new(config, seed, &session_nonce);
 		protocols.insert(party_id, protocol);
 	}
 

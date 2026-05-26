@@ -24,6 +24,12 @@ pub const COMMITMENT_HASH_SIZE: usize = 32;
 /// Size of entropy contribution in bytes.
 pub const ENTROPY_SIZE: usize = 32;
 
+/// Size of session identifier (SSID) in bytes.
+pub const RESHARING_SSID_SIZE: usize = 32;
+
+/// Domain separator for SSID computation.
+const DOMAIN_RESHARING_SSID: &[u8] = b"RESHARING_SSID_V1";
+
 /// Subset mask - a bitmask indicating which parties are in a subset.
 /// Uses u16 to support up to 16 parties.
 pub type SubsetMask = u16;
@@ -476,6 +482,17 @@ pub enum ResharingMessage {
 }
 
 impl ResharingMessage {
+	/// Get the session identifier (SSID) from this message.
+	pub fn ssid(&self) -> &[u8; RESHARING_SSID_SIZE] {
+		match self {
+			ResharingMessage::Round1(msg) => &msg.ssid,
+			ResharingMessage::Round2(msg) => &msg.ssid,
+			ResharingMessage::Round3(msg) => &msg.ssid,
+			ResharingMessage::Round4(msg) => &msg.ssid,
+			ResharingMessage::Round5(msg) => &msg.ssid,
+		}
+	}
+
 	/// Get the party ID that sent this message.
 	pub fn party_id(&self) -> ParticipantId {
 		match self {
@@ -518,6 +535,8 @@ impl ResharingMessage {
 /// messages.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound1EntropyCommitment {
+	/// Session identifier binding this message to the resharing session.
+	pub ssid: [u8; RESHARING_SSID_SIZE],
 	/// Party ID of the sender.
 	pub party_id: ParticipantId,
 	/// Hash commitment to the entropy: `SHAKE256("resharing-entropy-commit-v1" || entropy)`.
@@ -546,6 +565,8 @@ pub struct ResharingRound1EntropyCommitment {
 /// protocol fails immediately with `CommitmentMismatch(party_id)`.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound2EntropyReveal {
+	/// Session identifier binding this message to the resharing session.
+	pub ssid: [u8; RESHARING_SSID_SIZE],
 	/// Party ID of the sender.
 	pub party_id: ParticipantId,
 	/// The revealed entropy (32 bytes of randomness).
@@ -581,6 +602,8 @@ pub struct ResharingRound2EntropyReveal {
 /// be reconstructed.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound3Broadcast {
+	/// Session identifier binding this message to the resharing session.
+	pub ssid: [u8; RESHARING_SSID_SIZE],
 	/// Party ID of the sender.
 	pub party_id: ParticipantId,
 	/// Commitments keyed by `(old_subset_mask, new_subset_mask)`.
@@ -619,6 +642,8 @@ pub type SubsetPair = (SubsetMask, SubsetMask);
 /// eavesdroppers and compromises the threshold scheme's security.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound4Message {
+	/// Session identifier binding this message to the resharing session.
+	pub ssid: [u8; RESHARING_SSID_SIZE],
 	/// Party ID of the sender (dealer).
 	pub from_party_id: ParticipantId,
 	/// Party ID of the recipient.
@@ -676,6 +701,8 @@ impl Default for NewShareData {
 ///    Publishing `t_J^new` is safe: recovering `s_J^new` from `t_J^new` is the LWE problem.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound5Broadcast {
+	/// Session identifier binding this message to the resharing session.
+	pub ssid: [u8; RESHARING_SSID_SIZE],
 	/// Party ID of the sender.
 	pub party_id: ParticipantId,
 	/// Commitments to each computed new subset share (only populated by new committee members).
@@ -722,6 +749,99 @@ pub struct ResharingOutput {
 }
 
 // ============================================================================
+// SSID Computation
+// ============================================================================
+
+/// Compute the Session Identifier (SSID) for a resharing protocol session.
+///
+/// The SSID uniquely identifies a resharing session and is included in all protocol
+/// messages to prevent cross-session replay attacks (CVE-2022-47930 class).
+///
+/// # SSID Structure
+///
+/// ```text
+/// SSID = SHAKE256(
+///     "RESHARING_SSID_V1" ||
+///     old_threshold (u32 LE) ||
+///     old_n (u32 LE) ||
+///     old_num_participants (u32 LE) ||
+///     sorted_old_participant_ids (each u32 LE) ||
+///     new_threshold (u32 LE) ||
+///     new_n (u32 LE) ||
+///     new_num_participants (u32 LE) ||
+///     sorted_new_participant_ids (each u32 LE) ||
+///     public_key_bytes ||
+///     session_nonce[32]
+/// )
+/// ```
+///
+/// # Arguments
+///
+/// * `old_threshold` - Threshold of the old committee
+/// * `old_n` - Total parties in the old committee
+/// * `old_participants` - Participant IDs in the old committee
+/// * `new_threshold` - Threshold of the new committee
+/// * `new_n` - Total parties in the new committee
+/// * `new_participants` - Participant IDs in the new committee
+/// * `public_key` - The public key being reshared
+/// * `session_nonce` - Unique nonce for this session (e.g., from transport layer)
+pub fn compute_resharing_ssid(
+	old_threshold: u32,
+	old_n: u32,
+	old_participants: &[ParticipantId],
+	new_threshold: u32,
+	new_n: u32,
+	new_participants: &[ParticipantId],
+	public_key: &PublicKey,
+	session_nonce: &[u8; 32],
+) -> [u8; RESHARING_SSID_SIZE] {
+	use qp_rusty_crystals_dilithium::fips202;
+
+	let mut ssid = [0u8; RESHARING_SSID_SIZE];
+	let mut state = fips202::KeccakState::default();
+
+	// Domain separator
+	fips202::shake256_absorb(&mut state, DOMAIN_RESHARING_SSID, DOMAIN_RESHARING_SSID.len());
+
+	// Old committee configuration
+	fips202::shake256_absorb(&mut state, &old_threshold.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, &old_n.to_le_bytes(), 4);
+
+	// Old participants (sorted)
+	let old_num = old_participants.len() as u32;
+	fips202::shake256_absorb(&mut state, &old_num.to_le_bytes(), 4);
+	let mut sorted_old = old_participants.to_vec();
+	sorted_old.sort();
+	for pid in &sorted_old {
+		fips202::shake256_absorb(&mut state, &pid.to_le_bytes(), 4);
+	}
+
+	// New committee configuration
+	fips202::shake256_absorb(&mut state, &new_threshold.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, &new_n.to_le_bytes(), 4);
+
+	// New participants (sorted)
+	let new_num = new_participants.len() as u32;
+	fips202::shake256_absorb(&mut state, &new_num.to_le_bytes(), 4);
+	let mut sorted_new = new_participants.to_vec();
+	sorted_new.sort();
+	for pid in &sorted_new {
+		fips202::shake256_absorb(&mut state, &pid.to_le_bytes(), 4);
+	}
+
+	// Public key
+	fips202::shake256_absorb(&mut state, public_key.as_bytes(), public_key.as_bytes().len());
+
+	// Session nonce
+	fips202::shake256_absorb(&mut state, session_nonce, 32);
+
+	fips202::shake256_finalize(&mut state);
+	fips202::shake256_squeeze(&mut ssid, RESHARING_SSID_SIZE, &mut state);
+
+	ssid
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -729,6 +849,9 @@ pub struct ResharingOutput {
 mod tests {
 	use super::*;
 	use alloc::{format, string::ToString};
+
+	/// Test SSID for use in unit tests.
+	const TEST_SSID: [u8; RESHARING_SSID_SIZE] = [0xABu8; RESHARING_SSID_SIZE];
 
 	fn make_test_public_key() -> PublicKey {
 		// Create a dummy public key for testing
@@ -832,6 +955,7 @@ mod tests {
 	#[test]
 	fn test_message_round_numbers() {
 		let r1 = ResharingMessage::Round1(ResharingRound1EntropyCommitment {
+			ssid: TEST_SSID,
 			party_id: 0,
 			commitment: [0u8; COMMITMENT_HASH_SIZE],
 		});
@@ -839,6 +963,7 @@ mod tests {
 		assert_eq!(r1.party_id(), 0);
 
 		let r2 = ResharingMessage::Round2(ResharingRound2EntropyReveal {
+			ssid: TEST_SSID,
 			party_id: 1,
 			entropy: [0u8; ENTROPY_SIZE],
 		});
@@ -846,6 +971,7 @@ mod tests {
 		assert_eq!(r2.party_id(), 1);
 
 		let r3 = ResharingMessage::Round3(ResharingRound3Broadcast {
+			ssid: TEST_SSID,
 			party_id: 2,
 			commitments: BTreeMap::new(),
 		});
@@ -853,6 +979,7 @@ mod tests {
 		assert_eq!(r3.party_id(), 2);
 
 		let r4 = ResharingMessage::Round4(ResharingRound4Message {
+			ssid: TEST_SSID,
 			from_party_id: 3,
 			to_party_id: 4,
 			contributions: BTreeMap::new(),
@@ -861,6 +988,7 @@ mod tests {
 		assert_eq!(r4.party_id(), 3);
 
 		let r5 = ResharingMessage::Round5(ResharingRound5Broadcast {
+			ssid: TEST_SSID,
 			party_id: 5,
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
@@ -1026,24 +1154,28 @@ mod tests {
 	#[test]
 	fn test_resharing_message_party_id_extraction() {
 		let r1 = ResharingMessage::Round1(ResharingRound1EntropyCommitment {
+			ssid: TEST_SSID,
 			party_id: 42,
 			commitment: [0u8; COMMITMENT_HASH_SIZE],
 		});
 		assert_eq!(r1.party_id(), 42);
 
 		let r2 = ResharingMessage::Round2(ResharingRound2EntropyReveal {
+			ssid: TEST_SSID,
 			party_id: 99,
 			entropy: [0u8; ENTROPY_SIZE],
 		});
 		assert_eq!(r2.party_id(), 99);
 
 		let r3 = ResharingMessage::Round3(ResharingRound3Broadcast {
+			ssid: TEST_SSID,
 			party_id: 77,
 			commitments: BTreeMap::new(),
 		});
 		assert_eq!(r3.party_id(), 77);
 
 		let r4 = ResharingMessage::Round4(ResharingRound4Message {
+			ssid: TEST_SSID,
 			from_party_id: 88,
 			to_party_id: 100,
 			contributions: BTreeMap::new(),
@@ -1051,6 +1183,7 @@ mod tests {
 		assert_eq!(r4.party_id(), 88);
 
 		let r5 = ResharingMessage::Round5(ResharingRound5Broadcast {
+			ssid: TEST_SSID,
 			party_id: 55,
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
@@ -1064,6 +1197,7 @@ mod tests {
 	#[test]
 	fn test_resharing_round5_broadcast_error_handling() {
 		let success = ResharingRound5Broadcast {
+			ssid: TEST_SSID,
 			party_id: 0,
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
@@ -1075,6 +1209,7 @@ mod tests {
 		assert!(success.error_message.is_none());
 
 		let failure = ResharingRound5Broadcast {
+			ssid: TEST_SSID,
 			party_id: 1,
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
@@ -1160,6 +1295,7 @@ mod tests {
 		partial_pks.insert(0b011, [[42i32; N as usize]; K]);
 
 		let broadcast = ResharingRound5Broadcast {
+			ssid: TEST_SSID,
 			party_id: 5,
 			share_commitments: BTreeMap::new(),
 			partial_pks,
@@ -1186,6 +1322,7 @@ mod tests {
 		partial_pks.insert(0b011, [[0i32; N as usize]; K]);
 
 		let broadcast = ResharingRound5Broadcast {
+			ssid: TEST_SSID,
 			party_id: 0,
 			share_commitments: BTreeMap::new(),
 			partial_pks,
