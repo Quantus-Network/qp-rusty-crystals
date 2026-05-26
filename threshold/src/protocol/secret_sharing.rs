@@ -51,16 +51,16 @@ pub(crate) fn compute_sharing_patterns(
 	threshold: u32,
 	parties: u32,
 ) -> Result<Vec<Vec<u16>>, &'static str> {
+	use crate::error::MAX_PARTIES;
+
 	if threshold < 2 {
 		return Err("Threshold must be at least 2");
 	}
 	if threshold > parties {
 		return Err("Threshold cannot exceed number of parties");
 	}
-	// Maximum 15 parties due to u16 subset mask representation.
-	// (1 << 16 would overflow u16)
-	if parties >= 16 {
-		return Err("Maximum 15 parties supported for subset mask representation");
+	if parties > MAX_PARTIES {
+		return Err("Number of parties exceeds MAX_PARTIES");
 	}
 
 	let t = threshold as usize;
@@ -275,7 +275,8 @@ mod tests {
 	fn test_compute_sharing_patterns_t_equals_n() {
 		// When t = n, each party gets their single-party subset
 		// For n parties, there are n positions, each with one pattern (single bit set)
-		let test_cases = [(2, 2), (3, 3), (6, 6), (8, 8), (12, 12)];
+		// Limited to MAX_PARTIES=6
+		let test_cases = [(2, 2), (3, 3), (4, 4), (5, 5), (6, 6)];
 
 		for (t, n) in test_cases {
 			let patterns = compute_sharing_patterns(t as u32, n as u32).unwrap();
@@ -303,9 +304,10 @@ mod tests {
 
 	#[test]
 	fn test_compute_sharing_patterns_coverage() {
-		// Test all valid configurations up to n=15
+		use crate::error::MAX_PARTIES;
+		// Test all valid configurations up to MAX_PARTIES
 		// Verifies correctness properties for each (t, n) pair
-		for n in 2..=15usize {
+		for n in 2..=MAX_PARTIES as usize {
 			for t in 2..=n {
 				let patterns = compute_sharing_patterns(t as u32, n as u32).unwrap();
 
@@ -393,8 +395,8 @@ mod tests {
 		let result = compute_sharing_patterns(5u32, 3u32);
 		assert!(result.is_err());
 
-		// Too many parties
-		let result = compute_sharing_patterns(2u32, 17u32);
+		// Too many parties (exceeds MAX_PARTIES=6)
+		let result = compute_sharing_patterns(2u32, 7u32);
 		assert!(result.is_err());
 	}
 
