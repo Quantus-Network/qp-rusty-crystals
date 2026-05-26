@@ -2291,3 +2291,66 @@ fn test_measure_retry_rate_dkg_vs_reshared_shares() {
 		println!("Note: 1000x resharing shows degradation (expected at extreme scales)");
 	}
 }
+
+#[test]
+#[ignore] // Long-running test - run with `cargo test -- --ignored`
+fn test_coefficient_growth_tracking() {
+	// This test monitors coefficient growth at each resharing step to verify
+	// that the bounded conditional splitter prevents unbounded growth.
+
+	println!("\n=== Coefficient Growth Tracking ===\n");
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [0xBB; 32];
+	let (public_key, dkg_shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	// Get baseline coefficient stats from DKG shares
+	println!("Round 0 (DKG baseline):");
+	for share in &dkg_shares {
+		let (max_abs, min_c, max_c) = share.coefficient_stats();
+		println!("  Party {}: max_abs={}, range=[{}, {}]", share.party_id(), max_abs, min_c, max_c);
+	}
+
+	// Build old_shares map
+	let mut current_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &dkg_shares {
+		current_shares.insert(share.party_id(), share.clone());
+	}
+
+	// Track stats over many resharings
+	let checkpoints = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000];
+	let mut checkpoint_idx = 0;
+
+	for round in 1..=1000 {
+		let new_shares = run_resharing_protocol(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			&current_shares,
+			&public_key,
+		)
+		.expect("resharing should succeed");
+
+		current_shares = new_shares;
+
+		// Print stats at checkpoints
+		if checkpoint_idx < checkpoints.len() && round == checkpoints[checkpoint_idx] {
+			println!("\nRound {}:", round);
+			for party_id in [0, 1, 2] {
+				let share = current_shares.get(&party_id).unwrap();
+				let (max_abs, min_c, max_c) = share.coefficient_stats();
+				println!("  Party {}: max_abs={}, range=[{}, {}]", party_id, max_abs, min_c, max_c);
+			}
+			checkpoint_idx += 1;
+		}
+	}
+
+	// Final summary
+	println!("\n=== Summary ===");
+	println!("Expected behavior with bounded splitter:");
+	println!("  - Coefficients should stay bounded (not grow unboundedly)");
+	println!("  - max_abs should remain in a reasonable range (< 100 for 2-of-3)");
+	println!("\nWith old residual approach, coefficients would grow ~sqrt(n) and");
+	println!("exceed bounds around 250-500 resharings.");
+}

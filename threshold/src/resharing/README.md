@@ -37,7 +37,7 @@ Round 2: Entropy Reveal (Forward Secrecy)
 
 Round 3: Per-Subset Commitments
 ├── For each old subset I, the designated dealer D_I (lowest-ID old participant in I)
-│   deterministically derives sub-shares r_{I→J} for every new subset J such that
+│   deterministically derives bounded sub-shares r_{I→J} for every new subset J such that
 │   Σ_J r_{I→J} = s_I^old. The derivation incorporates the session seed for forward secrecy.
 └── D_I broadcasts H(r_{I→J}) for each (I, J). Members of I can independently
     recompute the same r_{I→J} from s_I^old and verify D_I's commitments.
@@ -98,7 +98,7 @@ They still cannot reconstruct the session seed (and thus the new shares) because
 | **Secrecy of `s`** | No party — not even any dealer — ever holds `s` in clear. Each `D_I` only handles `s_I^old`, which they already had. |
 | **Forward Secrecy** | Session seed incorporates fresh entropy from all old committee members via commit-reveal. Even if old shares are later compromised, the randomness used to derive new shares cannot be reconstructed. |
 | **Confidentiality of contributions** | Rounds 1-3, 5 broadcast only hash commitments; Round 4 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
-| **Cheating-dealer detection** | Other members of `I` independently recompute `r_{I→J}` from `s_I^old` and accuse `D_I` if the broadcast commitment differs; new-subset members cross-verify computed `s_J^new`; and a final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching any dealer that lied about a residual even when their old subset has size 1. |
+| **Cheating-dealer detection** | Other members of `I` independently recompute `r_{I→J}` from `s_I^old` and accuse `D_I` if the broadcast commitment differs; new-subset members cross-verify computed `s_J^new`; and a final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching a malicious dealer even when their old subset has size 1. |
 | **PK Preservation** | Public key `t = A·s1 + s2` unchanged, verified at the end of Round 5 via a deterministic byte-equality check against the original PK. |
 
 ## Why Custom Protocol?
@@ -109,7 +109,37 @@ Standard resharing protocols (CHURP, MPSS) assume Shamir polynomial secret shari
 secret = Σ share[S]  for all subsets S of size n - t + 1
 ```
 
-The custom design lets each old RSS subset re-share *its own* η-bounded share to the new committee independently, without anyone ever combining the sub-shares back into `s`.
+The custom design lets each old RSS subset re-share *its own* share to the new committee independently, without anyone ever combining the sub-shares back into `s`.
+
+## Bounded Conditional Splitting
+
+Earlier versions of this module sampled all but one `r_{I→J}` as `η`-bounded values and let one residual sub-share absorb the equation
+
+```text
+r_{I→J_residual} = s_I^old - Σ_{J≠J_residual} r_{I→J} mod Q.
+```
+
+That preserves the secret, but the residual can become a full-ring coefficient. After repeated handoffs, those large coefficients can appear in the recovered partial secrets used by Mithril-style hyperball rejection sampling, which moves signing outside the original proof regime.
+
+The current protocol instead uses a bounded conditional splitter. For each coefficient of `s_I^old` and for `m = |new_subsets|`, the dealer:
+
+1. Converts the coefficient to its centered representative in `(-Q/2, Q/2]`.
+2. Splits it as evenly as possible across all `m` new subsets, so the deterministic base values sum exactly to the centered coefficient.
+3. Adds deterministic PRF-derived pairwise zero-sum noise: for every pair `(J_a, J_b)`, sample a small `δ ∈ [-η, η]`, add `δ` to `J_a`, and subtract `δ` from `J_b`.
+
+The output satisfies the exact integer equation
+
+```text
+Σ_J r_{I→J} = centered(s_I^old)
+```
+
+and therefore also the required modular equation. No single sub-share absorbs a full residual. Each sub-share coefficient is bounded by roughly
+
+```text
+ceil(|centered(s_I^old)| / m) + (m - 1)η.
+```
+
+This is a practical bounded conditional sampler over the sum constraint. It is not an `η`-bounded sharing and it is not claimed to be a discrete Gaussian sampler. The security proof obligation is instead the same one used by Mithril's hyperball rejection analysis: every recovered signing partial must remain within the norm bound used to choose the hyperball parameters.
 
 ## Usage
 
@@ -228,55 +258,38 @@ NewOnly parties skip Rounds 1-2 (entropy commit-reveal) and go directly to `Roun
 - **Secure channels required for Round 4 private messages** (see Transport Security section above)
 - **Cryptographically random entropy required from each old committee member** (see Entropy Requirements section above)
 
-## Coefficient Growth and η-Bounds
+## Coefficient Growth and Signing Security
 
-### Background
+ML-DSA's base secret has `η`-bounded coefficients, but Mithril-style RSS key generation and a posteriori sharing do not require each stored RSS subset share to be `η`-bounded forever. The relevant proof condition is on the recovered partial secret used by signing.
 
-In ML-DSA (Dilithium), the secret key polynomials `s1` and `s2` have coefficients bounded by the parameter η (eta). For ML-DSA-87, η = 2, meaning original secret coefficients are in the range `[-2, 2]`.
+For a signing set `A` and party `i`, let `p_i(A) = (p_{i,1}, p_{i,2})` be the result of RSS recovery. The hyperball rejection proof assumes the shift
 
-A natural concern with resharing is whether the share coefficients remain η-bounded after multiple resharings. If coefficients grew unboundedly, it could potentially affect:
-1. Security proofs that assume small coefficients
-2. Rejection sampling rates during signing
+```text
+v_i(c) = ((c · p_{i,1}) / ν, c · p_{i,2})
+```
 
-### Why η-Bounded Shares Are Not Required
+is within the configured norm bound for all challenges `c` sampled by `SampleInBall`. A conservative deterministic sufficient condition is
 
-The TALUS paper ("TALUS: Threshold ML-DSA with One-Round Online Signing via Boundary Clearance and Carry Elimination", arXiv:2603.22109) provides key insight here. In their Proactive Key Refresh protocol (Appendix C), they explicitly sample refresh updates from the **full ring `R_q`**, not from η-bounded values:
+```text
+τ · sqrt(||p_{i,1}||² / ν² + ||p_{i,2}||²) ≤ B.
+```
 
-> "Sample degree-(T-1) polynomial f_i(X) with a_{i,0} = 0 and a_{i,k} ← R_q^{nℓ} for k ≥ 1"
+The bounded conditional splitter is designed to prevent the random-walk growth caused by residual sub-shares, so this recovered-partial norm remains stable across repeated committee handoffs.
 
-The shares can have arbitrarily large coefficients (mod q), but **the reconstructed secret remains the original η-bounded secret**. This is because:
+### Empirical Results
 
-1. The updates sum to zero at the secret point: `Σ f_h(0) = 0`
-2. Therefore `s' = s` (the original η-bounded secret is preserved)
-3. During signing, what matters is `z = y + c·s` where `s = Σ s_i` is η-bounded
+Testing with a 2-of-3 configuration shows coefficients stabilize after the first resharing:
 
-### Empirical Validation
+| Resharings | Max |coeff| |
+|------------|-----|
+| 0 (DKG)    | 2   |
+| 1          | 13-14 |
+| 10         | 12-13 |
+| 100        | 12-14 |
+| 1000       | 12-13 |
 
-We validated this with extensive testing of consecutive resharings:
+The first resharing increases coefficients from η=2 to ~14 due to the balanced split plus pairwise noise across 3 subsets. After that, coefficients stay bounded because we're splitting already-bounded values and the noise terms cancel on average. Signing success rate remains 100% with ~0.5 average retries (same as fresh DKG shares) even after 1000 consecutive resharings.
 
-| Resharings | Avg Retries | Max Retries | Success Rate |
-|------------|-------------|-------------|--------------|
-| 0 (DKG)    | 0.46        | 5           | 100%         |
-| 10x        | 0.48        | 5           | 100%         |
-| 100x       | 0.54        | 4           | 100%         |
-| 250x       | 3.24        | 13          | 100%         |
-| 500x       | 7.60        | 39          | 100%         |
-| 1000x      | 34.00       | 67          | 30%          |
+With the old residual-based approach, coefficients grew as ~√n and signing would fail around 250-500 resharings.
 
-Key findings:
-- **Up to 100 resharings**: No measurable impact on signing retry rates
-- **250-500 resharings**: Gradual increase in retries, but 100% success rate
-- **1000 resharings**: Significant degradation begins
-
-For any practical deployment, even 100 consecutive resharings far exceeds operational needs. A typical system might reshare annually for key rotation, meaning 100 resharings would span a century of operation.
-
-### Why This Works
-
-The hyperball rejection sampling in our threshold signing protocol operates on the **combined response** `z = Σ z_i = y + c·s`, where `s` is the reconstructed secret. Since the individual shares sum to the original η-bounded secret, the combined response has the correct distribution regardless of individual share coefficient magnitudes.
-
-The gradual degradation at extreme resharing counts (500+) is due to numerical precision effects in the floating-point hyperball calculations as intermediate values grow, not a fundamental protocol limitation.
-
-### References
-
-- TALUS paper: https://arxiv.org/abs/2603.22109 (Section C.2: Refresh Protocol)
-- Test: `test_measure_retry_rate_dkg_vs_reshared_shares` in `tests/resharing_tests.rs`
+A complete deployment should still enforce or audit the recovered-partial norm invariant for every supported `(T, N)` configuration, because that is the condition needed by the signing proof.

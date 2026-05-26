@@ -28,7 +28,6 @@ use alloc::{
 	collections::BTreeMap,
 	format,
 	string::{String, ToString},
-	vec,
 	vec::Vec,
 };
 use core::fmt;
@@ -52,6 +51,9 @@ use super::types::{
 
 /// Domain separator for the per-subset PRF seed (includes session seed for forward secrecy).
 const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
+
+/// Domain separator for bounded conditional splitting noise.
+const BOUNDED_SPLIT_DOMAIN: &[u8] = b"resharing-bounded-split-v1";
 
 const COMMIT_DOMAIN: &[u8] = b"resharing-commit-v3";
 
@@ -960,7 +962,7 @@ impl ResharingProtocol {
 			ResharingProtocolError::InternalError("Missing session seed".to_string())
 		})?;
 
-		for (i_idx, &i_mask) in self.old_subset_order.clone().iter().enumerate() {
+		for &i_mask in self.old_subset_order.clone().iter() {
 			// Only compute for subsets where we are the designated dealer.
 			if self.designated_dealer_for(i_mask) != Some(self.config.my_party_id()) {
 				continue;
@@ -971,14 +973,8 @@ impl ResharingProtocol {
 					i_mask
 				))
 			})?;
-			let residual_idx = i_idx % n_new;
-			let subshares = derive_subshares_with_session_seed(
-				i_mask,
-				s_i,
-				&new_subsets,
-				residual_idx,
-				&session_seed,
-			);
+			let subshares =
+				derive_subshares_with_session_seed(i_mask, s_i, &new_subsets, &session_seed);
 			for (j_idx, j_mask) in new_subsets.iter().enumerate() {
 				self.my_subshares.insert((i_mask, *j_mask), subshares[j_idx].clone());
 			}
@@ -1060,7 +1056,7 @@ impl ResharingProtocol {
 		})?;
 
 		let mut accusations = Vec::new();
-		for (i_idx, &i_mask) in self.old_subset_order.iter().enumerate() {
+		for &i_mask in self.old_subset_order.iter() {
 			let dealer = match self.designated_dealer_for(i_mask) {
 				Some(d) => d,
 				None => continue,
@@ -1080,14 +1076,8 @@ impl ResharingProtocol {
 					dealer, i_mask
 				))
 			})?;
-			let residual_idx = i_idx % n_new;
-			let expected = derive_subshares_with_session_seed(
-				i_mask,
-				s_i,
-				new_subsets,
-				residual_idx,
-				&session_seed,
-			);
+			let expected =
+				derive_subshares_with_session_seed(i_mask, s_i, new_subsets, &session_seed);
 			for (j_idx, &j_mask) in new_subsets.iter().enumerate() {
 				let expected_commit = commit_subshare(i_mask, j_mask, &expected[j_idx]);
 				match dealer_broadcast.commitments.get(&(i_mask, j_mask)) {
@@ -1420,65 +1410,152 @@ fn generate_subset_masks(n: usize, k: usize) -> Vec<SubsetMask> {
 	out
 }
 
-/// Derive sub-shares `r_{I→J}` for every new subset `J` such that
-/// `Σ_J r_{I→J} = s_I` (mod Q), where `s_I` is the (η-bounded) old subset
-/// share. The sub-share for `new_subsets[residual_idx]` absorbs the sum
-/// adjustment; all others are sampled deterministically η-bounded from a PRF
-/// seeded by `s_I`, the subset masks, and the session seed (for forward secrecy).
+/// Derive bounded sub-shares `r_{I→J}` for every new subset `J` such that
+/// `Σ_J r_{I→J} = s_I` (mod Q).
+///
+/// Earlier versions sampled all but one sub-share as η-bounded values and let
+/// one residual absorb the full difference. That preserves the secret, but the
+/// residual can become a full-ring value and cause recovered signing partials
+/// to leave the hyperball proof regime after repeated resharings.
+///
+/// This splitter first distributes the centered coefficient of `s_I` as evenly
+/// as possible across all new subsets, then adds deterministic pairwise
+/// zero-sum η-bounded noise. The integer sum of the outputs is exactly the
+/// centered representative of `s_I`, hence the modular sum is `s_I`.
 fn derive_subshares_with_session_seed(
 	i_mask: SubsetMask,
 	s_i: &SecretShareData,
 	new_subsets: &[SubsetMask],
-	residual_idx: usize,
 	session_seed: &[u8; 32],
 ) -> Vec<NewShareData> {
-	debug_assert!(new_subsets.len() > residual_idx);
+	debug_assert!(!new_subsets.is_empty());
 	let mut out: Vec<NewShareData> = (0..new_subsets.len()).map(|_| NewShareData::new()).collect();
 
 	// Build a PRF seed from (domain || session_seed || I_mask || s1 || s2).
 	// All members of subset I know `s_i` and have computed the same session_seed,
 	// so they derive the same PRF seed.
 	let prf_seed = build_subset_seed_with_session(i_mask, s_i, session_seed);
-
-	// Track running sums to compute the residual.
-	let mut sum_s1: Vec<[i32; N as usize]> = vec![[0i32; N as usize]; L];
-	let mut sum_s2: Vec<[i32; N as usize]> = vec![[0i32; N as usize]; K];
-
-	for (j_idx, &j_mask) in new_subsets.iter().enumerate() {
-		if j_idx == residual_idx {
-			continue;
-		}
-		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, &prf_seed, prf_seed.len());
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, BOUNDED_SPLIT_DOMAIN, BOUNDED_SPLIT_DOMAIN.len());
+	fips202::shake256_absorb(&mut state, &prf_seed, prf_seed.len());
+	for &j_mask in new_subsets {
 		fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes(), 2);
-		fips202::shake256_finalize(&mut state);
-
-		for poly in out[j_idx].s1.iter_mut() {
-			sample_eta_poly(&mut state, poly);
-		}
-		for poly in out[j_idx].s2.iter_mut() {
-			sample_eta_poly(&mut state, poly);
-		}
-		add_share_into_sum(&mut sum_s1, &mut sum_s2, &out[j_idx]);
 	}
+	fips202::shake256_finalize(&mut state);
 
-	// Residual: r_{I→J_residual} = s_I - Σ.
-	let residual = &mut out[residual_idx];
-	for (poly_idx, poly) in residual.s1.iter_mut().enumerate() {
-		for (coeff_idx, c) in poly.iter_mut().enumerate() {
-			let s = s_i.s1[poly_idx][coeff_idx];
-			let r = sum_s1[poly_idx][coeff_idx];
-			*c = mod_q(s.wrapping_sub(r));
+	let m = new_subsets.len();
+
+	for poly_idx in 0..L {
+		for coeff_idx in 0..N as usize {
+			balanced_split_coeff(
+				s_i.s1[poly_idx][coeff_idx],
+				&mut out,
+				true,
+				poly_idx,
+				coeff_idx,
+				&mut state,
+			);
 		}
 	}
-	for (poly_idx, poly) in residual.s2.iter_mut().enumerate() {
-		for (coeff_idx, c) in poly.iter_mut().enumerate() {
-			let s = s_i.s2[poly_idx][coeff_idx];
-			let r = sum_s2[poly_idx][coeff_idx];
-			*c = mod_q(s.wrapping_sub(r));
+	for poly_idx in 0..K {
+		for coeff_idx in 0..N as usize {
+			balanced_split_coeff(
+				s_i.s2[poly_idx][coeff_idx],
+				&mut out,
+				false,
+				poly_idx,
+				coeff_idx,
+				&mut state,
+			);
+		}
+	}
+
+	// Add pairwise zero-sum noise. Every unordered pair contributes +δ to one
+	// subset and -δ to the other, so the sum over all new subsets stays exact.
+	for a in 0..m {
+		for b in (a + 1)..m {
+			for poly_idx in 0..L {
+				for coeff_idx in 0..N as usize {
+					let delta = sample_eta_coeff(&mut state);
+					out[a].s1[poly_idx][coeff_idx] += delta;
+					out[b].s1[poly_idx][coeff_idx] -= delta;
+				}
+			}
+			for poly_idx in 0..K {
+				for coeff_idx in 0..N as usize {
+					let delta = sample_eta_coeff(&mut state);
+					out[a].s2[poly_idx][coeff_idx] += delta;
+					out[b].s2[poly_idx][coeff_idx] -= delta;
+				}
+			}
 		}
 	}
 	out
+}
+
+fn balanced_split_coeff(
+	coeff: i32,
+	out: &mut [NewShareData],
+	is_s1: bool,
+	poly_idx: usize,
+	coeff_idx: usize,
+	state: &mut fips202::KeccakState,
+) {
+	let m = out.len();
+	let centered = center_mod_q(coeff);
+	let m_i32 = m as i32;
+	let base = centered.div_euclid(m_i32);
+	let remainder = centered.rem_euclid(m_i32) as usize;
+	let offset = sample_uniform_usize(state, m);
+
+	for (j_idx, share) in out.iter_mut().enumerate() {
+		let gets_remainder = ((j_idx + m - offset) % m) < remainder;
+		let value = base + if gets_remainder { 1 } else { 0 };
+		if is_s1 {
+			share.s1[poly_idx][coeff_idx] = value;
+		} else {
+			share.s2[poly_idx][coeff_idx] = value;
+		}
+	}
+}
+
+#[inline]
+fn center_mod_q(coeff: i32) -> i32 {
+	let reduced = mod_q(coeff);
+	if reduced > Q / 2 {
+		reduced - Q
+	} else {
+		reduced
+	}
+}
+
+fn sample_eta_coeff(state: &mut fips202::KeccakState) -> i32 {
+	let eta_i32 = ETA as i32;
+	let bound = 2 * eta_i32 + 1;
+	let cutoff = (256 / bound) * bound;
+	let mut buf = [0u8; 1];
+	loop {
+		fips202::shake256_squeeze(&mut buf, 1, state);
+		let b = buf[0] as i32;
+		if b < cutoff {
+			return (b % bound) - eta_i32;
+		}
+	}
+}
+
+fn sample_uniform_usize(state: &mut fips202::KeccakState, upper: usize) -> usize {
+	if upper <= 1 {
+		return 0;
+	}
+	let cutoff = (256 / upper) * upper;
+	let mut buf = [0u8; 1];
+	loop {
+		fips202::shake256_squeeze(&mut buf, 1, state);
+		let b = buf[0] as usize;
+		if b < cutoff {
+			return b % upper;
+		}
+	}
 }
 
 /// Build subset seed incorporating session seed for forward secrecy.
@@ -1522,23 +1599,6 @@ fn commit_entropy(entropy: &[u8; ENTROPY_SIZE]) -> [u8; COMMITMENT_HASH_SIZE] {
 	let mut out = [0u8; COMMITMENT_HASH_SIZE];
 	fips202::shake256_squeeze(&mut out, COMMITMENT_HASH_SIZE, &mut state);
 	out
-}
-
-fn sample_eta_poly(state: &mut fips202::KeccakState, poly: &mut [i32; N as usize]) {
-	let eta_i32 = ETA as i32;
-	let bound: i32 = 2 * eta_i32 + 1;
-	let cutoff: i32 = (256 / bound) * bound;
-	for c in poly.iter_mut() {
-		let mut buf = [0u8; 1];
-		loop {
-			fips202::shake256_squeeze(&mut buf, 1, state);
-			let b = buf[0] as i32;
-			if b < cutoff {
-				*c = (b % bound) - eta_i32;
-				break;
-			}
-		}
-	}
 }
 
 fn commit_subshare(
@@ -1597,7 +1657,8 @@ fn commit_new_share(j_mask: SubsetMask, share: &NewShareData) -> [u8; COMMITMENT
 }
 
 fn add_share_into(acc: &mut NewShareData, r: &NewShareData) {
-	// Sub-shares are η-bounded, so accumulation cannot overflow i32.
+	// Bounded conditional sub-shares are small for supported n <= 6 configurations,
+	// so accumulation cannot overflow i32 before the final mod-Q reduction.
 	for (a, b) in acc.s1.iter_mut().zip(r.s1.iter()) {
 		for (ac, bc) in a.iter_mut().zip(b.iter()) {
 			*ac += *bc;
@@ -1609,25 +1670,6 @@ fn add_share_into(acc: &mut NewShareData, r: &NewShareData) {
 		}
 	}
 }
-
-fn add_share_into_sum(
-	sum_s1: &mut [[i32; N as usize]],
-	sum_s2: &mut [[i32; N as usize]],
-	r: &NewShareData,
-) {
-	// Sub-shares are η-bounded, so accumulation cannot overflow i32.
-	for (a, b) in sum_s1.iter_mut().zip(r.s1.iter()) {
-		for (ac, bc) in a.iter_mut().zip(b.iter()) {
-			*ac += *bc;
-		}
-	}
-	for (a, b) in sum_s2.iter_mut().zip(r.s2.iter()) {
-		for (ac, bc) in a.iter_mut().zip(b.iter()) {
-			*ac += *bc;
-		}
-	}
-}
-
 fn reduce_share_mod_q(share: &mut NewShareData) {
 	for poly in share.s1.iter_mut() {
 		for c in poly.iter_mut() {
@@ -1701,41 +1743,100 @@ mod tests {
 		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		for residual_idx in 0..new_subsets.len() {
-			let subshares = derive_subshares_with_session_seed(
-				0b011,
-				&s,
-				&new_subsets,
-				residual_idx,
-				&session_seed,
-			);
-			let mut sum_s1: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; L];
-			let mut sum_s2: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; K];
-			for sub in &subshares {
-				for (a, b) in sum_s1.iter_mut().zip(sub.s1.iter()) {
-					for (ac, bc) in a.iter_mut().zip(b.iter()) {
-						*ac += *bc as i64;
-					}
-				}
-				for (a, b) in sum_s2.iter_mut().zip(sub.s2.iter()) {
-					for (ac, bc) in a.iter_mut().zip(b.iter()) {
-						*ac += *bc as i64;
-					}
+		let subshares = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let mut sum_s1: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; L];
+		let mut sum_s2: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; K];
+		for sub in &subshares {
+			for (a, b) in sum_s1.iter_mut().zip(sub.s1.iter()) {
+				for (ac, bc) in a.iter_mut().zip(b.iter()) {
+					*ac += *bc as i64;
 				}
 			}
-			for (poly_idx, poly) in sum_s1.iter().enumerate() {
-				for (c_idx, &v) in poly.iter().enumerate() {
-					let expected = s.s1[poly_idx][c_idx] as i64;
-					let q = Q as i64;
-					assert_eq!((v % q + q) % q, (expected % q + q) % q);
+			for (a, b) in sum_s2.iter_mut().zip(sub.s2.iter()) {
+				for (ac, bc) in a.iter_mut().zip(b.iter()) {
+					*ac += *bc as i64;
 				}
 			}
-			for (poly_idx, poly) in sum_s2.iter().enumerate() {
-				for (c_idx, &v) in poly.iter().enumerate() {
-					let expected = s.s2[poly_idx][c_idx] as i64;
-					let q = Q as i64;
-					assert_eq!((v % q + q) % q, (expected % q + q) % q);
+		}
+		for (poly_idx, poly) in sum_s1.iter().enumerate() {
+			for (c_idx, &v) in poly.iter().enumerate() {
+				let expected = s.s1[poly_idx][c_idx] as i64;
+				let q = Q as i64;
+				assert_eq!((v % q + q) % q, (expected % q + q) % q);
+			}
+		}
+		for (poly_idx, poly) in sum_s2.iter().enumerate() {
+			for (c_idx, &v) in poly.iter().enumerate() {
+				let expected = s.s2[poly_idx][c_idx] as i64;
+				let q = Q as i64;
+				assert_eq!((v % q + q) % q, (expected % q + q) % q);
+			}
+		}
+	}
+
+	#[test]
+	fn test_derive_subshares_are_bounded_for_small_inputs() {
+		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
+		let new_subsets = generate_subset_masks(3, 2);
+		let session_seed = [42u8; 32];
+		let subshares = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let max_expected = 1 + (new_subsets.len() as i32 - 1) * ETA as i32;
+
+		for sub in &subshares {
+			for poly in &sub.s1 {
+				for &coeff in poly {
+					assert!(
+						coeff.abs() <= max_expected,
+						"s1 coefficient {} exceeded {}",
+						coeff,
+						max_expected
+					);
 				}
+			}
+			for poly in &sub.s2 {
+				for &coeff in poly {
+					assert!(
+						coeff.abs() <= max_expected,
+						"s2 coefficient {} exceeded {}",
+						coeff,
+						max_expected
+					);
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn test_derive_subshares_handles_centered_mod_q_inputs() {
+		let s = SecretShareData { s1: [[Q - 1; N as usize]; L], s2: [[Q - 2; N as usize]; K] };
+		let new_subsets = generate_subset_masks(3, 2);
+		let session_seed = [42u8; 32];
+		let subshares = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+
+		let mut sum_s1: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; L];
+		let mut sum_s2: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; K];
+		for sub in &subshares {
+			for (a, b) in sum_s1.iter_mut().zip(sub.s1.iter()) {
+				for (ac, bc) in a.iter_mut().zip(b.iter()) {
+					*ac += *bc as i64;
+				}
+			}
+			for (a, b) in sum_s2.iter_mut().zip(sub.s2.iter()) {
+				for (ac, bc) in a.iter_mut().zip(b.iter()) {
+					*ac += *bc as i64;
+				}
+			}
+		}
+
+		let q = Q as i64;
+		for poly in &sum_s1 {
+			for &v in poly {
+				assert_eq!((v % q + q) % q, (Q - 1) as i64);
+			}
+		}
+		for poly in &sum_s2 {
+			for &v in poly {
+				assert_eq!((v % q + q) % q, (Q - 2) as i64);
 			}
 		}
 	}
@@ -1745,8 +1846,8 @@ mod tests {
 		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let a = derive_subshares_with_session_seed(0b011, &s, &new_subsets, 0, &session_seed);
-		let b = derive_subshares_with_session_seed(0b011, &s, &new_subsets, 0, &session_seed);
+		let a = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let b = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
 		for (x, y) in a.iter().zip(b.iter()) {
 			assert_eq!(x.s1, y.s1);
 			assert_eq!(x.s2, y.s2);
@@ -1821,10 +1922,10 @@ mod tests {
 		let s_b = SecretShareData { s1: [[3i32; N as usize]; L], s2: [[5i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let a = derive_subshares_with_session_seed(0b011, &s_a, &new_subsets, 0, &session_seed);
-		let b = derive_subshares_with_session_seed(0b011, &s_b, &new_subsets, 0, &session_seed);
-		// Even the *first* sub-share (which is sampled, not residual) must differ
-		// because the PRF seed depends on `s_i`.
+		let a = derive_subshares_with_session_seed(0b011, &s_a, &new_subsets, &session_seed);
+		let b = derive_subshares_with_session_seed(0b011, &s_b, &new_subsets, &session_seed);
+		// The bounded split includes PRF-derived zero-sum noise keyed by `s_i`,
+		// so shares for different old secrets must differ.
 		assert_ne!(a[1].s1, b[1].s1);
 	}
 
@@ -1835,10 +1936,10 @@ mod tests {
 		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let a = derive_subshares_with_session_seed(0b011, &s, &new_subsets, 0, &session_seed);
-		let b = derive_subshares_with_session_seed(0b101, &s, &new_subsets, 0, &session_seed);
-		// The *non-residual* sub-shares are PRF outputs keyed on (s, i_mask, j_mask),
-		// so they must differ.
+		let a = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let b = derive_subshares_with_session_seed(0b101, &s, &new_subsets, &session_seed);
+		// The bounded split includes PRF-derived zero-sum noise keyed on `i_mask`,
+		// so shares for different old subsets must differ.
 		assert_ne!(a[1].s1, b[1].s1);
 	}
 

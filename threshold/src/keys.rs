@@ -209,6 +209,63 @@ impl PrivateKeyShare {
 	pub(crate) fn shares(&self) -> &BTreeMap<u16, SecretShareData> {
 		&self.shares
 	}
+
+	/// Compute coefficient statistics across all shares.
+	///
+	/// Returns `(max_abs_coeff, min_coeff, max_coeff)` where coefficients are
+	/// interpreted as centered values in `[-(Q-1)/2, (Q-1)/2]`.
+	///
+	/// This is useful for monitoring coefficient growth after resharing.
+	pub fn coefficient_stats(&self) -> (i32, i32, i32) {
+		const Q: i64 = 8380417;
+		const HALF_Q: i64 = Q / 2;
+
+		let mut max_abs: i32 = 0;
+		let mut min_coeff: i32 = 0;
+		let mut max_coeff: i32 = 0;
+
+		for share_data in self.shares.values() {
+			// Check s1 coefficients
+			for poly in &share_data.s1 {
+				for &coeff in poly {
+					// Center the coefficient
+					let c = coeff as i64;
+					let centered = if c > HALF_Q { c - Q } else { c };
+					let centered_i32 = centered as i32;
+
+					if centered_i32.abs() > max_abs {
+						max_abs = centered_i32.abs();
+					}
+					if centered_i32 < min_coeff {
+						min_coeff = centered_i32;
+					}
+					if centered_i32 > max_coeff {
+						max_coeff = centered_i32;
+					}
+				}
+			}
+			// Check s2 coefficients
+			for poly in &share_data.s2 {
+				for &coeff in poly {
+					let c = coeff as i64;
+					let centered = if c > HALF_Q { c - Q } else { c };
+					let centered_i32 = centered as i32;
+
+					if centered_i32.abs() > max_abs {
+						max_abs = centered_i32.abs();
+					}
+					if centered_i32 < min_coeff {
+						min_coeff = centered_i32;
+					}
+					if centered_i32 > max_coeff {
+						max_coeff = centered_i32;
+					}
+				}
+			}
+		}
+
+		(max_abs, min_coeff, max_coeff)
+	}
 }
 
 impl Zeroize for PrivateKeyShare {
