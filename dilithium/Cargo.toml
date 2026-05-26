@@ -32,8 +32,5 @@ dudect-bencher = { version = "=0.6" }
 name = "dilithium_benchmarks"
 harness = false
 
-[[example]]
-name = "ct_bench"
-
 [features]
 default = []

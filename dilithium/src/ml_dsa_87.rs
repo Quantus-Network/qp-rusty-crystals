@@ -240,9 +240,11 @@ impl PublicKey {
 	/// Returns 'true' if the verification process was successful, 'false' otherwise.
 	/// Returns 'false' early if the message exceeds 64 MiB or context exceeds 255 bytes.
 	pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool {
-		if sig.len() != SIGNBYTES {
-			return false;
-		}
+		// Validate signature length first
+		let sig: &[u8; SIGNBYTES] = match sig.try_into() {
+			Ok(s) => s,
+			Err(_) => return false,
+		};
 		if msg.len() > MAX_MESSAGE_SIZE {
 			return false;
 		}
