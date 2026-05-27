@@ -83,22 +83,22 @@ pub fn generate_with_dealer(
 
 	// Initialize SHAKE-256 stream for deterministic randomness
 	let mut h = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut h, seed, 32);
+	fips202::shake256_absorb(&mut h, seed);
 
 	// NIST mode: absorb K and L
 	let kl = [K as u8, L as u8];
-	fips202::shake256_absorb(&mut h, &kl, 2);
+	fips202::shake256_absorb(&mut h, &kl);
 	fips202::shake256_finalize(&mut h);
 
 	// 1. Squeeze rho (seed for matrix A)
 	let mut rho = [0u8; 32];
-	fips202::shake256_squeeze(&mut rho, 32, &mut h);
+	fips202::shake256_squeeze(&mut rho, &mut h);
 
 	// 2. Squeeze party keys
 	let mut party_keys = Vec::with_capacity(parties as usize);
 	for _ in 0..parties {
 		let mut key = [0u8; 32];
-		fips202::shake256_squeeze(&mut key, 32, &mut h);
+		fips202::shake256_squeeze(&mut key, &mut h);
 		party_keys.push(key);
 	}
 
@@ -107,8 +107,8 @@ pub fn generate_with_dealer(
 		generate_threshold_shares(&mut h, threshold, parties)?;
 
 	// 4. Generate matrix A from rho
-	let mut a_matrix: Vec<polyvec::Polyvecl> =
-		(0..K).map(|_| polyvec::Polyvecl::default()).collect();
+	let mut a_matrix: [polyvec::Polyvecl; K] =
+		core::array::from_fn(|_| polyvec::Polyvecl::default());
 	polyvec::matrix_expand(&mut a_matrix, &rho);
 
 	// 5. Compute t = A*s1 + s2
@@ -118,7 +118,7 @@ pub fn generate_with_dealer(
 		for (a_poly, s1h_poly) in a_row.vec.iter().zip(s1h_total.vec.iter()).take(L) {
 			let mut temp = poly::Poly::default();
 			poly::pointwise_montgomery(&mut temp, a_poly, s1h_poly);
-			t.vec[i] = poly::add(&t.vec[i], &temp);
+			poly::add_ip(&mut t.vec[i], &temp);
 		}
 		poly::reduce(&mut t.vec[i]);
 		poly::invntt_tomont(&mut t.vec[i]);
@@ -126,7 +126,7 @@ pub fn generate_with_dealer(
 
 	// Add s2
 	for (t_poly, s2_poly) in t.vec.iter_mut().zip(s2_total.vec.iter()).take(K) {
-		*t_poly = poly::add(t_poly, s2_poly);
+		poly::add_ip(t_poly, s2_poly);
 	}
 
 	// Normalize t
@@ -246,7 +246,7 @@ fn generate_threshold_shares(
 	while honest_signers < max_combinations {
 		// Generate random seed for this share
 		let mut share_seed = [0u8; 64];
-		fips202::shake256_squeeze(&mut share_seed, 64, state);
+		fips202::shake256_squeeze(&mut share_seed, state);
 
 		// Create η-bounded shares for s1
 		let mut s1_share = polyvec::Polyvecl::default();

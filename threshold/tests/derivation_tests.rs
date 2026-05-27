@@ -21,14 +21,14 @@ use std::collections::HashMap;
 /// `derive_dilithium_tweak` function.
 fn test_tweak(account_id: &str, path: &str) -> [u8; 32] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, b"dilithium-tweak-test:", 21);
-	fips202::shake256_absorb(&mut state, account_id.as_bytes(), account_id.len());
-	fips202::shake256_absorb(&mut state, b":", 1);
-	fips202::shake256_absorb(&mut state, path.as_bytes(), path.len());
+	fips202::shake256_absorb(&mut state, b"dilithium-tweak-test:");
+	fips202::shake256_absorb(&mut state, account_id.as_bytes());
+	fips202::shake256_absorb(&mut state, b":");
+	fips202::shake256_absorb(&mut state, path.as_bytes());
 	fips202::shake256_finalize(&mut state);
 
 	let mut tweak = [0u8; 32];
-	fips202::shake256_squeeze(&mut tweak, 32, &mut state);
+	fips202::shake256_squeeze(&mut tweak, &mut state);
 	tweak
 }
 

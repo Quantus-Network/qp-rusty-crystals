@@ -68,14 +68,14 @@ pub fn derive_dkg_contribution(master_share: &PrivateKeyShare, tweak: &[u8; 32])
 	let shares_digest = hash_secret_shares(master_share);
 
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, DKG_CONTRIBUTION_DOMAIN, DKG_CONTRIBUTION_DOMAIN.len());
-	fips202::shake256_absorb(&mut state, &party_id_bytes, party_id_bytes.len());
-	fips202::shake256_absorb(&mut state, tweak, tweak.len());
-	fips202::shake256_absorb(&mut state, &shares_digest, shares_digest.len());
+	fips202::shake256_absorb(&mut state, DKG_CONTRIBUTION_DOMAIN);
+	fips202::shake256_absorb(&mut state, &party_id_bytes);
+	fips202::shake256_absorb(&mut state, tweak);
+	fips202::shake256_absorb(&mut state, &shares_digest);
 	fips202::shake256_finalize(&mut state);
 
 	let mut contribution = [0u8; 32];
-	fips202::shake256_squeeze(&mut contribution, 32, &mut state);
+	fips202::shake256_squeeze(&mut contribution, &mut state);
 
 	contribution
 }
@@ -86,8 +86,8 @@ pub fn derive_dkg_contribution(master_share: &PrivateKeyShare, tweak: &[u8; 32])
 /// and across machines holding the same share data.
 pub(crate) fn hash_secret_shares(master_share: &PrivateKeyShare) -> [u8; 64] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, b"threshold-share-digest-v1", 25);
-	fips202::shake256_absorb(&mut state, &master_share.party_id().to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, b"threshold-share-digest-v1");
+	fips202::shake256_absorb(&mut state, &master_share.party_id().to_le_bytes());
 
 	let mut buf: Vec<u8> = Vec::new();
 	for (subset_mask, share_data) in master_share.shares() {
@@ -103,12 +103,12 @@ pub(crate) fn hash_secret_shares(master_share: &PrivateKeyShare) -> [u8; 64] {
 				buf.extend_from_slice(&coeff.to_le_bytes());
 			}
 		}
-		fips202::shake256_absorb(&mut state, &buf, buf.len());
+		fips202::shake256_absorb(&mut state, &buf);
 	}
 
 	fips202::shake256_finalize(&mut state);
 	let mut digest = [0u8; 64];
-	fips202::shake256_squeeze(&mut digest, 64, &mut state);
+	fips202::shake256_squeeze(&mut digest, &mut state);
 	digest
 }
 
@@ -165,14 +165,14 @@ mod tests {
 	/// Create a test tweak (simulates what the contract would compute)
 	fn test_tweak(account: &str, path: &str) -> [u8; 32] {
 		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, b"test-tweak:", 11);
-		fips202::shake256_absorb(&mut state, account.as_bytes(), account.len());
-		fips202::shake256_absorb(&mut state, b":", 1);
-		fips202::shake256_absorb(&mut state, path.as_bytes(), path.len());
+		fips202::shake256_absorb(&mut state, b"test-tweak:");
+		fips202::shake256_absorb(&mut state, account.as_bytes());
+		fips202::shake256_absorb(&mut state, b":");
+		fips202::shake256_absorb(&mut state, path.as_bytes());
 		fips202::shake256_finalize(&mut state);
 
 		let mut tweak = [0u8; 32];
-		fips202::shake256_squeeze(&mut tweak, 32, &mut state);
+		fips202::shake256_squeeze(&mut tweak, &mut state);
 		tweak
 	}
 

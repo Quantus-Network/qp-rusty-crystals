@@ -100,29 +100,29 @@ pub fn compute_ssid(
 	let mut state = fips202::KeccakState::default();
 
 	// Domain separator
-	fips202::shake256_absorb(&mut state, DOMAIN_SEPARATOR, DOMAIN_SEPARATOR.len());
+	fips202::shake256_absorb(&mut state, DOMAIN_SEPARATOR);
 
 	// Public key bytes
-	fips202::shake256_absorb(&mut state, public_key.as_bytes(), public_key.as_bytes().len());
+	fips202::shake256_absorb(&mut state, public_key.as_bytes());
 
 	// Threshold configuration
-	fips202::shake256_absorb(&mut state, &threshold.to_le_bytes(), 4);
-	fips202::shake256_absorb(&mut state, &total_parties.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, &threshold.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &total_parties.to_le_bytes());
 
 	// Number of participants
 	let num_participants = participants.len() as u32;
-	fips202::shake256_absorb(&mut state, &num_participants.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, &num_participants.to_le_bytes());
 
 	// Sorted participant IDs (ParticipantList maintains sorted order internally)
 	for participant_id in participants.iter() {
-		fips202::shake256_absorb(&mut state, &participant_id.to_le_bytes(), 4);
+		fips202::shake256_absorb(&mut state, &participant_id.to_le_bytes());
 	}
 
 	// Attempt nonce
-	fips202::shake256_absorb(&mut state, attempt_nonce, 32);
+	fips202::shake256_absorb(&mut state, attempt_nonce);
 
 	fips202::shake256_finalize(&mut state);
-	fips202::shake256_squeeze(&mut ssid, SSID_SIZE, &mut state);
+	fips202::shake256_squeeze(&mut ssid, &mut state);
 
 	ssid
 }
@@ -137,15 +137,15 @@ pub(crate) fn compute_mu(tr: &[u8; 64], message: &[u8], context: &[u8]) -> [u8; 
 	let mut mu = [0u8; 64];
 	let mut state = fips202::KeccakState::default();
 
-	fips202::shake256_absorb(&mut state, tr, 64);
-	fips202::shake256_absorb(&mut state, &[0u8], 1); // Domain separator for pure signatures
-	fips202::shake256_absorb(&mut state, &[context.len() as u8], 1);
+	fips202::shake256_absorb(&mut state, tr);
+	fips202::shake256_absorb(&mut state, &[0u8]); // Domain separator for pure signatures
+	fips202::shake256_absorb(&mut state, &[context.len() as u8]);
 	if !context.is_empty() {
-		fips202::shake256_absorb(&mut state, context, context.len());
+		fips202::shake256_absorb(&mut state, context);
 	}
-	fips202::shake256_absorb(&mut state, message, message.len());
+	fips202::shake256_absorb(&mut state, message);
 	fips202::shake256_finalize(&mut state);
-	fips202::shake256_squeeze(&mut mu, 64, &mut state);
+	fips202::shake256_squeeze(&mut mu, &mut state);
 
 	mu
 }
@@ -167,11 +167,11 @@ pub(crate) fn compute_commitment_hash(
 ) -> [u8; 32] {
 	let mut hash = [0u8; 32];
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, ssid, SSID_SIZE);
-	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
-	fips202::shake256_absorb(&mut state, commitment_data, commitment_data.len());
+	fips202::shake256_absorb(&mut state, ssid);
+	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
+	fips202::shake256_absorb(&mut state, commitment_data);
 	fips202::shake256_finalize(&mut state);
-	fips202::shake256_squeeze(&mut hash, 32, &mut state);
+	fips202::shake256_squeeze(&mut hash, &mut state);
 	hash
 }
 
@@ -265,18 +265,18 @@ pub(crate) fn generate_round1(
 	// Generate deterministic random bytes for commitment
 	let mut rho_prime = [0u8; 64];
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, seed, 32);
-	fips202::shake256_absorb(&mut state, b"rho_prime", 9);
+	fips202::shake256_absorb(&mut state, seed);
+	fips202::shake256_absorb(&mut state, b"rho_prime");
 	fips202::shake256_finalize(&mut state);
-	fips202::shake256_squeeze(&mut rho_prime, 64, &mut state);
+	fips202::shake256_squeeze(&mut rho_prime, &mut state);
 
 	let k_iterations = config.k_iterations() as usize;
 	let mut w_commitments = Vec::with_capacity(k_iterations);
 	let mut hyperball_samples = Vec::with_capacity(k_iterations);
 
 	// Initialize matrix A once for all computations
-	let mut a_matrix: Vec<polyvec::Polyvecl> =
-		(0..K).map(|_| polyvec::Polyvecl::default()).collect();
+	let mut a_matrix: [polyvec::Polyvecl; K] =
+		core::array::from_fn(|_| polyvec::Polyvecl::default());
 	polyvec::matrix_expand(&mut a_matrix, private_key.rho());
 
 	// Generate K different (w, y) pairs using different seeds
@@ -292,11 +292,11 @@ pub(crate) fn generate_round1(
 
 		let mut iter_rho_prime = [0u8; 64];
 		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, &iter_seed, 32);
-		fips202::shake256_absorb(&mut state, b"rho_prime", 9);
-		fips202::shake256_absorb(&mut state, &[k_iter as u8], 1);
+		fips202::shake256_absorb(&mut state, &iter_seed);
+		fips202::shake256_absorb(&mut state, b"rho_prime");
+		fips202::shake256_absorb(&mut state, &[k_iter as u8]);
 		fips202::shake256_finalize(&mut state);
-		fips202::shake256_squeeze(&mut iter_rho_prime, 64, &mut state);
+		fips202::shake256_squeeze(&mut iter_rho_prime, &mut state);
 
 		// Sample from hyperball using threshold parameters
 		let (_, r_prime, nu) = get_threshold_params(config)?;
@@ -566,10 +566,10 @@ pub(crate) fn generate_round3_response(
 
 		let mut challenge_bytes = [0u8; C_DASH_BYTES];
 		let mut keccak_state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut keccak_state, &round2.mu, 64);
-		fips202::shake256_absorb(&mut keccak_state, &w1_packed, w1_packed.len());
+		fips202::shake256_absorb(&mut keccak_state, &round2.mu);
+		fips202::shake256_absorb(&mut keccak_state, &w1_packed);
 		fips202::shake256_finalize(&mut keccak_state);
-		fips202::shake256_squeeze(&mut challenge_bytes, C_DASH_BYTES, &mut keccak_state);
+		fips202::shake256_squeeze(&mut challenge_bytes, &mut keccak_state);
 
 		// Derive challenge polynomial and convert to NTT domain
 		let mut challenge_ntt = poly::Poly::default();
@@ -755,8 +755,8 @@ pub(crate) fn combine_signature(
 	// Extract rho and build matrix A
 	let mut rho = [0u8; 32];
 	rho.copy_from_slice(&public_key.as_bytes()[..32]);
-	let mut a_matrix: Vec<polyvec::Polyvecl> =
-		(0..K).map(|_| polyvec::Polyvecl::default()).collect();
+	let mut a_matrix: [polyvec::Polyvecl; K] =
+		core::array::from_fn(|_| polyvec::Polyvecl::default());
 	polyvec::matrix_expand(&mut a_matrix, &rho);
 
 	// Extract t1 from public key
@@ -839,10 +839,10 @@ pub(crate) fn combine_signature(
 
 		let mut challenge_bytes = [0u8; C_DASH_BYTES];
 		let mut keccak_state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut keccak_state, &mu, 64);
-		fips202::shake256_absorb(&mut keccak_state, &w1_packed, w1_packed.len());
+		fips202::shake256_absorb(&mut keccak_state, &mu);
+		fips202::shake256_absorb(&mut keccak_state, &w1_packed);
 		fips202::shake256_finalize(&mut keccak_state);
-		fips202::shake256_squeeze(&mut challenge_bytes, C_DASH_BYTES, &mut keccak_state);
+		fips202::shake256_squeeze(&mut challenge_bytes, &mut keccak_state);
 
 		// Derive challenge polynomial and convert to NTT domain
 		let mut challenge_ntt = poly::Poly::default();

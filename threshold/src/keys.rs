@@ -23,9 +23,9 @@ pub const TR_SIZE: usize = 64;
 fn compute_tr(bytes: &[u8; PUBLIC_KEY_SIZE]) -> [u8; TR_SIZE] {
 	let mut tr = [0u8; TR_SIZE];
 	let mut state = qp_rusty_crystals_dilithium::fips202::KeccakState::default();
-	qp_rusty_crystals_dilithium::fips202::shake256_absorb(&mut state, bytes, bytes.len());
+	qp_rusty_crystals_dilithium::fips202::shake256_absorb(&mut state, bytes);
 	qp_rusty_crystals_dilithium::fips202::shake256_finalize(&mut state);
-	qp_rusty_crystals_dilithium::fips202::shake256_squeeze(&mut tr, TR_SIZE, &mut state);
+	qp_rusty_crystals_dilithium::fips202::shake256_squeeze(&mut tr, &mut state);
 	tr
 }
 

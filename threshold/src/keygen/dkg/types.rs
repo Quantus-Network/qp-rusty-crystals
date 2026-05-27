@@ -502,28 +502,28 @@ pub fn compute_dkg_ssid(
 	let mut state = fips202::KeccakState::default();
 
 	// Domain separator
-	fips202::shake256_absorb(&mut state, DOMAIN_DKG_SSID, DOMAIN_DKG_SSID.len());
+	fips202::shake256_absorb(&mut state, DOMAIN_DKG_SSID);
 
 	// Threshold configuration
-	fips202::shake256_absorb(&mut state, &threshold.to_le_bytes(), 4);
-	fips202::shake256_absorb(&mut state, &total_parties.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, &threshold.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &total_parties.to_le_bytes());
 
 	// Number of participants
 	let num_participants = participants.len() as u32;
-	fips202::shake256_absorb(&mut state, &num_participants.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, &num_participants.to_le_bytes());
 
 	// Sorted participant IDs (caller should ensure sorted order)
 	let mut sorted_participants = participants.to_vec();
 	sorted_participants.sort();
 	for participant_id in &sorted_participants {
-		fips202::shake256_absorb(&mut state, &participant_id.to_le_bytes(), 4);
+		fips202::shake256_absorb(&mut state, &participant_id.to_le_bytes());
 	}
 
 	// Session nonce
-	fips202::shake256_absorb(&mut state, session_nonce, 32);
+	fips202::shake256_absorb(&mut state, session_nonce);
 
 	fips202::shake256_finalize(&mut state);
-	fips202::shake256_squeeze(&mut ssid, DKG_SSID_SIZE, &mut state);
+	fips202::shake256_squeeze(&mut ssid, &mut state);
 
 	ssid
 }
@@ -538,14 +538,14 @@ pub fn h_commit(
 	data: &[u8],
 ) -> [u8; COMMITMENT_HASH_SIZE] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, DOMAIN_COMMIT, DOMAIN_COMMIT.len());
-	fips202::shake256_absorb(&mut state, ssid, DKG_SSID_SIZE);
-	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
-	fips202::shake256_absorb(&mut state, data, data.len());
+	fips202::shake256_absorb(&mut state, DOMAIN_COMMIT);
+	fips202::shake256_absorb(&mut state, ssid);
+	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
+	fips202::shake256_absorb(&mut state, data);
 	fips202::shake256_finalize(&mut state);
 
 	let mut hash = [0u8; COMMITMENT_HASH_SIZE];
-	fips202::shake256_squeeze(&mut hash, COMMITMENT_HASH_SIZE, &mut state);
+	fips202::shake256_squeeze(&mut hash, &mut state);
 	hash
 }
 
@@ -560,33 +560,33 @@ pub fn h_commit_pk(
 	partial_pk: &PartialPublicKey,
 ) -> [u8; COMMITMENT_HASH_SIZE] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, DOMAIN_PK_COMMIT, DOMAIN_PK_COMMIT.len());
-	fips202::shake256_absorb(&mut state, ssid, DKG_SSID_SIZE);
-	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
-	fips202::shake256_absorb(&mut state, &subset_mask.to_le_bytes(), 2);
+	fips202::shake256_absorb(&mut state, DOMAIN_PK_COMMIT);
+	fips202::shake256_absorb(&mut state, ssid);
+	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &subset_mask.to_le_bytes());
 
 	for poly in &partial_pk.t {
 		for coeff in poly {
-			fips202::shake256_absorb(&mut state, &coeff.to_le_bytes(), 4);
+			fips202::shake256_absorb(&mut state, &coeff.to_le_bytes());
 		}
 	}
 
 	fips202::shake256_finalize(&mut state);
 
 	let mut hash = [0u8; COMMITMENT_HASH_SIZE];
-	fips202::shake256_squeeze(&mut hash, COMMITMENT_HASH_SIZE, &mut state);
+	fips202::shake256_squeeze(&mut hash, &mut state);
 	hash
 }
 
 /// Derive ρ from global randomness.
 pub fn h_seed(global_randomness: &[u8]) -> [u8; 32] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, DOMAIN_SEED, DOMAIN_SEED.len());
-	fips202::shake256_absorb(&mut state, global_randomness, global_randomness.len());
+	fips202::shake256_absorb(&mut state, DOMAIN_SEED);
+	fips202::shake256_absorb(&mut state, global_randomness);
 	fips202::shake256_finalize(&mut state);
 
 	let mut rho = [0u8; 32];
-	fips202::shake256_squeeze(&mut rho, 32, &mut state);
+	fips202::shake256_squeeze(&mut rho, &mut state);
 	rho
 }
 
@@ -597,14 +597,14 @@ pub fn h_keygen(
 	global_randomness: &[u8],
 ) -> [u8; SUBSET_SEED_SIZE] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, DOMAIN_KEYGEN, DOMAIN_KEYGEN.len());
-	fips202::shake256_absorb(&mut state, &subset_mask.to_le_bytes(), 2);
-	fips202::shake256_absorb(&mut state, shared_secret, SHARED_SECRET_SIZE);
-	fips202::shake256_absorb(&mut state, global_randomness, global_randomness.len());
+	fips202::shake256_absorb(&mut state, DOMAIN_KEYGEN);
+	fips202::shake256_absorb(&mut state, &subset_mask.to_le_bytes());
+	fips202::shake256_absorb(&mut state, shared_secret);
+	fips202::shake256_absorb(&mut state, global_randomness);
 	fips202::shake256_finalize(&mut state);
 
 	let mut seed = [0u8; SUBSET_SEED_SIZE];
-	fips202::shake256_squeeze(&mut seed, SUBSET_SEED_SIZE, &mut state);
+	fips202::shake256_squeeze(&mut seed, &mut state);
 	seed
 }
 
@@ -620,33 +620,33 @@ pub fn compute_transcript_hash(
 	round3_broadcasts: &BTreeMap<ParticipantId, MithrilRound3Broadcast>,
 ) -> [u8; 32] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, DOMAIN_TRANSCRIPT, DOMAIN_TRANSCRIPT.len());
-	fips202::shake256_absorb(&mut state, ssid, DKG_SSID_SIZE);
+	fips202::shake256_absorb(&mut state, DOMAIN_TRANSCRIPT);
+	fips202::shake256_absorb(&mut state, ssid);
 
 	// BTreeMap iterates in sorted order, so no need to sort
 	for (party_id, msg) in round1_broadcasts {
-		fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
-		fips202::shake256_absorb(&mut state, &msg.commitment, COMMITMENT_HASH_SIZE);
+		fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
+		fips202::shake256_absorb(&mut state, &msg.commitment);
 	}
 
 	for (party_id, msg) in round2_broadcasts {
-		fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
-		fips202::shake256_absorb(&mut state, &msg.randomness, RANDOMNESS_SIZE);
+		fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
+		fips202::shake256_absorb(&mut state, &msg.randomness);
 	}
 
 	for (party_id, msg) in round3_broadcasts {
-		fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
+		fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
 		// partial_pk_commitments is already a BTreeMap, iterates in sorted order
 		for (mask, commitment) in &msg.partial_pk_commitments {
-			fips202::shake256_absorb(&mut state, &mask.to_le_bytes(), 2);
-			fips202::shake256_absorb(&mut state, commitment, COMMITMENT_HASH_SIZE);
+			fips202::shake256_absorb(&mut state, &mask.to_le_bytes());
+			fips202::shake256_absorb(&mut state, commitment);
 		}
 	}
 
 	fips202::shake256_finalize(&mut state);
 
 	let mut hash = [0u8; 32];
-	fips202::shake256_squeeze(&mut hash, 32, &mut state);
+	fips202::shake256_squeeze(&mut hash, &mut state);
 	hash
 }
 
@@ -655,14 +655,14 @@ pub fn compute_partial_output_hash(
 	partial_pks: &BTreeMap<SubsetMask, PartialPublicKey>,
 ) -> [u8; 32] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, b"PARTIAL_OUTPUT", 14);
+	fips202::shake256_absorb(&mut state, b"PARTIAL_OUTPUT");
 
 	// BTreeMap iterates in sorted order by key, so no need to sort
 	for (mask, pk) in partial_pks {
-		fips202::shake256_absorb(&mut state, &mask.to_le_bytes(), 2);
+		fips202::shake256_absorb(&mut state, &mask.to_le_bytes());
 		for poly in &pk.t {
 			for coeff in poly {
-				fips202::shake256_absorb(&mut state, &coeff.to_le_bytes(), 4);
+				fips202::shake256_absorb(&mut state, &coeff.to_le_bytes());
 			}
 		}
 	}
@@ -670,7 +670,7 @@ pub fn compute_partial_output_hash(
 	fips202::shake256_finalize(&mut state);
 
 	let mut hash = [0u8; 32];
-	fips202::shake256_squeeze(&mut hash, 32, &mut state);
+	fips202::shake256_squeeze(&mut hash, &mut state);
 	hash
 }
 
@@ -680,13 +680,13 @@ pub fn compute_signing_message(
 	partial_output_hash: &[u8; 32],
 ) -> [u8; 32] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, b"SIGN_MESSAGE", 12);
-	fips202::shake256_absorb(&mut state, transcript_hash, 32);
-	fips202::shake256_absorb(&mut state, partial_output_hash, 32);
+	fips202::shake256_absorb(&mut state, b"SIGN_MESSAGE");
+	fips202::shake256_absorb(&mut state, transcript_hash);
+	fips202::shake256_absorb(&mut state, partial_output_hash);
 	fips202::shake256_finalize(&mut state);
 
 	let mut hash = [0u8; 32];
-	fips202::shake256_squeeze(&mut hash, 32, &mut state);
+	fips202::shake256_squeeze(&mut hash, &mut state);
 	hash
 }
 

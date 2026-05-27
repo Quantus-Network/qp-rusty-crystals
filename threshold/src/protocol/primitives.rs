@@ -16,7 +16,7 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use core::f64::consts::PI;
 use qp_rusty_crystals_dilithium::{
 	fips202, packing,
-	params::{GAMMA2, K, L, N, Q, SIGNBYTES},
+	params::{C_DASH_BYTES, GAMMA2, K, L, N, Q, SIGNBYTES},
 	poly, polyvec,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -287,15 +287,14 @@ impl HyperballSampleVector {
 
 		// Use SHAKE256 for cryptographic randomness
 		let mut keccak_state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut keccak_state, b"H", 1); // Domain separator
-		fips202::shake256_absorb(&mut keccak_state, rhop, 64);
+		fips202::shake256_absorb(&mut keccak_state, b"H"); // Domain separator
+		fips202::shake256_absorb(&mut keccak_state, rhop);
 		let nonce_bytes = nonce.to_le_bytes();
-		fips202::shake256_absorb(&mut keccak_state, &nonce_bytes, 2);
+		fips202::shake256_absorb(&mut keccak_state, &nonce_bytes);
 		fips202::shake256_finalize(&mut keccak_state);
 
 		let mut buf = vec![0u8; (size + 2) * 8]; // 8 bytes per f64
-		let buf_len = buf.len();
-		fips202::shake256_squeeze(&mut buf, buf_len, &mut keccak_state);
+		fips202::shake256_squeeze(&mut buf, &mut keccak_state);
 
 		// Generate normally distributed random numbers using Box-Muller transform
 		// CRITICAL: Must compute sq BEFORE applying nu scaling (matching reference)
@@ -619,12 +618,16 @@ pub(crate) fn pack_signature(
 	z: &polyvec::Polyvecl,
 	hint: &polyvec::Polyveck,
 ) -> Vec<u8> {
-	let mut sig = vec![0u8; SIGNBYTES];
+	let mut sig = [0u8; SIGNBYTES];
+
+	// Convert c_tilde to fixed-size array
+	let c_tilde_arr: Option<&[u8; C_DASH_BYTES]> =
+		c_tilde.get(..C_DASH_BYTES).and_then(|slice| slice.try_into().ok());
 
 	// Use dilithium's pack_sig function
-	packing::pack_sig(&mut sig, Some(c_tilde), z, hint);
+	packing::pack_sig(&mut sig, c_tilde_arr, z, hint);
 
-	sig
+	sig.to_vec()
 }
 
 #[cfg(test)]

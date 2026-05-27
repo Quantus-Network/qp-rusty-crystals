@@ -801,42 +801,42 @@ pub fn compute_resharing_ssid(
 	let mut state = fips202::KeccakState::default();
 
 	// Domain separator
-	fips202::shake256_absorb(&mut state, DOMAIN_RESHARING_SSID, DOMAIN_RESHARING_SSID.len());
+	fips202::shake256_absorb(&mut state, DOMAIN_RESHARING_SSID);
 
 	// Old committee configuration
-	fips202::shake256_absorb(&mut state, &old_threshold.to_le_bytes(), 4);
-	fips202::shake256_absorb(&mut state, &old_n.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, &old_threshold.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &old_n.to_le_bytes());
 
 	// Old participants (sorted)
 	let old_num = old_participants.len() as u32;
-	fips202::shake256_absorb(&mut state, &old_num.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, &old_num.to_le_bytes());
 	let mut sorted_old = old_participants.to_vec();
 	sorted_old.sort();
 	for pid in &sorted_old {
-		fips202::shake256_absorb(&mut state, &pid.to_le_bytes(), 4);
+		fips202::shake256_absorb(&mut state, &pid.to_le_bytes());
 	}
 
 	// New committee configuration
-	fips202::shake256_absorb(&mut state, &new_threshold.to_le_bytes(), 4);
-	fips202::shake256_absorb(&mut state, &new_n.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, &new_threshold.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &new_n.to_le_bytes());
 
 	// New participants (sorted)
 	let new_num = new_participants.len() as u32;
-	fips202::shake256_absorb(&mut state, &new_num.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, &new_num.to_le_bytes());
 	let mut sorted_new = new_participants.to_vec();
 	sorted_new.sort();
 	for pid in &sorted_new {
-		fips202::shake256_absorb(&mut state, &pid.to_le_bytes(), 4);
+		fips202::shake256_absorb(&mut state, &pid.to_le_bytes());
 	}
 
 	// Public key
-	fips202::shake256_absorb(&mut state, public_key.as_bytes(), public_key.as_bytes().len());
+	fips202::shake256_absorb(&mut state, public_key.as_bytes());
 
 	// Session nonce
-	fips202::shake256_absorb(&mut state, session_nonce, 32);
+	fips202::shake256_absorb(&mut state, session_nonce);
 
 	fips202::shake256_finalize(&mut state);
-	fips202::shake256_squeeze(&mut ssid, RESHARING_SSID_SIZE, &mut state);
+	fips202::shake256_squeeze(&mut ssid, &mut state);
 
 	ssid
 }

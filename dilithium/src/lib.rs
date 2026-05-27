@@ -88,13 +88,13 @@ impl From<&mut [u8; 64]> for SensitiveBytes64 {
 mod errors;
 pub use errors::{KeyParsingError, SignatureError};
 
-pub(crate) mod fips202;
+pub mod fips202;
 pub mod ml_dsa_87;
 pub(crate) mod ntt;
-pub(crate) mod packing;
+pub mod packing;
 pub mod params;
-pub(crate) mod poly;
-pub(crate) mod polyvec;
+pub mod poly;
+pub mod polyvec;
 pub(crate) mod reduce;
 pub(crate) mod rounding;
 pub(crate) mod sign;

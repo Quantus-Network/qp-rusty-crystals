@@ -5,8 +5,6 @@
 //! partial contributions and pack them into the canonical ML-DSA-87 public-key
 //! encoding (`rho || t1`).
 
-use alloc::vec::Vec;
-
 use qp_rusty_crystals_dilithium::{
 	packing,
 	params::{K, N, Q},
@@ -27,7 +25,7 @@ pub fn compute_partial_pk_t(
 	s1: &[[i32; N as usize]],
 	s2: &[[i32; N as usize]],
 ) -> [[i32; N as usize]; K] {
-	let mut mat: Vec<polyvec::Polyvecl> = (0..K).map(|_| polyvec::Polyvecl::default()).collect();
+	let mut mat: [polyvec::Polyvecl; K] = core::array::from_fn(|_| polyvec::Polyvecl::default());
 	polyvec::matrix_expand(&mut mat, rho);
 
 	let mut s1_pv = polyvec::Polyvecl::default();

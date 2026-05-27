@@ -1244,12 +1244,12 @@ impl DilithiumSignProtocol {
 fn derive_party_seed(session_seed: &[u8; 32], party_id: ParticipantId) -> [u8; 32] {
 	const DOMAIN: &[u8] = b"local-signing-party-seed";
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, DOMAIN, DOMAIN.len());
-	fips202::shake256_absorb(&mut state, session_seed, 32);
-	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
+	fips202::shake256_absorb(&mut state, DOMAIN);
+	fips202::shake256_absorb(&mut state, session_seed);
+	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
 	fips202::shake256_finalize(&mut state);
 	let mut derived = [0u8; 32];
-	fips202::shake256_squeeze(&mut derived, 32, &mut state);
+	fips202::shake256_squeeze(&mut derived, &mut state);
 	derived
 }
 
@@ -1259,11 +1259,11 @@ fn derive_party_seed(session_seed: &[u8; 32], party_id: ParticipantId) -> [u8; 3
 fn derive_attempt_nonce(session_seed: &[u8; 32]) -> [u8; 32] {
 	const DOMAIN: &[u8] = b"local-signing-attempt-nonce";
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, DOMAIN, DOMAIN.len());
-	fips202::shake256_absorb(&mut state, session_seed, 32);
+	fips202::shake256_absorb(&mut state, DOMAIN);
+	fips202::shake256_absorb(&mut state, session_seed);
 	fips202::shake256_finalize(&mut state);
 	let mut derived = [0u8; 32];
-	fips202::shake256_squeeze(&mut derived, 32, &mut state);
+	fips202::shake256_squeeze(&mut derived, &mut state);
 	derived
 }
 

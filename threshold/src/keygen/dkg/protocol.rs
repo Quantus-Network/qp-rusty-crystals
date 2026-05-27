@@ -312,28 +312,28 @@ fn derive_round1_randomness(
 ) -> ([u8; RANDOMNESS_SIZE], BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>) {
 	// Derive my_randomness
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, b"dkg-r1-rand", 11);
-	fips202::shake256_absorb(&mut state, seed, 32);
+	fips202::shake256_absorb(&mut state, b"dkg-r1-rand");
+	fips202::shake256_absorb(&mut state, seed);
 	let party_bytes = party_id.to_le_bytes();
-	fips202::shake256_absorb(&mut state, &party_bytes, 4);
+	fips202::shake256_absorb(&mut state, &party_bytes);
 	fips202::shake256_finalize(&mut state);
 
 	let mut my_randomness = [0u8; RANDOMNESS_SIZE];
-	fips202::shake256_squeeze(&mut my_randomness, RANDOMNESS_SIZE, &mut state);
+	fips202::shake256_squeeze(&mut my_randomness, &mut state);
 
 	// Derive shared secrets for each subset
 	let mut my_shared_secrets = BTreeMap::new();
 	for &subset in leader_subsets {
 		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, b"dkg-r1-ss", 9);
-		fips202::shake256_absorb(&mut state, seed, 32);
-		fips202::shake256_absorb(&mut state, &party_bytes, 4);
+		fips202::shake256_absorb(&mut state, b"dkg-r1-ss");
+		fips202::shake256_absorb(&mut state, seed);
+		fips202::shake256_absorb(&mut state, &party_bytes);
 		let subset_bytes = subset.to_le_bytes();
-		fips202::shake256_absorb(&mut state, &subset_bytes, 2); // SubsetMask is u16 = 2 bytes
+		fips202::shake256_absorb(&mut state, &subset_bytes); // SubsetMask is u16 = 2 bytes
 		fips202::shake256_finalize(&mut state);
 
 		let mut secret = [0u8; SHARED_SECRET_SIZE];
-		fips202::shake256_squeeze(&mut secret, SHARED_SECRET_SIZE, &mut state);
+		fips202::shake256_squeeze(&mut secret, &mut state);
 		my_shared_secrets.insert(subset, secret);
 	}
 
@@ -1746,9 +1746,9 @@ fn build_private_share<S: TranscriptSigner>(
 	let mut party_key = [0u8; 32];
 	{
 		let mut h = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut h, b"dkg-party-key-v2", 16);
-		fips202::shake256_absorb(&mut h, rho, 32);
-		fips202::shake256_absorb(&mut h, &config.my_party_id.to_le_bytes(), 4);
+		fips202::shake256_absorb(&mut h, b"dkg-party-key-v2");
+		fips202::shake256_absorb(&mut h, rho);
+		fips202::shake256_absorb(&mut h, &config.my_party_id.to_le_bytes());
 		let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 		for (subset_mask, contribution) in my_contributions {
 			buf.clear();
@@ -1763,10 +1763,10 @@ fn build_private_share<S: TranscriptSigner>(
 					buf.extend_from_slice(&coeff.to_le_bytes());
 				}
 			}
-			fips202::shake256_absorb(&mut h, &buf, buf.len());
+			fips202::shake256_absorb(&mut h, &buf);
 		}
 		fips202::shake256_finalize(&mut h);
-		fips202::shake256_squeeze(&mut party_key, 32, &mut h);
+		fips202::shake256_squeeze(&mut party_key, &mut h);
 	}
 
 	// Use the TR from the public key (tr = H(pk))
@@ -1854,14 +1854,14 @@ where
 
 			// Derive party-specific seed: SHAKE256(master_seed || "dkg-party" || party_id)
 			let mut state = fips202::KeccakState::default();
-			fips202::shake256_absorb(&mut state, &master_seed, 32);
-			fips202::shake256_absorb(&mut state, b"dkg-party", 9);
+			fips202::shake256_absorb(&mut state, &master_seed);
+			fips202::shake256_absorb(&mut state, b"dkg-party");
 			let party_bytes = (i as u32).to_le_bytes();
-			fips202::shake256_absorb(&mut state, &party_bytes, 4);
+			fips202::shake256_absorb(&mut state, &party_bytes);
 			fips202::shake256_finalize(&mut state);
 
 			let mut party_seed = [0u8; 32];
-			fips202::shake256_squeeze(&mut party_seed, 32, &mut state);
+			fips202::shake256_squeeze(&mut party_seed, &mut state);
 
 			MithrilDkg::new(config, party_seed, session_nonce)
 		})
@@ -2045,10 +2045,20 @@ mod tests {
 			SensitiveBytes32,
 		};
 
-		#[derive(Clone)]
+		/// Signer that wraps a Dilithium secret key.
+		/// Clone is implemented manually to explicitly copy the secret key bytes.
 		struct DilithiumSigner {
 			sk: SecretKey,
 			pk: PublicKey,
+		}
+
+		impl Clone for DilithiumSigner {
+			fn clone(&self) -> Self {
+				// Explicitly copy secret key material (visible at call site per SecretKey design)
+				let sk = SecretKey::from_bytes(&self.sk.to_bytes())
+					.expect("valid secret key bytes");
+				Self { sk, pk: self.pk.clone() }
+			}
 		}
 
 		impl core::fmt::Debug for DilithiumSigner {
@@ -2098,7 +2108,10 @@ mod tests {
 			let keypair = Keypair::generate(SensitiveBytes32::from(&mut seed));
 
 			public_keys.push(keypair.public.clone());
-			signers.push(DilithiumSigner { sk: keypair.secret.clone(), pk: keypair.public });
+			// Explicitly copy secret key to create signer (keypair.secret is moved)
+			let sk = SecretKey::from_bytes(&keypair.secret.to_bytes())
+				.expect("valid secret key bytes");
+			signers.push(DilithiumSigner { sk, pk: keypair.public });
 		}
 
 		let seed = [56u8; 32];

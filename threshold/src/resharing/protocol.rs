@@ -556,12 +556,12 @@ impl ResharingProtocol {
 	/// Generate this party's entropy contribution from the constructor seed.
 	fn generate_entropy(&self) -> [u8; ENTROPY_SIZE] {
 		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, b"resharing-entropy-derive-v1", 27);
-		fips202::shake256_absorb(&mut state, &self.seed, 32);
-		fips202::shake256_absorb(&mut state, &self.config.my_party_id().to_le_bytes(), 4);
+		fips202::shake256_absorb(&mut state, b"resharing-entropy-derive-v1");
+		fips202::shake256_absorb(&mut state, &self.seed);
+		fips202::shake256_absorb(&mut state, &self.config.my_party_id().to_le_bytes());
 		fips202::shake256_finalize(&mut state);
 		let mut entropy = [0u8; ENTROPY_SIZE];
-		fips202::shake256_squeeze(&mut entropy, ENTROPY_SIZE, &mut state);
+		fips202::shake256_squeeze(&mut entropy, &mut state);
 		entropy
 	}
 
@@ -657,14 +657,14 @@ impl ResharingProtocol {
 		sorted_parties.sort_by_key(|(party_id, _)| *party_id);
 
 		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, SESSION_SEED_DOMAIN, SESSION_SEED_DOMAIN.len());
+		fips202::shake256_absorb(&mut state, SESSION_SEED_DOMAIN);
 		for (&party_id, entropy) in &sorted_parties {
-			fips202::shake256_absorb(&mut state, &party_id.to_le_bytes(), 4);
-			fips202::shake256_absorb(&mut state, *entropy, ENTROPY_SIZE);
+			fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
+			fips202::shake256_absorb(&mut state, *entropy);
 		}
 		fips202::shake256_finalize(&mut state);
 		let mut session_seed = [0u8; 32];
-		fips202::shake256_squeeze(&mut session_seed, 32, &mut state);
+		fips202::shake256_squeeze(&mut session_seed, &mut state);
 		self.session_seed = Some(session_seed);
 
 		Ok(())
@@ -1393,9 +1393,9 @@ impl ResharingProtocol {
 		let mut party_key = [0u8; 32];
 		{
 			let mut h = fips202::KeccakState::default();
-			fips202::shake256_absorb(&mut h, b"reshare-party-key-v2", 20);
-			fips202::shake256_absorb(&mut h, &rho, 32);
-			fips202::shake256_absorb(&mut h, &self.config.my_party_id().to_le_bytes(), 4);
+			fips202::shake256_absorb(&mut h, b"reshare-party-key-v2");
+			fips202::shake256_absorb(&mut h, &rho);
+			fips202::shake256_absorb(&mut h, &self.config.my_party_id().to_le_bytes());
 			let mut buf: Vec<u8> = Vec::new();
 			for (j_mask, share) in &self.new_shares {
 				buf.clear();
@@ -1410,10 +1410,10 @@ impl ResharingProtocol {
 						buf.extend_from_slice(&c.to_le_bytes());
 					}
 				}
-				fips202::shake256_absorb(&mut h, &buf, buf.len());
+				fips202::shake256_absorb(&mut h, &buf);
 			}
 			fips202::shake256_finalize(&mut h);
-			fips202::shake256_squeeze(&mut party_key, 32, &mut h);
+			fips202::shake256_squeeze(&mut party_key, &mut h);
 		}
 
 		Ok(PrivateKeyShare::new(
@@ -1494,10 +1494,10 @@ fn derive_subshares_with_session_seed(
 	// so they derive the same PRF seed.
 	let prf_seed = build_subset_seed_with_session(i_mask, s_i, session_seed);
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, BOUNDED_SPLIT_DOMAIN, BOUNDED_SPLIT_DOMAIN.len());
-	fips202::shake256_absorb(&mut state, &prf_seed, prf_seed.len());
+	fips202::shake256_absorb(&mut state, BOUNDED_SPLIT_DOMAIN);
+	fips202::shake256_absorb(&mut state, &prf_seed);
 	for &j_mask in new_subsets {
-		fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes(), 2);
+		fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes());
 	}
 	fips202::shake256_finalize(&mut state);
 
@@ -1593,7 +1593,7 @@ fn sample_eta_coeff(state: &mut fips202::KeccakState) -> i32 {
 	let cutoff = (256 / bound) * bound;
 	let mut buf = [0u8; 1];
 	loop {
-		fips202::shake256_squeeze(&mut buf, 1, state);
+		fips202::shake256_squeeze(&mut buf, state);
 		let b = buf[0] as i32;
 		if b < cutoff {
 			return (b % bound) - eta_i32;
@@ -1608,7 +1608,7 @@ fn sample_uniform_usize(state: &mut fips202::KeccakState, upper: usize) -> usize
 	let cutoff = (256 / upper) * upper;
 	let mut buf = [0u8; 1];
 	loop {
-		fips202::shake256_squeeze(&mut buf, 1, state);
+		fips202::shake256_squeeze(&mut buf, state);
 		let b = buf[0] as usize;
 		if b < cutoff {
 			return b % upper;
@@ -1623,39 +1623,39 @@ fn build_subset_seed_with_session(
 	session_seed: &[u8; 32],
 ) -> [u8; 64] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, SUBSET_SEED_DOMAIN, SUBSET_SEED_DOMAIN.len());
+	fips202::shake256_absorb(&mut state, SUBSET_SEED_DOMAIN);
 	// Mix in session seed for forward secrecy
-	fips202::shake256_absorb(&mut state, session_seed, 32);
-	fips202::shake256_absorb(&mut state, &i_mask.to_le_bytes(), 2);
+	fips202::shake256_absorb(&mut state, session_seed);
+	fips202::shake256_absorb(&mut state, &i_mask.to_le_bytes());
 	let mut buf: Vec<u8> = Vec::new();
 	for poly in &s_i.s1 {
 		buf.clear();
 		for c in poly {
 			buf.extend_from_slice(&c.to_le_bytes());
 		}
-		fips202::shake256_absorb(&mut state, &buf, buf.len());
+		fips202::shake256_absorb(&mut state, &buf);
 	}
 	for poly in &s_i.s2 {
 		buf.clear();
 		for c in poly {
 			buf.extend_from_slice(&c.to_le_bytes());
 		}
-		fips202::shake256_absorb(&mut state, &buf, buf.len());
+		fips202::shake256_absorb(&mut state, &buf);
 	}
 	fips202::shake256_finalize(&mut state);
 	let mut out = [0u8; 64];
-	fips202::shake256_squeeze(&mut out, 64, &mut state);
+	fips202::shake256_squeeze(&mut out, &mut state);
 	out
 }
 
 /// Compute commitment to entropy: H("resharing-entropy-commit-v1" || entropy).
 fn commit_entropy(entropy: &[u8; ENTROPY_SIZE]) -> [u8; COMMITMENT_HASH_SIZE] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, ENTROPY_COMMIT_DOMAIN, ENTROPY_COMMIT_DOMAIN.len());
-	fips202::shake256_absorb(&mut state, entropy, ENTROPY_SIZE);
+	fips202::shake256_absorb(&mut state, ENTROPY_COMMIT_DOMAIN);
+	fips202::shake256_absorb(&mut state, entropy);
 	fips202::shake256_finalize(&mut state);
 	let mut out = [0u8; COMMITMENT_HASH_SIZE];
-	fips202::shake256_squeeze(&mut out, COMMITMENT_HASH_SIZE, &mut state);
+	fips202::shake256_squeeze(&mut out, &mut state);
 	out
 }
 
@@ -1665,52 +1665,52 @@ fn commit_subshare(
 	r: &NewShareData,
 ) -> [u8; COMMITMENT_HASH_SIZE] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, COMMIT_DOMAIN, COMMIT_DOMAIN.len());
-	fips202::shake256_absorb(&mut state, &i_mask.to_le_bytes(), 2);
-	fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes(), 2);
+	fips202::shake256_absorb(&mut state, COMMIT_DOMAIN);
+	fips202::shake256_absorb(&mut state, &i_mask.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes());
 	let mut buf: Vec<u8> = Vec::new();
 	for poly in &r.s1 {
 		buf.clear();
 		for c in poly {
 			buf.extend_from_slice(&c.to_le_bytes());
 		}
-		fips202::shake256_absorb(&mut state, &buf, buf.len());
+		fips202::shake256_absorb(&mut state, &buf);
 	}
 	for poly in &r.s2 {
 		buf.clear();
 		for c in poly {
 			buf.extend_from_slice(&c.to_le_bytes());
 		}
-		fips202::shake256_absorb(&mut state, &buf, buf.len());
+		fips202::shake256_absorb(&mut state, &buf);
 	}
 	fips202::shake256_finalize(&mut state);
 	let mut out = [0u8; COMMITMENT_HASH_SIZE];
-	fips202::shake256_squeeze(&mut out, COMMITMENT_HASH_SIZE, &mut state);
+	fips202::shake256_squeeze(&mut out, &mut state);
 	out
 }
 
 fn commit_new_share(j_mask: SubsetMask, share: &NewShareData) -> [u8; COMMITMENT_HASH_SIZE] {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, NEW_SHARE_COMMIT_DOMAIN, NEW_SHARE_COMMIT_DOMAIN.len());
-	fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes(), 2);
+	fips202::shake256_absorb(&mut state, NEW_SHARE_COMMIT_DOMAIN);
+	fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes());
 	let mut buf: Vec<u8> = Vec::new();
 	for poly in &share.s1 {
 		buf.clear();
 		for c in poly {
 			buf.extend_from_slice(&c.to_le_bytes());
 		}
-		fips202::shake256_absorb(&mut state, &buf, buf.len());
+		fips202::shake256_absorb(&mut state, &buf);
 	}
 	for poly in &share.s2 {
 		buf.clear();
 		for c in poly {
 			buf.extend_from_slice(&c.to_le_bytes());
 		}
-		fips202::shake256_absorb(&mut state, &buf, buf.len());
+		fips202::shake256_absorb(&mut state, &buf);
 	}
 	fips202::shake256_finalize(&mut state);
 	let mut out = [0u8; COMMITMENT_HASH_SIZE];
-	fips202::shake256_squeeze(&mut out, COMMITMENT_HASH_SIZE, &mut state);
+	fips202::shake256_squeeze(&mut out, &mut state);
 	out
 }
 

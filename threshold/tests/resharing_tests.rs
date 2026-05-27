@@ -1171,27 +1171,27 @@ fn forge_consistent_commitment(i_mask: u16, j_mask: u16, r: &NewShareData) -> [u
 	use qp_rusty_crystals_dilithium::fips202;
 	const COMMIT_DOMAIN: &[u8] = b"resharing-commit-v2";
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, COMMIT_DOMAIN, COMMIT_DOMAIN.len());
-	fips202::shake256_absorb(&mut state, &i_mask.to_le_bytes(), 2);
-	fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes(), 2);
+	fips202::shake256_absorb(&mut state, COMMIT_DOMAIN);
+	fips202::shake256_absorb(&mut state, &i_mask.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes());
 	let mut buf: Vec<u8> = Vec::new();
 	for poly in &r.s1 {
 		buf.clear();
 		for c in poly {
 			buf.extend_from_slice(&c.to_le_bytes());
 		}
-		fips202::shake256_absorb(&mut state, &buf, buf.len());
+		fips202::shake256_absorb(&mut state, &buf);
 	}
 	for poly in &r.s2 {
 		buf.clear();
 		for c in poly {
 			buf.extend_from_slice(&c.to_le_bytes());
 		}
-		fips202::shake256_absorb(&mut state, &buf, buf.len());
+		fips202::shake256_absorb(&mut state, &buf);
 	}
 	fips202::shake256_finalize(&mut state);
 	let mut out = [0u8; 32];
-	fips202::shake256_squeeze(&mut out, 32, &mut state);
+	fips202::shake256_squeeze(&mut out, &mut state);
 	out
 }
 
