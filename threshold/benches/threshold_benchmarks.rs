@@ -130,7 +130,8 @@ fn bench_dkg(c: &mut Criterion) {
 					let signers: Vec<BenchSigner> = (0..n).map(|id| BenchSigner { id }).collect();
 					let public_keys: Vec<u32> = (0..n).collect();
 					let seed = [42u8; 32];
-					run_local_mithril_dkg(t, n, signers, public_keys, seed).unwrap()
+					let session_nonce = [0xAAu8; 32];
+					run_local_mithril_dkg(t, n, signers, public_keys, seed, &session_nonce).unwrap()
 				});
 			},
 		);
@@ -217,11 +218,12 @@ fn bench_round1(c: &mut Criterion) {
 			&(public_key, shares, config),
 			|b, (public_key, shares, config)| {
 				let round1_seed = [0xBEu8; 32];
+				let ssid = [0xCCu8; 32];
 				b.iter(|| {
 					let mut signer =
 						ThresholdSigner::new(shares[0].clone(), public_key.clone(), *config)
 							.unwrap();
-					signer.round1_commit_with_seed(&round1_seed).unwrap()
+					signer.round1_commit_with_seed(&ssid, &round1_seed).unwrap()
 				});
 			},
 		);
