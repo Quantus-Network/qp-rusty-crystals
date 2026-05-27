@@ -2405,3 +2405,90 @@ fn test_coefficient_growth_tracking() {
 	println!("\nWith old residual approach, coefficients would grow ~sqrt(n) and");
 	println!("exceed bounds around 250-500 resharings.");
 }
+
+/// Test that when a dealer omits Round 4 delivery to a specific victim, the protocol
+/// correctly blames the dealer rather than the victim.
+///
+/// Attack scenario:
+/// 1. Dealer (party 0) broadcasts faithful Round 3 commitments
+/// 2. Dealer omits Round 4 private delivery to victim (party 2)
+/// 3. Victim fails verification (missing data)
+/// 4. Protocol must blame dealer (party 0), NOT the victim (party 2)
+#[test]
+fn test_resharing_blames_dealer_for_round4_omission() {
+	use std::cell::RefCell;
+	use std::rc::Rc;
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [0xAAu8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	// Party 0 (dealer) will omit Round 4 delivery to party 2 (victim)
+	let malicious_dealer: u32 = 0;
+	let victim: u32 = 2;
+
+	// Track dropped Round 4 messages so we can verify the attack worked
+	let dropped_count = Rc::new(RefCell::new(0u32));
+	let dropped_count_clone = dropped_count.clone();
+
+	// We need a different approach: modify Round 4 message to not include
+	// contributions for the victim. But since this is complex, let's instead
+	// remove all contributions from dealer's Round 4 message to the victim.
+	let tamper: TamperFn = Box::new(move |sender, recipient, data| {
+		// Only intercept Round 4 messages from the malicious dealer to the victim
+		if sender == malicious_dealer && recipient == Some(victim) {
+			let msg: ResharingMessage = match borsh::from_slice(&data) {
+				Ok(m) => m,
+				Err(_) => return data,
+			};
+			// Strip all contributions from the Round 4 message
+			if let ResharingMessage::Round4(mut r4) = msg {
+				*dropped_count_clone.borrow_mut() += 1;
+				r4.contributions.clear(); // Empty contributions = dealer didn't deliver
+				return borsh::to_vec(&ResharingMessage::Round4(r4))
+					.expect("re-serialize tampered msg");
+			}
+		}
+		data
+	});
+
+	let result = run_resharing_protocol_with_tamper(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		Some(tamper),
+	);
+
+	// Verify we actually tampered with some messages
+	assert!(*dropped_count.borrow() > 0, "Test setup error: no Round 4 messages were tampered");
+
+	// Protocol should fail due to the omission
+	assert!(result.is_err(), "Protocol should fail when dealer omits Round 4 delivery");
+
+	let err = result.unwrap_err();
+	println!("Error: {}", err);
+
+	// The error should blame the dealer (party 0), not the victim (party 2)
+	assert!(
+		err.contains(&format!("{}", malicious_dealer)) || err.contains("Dealers failed"),
+		"Error should blame the malicious dealer ({}), not the victim ({}). Got: {}",
+		malicious_dealer,
+		victim,
+		err
+	);
+	assert!(
+		!err.contains(&format!("Party {} failed", victim))
+			&& !err.contains(&format!("Parties reported failure: [{}", victim)),
+		"Error should NOT blame the victim ({}). Got: {}",
+		victim,
+		err
+	);
+}

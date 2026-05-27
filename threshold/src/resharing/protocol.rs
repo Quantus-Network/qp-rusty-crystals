@@ -116,6 +116,13 @@ pub enum ResharingProtocolError {
 	CommitmentMismatch(ParticipantId),
 	/// Share verification failed.
 	ShareVerificationFailed(String),
+	/// A dealer failed to deliver valid Round 4 data.
+	DealerDeliveryFailed {
+		/// The dealer that failed to deliver.
+		dealer: ParticipantId,
+		/// Description of what was missing or invalid.
+		reason: String,
+	},
 	/// Serialization error.
 	SerializationError(String),
 	/// A party reported failure (or was accused as a dealer).
@@ -151,6 +158,9 @@ impl fmt::Display for ResharingProtocolError {
 			},
 			ResharingProtocolError::ShareVerificationFailed(s) => {
 				write!(f, "Share verification failed: {}", s)
+			},
+			ResharingProtocolError::DealerDeliveryFailed { dealer, reason } => {
+				write!(f, "Dealer {} failed to deliver: {}", dealer, reason)
 			},
 			ResharingProtocolError::SerializationError(s) => {
 				write!(f, "Serialization error: {}", s)
@@ -836,6 +846,7 @@ impl ResharingProtocol {
 		let mut accusations: Vec<DealerAccusation> = Vec::new();
 		let mut share_commitments: BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]> =
 			BTreeMap::new();
+		let mut blamed_dealers: Vec<ParticipantId> = Vec::new();
 		let mut success = true;
 		let mut error_message: Option<String> = None;
 
@@ -857,6 +868,12 @@ impl ResharingProtocol {
 		if self.config.role().is_new_committee() && success {
 			match self.verify_and_aggregate_new_shares() {
 				Ok(commits) => share_commitments = commits,
+				Err(ResharingProtocolError::DealerDeliveryFailed { dealer, reason }) => {
+					// Explicitly blame the dealer, not the victim
+					blamed_dealers.push(dealer);
+					success = false;
+					error_message = Some(format!("Dealer {} failed: {}", dealer, reason));
+				},
 				Err(e) => {
 					success = false;
 					error_message = Some(e.to_string());
@@ -881,6 +898,7 @@ impl ResharingProtocol {
 			share_commitments,
 			partial_pks,
 			accusations,
+			blamed_dealers,
 			success,
 			error_message,
 		};
@@ -927,16 +945,38 @@ impl ResharingProtocol {
 
 	fn handle_combining(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
 		// Surface any explicit failure flags from Round 5.
-		let failed_parties: Vec<ParticipantId> = self
-			.round5_broadcasts
-			.iter()
-			.filter(|(_, b)| !b.success)
-			.map(|(id, _)| *id)
-			.collect();
-		if !failed_parties.is_empty() {
-			let reason = format!("Parties reported failure: {:?}", failed_parties);
+		// If a party failed due to a dealer's misbehavior, blame the dealer instead.
+		let mut blamed_dealers_set: alloc::collections::BTreeSet<ParticipantId> =
+			alloc::collections::BTreeSet::new();
+		let mut failed_parties_without_blame: Vec<ParticipantId> = Vec::new();
+
+		for (id, broadcast) in &self.round5_broadcasts {
+			if !broadcast.success {
+				if broadcast.blamed_dealers.is_empty() {
+					// Party failed but didn't blame a dealer - party itself is at fault
+					failed_parties_without_blame.push(*id);
+				} else {
+					// Party failed and blamed specific dealer(s) - blame dealers
+					for dealer in &broadcast.blamed_dealers {
+						blamed_dealers_set.insert(*dealer);
+					}
+				}
+			}
+		}
+
+		// Blamed dealers take priority (they caused victims to fail)
+		if !blamed_dealers_set.is_empty() {
+			let blamed_vec: Vec<ParticipantId> = blamed_dealers_set.into_iter().collect();
+			let reason = format!("Dealers failed to deliver: {:?}", blamed_vec);
 			self.state = ResharingState::Failed(reason);
-			return Err(ResharingProtocolError::PartyFailure(failed_parties));
+			return Err(ResharingProtocolError::PartyFailure(blamed_vec));
+		}
+
+		// Then report parties that failed without blaming anyone
+		if !failed_parties_without_blame.is_empty() {
+			let reason = format!("Parties reported failure: {:?}", failed_parties_without_blame);
+			self.state = ResharingState::Failed(reason);
+			return Err(ResharingProtocolError::PartyFailure(failed_parties_without_blame));
 		}
 
 		// Surface any dealer accusations.
@@ -1190,40 +1230,43 @@ impl ResharingProtocol {
 					))),
 			};
 			let dealer_r3 = self.round3_broadcasts.get(&dealer).ok_or_else(|| {
-				ResharingProtocolError::ShareVerificationFailed(format!(
-					"missing Round 3 commitment from dealer {} for subset {:b}",
-					dealer, i_mask
-				))
+				ResharingProtocolError::DealerDeliveryFailed {
+					dealer,
+					reason: format!("missing Round 3 commitment for subset {:b}", i_mask),
+				}
 			})?;
 			let dealer_r4 = self.round4_messages.get(&dealer).ok_or_else(|| {
-				ResharingProtocolError::ShareVerificationFailed(format!(
-					"missing Round 4 message from dealer {} for subset {:b}",
-					dealer, i_mask
-				))
+				ResharingProtocolError::DealerDeliveryFailed {
+					dealer,
+					reason: format!("missing Round 4 message for subset {:b}", i_mask),
+				}
 			})?;
 			for &j_mask in new_subsets {
 				if (j_mask & (1 << my_idx)) == 0 {
 					continue;
 				}
 				let r = dealer_r4.contributions.get(&(i_mask, j_mask)).ok_or_else(|| {
-					ResharingProtocolError::ShareVerificationFailed(format!(
-						"dealer {} did not deliver r_{{{:b}->{:b}}}",
-						dealer, i_mask, j_mask
-					))
+					ResharingProtocolError::DealerDeliveryFailed {
+						dealer,
+						reason: format!("did not deliver r_{{{:b}->{:b}}}", i_mask, j_mask),
+					}
 				})?;
 				let expected_commit = commit_subshare(i_mask, j_mask, r);
 				let dealer_commit =
 					dealer_r3.commitments.get(&(i_mask, j_mask)).ok_or_else(|| {
-						ResharingProtocolError::ShareVerificationFailed(format!(
-							"dealer {} did not commit to r_{{{:b}->{:b}}}",
-							dealer, i_mask, j_mask
-						))
+						ResharingProtocolError::DealerDeliveryFailed {
+							dealer,
+							reason: format!("did not commit to r_{{{:b}->{:b}}}", i_mask, j_mask),
+						}
 					})?;
 				if *dealer_commit != expected_commit {
-					return Err(ResharingProtocolError::ShareVerificationFailed(format!(
-						"dealer {} sent r_{{{:b}->{:b}}} that doesn't match their commitment",
-						dealer, i_mask, j_mask
-					)));
+					return Err(ResharingProtocolError::DealerDeliveryFailed {
+						dealer,
+						reason: format!(
+							"sent r_{{{:b}->{:b}}} that doesn't match commitment",
+							i_mask, j_mask
+						),
+					});
 				}
 				let acc = s_new.get_mut(&j_mask).unwrap();
 				add_share_into(acc, r);

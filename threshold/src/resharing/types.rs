@@ -608,6 +608,10 @@ pub struct ResharingRound5Broadcast {
 	/// Accusations against dealers whose broadcast commitments did not match
 	/// the sender's independent recomputation.
 	pub accusations: Vec<DealerAccusation>,
+	/// Dealers that failed to deliver valid Round 4 messages to this party.
+	/// Used to correctly attribute blame when a new committee member fails
+	/// verification due to missing or invalid private deliveries.
+	pub blamed_dealers: Vec<ParticipantId>,
 	/// Indicates whether this party processed Round 3/4 successfully.
 	pub success: bool,
 	/// Optional error message if `success` is false.
@@ -868,6 +872,7 @@ mod tests {
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
 			accusations: Vec::new(),
+			blamed_dealers: Vec::new(),
 			success: true,
 			error_message: None,
 		});
@@ -1059,6 +1064,7 @@ mod tests {
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
 			accusations: Vec::new(),
+			blamed_dealers: Vec::new(),
 			success: true,
 			error_message: None,
 		});
@@ -1073,6 +1079,7 @@ mod tests {
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
 			accusations: Vec::new(),
+			blamed_dealers: Vec::new(),
 			success: true,
 			error_message: None,
 		};
@@ -1085,6 +1092,7 @@ mod tests {
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
 			accusations: Vec::new(),
+			blamed_dealers: Vec::new(),
 			success: false,
 			error_message: Some("Share verification failed".to_string()),
 		};
@@ -1169,6 +1177,7 @@ mod tests {
 			share_commitments: BTreeMap::new(),
 			partial_pks,
 			accusations: Vec::new(),
+			blamed_dealers: Vec::new(),
 			success: true,
 			error_message: None,
 		};
@@ -1196,6 +1205,7 @@ mod tests {
 			share_commitments: BTreeMap::new(),
 			partial_pks,
 			accusations: Vec::new(),
+			blamed_dealers: Vec::new(),
 			success: true,
 			error_message: None,
 		};
