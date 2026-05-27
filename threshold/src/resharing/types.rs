@@ -924,15 +924,9 @@ mod tests {
 		assert!(resharing_config.role.is_new_committee());
 
 		// Test Both role (party staying)
-		let resharing_config = ResharingConfig::new(
-			2,
-			vec![0, 1, 2],
-			2,
-			vec![0, 1, 3],
-			0,
-			public_key.clone(),
-		)
-		.expect("valid config");
+		let resharing_config =
+			ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 3], 0, public_key.clone())
+				.expect("valid config");
 		assert_eq!(resharing_config.role, ResharingRole::Both);
 		assert!(resharing_config.role.is_old_committee());
 		assert!(resharing_config.role.is_new_committee());
@@ -1010,7 +1004,8 @@ mod tests {
 		let pk = make_test_public_key();
 
 		// Test minimum valid threshold (t=2)
-		// Party 0 is in old committee - config creation is valid, share validation is now at protocol level
+		// Party 0 is in old committee - config creation is valid, share validation is now at
+		// protocol level
 		let result = ResharingConfig::new(2, vec![0, 1], 2, vec![0, 1], 0, pk.clone());
 		assert!(result.is_ok());
 

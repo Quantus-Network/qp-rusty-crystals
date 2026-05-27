@@ -139,8 +139,7 @@ use core::{fmt, mem};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use log::warn;
-use qp_rusty_crystals_dilithium::fips202;
-use qp_rusty_crystals_dilithium::ml_dsa_87::MAX_MESSAGE_SIZE;
+use qp_rusty_crystals_dilithium::{fips202, ml_dsa_87::MAX_MESSAGE_SIZE};
 
 use crate::{
 	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature, SSID_SIZE},

@@ -427,7 +427,12 @@ fn test_resharing_protocol_creation() {
 
 	let protocol_seed = [42u8; 32];
 	let session_nonce = [0x88u8; 32];
-	let protocol = ResharingProtocol::new(resharing_config, Some(shares[0].clone()), protocol_seed, &session_nonce);
+	let protocol = ResharingProtocol::new(
+		resharing_config,
+		Some(shares[0].clone()),
+		protocol_seed,
+		&session_nonce,
+	);
 	assert_eq!(*protocol.state(), ResharingState::Round1Generate);
 }
 
@@ -437,19 +442,17 @@ fn test_resharing_protocol_round1_generation() {
 	let seed = [42u8; 32];
 	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
 
-	let resharing_config = ResharingConfig::new(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 2],
-		0,
-		public_key,
-	)
-	.expect("valid config");
+	let resharing_config = ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 2], 0, public_key)
+		.expect("valid config");
 
 	let protocol_seed = [42u8; 32];
 	let session_nonce = [0x55u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, Some(shares[0].clone()), protocol_seed, &session_nonce);
+	let mut protocol = ResharingProtocol::new(
+		resharing_config,
+		Some(shares[0].clone()),
+		protocol_seed,
+		&session_nonce,
+	);
 
 	// First poke should generate Round 1 message (entropy commitment)
 	let action = protocol.poke().expect("poke should succeed");
@@ -480,13 +483,13 @@ fn test_resharing_new_party_skips_round1() {
 	let (public_key, _shares) = generate_with_dealer(&seed, config).expect("keygen");
 
 	// Party 3 is joining (not in old committee)
-	let resharing_config =
-		ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 3], 3, public_key)
-			.expect("valid config");
+	let resharing_config = ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 3], 3, public_key)
+		.expect("valid config");
 
 	let protocol_seed = [42u8; 32];
 	let session_nonce = [0x66u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, None, protocol_seed, &session_nonce);
+	let mut protocol =
+		ResharingProtocol::new(resharing_config, None, protocol_seed, &session_nonce);
 
 	// New party should skip Round 1-2 (entropy commit-reveal) and wait
 	let action = protocol.poke().expect("poke should succeed");
@@ -520,14 +523,8 @@ fn test_resharing_same_committee() {
 	// For now, just verify the protocol can be set up
 	// Full end-to-end test requires fixing the output extraction issue
 	for party_id in 0..3 {
-		let resharing_config = ResharingConfig::new(
-			2,
-			vec![0, 1, 2],
-			2,
-			vec![0, 1, 2],
-			party_id,
-			public_key.clone(),
-		);
+		let resharing_config =
+			ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 2], party_id, public_key.clone());
 		assert!(resharing_config.is_ok());
 	}
 }
@@ -581,14 +578,8 @@ fn test_resharing_remove_party() {
 	// Old committee: 0, 1, 2
 	// New committee: 0, 1 (party 2 leaves)
 	for party_id in 0..3 {
-		let resharing_config = ResharingConfig::new(
-			2,
-			vec![0, 1, 2],
-			2,
-			vec![0, 1],
-			party_id,
-			public_key.clone(),
-		);
+		let resharing_config =
+			ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1], party_id, public_key.clone());
 		assert!(
 			resharing_config.is_ok(),
 			"Failed to create config for party {}: {:?}",
@@ -646,14 +637,8 @@ fn test_resharing_complete_committee_change() {
 	// New committee: 3, 4, 5 (completely different)
 	// All old members are leaving, all new members are joining
 	for party_id in 0..6 {
-		let resharing_config = ResharingConfig::new(
-			2,
-			vec![0, 1, 2],
-			2,
-			vec![3, 4, 5],
-			party_id,
-			public_key.clone(),
-		);
+		let resharing_config =
+			ResharingConfig::new(2, vec![0, 1, 2], 2, vec![3, 4, 5], party_id, public_key.clone());
 		assert!(
 			resharing_config.is_ok(),
 			"Failed to create config for party {}: {:?}",
@@ -679,7 +664,8 @@ fn test_resharing_config_party_not_in_either_committee() {
 	assert!(result.is_err());
 }
 
-// Note: existing_share validation is now done at ResharingProtocol::new(), not ResharingConfig::new()
+// Note: existing_share validation is now done at ResharingProtocol::new(), not
+// ResharingConfig::new()
 
 #[test]
 fn test_resharing_config_invalid_old_threshold() {
@@ -729,18 +715,17 @@ fn test_resharing_round1_message_from_non_member_ignored() {
 	let seed = [42u8; 32];
 	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
 
-	let resharing_config = ResharingConfig::new(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 2],
-		0,
-		public_key.clone(),
-	)
-	.expect("valid config");
+	let resharing_config =
+		ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 2], 0, public_key.clone())
+			.expect("valid config");
 
 	let session_nonce = [0x44u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, Some(shares[0].clone()), [42u8; 32], &session_nonce);
+	let mut protocol = ResharingProtocol::new(
+		resharing_config,
+		Some(shares[0].clone()),
+		[42u8; 32],
+		&session_nonce,
+	);
 
 	// Generate Round 1 message first
 	let _ = protocol.poke().expect("poke should succeed");
@@ -765,29 +750,17 @@ fn test_resharing_duplicate_message_ignored() {
 	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
 
 	// Create two protocols for parties 0 and 1
-	let config0 = ResharingConfig::new(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 2],
-		0,
-		public_key.clone(),
-	)
-	.expect("valid config");
+	let config0 = ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 2], 0, public_key.clone())
+		.expect("valid config");
 
-	let config1 = ResharingConfig::new(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 2],
-		1,
-		public_key.clone(),
-	)
-	.expect("valid config");
+	let config1 = ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 2], 1, public_key.clone())
+		.expect("valid config");
 
 	let session_nonce = [0x33u8; 32];
-	let mut protocol0 = ResharingProtocol::new(config0, Some(shares[0].clone()), [0u8; 32], &session_nonce);
-	let mut protocol1 = ResharingProtocol::new(config1, Some(shares[1].clone()), [1u8; 32], &session_nonce);
+	let mut protocol0 =
+		ResharingProtocol::new(config0, Some(shares[0].clone()), [0u8; 32], &session_nonce);
+	let mut protocol1 =
+		ResharingProtocol::new(config1, Some(shares[1].clone()), [1u8; 32], &session_nonce);
 
 	// Generate Round 0 messages
 	let msg0 = match protocol0.poke().expect("poke should succeed") {
@@ -851,7 +824,12 @@ fn test_old_only_party_behavior() {
 	.expect("valid config");
 
 	let session_nonce = [0x22u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, Some(shares[2].clone()), [42u8; 32], &session_nonce);
+	let mut protocol = ResharingProtocol::new(
+		resharing_config,
+		Some(shares[2].clone()),
+		[42u8; 32],
+		&session_nonce,
+	);
 
 	// Party should participate in Round 0 (entropy commitment)
 	let action = protocol.poke().expect("poke should succeed");
@@ -1219,8 +1197,8 @@ fn test_resharing_ignores_fabricated_accusation_against_non_dealer() {
 	// was a bad dealer for old_subset 0b011 (parties {0,1}). But party 0 is the
 	// designated dealer for that subset (lowest ID), not party 2.
 	let fabricated_accusation = DealerAccusation {
-		dealer: 2,           // Framing party 2
-		old_subset: 0b011,   // Subset {0,1} - dealer is party 0, not party 2
+		dealer: 2,         // Framing party 2
+		old_subset: 0b011, // Subset {0,1} - dealer is party 0, not party 2
 		new_subset: 0b011,
 	};
 
@@ -2416,8 +2394,7 @@ fn test_coefficient_growth_tracking() {
 /// 4. Protocol must blame dealer (party 0), NOT the victim (party 2)
 #[test]
 fn test_resharing_blames_dealer_for_round4_omission() {
-	use std::cell::RefCell;
-	use std::rc::Rc;
+	use std::{cell::RefCell, rc::Rc};
 
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
 	let seed = [0xAAu8; 32];
@@ -2485,8 +2462,8 @@ fn test_resharing_blames_dealer_for_round4_omission() {
 		err
 	);
 	assert!(
-		!err.contains(&format!("Party {} failed", victim))
-			&& !err.contains(&format!("Parties reported failure: [{}", victim)),
+		!err.contains(&format!("Party {} failed", victim)) &&
+			!err.contains(&format!("Parties reported failure: [{}", victim)),
 		"Error should NOT blame the victim ({}). Got: {}",
 		victim,
 		err

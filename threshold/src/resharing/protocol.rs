@@ -296,7 +296,8 @@ pub struct ResharingProtocol {
 impl ResharingProtocol {
 	/// Create a new resharing protocol instance.
 	///
-	/// * `existing_share` - Required for old committee members (`OldOnly`/`Both`), `None` for `NewOnly`.
+	/// * `existing_share` - Required for old committee members (`OldOnly`/`Both`), `None` for
+	///   `NewOnly`.
 	/// * `seed` - 32 bytes of cryptographic randomness for forward secrecy.
 	/// * `session_nonce` - Unique nonce for SSID computation (prevents cross-session replay).
 	pub fn new(

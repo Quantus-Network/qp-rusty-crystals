@@ -573,19 +573,18 @@ mod resharing_edge_cases {
 		let config = ThresholdConfig::new(2, 3).expect("Valid config");
 		let (public_key, shares) = generate_with_dealer(&[42u8; 32], config).expect("Key gen");
 
-		let resharing_config = ResharingConfig::new(
-			2,
-			vec![0, 1, 2],
-			2,
-			vec![0, 1, 2],
-			0,
-			public_key,
-		)
-		.expect("Valid resharing config");
+		let resharing_config =
+			ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 2], 0, public_key)
+				.expect("Valid resharing config");
 
 		let protocol_seed = [42u8; 32];
 		let session_nonce = [0x77u8; 32];
-		let mut protocol = ResharingProtocol::new(resharing_config, Some(shares[0].clone()), protocol_seed, &session_nonce);
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			Some(shares[0].clone()),
+			protocol_seed,
+			&session_nonce,
+		);
 
 		// Before completion, take_output should return None
 		let output1 = protocol.take_output();
