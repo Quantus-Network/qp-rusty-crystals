@@ -140,6 +140,7 @@ use core::{fmt, mem};
 use borsh::{BorshDeserialize, BorshSerialize};
 use log::warn;
 use qp_rusty_crystals_dilithium::fips202;
+use qp_rusty_crystals_dilithium::ml_dsa_87::MAX_MESSAGE_SIZE;
 
 use crate::{
 	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature, SSID_SIZE},
@@ -594,6 +595,25 @@ impl DilithiumSignProtocol {
 				The scheme does not support more or fewer than threshold parties.",
 				threshold,
 				participants.len()
+			)));
+		}
+
+		// Validate message size against ML-DSA limit.
+		// Dilithium verification rejects messages larger than MAX_MESSAGE_SIZE, so rejecting
+		// early prevents wasted threshold work on inputs the verifier will never accept.
+		if message.len() > MAX_MESSAGE_SIZE {
+			return Err(SignProtocolError::InvalidConfig(format!(
+				"message size {} exceeds ML-DSA limit of {} bytes",
+				message.len(),
+				MAX_MESSAGE_SIZE
+			)));
+		}
+
+		// Validate context size (ML-DSA limit is 255 bytes).
+		if context.len() > 255 {
+			return Err(SignProtocolError::InvalidConfig(format!(
+				"context size {} exceeds ML-DSA limit of 255 bytes",
+				context.len()
 			)));
 		}
 
@@ -2298,5 +2318,85 @@ mod tests {
 		// Subsequent pokes must continue to fail (the instance is dead).
 		let again = protocol.poke();
 		assert!(matches!(again, Err(SignProtocolError::ProtocolFailed(_))));
+	}
+
+	#[test]
+	fn test_protocol_rejects_oversized_message() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+
+		// Create a message larger than MAX_MESSAGE_SIZE (64 MiB)
+		let oversized_message = vec![0u8; MAX_MESSAGE_SIZE + 1];
+
+		let result = DilithiumSignProtocol::new(
+			signer,
+			oversized_message,
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+			[0xBB; 32],
+		);
+
+		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
+		if let Err(SignProtocolError::InvalidConfig(msg)) = result {
+			assert!(msg.contains("message size"), "Error should mention message size: {}", msg);
+			assert!(msg.contains("exceeds"), "Error should mention limit exceeded: {}", msg);
+		}
+	}
+
+	#[test]
+	fn test_protocol_rejects_oversized_context() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+
+		// Create a context larger than 255 bytes
+		let oversized_context = vec![0u8; 256];
+
+		let result = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			oversized_context,
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+			[0xBB; 32],
+		);
+
+		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
+		if let Err(SignProtocolError::InvalidConfig(msg)) = result {
+			assert!(msg.contains("context size"), "Error should mention context size: {}", msg);
+			assert!(msg.contains("255"), "Error should mention 255 byte limit: {}", msg);
+		}
+	}
+
+	#[test]
+	fn test_protocol_accepts_max_valid_sizes() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+
+		// Max valid context (255 bytes)
+		let max_context = vec![0u8; 255];
+
+		let result = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			max_context,
+			vec![0, 1],
+			0,
+			0,
+			[0xAA; 32],
+			[0xBB; 32],
+		);
+
+		assert!(result.is_ok(), "Should accept 255-byte context");
 	}
 }
