@@ -229,6 +229,10 @@ pub struct ResharingProtocol {
 	/// Seed for entropy generation (provided by caller).
 	seed: [u8; 32],
 
+	/// This party's existing private key share (if in old committee).
+	/// None if this party is NewOnly (joining the new committee).
+	existing_share: Option<PrivateKeyShare>,
+
 	/// Old subset masks (from the existing share's stored shares), in canonical
 	/// (BTreeMap) order. Indexed by `old_subset_index`.
 	old_subset_order: Vec<SubsetMask>,
@@ -282,30 +286,15 @@ pub struct ResharingProtocol {
 impl ResharingProtocol {
 	/// Create a new resharing protocol instance.
 	///
-	/// # Arguments
-	///
-	/// * `config` - The resharing configuration specifying old/new committees and this party's
-	///   role.
-	/// * `seed` - 32 bytes of entropy for generating this party's random contribution to the
-	///   session seed. Must be cryptographically random (e.g., from `OsRng`). Each party must
-	///   provide independent entropy; using the same seed across parties breaks forward secrecy.
-	/// * `session_nonce` - A unique nonce for this resharing session (e.g., from transport layer).
-	///   Used to compute the SSID that binds all messages to this session.
-	///
-	/// # Forward Secrecy
-	///
-	/// The `seed` parameter enables forward secrecy by ensuring that the randomness used to derive
-	/// new shares includes fresh entropy from all old committee members. Even if old shares are
-	/// later compromised, an attacker cannot reconstruct the specific randomness used in this
-	/// resharing session.
-	///
-	/// # Session Binding (SSID)
-	///
-	/// The `session_nonce` is combined with the committee configurations and public key to compute
-	/// a Session Identifier (SSID). This SSID is included in all protocol messages to prevent
-	/// cross-session replay attacks (CVE-2022-47930 class vulnerabilities).
-	pub fn new(config: ResharingConfig, seed: [u8; 32], session_nonce: &[u8; 32]) -> Self {
-		// Compute SSID from configuration + session nonce
+	/// * `existing_share` - Required for old committee members (`OldOnly`/`Both`), `None` for `NewOnly`.
+	/// * `seed` - 32 bytes of cryptographic randomness for forward secrecy.
+	/// * `session_nonce` - Unique nonce for SSID computation (prevents cross-session replay).
+	pub fn new(
+		config: ResharingConfig,
+		existing_share: Option<PrivateKeyShare>,
+		seed: [u8; 32],
+		session_nonce: &[u8; 32],
+	) -> Self {
 		let old_participants: Vec<_> = config.old_participants().iter().collect();
 		let new_participants: Vec<_> = config.new_participants().iter().collect();
 		let ssid = compute_resharing_ssid(
@@ -325,6 +314,7 @@ impl ResharingProtocol {
 			state: ResharingState::Round1Generate,
 			ssid,
 			seed,
+			existing_share,
 			old_subset_order,
 			new_subset_order,
 			my_entropy: None,
@@ -999,7 +989,7 @@ impl ResharingProtocol {
 	/// Pre-compute every sub-share `r_{I→J}` we are responsible for dealing.
 	/// Uses the session seed for forward secrecy.
 	fn compute_my_subshares(&mut self) -> Result<(), ResharingProtocolError> {
-		let existing = self.config.existing_share().ok_or_else(|| {
+		let existing = self.existing_share.as_ref().ok_or_else(|| {
 			ResharingProtocolError::InternalError("Missing existing share".to_string())
 		})?;
 		let shares = existing.shares();
@@ -1098,7 +1088,7 @@ impl ResharingProtocol {
 	/// subset we belong to, compare against the dealer's broadcast commitments, and
 	/// produce accusations for any mismatches.
 	fn collect_accusations(&self) -> Result<Vec<DealerAccusation>, ResharingProtocolError> {
-		let existing = self.config.existing_share().ok_or_else(|| {
+		let existing = self.existing_share.as_ref().ok_or_else(|| {
 			ResharingProtocolError::InternalError("Missing existing share".to_string())
 		})?;
 		let shares = existing.shares();
@@ -1276,7 +1266,7 @@ impl ResharingProtocol {
 	/// Extract `rho` (matrix-A seed). Old/Both parties take it from their existing
 	/// share; NewOnly parties extract it from the public key prefix.
 	fn derive_rho(&self) -> [u8; 32] {
-		if let Some(existing) = self.config.existing_share() {
+		if let Some(existing) = self.existing_share.as_ref() {
 			*existing.rho()
 		} else {
 			let mut rho = [0u8; 32];
@@ -1382,7 +1372,7 @@ impl ResharingProtocol {
 		}
 
 		let rho = self.derive_rho();
-		let tr = if let Some(existing) = self.config.existing_share() {
+		let tr = if let Some(existing) = self.existing_share.as_ref() {
 			*existing.tr()
 		} else {
 			*self.config.public_key().tr()

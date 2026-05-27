@@ -67,7 +67,6 @@ fn run_resharing_protocol_with_tamper(
 			new_threshold,
 			new_participants.clone(),
 			party_id,
-			existing_share,
 			public_key.clone(),
 		)
 		.map_err(|e| format!("Config error for party {}: {}", party_id, e))?;
@@ -81,7 +80,7 @@ fn run_resharing_protocol_with_tamper(
 			*byte = ((party_id as u8).wrapping_mul(i as u8)).wrapping_add(0x42);
 		}
 
-		let protocol = ResharingProtocol::new(config, seed, &session_nonce);
+		let protocol = ResharingProtocol::new(config, existing_share, seed, &session_nonce);
 		protocols.insert(party_id, protocol);
 	}
 
@@ -344,7 +343,7 @@ fn run_signing_and_verify_with_retries(
 fn test_resharing_config_creation() {
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
 	let seed = [42u8; 32];
-	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+	let (public_key, _shares) = generate_with_dealer(&seed, config).expect("keygen");
 
 	// Create resharing config for party 0 (staying in committee)
 	let resharing_config = ResharingConfig::new(
@@ -353,7 +352,6 @@ fn test_resharing_config_creation() {
 		2,             // new threshold
 		vec![0, 1, 3], // new participants (2 leaves, 3 joins)
 		0,             // my party id
-		Some(shares[0].clone()),
 		public_key.clone(),
 	);
 
@@ -375,8 +373,7 @@ fn test_resharing_config_new_party() {
 		vec![0, 1, 2],
 		2,
 		vec![0, 1, 3],
-		3,    // joining party
-		None, // no existing share
+		3, // joining party
 		public_key.clone(),
 	);
 
@@ -390,7 +387,7 @@ fn test_resharing_config_new_party() {
 fn test_resharing_config_leaving_party() {
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
 	let seed = [42u8; 32];
-	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+	let (public_key, _shares) = generate_with_dealer(&seed, config).expect("keygen");
 
 	// Create resharing config for party 2 (leaving)
 	let resharing_config = ResharingConfig::new(
@@ -399,7 +396,6 @@ fn test_resharing_config_leaving_party() {
 		2,
 		vec![0, 1, 3],
 		2, // leaving party
-		Some(shares[2].clone()),
 		public_key.clone(),
 	);
 
@@ -425,14 +421,13 @@ fn test_resharing_protocol_creation() {
 		2,
 		vec![0, 1, 2], // same committee
 		0,
-		Some(shares[0].clone()),
 		public_key,
 	)
 	.expect("valid config");
 
 	let protocol_seed = [42u8; 32];
 	let session_nonce = [0x88u8; 32];
-	let protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
+	let protocol = ResharingProtocol::new(resharing_config, Some(shares[0].clone()), protocol_seed, &session_nonce);
 	assert_eq!(*protocol.state(), ResharingState::Round1Generate);
 }
 
@@ -448,14 +443,13 @@ fn test_resharing_protocol_round1_generation() {
 		2,
 		vec![0, 1, 2],
 		0,
-		Some(shares[0].clone()),
 		public_key,
 	)
 	.expect("valid config");
 
 	let protocol_seed = [42u8; 32];
 	let session_nonce = [0x55u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
+	let mut protocol = ResharingProtocol::new(resharing_config, Some(shares[0].clone()), protocol_seed, &session_nonce);
 
 	// First poke should generate Round 1 message (entropy commitment)
 	let action = protocol.poke().expect("poke should succeed");
@@ -487,12 +481,12 @@ fn test_resharing_new_party_skips_round1() {
 
 	// Party 3 is joining (not in old committee)
 	let resharing_config =
-		ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 3], 3, None, public_key)
+		ResharingConfig::new(2, vec![0, 1, 2], 2, vec![0, 1, 3], 3, public_key)
 			.expect("valid config");
 
 	let protocol_seed = [42u8; 32];
 	let session_nonce = [0x66u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
+	let mut protocol = ResharingProtocol::new(resharing_config, None, protocol_seed, &session_nonce);
 
 	// New party should skip Round 1-2 (entropy commit-reveal) and wait
 	let action = protocol.poke().expect("poke should succeed");
@@ -532,7 +526,6 @@ fn test_resharing_same_committee() {
 			2,
 			vec![0, 1, 2],
 			party_id,
-			old_shares.get(&party_id).cloned(),
 			public_key.clone(),
 		);
 		assert!(resharing_config.is_ok());
@@ -555,15 +548,12 @@ fn test_resharing_add_party() {
 	// Old committee: 0, 1, 2
 	// New committee: 0, 1, 2, 3
 	for party_id in 0..4 {
-		let existing_share = if party_id < 3 { old_shares.get(&party_id).cloned() } else { None };
-
 		let resharing_config = ResharingConfig::new(
 			2,
 			vec![0, 1, 2],
 			2,
 			vec![0, 1, 2, 3],
 			party_id,
-			existing_share,
 			public_key.clone(),
 		);
 		assert!(
@@ -597,7 +587,6 @@ fn test_resharing_remove_party() {
 			2,
 			vec![0, 1],
 			party_id,
-			old_shares.get(&party_id).cloned(),
 			public_key.clone(),
 		);
 		assert!(
@@ -624,15 +613,12 @@ fn test_resharing_change_threshold() {
 	// Old committee: 0, 1, 2 with t=2
 	// New committee: 0, 1, 2, 3 with t=3
 	for party_id in 0..4 {
-		let existing_share = if party_id < 3 { old_shares.get(&party_id).cloned() } else { None };
-
 		let resharing_config = ResharingConfig::new(
 			2,
 			vec![0, 1, 2],
 			3, // new threshold
 			vec![0, 1, 2, 3],
 			party_id,
-			existing_share,
 			public_key.clone(),
 		);
 		assert!(
@@ -660,15 +646,12 @@ fn test_resharing_complete_committee_change() {
 	// New committee: 3, 4, 5 (completely different)
 	// All old members are leaving, all new members are joining
 	for party_id in 0..6 {
-		let existing_share = if party_id < 3 { old_shares.get(&party_id).cloned() } else { None };
-
 		let resharing_config = ResharingConfig::new(
 			2,
 			vec![0, 1, 2],
 			2,
 			vec![3, 4, 5],
 			party_id,
-			existing_share,
 			public_key.clone(),
 		);
 		assert!(
@@ -691,56 +674,18 @@ fn test_resharing_config_party_not_in_either_committee() {
 	let (public_key, _shares) = generate_with_dealer(&seed, config).expect("keygen");
 
 	// Party 10 is not in either committee
-	let result = ResharingConfig::new(2, vec![0, 1, 2], 2, vec![3, 4, 5], 10, None, public_key);
+	let result = ResharingConfig::new(2, vec![0, 1, 2], 2, vec![3, 4, 5], 10, public_key);
 
 	assert!(result.is_err());
 }
 
-#[test]
-fn test_resharing_config_missing_share_for_old_member() {
-	let config = ThresholdConfig::new(2, 3).expect("valid config");
-	let seed = [42u8; 32];
-	let (public_key, _shares) = generate_with_dealer(&seed, config).expect("keygen");
-
-	// Party 0 is in old committee but has no share
-	let result = ResharingConfig::new(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 2],
-		0,
-		None, // missing share!
-		public_key,
-	);
-
-	assert!(result.is_err());
-}
-
-#[test]
-fn test_resharing_config_unexpected_share_for_new_member() {
-	let config = ThresholdConfig::new(2, 3).expect("valid config");
-	let seed = [42u8; 32];
-	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
-
-	// Party 3 is only in new committee but has a share (wrong!)
-	let result = ResharingConfig::new(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 3],
-		3,
-		Some(shares[0].clone()), // unexpected share!
-		public_key,
-	);
-
-	assert!(result.is_err());
-}
+// Note: existing_share validation is now done at ResharingProtocol::new(), not ResharingConfig::new()
 
 #[test]
 fn test_resharing_config_invalid_old_threshold() {
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
 	let seed = [42u8; 32];
-	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+	let (public_key, _shares) = generate_with_dealer(&seed, config).expect("keygen");
 
 	// Old threshold too high
 	let result = ResharingConfig::new(
@@ -749,7 +694,6 @@ fn test_resharing_config_invalid_old_threshold() {
 		2,
 		vec![0, 1, 2],
 		0,
-		Some(shares[0].clone()),
 		public_key,
 	);
 
@@ -760,7 +704,7 @@ fn test_resharing_config_invalid_old_threshold() {
 fn test_resharing_config_invalid_new_threshold() {
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
 	let seed = [42u8; 32];
-	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+	let (public_key, _shares) = generate_with_dealer(&seed, config).expect("keygen");
 
 	// New threshold too low
 	let result = ResharingConfig::new(
@@ -769,7 +713,6 @@ fn test_resharing_config_invalid_new_threshold() {
 		1, // invalid: < 2
 		vec![0, 1, 2],
 		0,
-		Some(shares[0].clone()),
 		public_key,
 	);
 
@@ -792,13 +735,12 @@ fn test_resharing_round1_message_from_non_member_ignored() {
 		2,
 		vec![0, 1, 2],
 		0,
-		Some(shares[0].clone()),
 		public_key.clone(),
 	)
 	.expect("valid config");
 
 	let session_nonce = [0x44u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
+	let mut protocol = ResharingProtocol::new(resharing_config, Some(shares[0].clone()), [42u8; 32], &session_nonce);
 
 	// Generate Round 1 message first
 	let _ = protocol.poke().expect("poke should succeed");
@@ -829,7 +771,6 @@ fn test_resharing_duplicate_message_ignored() {
 		2,
 		vec![0, 1, 2],
 		0,
-		Some(shares[0].clone()),
 		public_key.clone(),
 	)
 	.expect("valid config");
@@ -840,14 +781,13 @@ fn test_resharing_duplicate_message_ignored() {
 		2,
 		vec![0, 1, 2],
 		1,
-		Some(shares[1].clone()),
 		public_key.clone(),
 	)
 	.expect("valid config");
 
 	let session_nonce = [0x33u8; 32];
-	let mut protocol0 = ResharingProtocol::new(config0, [0u8; 32], &session_nonce);
-	let mut protocol1 = ResharingProtocol::new(config1, [1u8; 32], &session_nonce);
+	let mut protocol0 = ResharingProtocol::new(config0, Some(shares[0].clone()), [0u8; 32], &session_nonce);
+	let mut protocol1 = ResharingProtocol::new(config1, Some(shares[1].clone()), [1u8; 32], &session_nonce);
 
 	// Generate Round 0 messages
 	let msg0 = match protocol0.poke().expect("poke should succeed") {
@@ -906,13 +846,12 @@ fn test_old_only_party_behavior() {
 		2,
 		vec![0, 1, 3], // party 2 not in new committee
 		2,
-		Some(shares[2].clone()),
 		public_key,
 	)
 	.expect("valid config");
 
 	let session_nonce = [0x22u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
+	let mut protocol = ResharingProtocol::new(resharing_config, Some(shares[2].clone()), [42u8; 32], &session_nonce);
 
 	// Party should participate in Round 0 (entropy commitment)
 	let action = protocol.poke().expect("poke should succeed");
@@ -937,13 +876,12 @@ fn test_new_only_party_behavior() {
 		2,
 		vec![0, 1, 3],
 		3, // new party
-		None,
 		public_key,
 	)
 	.expect("valid config");
 
 	let session_nonce = [0x11u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
+	let mut protocol = ResharingProtocol::new(resharing_config, None, [42u8; 32], &session_nonce);
 
 	// New party should skip Round 1-2 (entropy commit-reveal) and wait
 	let action = protocol.poke().expect("poke should succeed");
@@ -1435,14 +1373,13 @@ fn run_resharing_protocol_with_seeds(
 			new_threshold,
 			new_participants.clone(),
 			party_id,
-			existing_share,
 			public_key.clone(),
 		)
 		.map_err(|e| format!("Config error for party {}: {}", party_id, e))?;
 
 		// Use the provided seed for this party
 		let seed = party_seeds.get(&party_id).copied().unwrap_or([0u8; 32]);
-		let protocol = ResharingProtocol::new(config, seed, &session_nonce);
+		let protocol = ResharingProtocol::new(config, existing_share, seed, &session_nonce);
 		protocols.insert(party_id, protocol);
 	}
 
