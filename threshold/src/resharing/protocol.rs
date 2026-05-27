@@ -947,17 +947,33 @@ impl ResharingProtocol {
 		for (accuser, broadcast) in &self.round5_broadcasts {
 			for accusation in &broadcast.accusations {
 				// Validate: accuser must be in the old subset to have recomputed the commitment
-				if self.config.old_participants().is_in_mask(*accuser, accusation.old_subset) {
-					accused.insert(accusation.dealer);
-				} else {
+				if !self.config.old_participants().is_in_mask(*accuser, accusation.old_subset) {
 					log::warn!(
-						"Ignoring invalid accusation from party {} against dealer {} \
-						 for old_subset {:b}: accuser not in subset",
+						"Ignoring accusation from party {} against {} for old_subset {:b}: \
+						 accuser not in subset",
 						accuser,
 						accusation.dealer,
 						accusation.old_subset
 					);
+					continue;
 				}
+
+				// Validate: accused dealer must actually be the designated dealer for this subset
+				let actual_dealer = self.designated_dealer_for(accusation.old_subset);
+				if actual_dealer != Some(accusation.dealer) {
+					log::warn!(
+						"Ignoring accusation from party {} against {} for old_subset {:b}: \
+						 designated dealer is {:?}, not {}",
+						accuser,
+						accusation.dealer,
+						accusation.old_subset,
+						actual_dealer,
+						accusation.dealer
+					);
+					continue;
+				}
+
+				accused.insert(accusation.dealer);
 			}
 		}
 		if !accused.is_empty() {

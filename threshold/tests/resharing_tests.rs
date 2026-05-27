@@ -1198,6 +1198,72 @@ fn test_resharing_detects_dealer_accusation_when_commitment_tampered() {
 }
 
 #[test]
+fn test_resharing_ignores_fabricated_accusation_against_non_dealer() {
+	// A malicious party could try to frame another party by fabricating an accusation
+	// claiming they were a bad dealer for a subset they weren't actually the dealer of.
+	// The protocol must validate that the accused party is the designated dealer for
+	// the claimed subset, and ignore accusations against non-dealers.
+
+	use qp_rusty_crystals_threshold::resharing::DealerAccusation;
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [88u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	// Party 1 will inject a fabricated accusation against party 2, claiming party 2
+	// was a bad dealer for old_subset 0b011 (parties {0,1}). But party 0 is the
+	// designated dealer for that subset (lowest ID), not party 2.
+	let fabricated_accusation = DealerAccusation {
+		dealer: 2,           // Framing party 2
+		old_subset: 0b011,   // Subset {0,1} - dealer is party 0, not party 2
+		new_subset: 0b011,
+	};
+
+	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
+		if sender != 1 {
+			return data;
+		}
+		let msg: ResharingMessage = match borsh::from_slice(&data) {
+			Ok(m) => m,
+			Err(_) => return data,
+		};
+		let modified = match msg {
+			ResharingMessage::Round5(mut b) => {
+				// Inject the fabricated accusation
+				b.accusations.push(fabricated_accusation.clone());
+				ResharingMessage::Round5(b)
+			},
+			other => other,
+		};
+		borsh::to_vec(&modified).expect("re-serialize tampered msg")
+	});
+
+	// The protocol should succeed despite the fabricated accusation, because the
+	// accusation is invalid (party 2 is not the dealer for subset 0b011).
+	let result = run_resharing_protocol_with_tamper(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		Some(tamper),
+	);
+
+	assert!(
+		result.is_ok(),
+		"Protocol should succeed - fabricated accusation against non-dealer must be ignored. \
+		 Got error: {:?}",
+		result.err()
+	);
+}
+
+#[test]
 fn test_resharing_detects_round2_payload_mismatch() {
 	// Tamper only the Round 4 payload (not the commitment). The recipient will
 	// detect that the received `r` doesn't match the broadcast commitment and
