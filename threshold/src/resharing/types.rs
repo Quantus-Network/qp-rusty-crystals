@@ -81,6 +81,7 @@ impl ResharingRole {
 /// Configuration for the resharing protocol.
 ///
 /// Specifies the old and new committee structures, and this party's role.
+#[derive(Debug, Clone)]
 pub struct ResharingConfig {
 	old_threshold: u32,
 	old_participants: ParticipantList,
