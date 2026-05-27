@@ -36,22 +36,6 @@ pub fn caddq(a: &mut Poly) {
 	}
 }
 
-/// Add polynomials. No modular reduction is performed.
-///
-/// # Arguments
-///
-/// * 'a' - 1st input polynomial
-/// * 'b' - 2nd input polynomial
-///
-/// Returns coefficient wise a + b
-pub fn add(a: &Poly, b: &Poly) -> Poly {
-	let mut c = Poly::default();
-	for i in 0..N {
-		c.coeffs[i] = a.coeffs[i] + b.coeffs[i];
-	}
-	c
-}
-
 /// Add polynomials in place. No modular reduction is performed.
 ///
 /// # Arguments
@@ -62,22 +46,6 @@ pub fn add_ip(a: &mut Poly, b: &Poly) {
 	for i in 0..N {
 		a.coeffs[i] += b.coeffs[i];
 	}
-}
-
-/// Subtract polynomials. No modular reduction is performed.
-///
-/// # Arguments
-///
-/// * 'a' - 1st input polynomial
-/// * 'b' - 2nd input polynomial
-///
-/// Returns coefficient wise a - b
-pub fn sub(a: &Poly, b: &Poly) -> Poly {
-	let mut c = Poly::default();
-	for i in 0..N {
-		c.coeffs[i] = a.coeffs[i] - b.coeffs[i];
-	}
-	c
 }
 
 /// Subtract polynomials in place. No modular reduction is performed.
@@ -176,12 +144,15 @@ pub fn check_norm(a: &Poly, b: i32) -> bool {
 ///
 /// # Arguments
 ///
-/// * 'a' - output array (allocated)
-/// * 'b' - array of random bytes
+/// * 'a' - output coefficient slice
+/// * 'buf' - array of random bytes
 ///
 /// Returns number of sampled coefficients. Can be smaller than a.len() if not enough random bytes
 /// were given.
-pub fn rej_uniform(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
+pub fn rej_uniform(a: &mut [i32], buf: &[u8]) -> usize {
+	let alen = a.len();
+	let buflen = buf.len();
+
 	let mut ctr: usize = 0;
 	let mut pos: usize = 0;
 	while ctr < alen && pos + 3 <= buflen {
@@ -201,7 +172,7 @@ pub fn rej_uniform(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usi
 
 /// Sample polynomial with uniformly random coefficients in [0, Q-1] by performing rejection
 /// sampling using the output stream of SHAKE128(seed|nonce).
-pub fn uniform(a: &mut Poly, seed: &[u8], nonce: u16) {
+pub fn uniform(a: &mut Poly, seed: &[u8; params::SEEDBYTES], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake128_stream_init(&mut state, seed, nonce);
 
@@ -209,16 +180,16 @@ pub fn uniform(a: &mut Poly, seed: &[u8], nonce: u16) {
 	fips202::shake128_squeezeblocks(&mut buf, UNIFORM_NBLOCKS, &mut state);
 
 	let mut buflen: usize = UNIFORM_NBLOCKS * fips202::SHAKE128_RATE;
-	let mut ctr = rej_uniform(&mut a.coeffs, N, &buf, buflen);
+	let mut ctr = rej_uniform(&mut a.coeffs, &buf[..buflen]);
 
 	while ctr < N {
 		let off = buflen % 3;
 		for i in 0..off {
 			buf[i] = buf[buflen - off + i];
 		}
-		buflen = fips202::SHAKE128_RATE + off;
 		fips202::shake128_squeezeblocks(&mut buf[off..], 1, &mut state);
-		ctr += rej_uniform(&mut a.coeffs[ctr..], N - ctr, &buf, buflen);
+		buflen = fips202::SHAKE128_RATE + off;
+		ctr += rej_uniform(&mut a.coeffs[ctr..], &buf[..buflen]);
 	}
 }
 
@@ -378,21 +349,7 @@ pub fn make_hint(h: &mut Poly, a0: &Poly, a1: &Poly) -> i32 {
 ///
 /// * 'a' - input polynomial
 /// * 'hint' - hint polynomial
-///
-/// Returns polynomial with corrected high bits
 pub fn use_hint(a: &mut Poly, hint: &Poly) {
-	for i in 0..N {
-		a.coeffs[i] = rounding::use_hint(a.coeffs[i], hint.coeffs[i]);
-	}
-}
-
-/// Use hint polynomial to correct the high bits of a polynomial in place.
-///
-/// # Arguments
-///
-/// * 'a' - input polynomial to have high bits corrected
-/// * 'hint' - hint polynomial
-pub fn use_hint_ip(a: &mut Poly, hint: &Poly) {
 	for i in 0..N {
 		a.coeffs[i] = rounding::use_hint(a.coeffs[i], hint.coeffs[i]);
 	}
@@ -401,12 +358,23 @@ pub fn use_hint_ip(a: &mut Poly, hint: &Poly) {
 /// Sample uniformly random coefficients in [-ETA, ETA] by performing rejection sampling using array
 /// of random bytes.
 ///
-/// Returns number of sampled coefficients. Can be smaller than len if not enough random bytes were
-/// given
-pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
+/// Returns number of sampled coefficients. Can be smaller than a.len() if not enough random bytes
+/// were given.
+///
+/// Note: Returns immediately if output slice is empty. For non-empty output, always processes
+/// all input bytes to maintain constant-time behavior.
+pub fn rej_eta(a: &mut [i32], buf: &[u8]) -> usize {
+	let alen = a.len();
+	let buflen = buf.len();
+
+	// Early return for empty output - avoids any potential issues with modulo operations
+	if alen == 0 {
+		return 0;
+	}
+
 	let mut ctr = 0usize;
 
-	// Always process exactly buflen bytes
+	// Always process exactly buflen bytes (constant-time for non-empty output)
 	for pos in 0..buflen {
 		let lower_nibble = (buf[pos] & 0x0F) as u32;
 		let upper_nibble = (buf[pos] >> 4) as u32;
@@ -429,7 +397,7 @@ pub fn rej_eta(a: &mut [i32], alen: usize, buf: &[u8], buflen: usize) -> usize {
 
 /// Sample polynomial with uniformly random coefficients in [-ETA,ETA] by performing rejection
 /// sampling using the output stream from SHAKE256(seed|nonce).
-pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
+pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8; params::CRHBYTES], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
@@ -448,13 +416,9 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
 			fips202::shake256_squeezeblocks(&mut shake_output_buffer, 1, &mut state);
 
 			// Always call rej_eta with same parameters regardless of how many coeffs we have
-			let available_storage_space =
-				temporary_coefficient_storage.len() - total_coefficients_collected;
 			let coefficients_extracted_this_round = rej_eta(
 				&mut temporary_coefficient_storage[total_coefficients_collected..],
-				available_storage_space,
 				&shake_output_buffer,
-				fips202::SHAKE256_RATE,
 			);
 			total_coefficients_collected += coefficients_extracted_this_round;
 		}
@@ -466,7 +430,7 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8], nonce: u16) {
 
 /// Sample polynomial with uniformly random coefficients in [-(GAMMA1 - 1), GAMMA1] by
 /// performing rejection sampling on output stream of SHAKE256(seed|nonce).
-pub fn uniform_gamma1(a: &mut Poly, seed: &[u8], nonce: u16) {
+pub fn uniform_gamma1(a: &mut Poly, seed: &[u8; params::CRHBYTES], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
@@ -481,7 +445,7 @@ pub fn uniform_gamma1(a: &mut Poly, seed: &[u8], nonce: u16) {
 /// Includes timing countermeasures using dummy operations to reduce side-channel leakage
 pub fn challenge(c: &mut Poly, seed: &[u8]) {
 	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, seed, params::C_DASH_BYTES);
+	fips202::shake256_absorb(&mut state, seed);
 	fips202::shake256_finalize(&mut state);
 
 	let mut buf = [0u8; fips202::SHAKE256_RATE];
@@ -673,23 +637,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_add() {
-		let mut a = Poly::default();
-		let mut b = Poly::default();
-
-		for i in 0..N {
-			a.coeffs[i] = i as i32;
-			b.coeffs[i] = (i * 2) as i32;
-		}
-
-		let c = add(&a, &b);
-
-		for i in 0..N {
-			assert_eq!(c.coeffs[i], a.coeffs[i] + b.coeffs[i]);
-		}
-	}
-
-	#[test]
 	fn test_add_ip() {
 		let mut a = Poly::default();
 		let mut b = Poly::default();
@@ -704,23 +651,6 @@ mod tests {
 
 		for i in 0..N {
 			assert_eq!(a.coeffs[i], original_a.coeffs[i] + b.coeffs[i]);
-		}
-	}
-
-	#[test]
-	fn test_sub() {
-		let mut a = Poly::default();
-		let mut b = Poly::default();
-
-		for i in 0..N {
-			a.coeffs[i] = (i * 10) as i32;
-			b.coeffs[i] = (i * 3) as i32;
-		}
-
-		let c = sub(&a, &b);
-
-		for i in 0..N {
-			assert_eq!(c.coeffs[i], a.coeffs[i] - b.coeffs[i]);
 		}
 	}
 
@@ -1022,10 +952,18 @@ mod tests {
 	}
 
 	#[test]
+	fn test_rej_eta_empty_output() {
+		let mut output = [0i32; 0];
+		let buffer = [0x00u8, 0x11u8]; // Valid nibbles
+		let result = rej_eta(&mut output, &buffer);
+		assert_eq!(result, 0); // No space for coefficients
+	}
+
+	#[test]
 	fn test_rej_eta_empty_buffer() {
 		let mut output = [0i32; 10];
 		let buffer = [];
-		let result = rej_eta(&mut output, 5, &buffer, 0);
+		let result = rej_eta(&mut output[..5], &buffer);
 		assert_eq!(result, 0);
 		// All coefficients should remain unchanged (zero)
 		for coeff in &output {
@@ -1038,7 +976,7 @@ mod tests {
 		let mut output = [0i32; 10];
 		// Create buffer with all nibbles = 15 (invalid)
 		let buffer = [0xFFu8; 4]; // 8 nibbles, all invalid
-		let result = rej_eta(&mut output, 10, &buffer, 4);
+		let result = rej_eta(&mut output, &buffer);
 		assert_eq!(result, 0);
 		// All coefficients should remain unchanged (zero)
 		for coeff in &output {
@@ -1052,7 +990,7 @@ mod tests {
 		let mut output = [0i32; 10];
 		// Create buffer with all nibbles < 15
 		let buffer = [0x00u8, 0x11u8, 0x22u8, 0x33u8]; // nibbles: 0,0,1,1,2,2,3,3
-		let result = rej_eta(&mut output, 10, &buffer, 4);
+		let result = rej_eta(&mut output, &buffer);
 
 		// Should accept all 8 coefficients
 		assert_eq!(result, 8);
@@ -1081,7 +1019,7 @@ mod tests {
 		let mut output = [0i32; 10];
 		// Mix valid and invalid nibbles: 0xF0 = nibbles 0 (valid), 15 (invalid)
 		let buffer = [0xF0u8, 0x1Fu8]; // nibbles: 0,15,1,15
-		let result = rej_eta(&mut output, 10, &buffer, 2);
+		let result = rej_eta(&mut output, &buffer);
 
 		// Should accept 2 coefficients (nibbles 0 and 1)
 		assert_eq!(result, 2);
@@ -1102,7 +1040,7 @@ mod tests {
 		let mut output = [0i32; 10];
 		// Create buffer with many valid nibbles
 		let buffer = [0x01u8, 0x23u8, 0x45u8]; // nibbles: 1,0,3,2,5,4
-		let result = rej_eta(&mut output, 3, &buffer, 3); // Only space for 3 coefficients
+		let result = rej_eta(&mut output[..3], &buffer); // Only space for 3 coefficients
 
 		// Should stop after accepting 3 coefficients
 		assert_eq!(result, 3);
@@ -1128,7 +1066,7 @@ mod tests {
 			0xDCu8, // nibbles: 12,13
 			0xEEu8, // nibbles: 14,14
 		];
-		let result = rej_eta(&mut output, 20, &buffer, 4);
+		let result = rej_eta(&mut output, &buffer);
 
 		// Should accept 8 coefficients (all are < 15)
 		assert_eq!(result, 8);
@@ -1147,7 +1085,7 @@ mod tests {
 		let mut output = [0i32; 4];
 		// Test nibble 14 (valid) and 15 (invalid)
 		let buffer = [0xFEu8]; // nibbles: 14,15
-		let result = rej_eta(&mut output, 4, &buffer, 1);
+		let result = rej_eta(&mut output, &buffer);
 
 		// Should accept 1 coefficient (nibble 14)
 		assert_eq!(result, 1);
@@ -1165,7 +1103,7 @@ mod tests {
 			0x10u8, 0x32u8, 0x54u8, 0x76u8, 0x98u8, 0xBAu8, 0xDCu8,
 			0xEEu8, // nibbles: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,14
 		];
-		let result = rej_eta(&mut output, 20, &buffer, 8);
+		let result = rej_eta(&mut output, &buffer);
 
 		assert_eq!(result, 16); // Should accept 16 coefficients (all nibbles are < 15)
 
@@ -1210,13 +1148,9 @@ mod tests {
 			for _round_number in 0..FIXED_ROUNDS_FOR_CONSTANT_TIME {
 				fips202::shake256_squeezeblocks(&mut shake_output_buffer, 1, &mut state);
 
-				let available_storage_space =
-					temporary_coefficient_storage.len() - total_coefficients_collected;
 				let coefficients_extracted_this_round = rej_eta(
 					&mut temporary_coefficient_storage[total_coefficients_collected..],
-					available_storage_space,
 					&shake_output_buffer,
-					fips202::SHAKE256_RATE,
 				);
 				total_coefficients_collected += coefficients_extracted_this_round;
 			}

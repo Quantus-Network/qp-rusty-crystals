@@ -12,7 +12,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// Wrapper for sensitive 32-byte data that enforces move semantics and automatic zeroization
 ///
 /// Both `new()` and `from()` take mutable references and zeroize the input data,
-/// ensuring no copies of sensitive data remain in memory.
+/// ensuring no copies of sensitive data remain in memory. `Clone` is intentionally
+/// not derived: the type is move-only by construction, so the secret can exist in
+/// at most one wrapper instance at a time.
 ///
 /// ```rust
 /// use qp_rusty_crystals_dilithium::SensitiveBytes32;
@@ -21,7 +23,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// // or
 /// let sensitive = SensitiveBytes32::from(&mut entropy); // same behavior
 /// ```
-#[derive(Clone, ZeroizeOnDrop)]
+#[derive(ZeroizeOnDrop)]
 pub struct SensitiveBytes32([u8; 32]);
 
 impl SensitiveBytes32 {
@@ -52,8 +54,10 @@ impl From<&mut [u8; 32]> for SensitiveBytes32 {
 /// Wrapper for sensitive 64-byte data that enforces move semantics and automatic zeroization
 ///
 /// Both `new()` and `from()` take mutable references and zeroize the input data,
-/// ensuring no copies of sensitive data remain in memory.
-#[derive(Clone, ZeroizeOnDrop)]
+/// ensuring no copies of sensitive data remain in memory. `Clone` is intentionally
+/// not derived: the type is move-only by construction, so the secret can exist in
+/// at most one wrapper instance at a time.
+#[derive(ZeroizeOnDrop)]
 pub struct SensitiveBytes64([u8; 64]);
 
 impl SensitiveBytes64 {
@@ -82,16 +86,18 @@ impl From<&mut [u8; 64]> for SensitiveBytes64 {
 }
 
 mod errors;
-pub mod fips202;
+pub use errors::{KeyParsingError, SignatureError};
+
+pub(crate) mod fips202;
 pub mod ml_dsa_87;
-pub mod ntt;
-pub mod packing;
+pub(crate) mod ntt;
+pub(crate) mod packing;
 pub mod params;
-pub mod poly;
-pub mod polyvec;
-pub mod reduce;
-pub mod rounding;
-pub mod sign;
+pub(crate) mod poly;
+pub(crate) mod polyvec;
+pub(crate) mod reduce;
+pub(crate) mod rounding;
+pub(crate) mod sign;
 
 #[cfg(test)]
 mod tests {

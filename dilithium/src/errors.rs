@@ -21,12 +21,14 @@ impl Display for KeyParsingError {
 #[derive(Debug)]
 pub enum SignatureError {
 	ContextTooLong,
+	MessageTooLong,
 }
 
 impl Display for SignatureError {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		let str = match self {
 			SignatureError::ContextTooLong => "ContextTooLong",
+			SignatureError::MessageTooLong => "MessageTooLong",
 		};
 		write!(f, "{str}")
 	}

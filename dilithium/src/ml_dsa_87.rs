@@ -12,10 +12,20 @@ pub const PUBLICKEYBYTES: usize = crate::params::PUBLICKEYBYTES;
 pub const SIGNBYTES: usize = crate::params::SIGNBYTES;
 pub const KEYPAIRBYTES: usize = SECRETKEYBYTES + PUBLICKEYBYTES;
 
+/// Maximum message size for signing/verification (64 MiB).
+///
+/// This limit prevents denial-of-service attacks via memory exhaustion from
+/// oversized messages. The limit is generous enough for any legitimate use case.
+pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
 pub type Signature = [u8; SIGNBYTES];
 
 /// A pair of private and public keys.
-#[derive(Clone)]
+///
+/// `Clone` is intentionally not derived because the embedded `SecretKey` is sensitive.
+/// To explicitly copy a keypair (e.g. to move it into a closure), serialize and
+/// reconstruct: `Keypair::from_bytes(&keypair.to_bytes())?`. This forces the
+/// duplication of secret material to be visible at every call site.
 pub struct Keypair {
 	pub secret: SecretKey,
 	pub public: PublicKey,
@@ -75,9 +85,14 @@ impl Keypair {
 	///
 	/// # Arguments
 	///
-	/// * 'msg' - message to sign
+	/// * 'msg' - message to sign (max 64 MiB)
+	/// * 'ctx' - optional context string (max 255 bytes)
+	/// * 'hedge' - optional random bytes for hedged signing
 	///
-	/// Returns Result<Signature, SignatureError>
+	/// # Errors
+	///
+	/// Returns `SignatureError::MessageTooLong` if the message exceeds 64 MiB.
+	/// Returns `SignatureError::ContextTooLong` if the context exceeds 255 bytes.
 	pub fn sign(
 		&self,
 		msg: &[u8],
@@ -91,10 +106,13 @@ impl Keypair {
 	///
 	/// # Arguments
 	///
-	/// * 'msg' - message that is claimed to be signed
+	/// * 'msg' - message that is claimed to be signed (max 64 MiB)
 	/// * 'sig' - signature to verify
+	/// * 'ctx' - optional context string (max 255 bytes)
 	///
-	/// Returns 'true' if the verification process was successful, 'false' otherwise
+	/// Returns 'true' if the verification process was successful, 'false' otherwise.
+	/// Returns 'false' if the message exceeds 64 MiB, the context exceeds 255 bytes,
+	/// or the signature length is incorrect.
 	pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool {
 		self.public.verify(msg, sig, ctx)
 	}
@@ -108,9 +126,10 @@ impl fmt::Debug for Keypair {
 
 /// Private key.
 ///
-/// The internal bytes are private to ensure ZeroizeOnDrop works correctly
-/// and to prevent accidental exposure of secret material (HQ4).
-#[derive(Clone, ZeroizeOnDrop)]
+/// `Clone` is intentionally not derived because the underlying bytes are sensitive.
+/// To explicitly copy a secret key, use `SecretKey::from_bytes(&sk.to_bytes())?`,
+/// which makes the duplication of secret material visible at every call site.
+#[derive(ZeroizeOnDrop)]
 pub struct SecretKey {
 	bytes: [u8; SECRETKEYBYTES],
 }
@@ -140,17 +159,23 @@ impl SecretKey {
 	///
 	/// # Arguments
 	///
-	/// * 'msg' - message to sign
-	/// * 'ctx' - context string
+	/// * 'msg' - message to sign (max 64 MiB)
+	/// * 'ctx' - context string (max 255 bytes)
 	/// * 'hedged' - wether to use RNG or not
 	///
-	/// Returns Option<Signature>
+	/// # Errors
+	///
+	/// Returns `SignatureError::MessageTooLong` if the message exceeds 64 MiB.
+	/// Returns `SignatureError::ContextTooLong` if the context exceeds 255 bytes.
 	pub fn sign(
 		&self,
 		msg: &[u8],
 		ctx: Option<&[u8]>,
 		hedge: Option<[u8; params::SEEDBYTES]>,
 	) -> Result<Signature, SignatureError> {
+		if msg.len() > MAX_MESSAGE_SIZE {
+			return Err(SignatureError::MessageTooLong);
+		}
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
@@ -208,13 +233,19 @@ impl PublicKey {
 	///
 	/// # Arguments
 	///
-	/// * 'msg' - message that is claimed to be signed
+	/// * 'msg' - message that is claimed to be signed (max 64 MiB)
 	/// * 'sig' - signature to verify
-	/// * 'ctx' - context string
+	/// * 'ctx' - context string (max 255 bytes)
 	///
-	/// Returns 'true' if the verification process was successful, 'false' otherwise
+	/// Returns 'true' if the verification process was successful, 'false' otherwise.
+	/// Returns 'false' early if the message exceeds 64 MiB or context exceeds 255 bytes.
 	pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool {
-		if sig.len() != SIGNBYTES {
+		// Validate signature length first
+		let sig: &[u8; SIGNBYTES] = match sig.try_into() {
+			Ok(s) => s,
+			Err(_) => return false,
+		};
+		if msg.len() > MAX_MESSAGE_SIZE {
 			return false;
 		}
 		match ctx {
@@ -241,8 +272,9 @@ impl PublicKey {
 
 #[cfg(test)]
 mod tests {
-	use super::Keypair;
-	use crate::SensitiveBytes32;
+	use super::{Keypair, MAX_MESSAGE_SIZE, SIGNBYTES};
+	use crate::{errors::SignatureError, SensitiveBytes32};
+	use alloc::vec;
 	use rand::Rng;
 
 	fn get_random_bytes() -> SensitiveBytes32 {
@@ -296,5 +328,20 @@ mod tests {
 
 		// Verify with correct context should still work
 		assert!(keys.verify(&msg, &sig, Some(ctx1)));
+	}
+
+	#[test]
+	fn sign_rejects_oversized_message() {
+		let keys = Keypair::generate(get_random_bytes());
+		let big_msg = vec![0u8; MAX_MESSAGE_SIZE + 1];
+		let result = keys.sign(&big_msg, None, None);
+		assert!(matches!(result, Err(SignatureError::MessageTooLong)));
+	}
+
+	#[test]
+	fn verify_rejects_oversized_message() {
+		let keys = Keypair::generate(get_random_bytes());
+		let big_msg = vec![0u8; MAX_MESSAGE_SIZE + 1];
+		assert!(!keys.verify(&big_msg, &[0u8; SIGNBYTES], None));
 	}
 }

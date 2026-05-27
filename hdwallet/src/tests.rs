@@ -526,4 +526,77 @@ mod hdwallet_tests {
 		f.write_all(out.as_bytes()).unwrap();
 		println!("Wrote updated Rust test vectors");
 	}
+
+	#[test]
+	fn test_derive_rejects_oversized_path() {
+		use crate::{generate_wormhole_from_seed, MAX_DERIVATION_PATH_BYTES};
+
+		let mnemonic =
+			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
+		let mut oversized = String::from("m");
+		while oversized.len() <= MAX_DERIVATION_PATH_BYTES {
+			oversized.push_str("/1'");
+		}
+		assert!(oversized.len() > MAX_DERIVATION_PATH_BYTES);
+
+		let mut seed1 = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
+		let err1 = derive_key_from_seed((&mut seed1).into(), &oversized).unwrap_err();
+		assert!(matches!(err1, HDLatticeError::PathTooLong(_)), "got {err1:?}");
+
+		let mut seed2 = mnemonic_to_seed(mnemonic, None).unwrap();
+		match generate_wormhole_from_seed((&mut seed2).into(), &oversized) {
+			Err(HDLatticeError::PathTooLong(_)) => {},
+			Err(other) => panic!("expected PathTooLong, got {other:?}"),
+			Ok(_) => panic!("expected PathTooLong, got Ok"),
+		}
+	}
+
+	#[test]
+	fn test_derive_rejects_too_deep_path() {
+		use crate::{generate_wormhole_from_seed, MAX_DERIVATION_DEPTH};
+
+		let mnemonic =
+			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
+		let mut too_deep = String::from("m");
+		for _ in 0..=MAX_DERIVATION_DEPTH {
+			too_deep.push_str("/1'");
+		}
+
+		let mut seed1 = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
+		let err1 = derive_key_from_seed((&mut seed1).into(), &too_deep).unwrap_err();
+		assert!(matches!(err1, HDLatticeError::PathTooDeep(_)), "got {err1:?}");
+
+		let mut seed2 = mnemonic_to_seed(mnemonic, None).unwrap();
+		match generate_wormhole_from_seed((&mut seed2).into(), &too_deep) {
+			Err(HDLatticeError::PathTooDeep(_)) => {},
+			Err(other) => panic!("expected PathTooDeep, got {other:?}"),
+			Ok(_) => panic!("expected PathTooDeep, got Ok"),
+		}
+	}
+
+	#[test]
+	fn test_mnemonic_to_seed_zeroizes_on_parse_failure() {
+		let bogus = "not a valid bip39 mnemonic phrase at all".to_string();
+		let result = mnemonic_to_seed(bogus, None);
+		match result {
+			Err(HDLatticeError::Bip39Error(_)) => {},
+			other => panic!("expected Bip39Error, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn test_derive_accepts_max_depth() {
+		use crate::MAX_DERIVATION_DEPTH;
+
+		let mnemonic =
+			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
+		let mut max_depth = String::from("m");
+		for _ in 0..MAX_DERIVATION_DEPTH {
+			max_depth.push_str("/1'");
+		}
+
+		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
+		derive_key_from_seed((&mut seed).into(), &max_depth)
+			.expect("path at exactly MAX_DERIVATION_DEPTH must succeed");
+	}
 }

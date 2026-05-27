@@ -10,11 +10,15 @@ const N: usize = params::N as usize;
 ///
 /// # Arguments
 ///
-/// * 'pk' - output for public key value
-/// * 'rho' - const reference to rho of params::SEEDBYTES length
+/// * 'pk' - output buffer for public key (PUBLICKEYBYTES)
+/// * 'rho' - const reference to rho of SEEDBYTES length
 /// * 't1' - const reference to t1
-pub fn pack_pk(pk: &mut [u8], rho: &[u8], t1: &Polyveck) {
-	pk[..params::SEEDBYTES].copy_from_slice(&rho[..params::SEEDBYTES]);
+pub fn pack_pk(
+	pk: &mut [u8; params::PUBLICKEYBYTES],
+	rho: &[u8; params::SEEDBYTES],
+	t1: &Polyveck,
+) {
+	pk[..params::SEEDBYTES].copy_from_slice(rho);
 	for i in 0..K {
 		poly::t1_pack(&mut pk[params::SEEDBYTES + i * params::POLYT1_PACKEDBYTES..], &t1.vec[i]);
 	}
@@ -24,11 +28,15 @@ pub fn pack_pk(pk: &mut [u8], rho: &[u8], t1: &Polyveck) {
 ///
 /// # Arguments
 ///
-/// * 'rho' - output for rho value of params::SEEDBYTES length
+/// * 'rho' - output for rho value of SEEDBYTES length
 /// * 't1' - output for t1 value
 /// * 'pk' - const reference to public key
-pub fn unpack_pk(rho: &mut [u8], t1: &mut Polyveck, pk: &[u8]) {
-	rho[..params::SEEDBYTES].copy_from_slice(&pk[..params::SEEDBYTES]);
+pub fn unpack_pk(
+	rho: &mut [u8; params::SEEDBYTES],
+	t1: &mut Polyveck,
+	pk: &[u8; params::PUBLICKEYBYTES],
+) {
+	rho.copy_from_slice(&pk[..params::SEEDBYTES]);
 	for i in 0..K {
 		poly::t1_unpack(&mut t1.vec[i], &pk[params::SEEDBYTES + i * params::POLYT1_PACKEDBYTES..]);
 	}
@@ -36,21 +44,21 @@ pub fn unpack_pk(rho: &mut [u8], t1: &mut Polyveck, pk: &[u8]) {
 
 /// Bit-pack secret key sk = (rho, key, tr, s1, s2, t0).
 pub fn pack_sk(
-	sk: &mut [u8],
-	rho: &[u8],
-	tr: &[u8],
-	key: &[u8],
+	sk: &mut [u8; params::SECRETKEYBYTES],
+	rho: &[u8; params::SEEDBYTES],
+	tr: &[u8; params::TR_BYTES],
+	key: &[u8; params::SEEDBYTES],
 	t0: &Polyveck,
 	s1: &Polyvecl,
 	s2: &Polyveck,
 ) {
-	sk[..params::SEEDBYTES].copy_from_slice(&rho[0..params::SEEDBYTES]);
+	sk[..params::SEEDBYTES].copy_from_slice(rho);
 	let mut idx = params::SEEDBYTES;
 
-	sk[idx..idx + params::SEEDBYTES].copy_from_slice(&key[0..params::SEEDBYTES]);
+	sk[idx..idx + params::SEEDBYTES].copy_from_slice(key);
 	idx += params::SEEDBYTES;
 
-	sk[idx..idx + params::TR_BYTES].copy_from_slice(&tr[0..params::TR_BYTES]);
+	sk[idx..idx + params::TR_BYTES].copy_from_slice(tr);
 	idx += params::TR_BYTES;
 
 	for i in 0..L {
@@ -70,21 +78,21 @@ pub fn pack_sk(
 
 /// Unpack secret key sk = (rho, key, tr, s1, s2, t0).
 pub fn unpack_sk(
-	rho: &mut [u8],
-	tr: &mut [u8],
-	key: &mut [u8],
+	rho: &mut [u8; params::SEEDBYTES],
+	tr: &mut [u8; params::TR_BYTES],
+	key: &mut [u8; params::SEEDBYTES],
 	t0: &mut Polyveck,
 	s1: &mut Polyvecl,
 	s2: &mut Polyveck,
-	sk: &[u8],
+	sk: &[u8; params::SECRETKEYBYTES],
 ) {
-	rho[..params::SEEDBYTES].copy_from_slice(&sk[..params::SEEDBYTES]);
+	rho.copy_from_slice(&sk[..params::SEEDBYTES]);
 	let mut idx = params::SEEDBYTES;
 
-	key[..params::SEEDBYTES].copy_from_slice(&sk[idx..idx + params::SEEDBYTES]);
+	key.copy_from_slice(&sk[idx..idx + params::SEEDBYTES]);
 	idx += params::SEEDBYTES;
 
-	tr[..params::TR_BYTES].copy_from_slice(&sk[idx..idx + params::TR_BYTES]);
+	tr.copy_from_slice(&sk[idx..idx + params::TR_BYTES]);
 	idx += params::TR_BYTES;
 
 	for i in 0..L {
@@ -103,9 +111,14 @@ pub fn unpack_sk(
 }
 
 /// Bit-pack signature sig = (c, z, h).
-pub fn pack_sig(sig: &mut [u8], c: Option<&[u8]>, z: &Polyvecl, h: &Polyveck) {
+pub fn pack_sig(
+	sig: &mut [u8; params::SIGNBYTES],
+	c: Option<&[u8; params::C_DASH_BYTES]>,
+	z: &Polyvecl,
+	h: &Polyveck,
+) {
 	if let Some(challenge) = c {
-		sig[..params::C_DASH_BYTES].copy_from_slice(&challenge[..params::C_DASH_BYTES]);
+		sig[..params::C_DASH_BYTES].copy_from_slice(challenge);
 	}
 
 	let mut idx = params::C_DASH_BYTES;
@@ -149,8 +162,13 @@ pub fn pack_sig(sig: &mut [u8], c: Option<&[u8]>, z: &Polyvecl, h: &Polyveck) {
 }
 
 /// Unpack signature sig = (z, h, c).
-pub fn unpack_sig(c: &mut [u8], z: &mut Polyvecl, h: &mut Polyveck, sig: &[u8]) -> bool {
-	c[..params::C_DASH_BYTES].copy_from_slice(&sig[..params::C_DASH_BYTES]);
+pub fn unpack_sig(
+	c: &mut [u8; params::C_DASH_BYTES],
+	z: &mut Polyvecl,
+	h: &mut Polyveck,
+	sig: &[u8; params::SIGNBYTES],
+) -> bool {
+	c.copy_from_slice(&sig[..params::C_DASH_BYTES]);
 
 	let mut idx = params::C_DASH_BYTES;
 	for i in 0..L {

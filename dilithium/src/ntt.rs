@@ -36,8 +36,8 @@ const ZETAS: [i32; N] = [
 ///
 /// # Arguments
 ///
-/// * 'a' - input/output coefficient array of size N
-pub fn ntt(a: &mut [i32]) {
+/// * 'a' - input/output coefficient array of size N (256 elements)
+pub fn ntt(a: &mut [i32; N]) {
 	let mut k: usize = 0;
 	let mut len: usize = 128;
 
@@ -65,8 +65,8 @@ pub fn ntt(a: &mut [i32]) {
 ///
 /// # Arguments
 ///
-/// * 'a' - input/output coefficient array of size N
-pub fn invntt_tomont(a: &mut [i32]) {
+/// * 'a' - input/output coefficient array of size N (256 elements)
+pub fn invntt_tomont(a: &mut [i32; N]) {
 	let mut k: usize = 256;
 	let mut len: usize = 1;
 	const F: i64 = 41978; // mont^2/256
