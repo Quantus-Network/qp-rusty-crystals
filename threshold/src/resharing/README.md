@@ -46,7 +46,7 @@ Round 4: Private Sub-Share Reveal (⚠️ REQUIRES SECURE CHANNEL)
 ├── D_I privately delivers r_{I→J} to each member of new subset J.
 └── No public traffic carries any share material.
 
-Round 5: Verification + Accusations + Public-Key Invariant
+Round 5: Verification + Public-Key Invariant
 ├── Each new party verifies received r_{I→J} against the Round 3 commitment, then
 │   sums s_J^new = Σ_I r_{I→J} for each new subset J they're in, and broadcasts
 │   a commitment to s_J^new so that the membership of J can cross-verify.
@@ -55,8 +55,8 @@ Round 5: Verification + Accusations + Public-Key Invariant
 │   Σ_J t_J^new = T (the original public key). This catches a malicious dealer
 │   that owns a *size-1* old subset (e.g. t = n configurations), where there is
 │   no other I-member to cross-verify the dealer's commitments.
-└── Old subset members file DealerAccusation if any dealer's broadcast commitment
-    doesn't match their independent recomputation.
+└── If any verification fails, the protocol aborts. (No blame attribution is
+    attempted since it's not always possible to identify the misbehaving party.)
 ```
 
 Because `Σ_J s_J^new = Σ_J Σ_I r_{I→J} = Σ_I s_I^old = s`, the secret — and hence the public key `t = A·s1 + s2` — is preserved.
@@ -98,7 +98,7 @@ They still cannot reconstruct the session seed (and thus the new shares) because
 | **Secrecy of `s`** | No party — not even any dealer — ever holds `s` in clear. Each `D_I` only handles `s_I^old`, which they already had. |
 | **Forward Secrecy** | Session seed incorporates fresh entropy from all old committee members via commit-reveal. Even if old shares are later compromised, the randomness used to derive new shares cannot be reconstructed. |
 | **Confidentiality of contributions** | Rounds 1-3, 5 broadcast only hash commitments; Round 4 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
-| **Cheating-dealer detection** | Other members of `I` independently recompute `r_{I→J}` from `s_I^old` and accuse `D_I` if the broadcast commitment differs; new-subset members cross-verify computed `s_J^new`; and a final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching a malicious dealer even when their old subset has size 1. |
+| **Cheating-dealer detection** | New-subset members cross-verify computed `s_J^new` against broadcast commitments, and a final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching a malicious dealer even when their old subset has size 1. If any verification fails, the protocol aborts. |
 | **PK Preservation** | Public key `t = A·s1 + s2` unchanged, verified at the end of Round 5 via a deterministic byte-equality check against the original PK. |
 
 ## Why Custom Protocol?
@@ -229,7 +229,7 @@ Each party has a role determined by committee membership:
 
 | Role | Old Committee | New Committee | Actions |
 |------|--------------|---------------|---------|
-| `OldOnly` | ✓ | ✗ | Generate entropy; deal sub-shares for old subsets they own; file dealer accusations |
+| `OldOnly` | ✓ | ✗ | Generate entropy; deal sub-shares for old subsets they own |
 | `NewOnly` | ✗ | ✓ | Receive sub-shares; verify against commitments; aggregate `s_J^new` |
 | `Both`    | ✓ | ✓ | Generate entropy; deal + receive + verify |
 
@@ -239,7 +239,7 @@ Each party has a role determined by committee membership:
 - `Round2EntropyReveal`: Revealed entropy (32 bytes) — verified against Round 1 commitment
 - `Round3Broadcast`: Per-subset commitment hashes `H(r_{I→J})` (no plaintext shares)
 - `Round4Message`: Private sub-share reveal (**requires secure channel**) — one message per (dealer, recipient) carrying every `r_{I→J}` the dealer owes that recipient. Dealers handle self-deals locally and never emit `SendPrivate(self, _)`.
-- `Round5Broadcast`: Commitments to computed `s_J^new`, partial public-key contributions `t_J^new`, and any `DealerAccusation`s
+- `Round5Broadcast`: Commitments to computed `s_J^new`, partial public-key contributions `t_J^new`
 
 ## State Machine
 
