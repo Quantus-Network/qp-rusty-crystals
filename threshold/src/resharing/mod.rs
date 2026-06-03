@@ -110,8 +110,8 @@ mod types;
 
 // Re-export public types
 pub use types::{
-	compute_resharing_ssid, DealerAccusation, NewShareData, ResharingConfig, ResharingMessage,
-	ResharingOutput, ResharingRole, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
+	compute_resharing_ssid, NewShareData, ResharingConfig, ResharingMessage, ResharingOutput,
+	ResharingRole, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
 	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast, SubsetMask,
 	SubsetPair, ENTROPY_SIZE, RESHARING_SSID_SIZE,
 };

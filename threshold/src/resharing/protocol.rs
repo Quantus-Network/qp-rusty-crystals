@@ -43,10 +43,10 @@ use crate::{
 };
 
 use super::types::{
-	compute_resharing_ssid, DealerAccusation, NewShareData, ResharingConfig, ResharingMessage,
-	ResharingOutput, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
-	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast, SubsetMask,
-	SubsetPair, COMMITMENT_HASH_SIZE, ENTROPY_SIZE, RESHARING_SSID_SIZE,
+	compute_resharing_ssid, NewShareData, ResharingConfig, ResharingMessage, ResharingOutput,
+	ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal, ResharingRound3Broadcast,
+	ResharingRound4Message, ResharingRound5Broadcast, SubsetMask, SubsetPair, COMMITMENT_HASH_SIZE,
+	ENTROPY_SIZE, RESHARING_SSID_SIZE,
 };
 
 /// Domain separator for the per-subset PRF seed (includes session seed for forward secrecy).
@@ -116,7 +116,7 @@ pub enum ResharingProtocolError {
 	CommitmentMismatch(ParticipantId),
 	/// Share verification failed.
 	ShareVerificationFailed(String),
-	/// A dealer failed to deliver valid Round 4 data.
+	/// A dealer failed to deliver valid Round 4 data (logged for debugging, not used for blame).
 	DealerDeliveryFailed {
 		/// The dealer that failed to deliver.
 		dealer: ParticipantId,
@@ -125,8 +125,8 @@ pub enum ResharingProtocolError {
 	},
 	/// Serialization error.
 	SerializationError(String),
-	/// A party reported failure (or was accused as a dealer).
-	PartyFailure(Vec<ParticipantId>),
+	/// Protocol aborted due to a failure (no specific party blamed).
+	ProtocolAborted(String),
 	/// Not enough parties participated.
 	InsufficientParties {
 		/// The minimum number of parties required.
@@ -165,8 +165,8 @@ impl fmt::Display for ResharingProtocolError {
 			ResharingProtocolError::SerializationError(s) => {
 				write!(f, "Serialization error: {}", s)
 			},
-			ResharingProtocolError::PartyFailure(parties) => {
-				write!(f, "Party failure: {:?}", parties)
+			ResharingProtocolError::ProtocolAborted(reason) => {
+				write!(f, "Protocol aborted: {}", reason)
 			},
 			ResharingProtocolError::InsufficientParties { required, received } => {
 				write!(f, "Insufficient parties: required {}, received {}", required, received)
@@ -838,43 +838,22 @@ impl ResharingProtocol {
 	}
 
 	// ========================================================================
-	// Round 5: Verification + Accusations
+	// Round 5: Verification
 	// ========================================================================
 
 	fn handle_round5_generate(
 		&mut self,
 	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		let mut accusations: Vec<DealerAccusation> = Vec::new();
 		let mut share_commitments: BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]> =
 			BTreeMap::new();
-		let mut blamed_dealers: Vec<ParticipantId> = Vec::new();
 		let mut success = true;
 		let mut error_message: Option<String> = None;
 
-		// Old committee members independently recompute every commitment for every old
-		// subset they belong to and accuse the dealer if the dealer's commitment differs
-		// from their independent computation.
-		if self.config.role().is_old_committee() {
-			match self.collect_accusations() {
-				Ok(a) => accusations = a,
-				Err(e) => {
-					success = false;
-					error_message = Some(e.to_string());
-				},
-			}
-		}
-
 		// New committee members verify privately-received sub-shares against the
 		// broadcast commitments, sum them into new subset shares, and commit.
-		if self.config.role().is_new_committee() && success {
+		if self.config.role().is_new_committee() {
 			match self.verify_and_aggregate_new_shares() {
 				Ok(commits) => share_commitments = commits,
-				Err(ResharingProtocolError::DealerDeliveryFailed { dealer, reason }) => {
-					// Explicitly blame the dealer, not the victim
-					blamed_dealers.push(dealer);
-					success = false;
-					error_message = Some(format!("Dealer {} failed: {}", dealer, reason));
-				},
 				Err(e) => {
 					success = false;
 					error_message = Some(e.to_string());
@@ -898,8 +877,6 @@ impl ResharingProtocol {
 			party_id: self.config.my_party_id(),
 			share_commitments,
 			partial_pks,
-			accusations,
-			blamed_dealers,
 			success,
 			error_message,
 		};
@@ -945,92 +922,28 @@ impl ResharingProtocol {
 	// ========================================================================
 
 	fn handle_combining(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// Surface any explicit failure flags from Round 5.
-		// If a party failed due to a dealer's misbehavior, blame the dealer instead.
-		let mut blamed_dealers_set: alloc::collections::BTreeSet<ParticipantId> =
-			alloc::collections::BTreeSet::new();
-		let mut failed_parties_without_blame: Vec<ParticipantId> = Vec::new();
+		// Check if any party reported failure - abort without attribution
+		let failed_parties: Vec<ParticipantId> = self
+			.round5_broadcasts
+			.iter()
+			.filter(|(_, b)| !b.success)
+			.map(|(id, _)| *id)
+			.collect();
 
-		for (id, broadcast) in &self.round5_broadcasts {
-			if !broadcast.success {
-				if broadcast.blamed_dealers.is_empty() {
-					// Party failed but didn't blame a dealer - party itself is at fault
-					failed_parties_without_blame.push(*id);
-				} else {
-					// Party failed and blamed specific dealer(s) - blame dealers
-					for dealer in &broadcast.blamed_dealers {
-						blamed_dealers_set.insert(*dealer);
-					}
-				}
-			}
-		}
-
-		// Blamed dealers take priority (they caused victims to fail)
-		if !blamed_dealers_set.is_empty() {
-			let blamed_vec: Vec<ParticipantId> = blamed_dealers_set.into_iter().collect();
-			let reason = format!("Dealers failed to deliver: {:?}", blamed_vec);
-			self.state = ResharingState::Failed(reason);
-			return Err(ResharingProtocolError::PartyFailure(blamed_vec));
-		}
-
-		// Then report parties that failed without blaming anyone
-		if !failed_parties_without_blame.is_empty() {
-			let reason = format!("Parties reported failure: {:?}", failed_parties_without_blame);
-			self.state = ResharingState::Failed(reason);
-			return Err(ResharingProtocolError::PartyFailure(failed_parties_without_blame));
-		}
-
-		// Surface any dealer accusations.
-		// Only accept accusations from parties that are actually in the old subset
-		// being accused about (they need s_I^old to verify the dealer's commitment).
-		let mut accused: alloc::collections::BTreeSet<ParticipantId> =
-			alloc::collections::BTreeSet::new();
-		for (accuser, broadcast) in &self.round5_broadcasts {
-			for accusation in &broadcast.accusations {
-				// Validate: accuser must be in the old subset to have recomputed the commitment
-				if !self.config.old_participants().is_in_mask(*accuser, accusation.old_subset) {
-					log::warn!(
-						"Ignoring accusation from party {} against {} for old_subset {:b}: \
-						 accuser not in subset",
-						accuser,
-						accusation.dealer,
-						accusation.old_subset
-					);
-					continue;
-				}
-
-				// Validate: accused dealer must actually be the designated dealer for this subset
-				let actual_dealer = self.designated_dealer_for(accusation.old_subset);
-				if actual_dealer != Some(accusation.dealer) {
-					log::warn!(
-						"Ignoring accusation from party {} against {} for old_subset {:b}: \
-						 designated dealer is {:?}, not {}",
-						accuser,
-						accusation.dealer,
-						accusation.old_subset,
-						actual_dealer,
-						accusation.dealer
-					);
-					continue;
-				}
-
-				accused.insert(accusation.dealer);
-			}
-		}
-		if !accused.is_empty() {
-			let accused_vec: Vec<ParticipantId> = accused.into_iter().collect();
-			let reason = format!("Dealers accused of misbehavior: {:?}", accused_vec);
-			self.state = ResharingState::Failed(reason);
-			return Err(ResharingProtocolError::PartyFailure(accused_vec));
+		if !failed_parties.is_empty() {
+			let reason = format!(
+				"Protocol aborted: {} parties reported failure",
+				failed_parties.len()
+			);
+			self.state = ResharingState::Failed(reason.clone());
+			return Err(ResharingProtocolError::ProtocolAborted(reason));
 		}
 
 		// New committee members must agree on every shared new subset.
 		self.verify_new_share_consistency()?;
 
-		// Verify the resharing preserved the public key invariant. This is the
-		// only line of defense against a malicious dealer that owns a size-1 old
-		// subset (`t = n` configurations), since `collect_accusations` cannot
-		// catch them — there is nobody else in the old subset to cross-check.
+		// Verify the resharing preserved the public key invariant. This catches
+		// a malicious dealer that lies about a residual `r_{I→J}`.
 		self.verify_public_key_preservation()?;
 
 		let output = self.build_output()?;
@@ -1139,65 +1052,6 @@ impl ResharingProtocol {
 			}
 		}
 		None
-	}
-
-	/// Old committee post-Round-3 verification: re-derive sub-shares for every old
-	/// subset we belong to, compare against the dealer's broadcast commitments, and
-	/// produce accusations for any mismatches.
-	fn collect_accusations(&self) -> Result<Vec<DealerAccusation>, ResharingProtocolError> {
-		let existing = self.existing_share.as_ref().ok_or_else(|| {
-			ResharingProtocolError::InternalError("Missing existing share".to_string())
-		})?;
-		let shares = existing.shares();
-		let new_subsets = &self.new_subset_order;
-		let n_new = new_subsets.len();
-		if n_new == 0 {
-			return Ok(Vec::new());
-		}
-
-		// Get the session seed for forward-secrecy PRF derivation
-		let session_seed = self.session_seed.ok_or_else(|| {
-			ResharingProtocolError::InternalError("Missing session seed".to_string())
-		})?;
-
-		let mut accusations = Vec::new();
-		for &i_mask in self.old_subset_order.iter() {
-			let dealer = match self.designated_dealer_for(i_mask) {
-				Some(d) => d,
-				None => continue,
-			};
-			// Skip subsets we are not in (we can't recompute their secret share data).
-			let s_i = match shares.get(&i_mask) {
-				Some(s) => s,
-				None => continue,
-			};
-			// We don't accuse ourselves.
-			if dealer == self.config.my_party_id() {
-				continue;
-			}
-			let dealer_broadcast = self.round3_broadcasts.get(&dealer).ok_or_else(|| {
-				ResharingProtocolError::InternalError(format!(
-					"Missing Round 3 broadcast from designated dealer {} for subset {:b}",
-					dealer, i_mask
-				))
-			})?;
-			let expected =
-				derive_subshares_with_session_seed(i_mask, s_i, new_subsets, &session_seed);
-			for (j_idx, &j_mask) in new_subsets.iter().enumerate() {
-				let expected_commit = commit_subshare(i_mask, j_mask, &expected[j_idx]);
-				match dealer_broadcast.commitments.get(&(i_mask, j_mask)) {
-					Some(c) if *c == expected_commit => {},
-					_ => {
-						accusations.push(DealerAccusation {
-							dealer,
-							old_subset: i_mask,
-							new_subset: j_mask,
-						});
-					},
-				}
-			}
-		}
-		Ok(accusations)
 	}
 
 	/// New committee post-Round-4 work: verify each received `r_{I→J}` against the

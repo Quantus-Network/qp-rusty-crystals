@@ -605,29 +605,10 @@ pub struct ResharingRound5Broadcast {
 	/// one entry per new subset `J` this party belongs to. Empty for old-only parties.
 	/// Each entry has exactly `K` polynomials (enforced by the fixed-size array type).
 	pub partial_pks: BTreeMap<SubsetMask, [[i32; N as usize]; K]>,
-	/// Accusations against dealers whose broadcast commitments did not match
-	/// the sender's independent recomputation.
-	pub accusations: Vec<DealerAccusation>,
-	/// Dealers that failed to deliver valid Round 4 messages to this party.
-	/// Used to correctly attribute blame when a new committee member fails
-	/// verification due to missing or invalid private deliveries.
-	pub blamed_dealers: Vec<ParticipantId>,
 	/// Indicates whether this party processed Round 3/4 successfully.
 	pub success: bool,
 	/// Optional error message if `success` is false.
 	pub error_message: Option<String>,
-}
-
-/// An accusation that a dealer published a commitment that does not match
-/// the independent recomputation by another member of the same old subset.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct DealerAccusation {
-	/// The party being accused (the broadcaster of the bad commitment).
-	pub dealer: ParticipantId,
-	/// The old subset for which the dealer's commitment was wrong.
-	pub old_subset: SubsetMask,
-	/// The new subset whose `r_{I→J}` commitment was wrong.
-	pub new_subset: SubsetMask,
 }
 
 // ============================================================================
@@ -871,8 +852,6 @@ mod tests {
 			party_id: 5,
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
-			accusations: Vec::new(),
-			blamed_dealers: Vec::new(),
 			success: true,
 			error_message: None,
 		});
@@ -1058,8 +1037,6 @@ mod tests {
 			party_id: 55,
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
-			accusations: Vec::new(),
-			blamed_dealers: Vec::new(),
 			success: true,
 			error_message: None,
 		});
@@ -1073,8 +1050,6 @@ mod tests {
 			party_id: 0,
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
-			accusations: Vec::new(),
-			blamed_dealers: Vec::new(),
 			success: true,
 			error_message: None,
 		};
@@ -1086,8 +1061,6 @@ mod tests {
 			party_id: 1,
 			share_commitments: BTreeMap::new(),
 			partial_pks: BTreeMap::new(),
-			accusations: Vec::new(),
-			blamed_dealers: Vec::new(),
 			success: false,
 			error_message: Some("Share verification failed".to_string()),
 		};
@@ -1171,8 +1144,6 @@ mod tests {
 			party_id: 5,
 			share_commitments: BTreeMap::new(),
 			partial_pks,
-			accusations: Vec::new(),
-			blamed_dealers: Vec::new(),
 			success: true,
 			error_message: None,
 		};
@@ -1199,8 +1170,6 @@ mod tests {
 			party_id: 0,
 			share_commitments: BTreeMap::new(),
 			partial_pks,
-			accusations: Vec::new(),
-			blamed_dealers: Vec::new(),
 			success: true,
 			error_message: None,
 		};

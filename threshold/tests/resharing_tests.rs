@@ -1112,10 +1112,10 @@ fn forge_consistent_commitment(i_mask: u16, j_mask: u16, r: &NewShareData) -> [u
 }
 
 #[test]
-fn test_resharing_detects_dealer_accusation_when_commitment_tampered() {
+fn test_resharing_aborts_when_commitment_tampered() {
 	// In a (2,3) resharing, old subsets have size 2 (n - t + 1 = 3 - 2 + 1 = 2).
-	// Each old subset has a designated dealer and another verifier. If the dealer
-	// broadcasts a bad commitment, the verifier will detect it in `collect_accusations`.
+	// If the dealer broadcasts a bad commitment, the protocol will detect the mismatch
+	// during share verification and abort (without blame attribution).
 
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
 	let seed = [77u8; 32];
@@ -1126,10 +1126,8 @@ fn test_resharing_detects_dealer_accusation_when_commitment_tampered() {
 		old_shares.insert(share.party_id(), share.clone());
 	}
 
-	// Tamper only the Round 3 Commitments (not the Round 4 payload). The recipient
-	// will accept the sub-share (commitment mismatch with our tampered value), but
-	// another member of the same old subset will independently recompute the
-	// *correct* commitment and file an accusation.
+	// Tamper the Round 3 Commitments. The recipient will detect that the received
+	// sub-share doesn't match the tampered commitment.
 	let target_pair = (0b011u16, 0b011u16); // old subset {0,1}, new subset {0,1}
 	let bad_commit = [0xAAu8; 32];
 
@@ -1163,81 +1161,17 @@ fn test_resharing_detects_dealer_accusation_when_commitment_tampered() {
 		Some(tamper),
 	);
 
-	let err = result.expect_err("tampered commitment must be detected via accusation");
-	// The protocol detects dealer misbehavior - either via accusation or party failure
+	let err = result.expect_err("tampered commitment must be detected");
+	// The protocol aborts when it detects misbehavior (no blame attribution)
 	assert!(
-		err.contains("accused") ||
-			err.contains("misbehavior") ||
-			err.contains("Party failure") ||
-			err.contains("PartyFailure"),
-		"expected dealer accusation or party failure, got: {}",
+		err.contains("abort") ||
+			err.contains("Abort") ||
+			err.contains("verification") ||
+			err.contains("Verification") ||
+			err.contains("failed") ||
+			err.contains("Failed"),
+		"expected protocol abort due to verification failure, got: {}",
 		err
-	);
-}
-
-#[test]
-fn test_resharing_ignores_fabricated_accusation_against_non_dealer() {
-	// A malicious party could try to frame another party by fabricating an accusation
-	// claiming they were a bad dealer for a subset they weren't actually the dealer of.
-	// The protocol must validate that the accused party is the designated dealer for
-	// the claimed subset, and ignore accusations against non-dealers.
-
-	use qp_rusty_crystals_threshold::resharing::DealerAccusation;
-
-	let config = ThresholdConfig::new(2, 3).expect("valid config");
-	let seed = [88u8; 32];
-	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
-
-	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
-	for share in &shares {
-		old_shares.insert(share.party_id(), share.clone());
-	}
-
-	// Party 1 will inject a fabricated accusation against party 2, claiming party 2
-	// was a bad dealer for old_subset 0b011 (parties {0,1}). But party 0 is the
-	// designated dealer for that subset (lowest ID), not party 2.
-	let fabricated_accusation = DealerAccusation {
-		dealer: 2,         // Framing party 2
-		old_subset: 0b011, // Subset {0,1} - dealer is party 0, not party 2
-		new_subset: 0b011,
-	};
-
-	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
-		if sender != 1 {
-			return data;
-		}
-		let msg: ResharingMessage = match borsh::from_slice(&data) {
-			Ok(m) => m,
-			Err(_) => return data,
-		};
-		let modified = match msg {
-			ResharingMessage::Round5(mut b) => {
-				// Inject the fabricated accusation
-				b.accusations.push(fabricated_accusation.clone());
-				ResharingMessage::Round5(b)
-			},
-			other => other,
-		};
-		borsh::to_vec(&modified).expect("re-serialize tampered msg")
-	});
-
-	// The protocol should succeed despite the fabricated accusation, because the
-	// accusation is invalid (party 2 is not the dealer for subset 0b011).
-	let result = run_resharing_protocol_with_tamper(
-		2,
-		vec![0, 1, 2],
-		2,
-		vec![0, 1, 2],
-		&old_shares,
-		&public_key,
-		Some(tamper),
-	);
-
-	assert!(
-		result.is_ok(),
-		"Protocol should succeed - fabricated accusation against non-dealer must be ignored. \
-		 Got error: {:?}",
-		result.err()
 	);
 }
 
@@ -1294,12 +1228,15 @@ fn test_resharing_detects_round2_payload_mismatch() {
 	);
 
 	let err = result.expect_err("tampered Round 2 payload must be detected");
-	// The protocol detects the mismatch - either via commitment check or party failure
+	// The protocol aborts when it detects the mismatch
 	assert!(
 		err.contains("commitment") ||
 			err.contains("ShareVerificationFailed") ||
-			err.contains("Party failure"),
-		"expected commitment mismatch or party failure, got: {}",
+			err.contains("Party failure") ||
+			err.contains("abort") ||
+			err.contains("Abort") ||
+			err.contains("parties reported failure"),
+		"expected protocol abort due to verification failure, got: {}",
 		err
 	);
 }
@@ -1307,8 +1244,8 @@ fn test_resharing_detects_round2_payload_mismatch() {
 #[test]
 fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 	// In a (2,2) -> (2,2) resharing every old subset has size 1, so the dealer is
-	// the sole member of their old subset and `collect_accusations` cannot catch a
-	// dealer that lies about their residual `r`. To prove that lying about `r` is
+	// the sole member of their old subset and no other party can verify their
+	// commitment against the original share. To prove that lying about `r` is
 	// nonetheless caught, we tamper *both* the Round 3 Commitments and the Round 4
 	// payload so that they remain mutually consistent (passing the recipient's
 	// commit-vs-r check). The resulting `s_J^new` for the recipient is corrupted,
@@ -1375,8 +1312,11 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 		err.contains("public key") ||
 			err.contains("ShareVerificationFailed") ||
 			err.contains("Party failure") ||
-			err.contains("PartyFailure"),
-		"expected public-key invariant failure or party failure, got: {}",
+			err.contains("PartyFailure") ||
+			err.contains("abort") ||
+			err.contains("Abort") ||
+			err.contains("parties reported failure"),
+		"expected protocol abort due to tampering, got: {}",
 		err
 	);
 }
@@ -2385,15 +2325,15 @@ fn test_coefficient_growth_tracking() {
 }
 
 /// Test that when a dealer omits Round 4 delivery to a specific victim, the protocol
-/// correctly blames the dealer rather than the victim.
+/// correctly detects the failure and aborts.
 ///
 /// Attack scenario:
 /// 1. Dealer (party 0) broadcasts faithful Round 3 commitments
 /// 2. Dealer omits Round 4 private delivery to victim (party 2)
 /// 3. Victim fails verification (missing data)
-/// 4. Protocol must blame dealer (party 0), NOT the victim (party 2)
+/// 4. Protocol aborts (without blame attribution, since attribution isn't always possible)
 #[test]
-fn test_resharing_blames_dealer_for_round4_omission() {
+fn test_resharing_aborts_on_round4_omission() {
 	use std::{cell::RefCell, rc::Rc};
 
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
@@ -2413,9 +2353,7 @@ fn test_resharing_blames_dealer_for_round4_omission() {
 	let dropped_count = Rc::new(RefCell::new(0u32));
 	let dropped_count_clone = dropped_count.clone();
 
-	// We need a different approach: modify Round 4 message to not include
-	// contributions for the victim. But since this is complex, let's instead
-	// remove all contributions from dealer's Round 4 message to the victim.
+	// Remove all contributions from dealer's Round 4 message to the victim.
 	let tamper: TamperFn = Box::new(move |sender, recipient, data| {
 		// Only intercept Round 4 messages from the malicious dealer to the victim
 		if sender == malicious_dealer && recipient == Some(victim) {
@@ -2453,19 +2391,15 @@ fn test_resharing_blames_dealer_for_round4_omission() {
 	let err = result.unwrap_err();
 	println!("Error: {}", err);
 
-	// The error should blame the dealer (party 0), not the victim (party 2)
+	// The protocol aborts without blame attribution
 	assert!(
-		err.contains(&format!("{}", malicious_dealer)) || err.contains("Dealers failed"),
-		"Error should blame the malicious dealer ({}), not the victim ({}). Got: {}",
-		malicious_dealer,
-		victim,
-		err
-	);
-	assert!(
-		!err.contains(&format!("Party {} failed", victim)) &&
-			!err.contains(&format!("Parties reported failure: [{}", victim)),
-		"Error should NOT blame the victim ({}). Got: {}",
-		victim,
+		err.contains("abort") ||
+			err.contains("Abort") ||
+			err.contains("failed") ||
+			err.contains("Failed") ||
+			err.contains("missing") ||
+			err.contains("Missing"),
+		"Protocol should abort due to missing Round 4 data. Got: {}",
 		err
 	);
 }
