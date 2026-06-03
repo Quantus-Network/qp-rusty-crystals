@@ -931,10 +931,8 @@ impl ResharingProtocol {
 			.collect();
 
 		if !failed_parties.is_empty() {
-			let reason = format!(
-				"Protocol aborted: {} parties reported failure",
-				failed_parties.len()
-			);
+			let reason =
+				format!("Protocol aborted: {} parties reported failure", failed_parties.len());
 			self.state = ResharingState::Failed(reason.clone());
 			return Err(ResharingProtocolError::ProtocolAborted(reason));
 		}
