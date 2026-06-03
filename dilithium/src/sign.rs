@@ -887,7 +887,8 @@ mod tests {
 		let rnd = [2u8; params::SEEDBYTES];
 		let mu = [3u8; params::CRHBYTES];
 
-		// python3 -c "import hashlib; print(hashlib.shake_256(bytes([1]*32)+bytes([2]*32)+bytes([3]*64)).hexdigest(64))"
+		// python3 -c "import hashlib;
+		// print(hashlib.shake_256(bytes([1]*32)+bytes([2]*32)+bytes([3]*64)).hexdigest(64))"
 		let expected: [u8; params::CRHBYTES] = [
 			0x4d, 0xfd, 0xda, 0xba, 0x94, 0x98, 0x12, 0xaa, 0xc7, 0x9f, 0xc8, 0xc2, 0xa7, 0xa6,
 			0x2e, 0x36, 0xc6, 0xd2, 0x69, 0x58, 0xbb, 0x73, 0x9e, 0x81, 0xd7, 0x48, 0xdc, 0xec,
