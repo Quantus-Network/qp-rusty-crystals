@@ -800,7 +800,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_produces_valid_coefficients() {
-		use rand::{rngs::StdRng, RngCore, SeedableRng};
+		use rand::{rngs::StdRng, Rng, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0x123456789ABCDEF0);
 		const NUM_TESTS: usize = 100;
@@ -837,7 +837,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_different_seeds() {
-		use rand::{rngs::StdRng, RngCore, SeedableRng};
+		use rand::{rngs::StdRng, Rng, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0xFEDCBA9876543210);
 		const NUM_TESTS: usize = 50;
@@ -880,7 +880,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_deterministic() {
-		use rand::{rngs::StdRng, RngCore, SeedableRng};
+		use rand::{rngs::StdRng, Rng, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0x1122334455667788);
 		const NUM_TESTS: usize = 25;
@@ -910,7 +910,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_nonce_variations() {
-		use rand::{rngs::StdRng, RngCore, SeedableRng};
+		use rand::{rngs::StdRng, Rng, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0x9999888877776666);
 		const NUM_TESTS: usize = 30;
@@ -1120,7 +1120,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_coefficient_efficiency() {
-		use rand::{rngs::StdRng, RngCore, SeedableRng};
+		use rand::{rngs::StdRng, Rng, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0xABCDEF0123456789);
 		const NUM_TESTS: usize = 100;
@@ -1221,7 +1221,7 @@ mod tests {
 	// A0B0 bug would zero every second coefficient.
 	#[test]
 	fn test_uniform_gamma1_no_paired_coefficient_repetition() {
-		use rand::{rngs::StdRng, RngCore, SeedableRng};
+		use rand::{rngs::StdRng, Rng, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0x5EED_1234_ABCD_0001);
 		const NUM_POLYS: usize = 256;

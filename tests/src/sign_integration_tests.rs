@@ -1,10 +1,10 @@
 // tests/sign_integration_tests.rs
 
 use qp_rusty_crystals_hdwallet::{derive_key_from_seed, generate_mnemonic, mnemonic_to_seed};
-use rand::{rngs::OsRng, Rng, RngCore};
+use rand::{Rng, RngExt};
 
 fn get_random_bytes() -> [u8; 32] {
-	let mut rng = rand::thread_rng();
+	let mut rng = rand::rng();
 	let mut bytes = [0u8; 32];
 	rng.fill(&mut bytes);
 	bytes
@@ -35,7 +35,7 @@ fn test_sign() {
 #[test]
 fn test_sign_multiple_messages() {
 	let mut entropy = [0u8; 32];
-	OsRng.fill_bytes(&mut entropy);
+	rand::rng().fill_bytes(&mut entropy);
 
 	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
 	let mut seed = mnemonic_to_seed(mnemonic, None).expect("Failed to create seed from mnemonic");
@@ -61,7 +61,7 @@ fn test_sign_multiple_messages() {
 #[test]
 fn test_hedged_vs_deterministic_signing() {
 	let mut entropy = [0u8; 32];
-	OsRng.fill_bytes(&mut entropy);
+	rand::rng().fill_bytes(&mut entropy);
 
 	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
 	let mut seed = mnemonic_to_seed(mnemonic, None).expect("Failed to create seed from mnemonic");
@@ -97,8 +97,8 @@ fn test_hedged_vs_deterministic_signing() {
 fn test_cross_keypair_verification_fails() {
 	let mut entropy1 = [0u8; 32];
 	let mut entropy2 = [0u8; 32];
-	OsRng.fill_bytes(&mut entropy1);
-	OsRng.fill_bytes(&mut entropy2);
+	rand::rng().fill_bytes(&mut entropy1);
+	rand::rng().fill_bytes(&mut entropy2);
 
 	let mnemonic1 =
 		generate_mnemonic((&mut entropy1).into()).expect("Failed to generate mnemonic 1");
@@ -132,7 +132,7 @@ fn test_cross_keypair_verification_fails() {
 #[test]
 fn test_corrupted_signature_fails() {
 	let mut entropy = [0u8; 32];
-	OsRng.fill_bytes(&mut entropy);
+	rand::rng().fill_bytes(&mut entropy);
 
 	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
 	let mut seed = mnemonic_to_seed(mnemonic, None).expect("Failed to create seed from mnemonic");
@@ -207,7 +207,7 @@ fn test_same_seed_produces_same_keypair() {
 #[test]
 fn test_stress_multiple_signatures() {
 	let mut entropy = [0u8; 32];
-	OsRng.fill_bytes(&mut entropy);
+	rand::rng().fill_bytes(&mut entropy);
 
 	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
 	let mut seed = mnemonic_to_seed(mnemonic, None).expect("Failed to create seed from mnemonic");

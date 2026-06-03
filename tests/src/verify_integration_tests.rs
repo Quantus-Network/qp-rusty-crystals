@@ -6,7 +6,7 @@ use crate::helpers::{
 };
 use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, PUBLICKEYBYTES};
 use qp_rusty_crystals_hdwallet::SensitiveBytes32;
-use rand::{thread_rng, Rng};
+use rand::RngExt;
 
 fn keypair_from_test(test: &TestVector) -> Keypair {
 	let total_len = test.sk.len() + test.pk.len();
@@ -26,7 +26,7 @@ fn test_nist_kat() {
 }
 
 fn get_random_bytes() -> SensitiveBytes32 {
-	let mut rng = rand::thread_rng();
+	let mut rng = rand::rng();
 	let mut bytes = [0u8; 32];
 	rng.fill(&mut bytes);
 	(&mut bytes).into()
@@ -96,7 +96,7 @@ fn verify_test_vector(test: &TestVector) {
 	);
 
 	// Fuzzing loop: randomly modify signature and verify it fails
-	let mut rng = thread_rng();
+	let mut rng = rand::rng();
 	let num_fuzz_attempts = 20; // Number of random modifications to test
 
 	for _ in 0..num_fuzz_attempts {
@@ -108,46 +108,46 @@ fn verify_test_vector(test: &TestVector) {
 		}
 
 		// Randomly choose modification type
-		let modification_type = rng.gen_range(0..4);
+		let modification_type = rng.random_range(0..4);
 
 		match modification_type {
 			0 => {
 				// Flip a random bit
-				let byte_index = rng.gen_range(0..fuzzed_signature.len());
-				let bit_index = rng.gen_range(0..8);
+				let byte_index = rng.random_range(0..fuzzed_signature.len());
+				let bit_index = rng.random_range(0..8);
 				fuzzed_signature[byte_index] ^= 1 << bit_index;
 			},
 			1 => {
 				// Replace a random byte with a random value
-				let byte_index = rng.gen_range(0..fuzzed_signature.len());
+				let byte_index = rng.random_range(0..fuzzed_signature.len());
 				let previous = fuzzed_signature[byte_index];
-				let mut new_value = rng.gen();
+				let mut new_value = rng.random();
 				// Make sure it is actually different
 				while new_value == previous {
-					new_value = rng.gen();
+					new_value = rng.random();
 				}
 				fuzzed_signature[byte_index] = new_value;
 			},
 			2 => {
 				// Zero out a random byte (only if it's not already zero)
-				let byte_index = rng.gen_range(0..fuzzed_signature.len());
+				let byte_index = rng.random_range(0..fuzzed_signature.len());
 				if fuzzed_signature[byte_index] != 0 {
 					fuzzed_signature[byte_index] = 0;
 				} else {
 					// If it's already zero, set it to a non-zero value
 					println!("Byte at index {byte_index} was already zero, setting to non-zero");
-					fuzzed_signature[byte_index] = rng.gen_range(1..=255);
+					fuzzed_signature[byte_index] = rng.random_range(1..=255);
 				}
 			},
 			3 => {
 				// Modify multiple bytes (1-5 bytes)
-				let num_bytes_to_modify = rng.gen_range(1..=5.min(fuzzed_signature.len()));
+				let num_bytes_to_modify = rng.random_range(1..=5.min(fuzzed_signature.len()));
 				for _ in 0..num_bytes_to_modify {
-					let byte_index = rng.gen_range(0..fuzzed_signature.len());
+					let byte_index = rng.random_range(0..fuzzed_signature.len());
 					let previous = fuzzed_signature[byte_index];
-					let mut new_value = rng.gen();
+					let mut new_value = rng.random();
 					while new_value == previous {
-						new_value = rng.gen();
+						new_value = rng.random();
 					}
 					fuzzed_signature[byte_index] = new_value;
 				}

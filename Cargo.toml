@@ -8,11 +8,11 @@ criterion = { version = "=0.5.1", features = ["html_reports"] }
 getrandom = { version = "=0.2.17", features = ["js"] }
 hex = { version = "=0.4.3", default-features = false, features = ["alloc"] }
 hex-literal = { version = "=0.4.1", default-features = false }
-qp-poseidon-core = { version = "1.4.0", default-features = false }
+qp-poseidon-core = { version = "2.0.2", default-features = false }
 qp-rusty-crystals-dilithium = { path = "./dilithium", version = "2.4.0", default-features = false }
 qp-rusty-crystals-hdwallet = { path = "./hdwallet", version = "2.3.1", default-features = false }
-rand = { version = "=0.8.5", default-features = false, features = ["std_rng"] }
-rand_core = { version = "=0.6.4", default-features = false }
+rand = { version = "=0.10.1", default-features = false, features = ["std_rng", "thread_rng"] }
+rand_core = { version = "=0.10.0", default-features = false }
 rusty-crystals-integration-tests = { path = "./tests" }
 serde = { version = "=1.0.228", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "=1.0.149", default-features = false, features = ["alloc"] }
