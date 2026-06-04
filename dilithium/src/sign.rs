@@ -537,7 +537,7 @@ pub(crate) fn verify(
 mod tests {
 	use super::*;
 	use alloc::{string::String, vec};
-	use rand::Rng;
+	use rand::RngExt;
 
 	fn get_random_bytes() -> SensitiveBytes32 {
 		let mut rng = rand::rng();

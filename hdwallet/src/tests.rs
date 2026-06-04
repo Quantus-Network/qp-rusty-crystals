@@ -15,7 +15,7 @@ mod hdwallet_tests {
 	};
 	use core::str::FromStr;
 	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
-	use rand::{rngs::StdRng, RngCore, SeedableRng};
+	use rand::{rngs::StdRng, Rng, SeedableRng};
 
 	// For test-only functionality that needs std
 	#[cfg(test)]
