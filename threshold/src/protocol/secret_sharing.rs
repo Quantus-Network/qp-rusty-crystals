@@ -96,7 +96,7 @@ pub(crate) fn compute_sharing_patterns(
 
 /// Generate all subsets of exactly `size` elements from `n` elements.
 /// Uses Gosper's hack to efficiently enumerate subsets.
-fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
+pub fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
 	if size > n || size == 0 {
 		return Vec::new();
 	}

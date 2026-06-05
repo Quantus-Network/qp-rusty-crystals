@@ -181,7 +181,13 @@ pub use derivation::{derive_dkg_contribution, DerivedKeyId};
 pub use verification::verify_signature;
 
 // SSID computation (for tests and advanced use cases)
-pub use protocol::signing::compute_ssid;
+pub use protocol::signing::{compute_ssid, convert_shares};
+
+// Hyperball parameters (for analysis and testing)
+pub use protocol::signing::get_hyperball_params;
+
+// Secret sharing utilities (for analysis and testing)
+pub use protocol::secret_sharing::generate_subsets_of_size;
 
 /// Signature verification.
 mod verification {

@@ -6,8 +6,9 @@
 use std::collections::HashMap;
 
 use qp_rusty_crystals_threshold::{
-	compute_ssid, generate_with_dealer, verify_signature, ParticipantList, PrivateKeyShare,
-	PublicKey, Round1Broadcast, Round2Broadcast, Round3Broadcast, ThresholdConfig, ThresholdSigner,
+	compute_ssid, convert_shares, generate_subsets_of_size, generate_with_dealer,
+	get_hyperball_params, verify_signature, ParticipantList, PrivateKeyShare, PublicKey,
+	Round1Broadcast, Round2Broadcast, Round3Broadcast, ThresholdConfig, ThresholdSigner,
 };
 
 use qp_rusty_crystals_threshold::resharing::{
@@ -2858,4 +2859,385 @@ fn test_coefficient_distribution_2_of_4() {
 #[test]
 fn test_coefficient_distribution_4_of_6() {
 	run_distribution_analysis(4, 6, 10);
+}
+
+// ============================================================================
+// Recovered Partial Analysis Tests
+// ============================================================================
+//
+// These tests analyze the variance of recovered partials (what's actually used
+// in signing) compared to individual stored shares. The hyperball rejection
+// sampling parameters are computed assuming a certain coefficient standard
+// deviation, so we need to verify that post-resharing partials stay within
+// acceptable bounds.
+
+/// Statistics for recovered partial analysis.
+#[derive(Debug, Clone)]
+struct RecoveredPartialStats {
+	/// Number of shares summed to form this partial
+	num_shares_summed: usize,
+	/// L-infinity norm of s1 component
+	s1_linf_norm: i64,
+	/// L-infinity norm of s2 component
+	s2_linf_norm: i64,
+	/// Variance of s1 coefficients
+	s1_variance: f64,
+	/// Variance of s2 coefficients
+	s2_variance: f64,
+	/// Combined weighted norm: sqrt(||s1||^2/nu^2 + ||s2||^2)
+	combined_weighted_norm: f64,
+}
+
+/// Compute statistics for a recovered partial.
+fn compute_partial_stats(s1_coeffs: &[i64], s2_coeffs: &[i64], nu: f64) -> RecoveredPartialStats {
+	// L2 norms
+	let s1_l2_sq: f64 = s1_coeffs.iter().map(|&c| (c as f64).powi(2)).sum();
+	let s2_l2_sq: f64 = s2_coeffs.iter().map(|&c| (c as f64).powi(2)).sum();
+
+	// L-infinity norms
+	let s1_linf = s1_coeffs.iter().map(|&c| c.abs()).max().unwrap_or(0);
+	let s2_linf = s2_coeffs.iter().map(|&c| c.abs()).max().unwrap_or(0);
+
+	// Variances
+	let s1_mean: f64 = s1_coeffs.iter().map(|&c| c as f64).sum::<f64>() / s1_coeffs.len() as f64;
+	let s2_mean: f64 = s2_coeffs.iter().map(|&c| c as f64).sum::<f64>() / s2_coeffs.len() as f64;
+
+	let s1_variance: f64 = s1_coeffs.iter().map(|&c| (c as f64 - s1_mean).powi(2)).sum::<f64>() /
+		s1_coeffs.len() as f64;
+	let s2_variance: f64 = s2_coeffs.iter().map(|&c| (c as f64 - s2_mean).powi(2)).sum::<f64>() /
+		s2_coeffs.len() as f64;
+
+	// Combined weighted norm (as used in hyperball check)
+	let combined_weighted_norm = (s1_l2_sq / (nu * nu) + s2_l2_sq).sqrt();
+
+	RecoveredPartialStats {
+		num_shares_summed: 0, // Set by caller
+		s1_linf_norm: s1_linf,
+		s2_linf_norm: s2_linf,
+		s1_variance,
+		s2_variance,
+		combined_weighted_norm,
+	}
+}
+
+/// Extract centered coefficients from recovered partial for analysis.
+/// Sums share coefficients directly (no NTT) for statistical analysis.
+fn extract_recovered_coefficients(
+	share: &PrivateKeyShare,
+	signing_set: &[u32],
+) -> Option<(Vec<i64>, Vec<i64>)> {
+	const Q: i64 = 8380417;
+	const HALF_Q: i64 = Q / 2;
+
+	if !signing_set.contains(&share.party_id()) {
+		return None;
+	}
+
+	let shares = convert_shares(share);
+	let threshold = share.threshold();
+	let parties = share.total_parties();
+	let t = threshold as usize;
+	let n = parties as usize;
+
+	// Compute sharing patterns (same as recover_share)
+	let subset_size = n - t + 1;
+	let subsets = generate_subsets_of_size(n, subset_size);
+
+	let mut patterns: Vec<Vec<u16>> = vec![Vec::new(); t];
+	let mut used = std::collections::BTreeSet::new();
+	for (pos, pattern) in patterns.iter_mut().enumerate().take(t) {
+		for &subset in &subsets {
+			if !used.contains(&subset) && (subset & (1 << pos)) != 0 {
+				pattern.push(subset);
+				used.insert(subset);
+			}
+		}
+	}
+
+	// Sort signing set and find our position
+	let mut sorted_signing: Vec<u32> = signing_set.to_vec();
+	sorted_signing.sort();
+
+	let my_dkg_index = share.dkg_participants().index_of(share.party_id())?;
+	let sorted_indices: Vec<usize> = sorted_signing
+		.iter()
+		.filter_map(|&p| share.dkg_participants().index_of(p))
+		.collect();
+	let current_i = sorted_indices.iter().position(|&idx| idx == my_dkg_index)?;
+
+	// Create permutation
+	let mut perm = vec![0usize; n];
+	let mut i1 = 0;
+	let mut i2 = t;
+	for j in 0..n {
+		if sorted_indices.contains(&j) {
+			perm[i1] = j;
+			i1 += 1;
+		} else {
+			perm[i2] = j;
+			i2 += 1;
+		}
+	}
+
+	// Accumulate coefficients directly (no NTT)
+	let mut s1_acc = vec![0i64; 7 * 256];
+	let mut s2_acc = vec![0i64; 8 * 256];
+
+	for &pattern_u in &patterns[current_i] {
+		let mut u_translated = 0u16;
+		for (i, &perm_val) in perm.iter().enumerate().take(n) {
+			if pattern_u & (1 << i) != 0 {
+				u_translated |= 1 << (perm_val as u16);
+			}
+		}
+
+		if let Some(secret_share) = shares.get(&u_translated) {
+			for (poly_idx, poly) in secret_share.s1_share.vec.iter().enumerate().take(7) {
+				for (coeff_idx, &coeff) in poly.coeffs.iter().enumerate() {
+					let c = coeff as i64;
+					let centered = if c > HALF_Q { c - Q } else { c };
+					s1_acc[poly_idx * 256 + coeff_idx] += centered;
+				}
+			}
+			for (poly_idx, poly) in secret_share.s2_share.vec.iter().enumerate().take(8) {
+				for (coeff_idx, &coeff) in poly.coeffs.iter().enumerate() {
+					let c = coeff as i64;
+					let centered = if c > HALF_Q { c - Q } else { c };
+					s2_acc[poly_idx * 256 + coeff_idx] += centered;
+				}
+			}
+		}
+	}
+
+	Some((s1_acc, s2_acc))
+}
+
+/// Convert a bitmask subset to a list of party IDs.
+fn bitmask_to_party_ids(mask: u16, parties: &[u32]) -> Vec<u32> {
+	parties
+		.iter()
+		.enumerate()
+		.filter(|(i, _)| mask & (1 << i) != 0)
+		.map(|(_, &id)| id)
+		.collect()
+}
+
+/// Generate all t-subsets of parties as lists of party IDs.
+fn generate_signing_sets(parties: &[u32], threshold: usize) -> Vec<Vec<u32>> {
+	generate_subsets_of_size(parties.len(), threshold)
+		.into_iter()
+		.map(|mask| bitmask_to_party_ids(mask, parties))
+		.collect()
+}
+
+/// Analyze recovered partial variance for a given configuration.
+fn analyze_recovered_partials(threshold: u32, parties: u32, num_resharings: usize) {
+	println!("\n======================================================================");
+	println!(
+		"RECOVERED PARTIAL ANALYSIS: {}-of-{} ({} resharings)",
+		threshold, parties, num_resharings
+	);
+	println!("======================================================================\n");
+
+	let party_ids: Vec<u32> = (0..parties).collect();
+
+	// Generate initial keys
+	let config = ThresholdConfig::new(threshold, parties).expect("valid config");
+	let seed = [0x42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut current_shares: HashMap<u32, PrivateKeyShare> =
+		shares.into_iter().map(|s| (s.party_id(), s)).collect();
+
+	// Run resharings
+	for _ in 0..num_resharings {
+		let new_shares = run_resharing_protocol(
+			threshold,
+			party_ids.clone(),
+			threshold,
+			party_ids.clone(),
+			&current_shares,
+			&public_key,
+		)
+		.expect("resharing should succeed");
+		current_shares = new_shares;
+	}
+
+	// Get hyperball parameters
+	let (r, r_prime, nu) =
+		get_hyperball_params(threshold, parties).expect("hyperball params for config");
+
+	println!("Hyperball parameters:");
+	println!("  r (rejection radius):  {:.0}", r);
+	println!("  r' (sampling radius):  {:.0}", r_prime);
+	println!("  nu (s1 scaling):       {:.0}", nu);
+	println!();
+
+	// Analyze recovered partials for all signing sets
+	let signing_sets = generate_signing_sets(&party_ids, threshold as usize);
+	println!("Analyzing {} signing sets...\n", signing_sets.len());
+
+	let mut all_stats: Vec<(Vec<u32>, u32, RecoveredPartialStats)> = Vec::new();
+
+	for signing_set in &signing_sets {
+		for &party_id in signing_set {
+			let share = current_shares.get(&party_id).expect("share exists");
+			if let Some((s1_coeffs, s2_coeffs)) = extract_recovered_coefficients(share, signing_set) {
+				let mut stats = compute_partial_stats(&s1_coeffs, &s2_coeffs, nu);
+
+				// Count how many shares were summed (from sharing pattern)
+				let t = threshold as usize;
+				let n = parties as usize;
+				let subset_size = n - t + 1;
+				let total_subsets = binomial(n, subset_size);
+				let avg_shares_per_party = total_subsets / t;
+				stats.num_shares_summed = avg_shares_per_party;
+
+				all_stats.push((signing_set.clone(), party_id, stats));
+			}
+		}
+	}
+
+	// Compute aggregate statistics
+	let total_partials = all_stats.len();
+	let avg_s1_variance: f64 =
+		all_stats.iter().map(|(_, _, s)| s.s1_variance).sum::<f64>() / total_partials as f64;
+	let avg_s2_variance: f64 =
+		all_stats.iter().map(|(_, _, s)| s.s2_variance).sum::<f64>() / total_partials as f64;
+	let max_s1_linf: i64 = all_stats.iter().map(|(_, _, s)| s.s1_linf_norm).max().unwrap_or(0);
+	let max_s2_linf: i64 = all_stats.iter().map(|(_, _, s)| s.s2_linf_norm).max().unwrap_or(0);
+	let max_combined_norm: f64 =
+		all_stats.iter().map(|(_, _, s)| s.combined_weighted_norm).fold(0.0, f64::max);
+	let avg_combined_norm: f64 =
+		all_stats.iter().map(|(_, _, s)| s.combined_weighted_norm).sum::<f64>() /
+			total_partials as f64;
+
+	println!("Aggregate Statistics ({} recovered partials):", total_partials);
+	println!("  Avg s1 coefficient variance: {:.2}", avg_s1_variance);
+	println!("  Avg s2 coefficient variance: {:.2}", avg_s2_variance);
+	println!("  Avg s1 coefficient std dev:  {:.2}", avg_s1_variance.sqrt());
+	println!("  Avg s2 coefficient std dev:  {:.2}", avg_s2_variance.sqrt());
+	println!("  Max s1 L-infinity norm:      {}", max_s1_linf);
+	println!("  Max s2 L-infinity norm:      {}", max_s2_linf);
+	println!();
+
+	println!("Combined Weighted Norm (sqrt(||s1||²/nu² + ||s2||²)):");
+	println!("  Average:  {:.0}", avg_combined_norm);
+	println!("  Maximum:  {:.0}", max_combined_norm);
+	println!("  r' limit: {:.0}", r_prime);
+	println!("  Margin:   {:.1}% of r'", (1.0 - max_combined_norm / r_prime) * 100.0);
+	println!();
+
+	// Compare to expected values based on coefficient variance
+	// The hyperball formula uses: beta = 1.3 * sqrt((k + l/nu²) * n * num_subsets) * sigt *
+	// sqrt(tau) where sigt is the coefficient std dev (sqrt(2) for eta=2)
+	let k = 8usize;
+	let l = 7usize;
+	let n_poly = 256usize;
+	let tau = 60.0f64;
+	let num_subsets_per_party =
+		binomial(parties as usize, threshold as usize - 1) / threshold as usize;
+
+	let original_sigt = (2.0f64).sqrt(); // sqrt((5²-1)/12) for eta=2
+	let post_reshare_sigt_s1 = avg_s1_variance.sqrt();
+	let post_reshare_sigt_s2 = avg_s2_variance.sqrt();
+
+	println!("Coefficient Standard Deviation Comparison:");
+	println!("  Original (η=2):            {:.4}", original_sigt);
+	println!("  Post-reshare s1:           {:.4}", post_reshare_sigt_s1);
+	println!("  Post-reshare s2:           {:.4}", post_reshare_sigt_s2);
+	println!("  Ratio (s1/original):       {:.2}x", post_reshare_sigt_s1 / original_sigt);
+	println!("  Ratio (s2/original):       {:.2}x", post_reshare_sigt_s2 / original_sigt);
+	println!();
+
+	// Expected beta using post-resharing std dev
+	let expected_combined_norm_original = 1.3 *
+		((k as f64 + l as f64 / (nu * nu)) * n_poly as f64 * num_subsets_per_party as f64).sqrt() *
+		original_sigt *
+		tau.sqrt();
+
+	let expected_combined_norm_post_reshare =
+		1.3 * ((k as f64 * post_reshare_sigt_s2.powi(2) +
+			l as f64 * post_reshare_sigt_s1.powi(2) / (nu * nu)) *
+			n_poly as f64 *
+			num_subsets_per_party as f64)
+			.sqrt() * tau.sqrt();
+
+	println!("Expected Combined Norm (from formula):");
+	println!("  Using original sigt:       {:.0}", expected_combined_norm_original);
+	println!("  Using post-reshare sigt:   {:.0}", expected_combined_norm_post_reshare);
+	println!("  Actual max observed:       {:.0}", max_combined_norm);
+	println!();
+
+	// Safety margin analysis
+	let safety_margin = r_prime - max_combined_norm;
+	let required_margin_for_challenge = tau * max_s2_linf as f64; // c*s2 contribution
+
+	println!("Safety Margin Analysis:");
+	println!("  Available margin (r' - max_norm): {:.0}", safety_margin);
+	println!("  Margin needed for c·s (τ * max_s2): {:.0}", required_margin_for_challenge);
+	println!("  Remaining slack: {:.0}", safety_margin - required_margin_for_challenge);
+
+	// Per-signing-set breakdown (first few)
+	println!("\nPer-party breakdown (first 5):");
+	println!(
+		"  {:20} {:>8} {:>12} {:>12} {:>12}",
+		"Signing Set", "Party", "s1 StdDev", "s2 StdDev", "Combined"
+	);
+	println!("  {}", "-".repeat(68));
+
+	for (signing_set, party_id, stats) in all_stats.iter().take(5) {
+		println!(
+			"  {:20} {:>8} {:>12.2} {:>12.2} {:>12.0}",
+			format!("{:?}", signing_set),
+			party_id,
+			stats.s1_variance.sqrt(),
+			stats.s2_variance.sqrt(),
+			stats.combined_weighted_norm
+		);
+	}
+
+	// Assert safety: max combined norm should be well below r'
+	assert!(
+		max_combined_norm < r_prime,
+		"Max combined norm {:.0} exceeds r' {:.0}",
+		max_combined_norm,
+		r_prime
+	);
+
+	// The norm should have reasonable margin (at least 10%)
+	let margin_ratio = (r_prime - max_combined_norm) / r_prime;
+	println!("\nSafety check: margin ratio = {:.1}% (want > 10%)", margin_ratio * 100.0);
+}
+
+/// Compute binomial coefficient C(n, k).
+fn binomial(n: usize, k: usize) -> usize {
+	if k > n {
+		return 0;
+	}
+	let mut result = 1;
+	for i in 0..k {
+		result = result * (n - i) / (i + 1);
+	}
+	result
+}
+
+#[test]
+fn test_recovered_partial_variance_2_of_3() {
+	analyze_recovered_partials(2, 3, 100);
+}
+
+#[test]
+fn test_recovered_partial_variance_2_of_4() {
+	analyze_recovered_partials(2, 4, 100);
+}
+
+#[test]
+fn test_recovered_partial_variance_3_of_5() {
+	analyze_recovered_partials(3, 5, 20);
+}
+
+#[test]
+fn test_recovered_partial_variance_4_of_6() {
+	analyze_recovered_partials(4, 6, 10);
 }
