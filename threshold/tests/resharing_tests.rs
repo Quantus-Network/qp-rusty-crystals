@@ -2403,3 +2403,459 @@ fn test_resharing_aborts_on_round4_omission() {
 		err
 	);
 }
+
+// ============================================================================
+// Coefficient Distribution Analysis
+// ============================================================================
+
+/// Collect all coefficients from a set of shares, centered in (-Q/2, Q/2].
+fn collect_coefficients(shares: &HashMap<u32, PrivateKeyShare>) -> Vec<i32> {
+	let mut coeffs = Vec::new();
+	for share in shares.values() {
+		coeffs.extend(share.collect_all_coefficients());
+	}
+	coeffs
+}
+
+/// Compute distribution statistics for a set of coefficients.
+struct DistributionStats {
+	count: usize,
+	min: i32,
+	max: i32,
+	mean: f64,
+	variance: f64,
+	std_dev: f64,
+	skewness: f64,
+	kurtosis: f64,
+	histogram: std::collections::BTreeMap<i32, usize>,
+}
+
+fn compute_distribution_stats(coeffs: &[i32]) -> DistributionStats {
+	use std::collections::BTreeMap;
+
+	let count = coeffs.len();
+	let min = *coeffs.iter().min().unwrap_or(&0);
+	let max = *coeffs.iter().max().unwrap_or(&0);
+
+	// Mean
+	let sum: i64 = coeffs.iter().map(|&c| c as i64).sum();
+	let mean = sum as f64 / count as f64;
+
+	// Variance and higher moments
+	let mut m2: f64 = 0.0; // sum of (x - mean)^2
+	let mut m3: f64 = 0.0; // sum of (x - mean)^3
+	let mut m4: f64 = 0.0; // sum of (x - mean)^4
+
+	for &c in coeffs {
+		let d = c as f64 - mean;
+		let d2 = d * d;
+		m2 += d2;
+		m3 += d2 * d;
+		m4 += d2 * d2;
+	}
+
+	let variance = m2 / count as f64;
+	let std_dev = variance.sqrt();
+
+	// Skewness = E[(X-μ)³] / σ³
+	let skewness =
+		if std_dev > 0.0 { (m3 / count as f64) / (std_dev * std_dev * std_dev) } else { 0.0 };
+
+	// Kurtosis = E[(X-μ)⁴] / σ⁴ - 3 (excess kurtosis, 0 for normal)
+	let kurtosis =
+		if std_dev > 0.0 { (m4 / count as f64) / (variance * variance) - 3.0 } else { 0.0 };
+
+	// Build histogram
+	let mut histogram: BTreeMap<i32, usize> = BTreeMap::new();
+	for &c in coeffs {
+		*histogram.entry(c).or_insert(0) += 1;
+	}
+
+	DistributionStats { count, min, max, mean, variance, std_dev, skewness, kurtosis, histogram }
+}
+
+/// Compute chi-squared statistic comparing observed distribution to uniform.
+/// Returns (chi_squared, degrees_of_freedom, p_value_approximate).
+fn chi_squared_vs_uniform(
+	histogram: &std::collections::BTreeMap<i32, usize>,
+	total: usize,
+) -> (f64, usize, f64) {
+	let num_bins = histogram.len();
+	if num_bins == 0 {
+		return (0.0, 0, 1.0);
+	}
+
+	let expected = total as f64 / num_bins as f64;
+	let mut chi_sq: f64 = 0.0;
+
+	for &observed in histogram.values() {
+		let diff = observed as f64 - expected;
+		chi_sq += (diff * diff) / expected;
+	}
+
+	let df = num_bins - 1;
+
+	// Approximate p-value using Wilson-Hilferty transformation
+	// For large df, chi-squared approaches normal distribution
+	let p_value = if df > 0 {
+		// Normalized chi-squared
+		let z = (chi_sq / df as f64).powf(1.0 / 3.0) - (1.0 - 2.0 / (9.0 * df as f64));
+		let z = z / (2.0 / (9.0 * df as f64)).sqrt();
+		// Convert to p-value (one-tailed, upper)
+		0.5 * (1.0 - erf(z / std::f64::consts::SQRT_2))
+	} else {
+		1.0
+	};
+
+	(chi_sq, df, p_value)
+}
+
+/// Error function approximation for p-value calculation.
+fn erf(x: f64) -> f64 {
+	// Abramowitz and Stegun approximation
+	let a1 = 0.254829592;
+	let a2 = -0.284496736;
+	let a3 = 1.421413741;
+	let a4 = -1.453152027;
+	let a5 = 1.061405429;
+	let p = 0.3275911;
+
+	let sign = if x < 0.0 { -1.0 } else { 1.0 };
+	let x = x.abs();
+
+	let t = 1.0 / (1.0 + p * x);
+	let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+
+	sign * y
+}
+
+/// Print a simple ASCII histogram.
+fn print_histogram(
+	histogram: &std::collections::BTreeMap<i32, usize>,
+	total: usize,
+	max_width: usize,
+) {
+	let max_count = *histogram.values().max().unwrap_or(&1);
+	let scale = max_width as f64 / max_count as f64;
+
+	for (&value, &count) in histogram {
+		let bar_len = (count as f64 * scale) as usize;
+		let pct = 100.0 * count as f64 / total as f64;
+		println!("{:4}: {:6} ({:5.2}%) {}", value, count, pct, "█".repeat(bar_len));
+	}
+}
+
+#[test]
+fn test_coefficient_distribution_analysis() {
+	println!("\n======================================================================");
+	println!("COEFFICIENT DISTRIBUTION ANALYSIS");
+	println!("======================================================================\n");
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [0xCCu8; 32];
+	let (public_key, dkg_shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	// Convert to HashMap
+	let mut current_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &dkg_shares {
+		current_shares.insert(share.party_id(), share.clone());
+	}
+
+	// ========== DKG Baseline ==========
+	println!("=== DKG Baseline (0 resharings) ===\n");
+	let dkg_coeffs = collect_coefficients(&current_shares);
+	let dkg_stats = compute_distribution_stats(&dkg_coeffs);
+
+	println!("Sample size: {} coefficients", dkg_stats.count);
+	println!("Range: [{}, {}]", dkg_stats.min, dkg_stats.max);
+	println!("Mean: {:.6}", dkg_stats.mean);
+	println!("Std Dev: {:.6}", dkg_stats.std_dev);
+	println!("Variance: {:.6}", dkg_stats.variance);
+	println!("Skewness: {:.6} (0 = symmetric)", dkg_stats.skewness);
+	println!("Excess Kurtosis: {:.6} (0 = normal, <0 = flatter, >0 = peakier)", dkg_stats.kurtosis);
+
+	println!("\nHistogram:");
+	print_histogram(&dkg_stats.histogram, dkg_stats.count, 50);
+
+	let (chi_sq, df, p_value) = chi_squared_vs_uniform(&dkg_stats.histogram, dkg_stats.count);
+	println!("\nChi-squared vs uniform: {:.2} (df={}, p≈{:.4})", chi_sq, df, p_value);
+	println!("  (p > 0.05 means we cannot reject uniformity hypothesis)");
+
+	// Verify DKG produces uniform over [-2, 2]
+	assert_eq!(dkg_stats.min, -2, "DKG min should be -2 (eta)");
+	assert_eq!(dkg_stats.max, 2, "DKG max should be 2 (eta)");
+	assert!(dkg_stats.skewness.abs() < 0.1, "DKG should be symmetric");
+
+	// For uniform over {-2,-1,0,1,2}: variance = (4+1+0+1+4)/5 = 2.0
+	let expected_uniform_variance = 2.0;
+	assert!(
+		(dkg_stats.variance - expected_uniform_variance).abs() < 0.1,
+		"DKG variance should be ~2.0 for uniform over [-2,2], got {}",
+		dkg_stats.variance
+	);
+
+	// ========== After 1 Resharing ==========
+	println!("\n\n=== After 1 Resharing ===\n");
+
+	let new_shares =
+		run_resharing_protocol(2, vec![0, 1, 2], 2, vec![0, 1, 2], &current_shares, &public_key)
+			.expect("resharing should succeed");
+	current_shares = new_shares;
+
+	let r1_coeffs = collect_coefficients(&current_shares);
+	let r1_stats = compute_distribution_stats(&r1_coeffs);
+
+	println!("Sample size: {} coefficients", r1_stats.count);
+	println!("Range: [{}, {}]", r1_stats.min, r1_stats.max);
+	println!("Mean: {:.6}", r1_stats.mean);
+	println!("Std Dev: {:.6}", r1_stats.std_dev);
+	println!("Variance: {:.6}", r1_stats.variance);
+	println!("Skewness: {:.6}", r1_stats.skewness);
+	println!("Excess Kurtosis: {:.6}", r1_stats.kurtosis);
+
+	println!("\nHistogram:");
+	print_histogram(&r1_stats.histogram, r1_stats.count, 50);
+
+	let (chi_sq, df, p_value) = chi_squared_vs_uniform(&r1_stats.histogram, r1_stats.count);
+	println!("\nChi-squared vs uniform: {:.2} (df={}, p≈{:.4})", chi_sq, df, p_value);
+
+	// ========== After 10 Resharings ==========
+	println!("\n\n=== After 10 Resharings ===\n");
+
+	for _ in 0..9 {
+		let new_shares = run_resharing_protocol(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			&current_shares,
+			&public_key,
+		)
+		.expect("resharing should succeed");
+		current_shares = new_shares;
+	}
+
+	let r10_coeffs = collect_coefficients(&current_shares);
+	let r10_stats = compute_distribution_stats(&r10_coeffs);
+
+	println!("Sample size: {} coefficients", r10_stats.count);
+	println!("Range: [{}, {}]", r10_stats.min, r10_stats.max);
+	println!("Mean: {:.6}", r10_stats.mean);
+	println!("Std Dev: {:.6}", r10_stats.std_dev);
+	println!("Variance: {:.6}", r10_stats.variance);
+	println!("Skewness: {:.6}", r10_stats.skewness);
+	println!("Excess Kurtosis: {:.6}", r10_stats.kurtosis);
+
+	println!("\nHistogram:");
+	print_histogram(&r10_stats.histogram, r10_stats.count, 50);
+
+	let (chi_sq, df, p_value) = chi_squared_vs_uniform(&r10_stats.histogram, r10_stats.count);
+	println!("\nChi-squared vs uniform: {:.2} (df={}, p≈{:.4})", chi_sq, df, p_value);
+
+	// ========== After 100 Resharings ==========
+	println!("\n\n=== After 100 Resharings ===\n");
+
+	for _ in 0..90 {
+		let new_shares = run_resharing_protocol(
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			&current_shares,
+			&public_key,
+		)
+		.expect("resharing should succeed");
+		current_shares = new_shares;
+	}
+
+	let r100_coeffs = collect_coefficients(&current_shares);
+	let r100_stats = compute_distribution_stats(&r100_coeffs);
+
+	println!("Sample size: {} coefficients", r100_stats.count);
+	println!("Range: [{}, {}]", r100_stats.min, r100_stats.max);
+	println!("Mean: {:.6}", r100_stats.mean);
+	println!("Std Dev: {:.6}", r100_stats.std_dev);
+	println!("Variance: {:.6}", r100_stats.variance);
+	println!("Skewness: {:.6}", r100_stats.skewness);
+	println!("Excess Kurtosis: {:.6}", r100_stats.kurtosis);
+
+	println!("\nHistogram:");
+	print_histogram(&r100_stats.histogram, r100_stats.count, 50);
+
+	let (chi_sq, df, p_value) = chi_squared_vs_uniform(&r100_stats.histogram, r100_stats.count);
+	println!("\nChi-squared vs uniform: {:.2} (df={}, p≈{:.4})", chi_sq, df, p_value);
+
+	// ========== Summary ==========
+	println!("\n\n======================================================================");
+	println!("SUMMARY");
+	println!("======================================================================\n");
+
+	println!("| Resharings | Range        | Std Dev | Variance | Skewness | Kurtosis | Chi-sq (vs uniform) |");
+	println!("|------------|--------------|---------|----------|----------|----------|---------------------|");
+	println!(
+		"| {:>10} | [{:>3}, {:>3}]   | {:>7.3} | {:>8.3} | {:>8.4} | {:>8.4} | {:>19.2} |",
+		0,
+		dkg_stats.min,
+		dkg_stats.max,
+		dkg_stats.std_dev,
+		dkg_stats.variance,
+		dkg_stats.skewness,
+		dkg_stats.kurtosis,
+		chi_squared_vs_uniform(&dkg_stats.histogram, dkg_stats.count).0
+	);
+	println!(
+		"| {:>10} | [{:>3}, {:>3}]   | {:>7.3} | {:>8.3} | {:>8.4} | {:>8.4} | {:>19.2} |",
+		1,
+		r1_stats.min,
+		r1_stats.max,
+		r1_stats.std_dev,
+		r1_stats.variance,
+		r1_stats.skewness,
+		r1_stats.kurtosis,
+		chi_squared_vs_uniform(&r1_stats.histogram, r1_stats.count).0
+	);
+	println!(
+		"| {:>10} | [{:>3}, {:>3}]   | {:>7.3} | {:>8.3} | {:>8.4} | {:>8.4} | {:>19.2} |",
+		10,
+		r10_stats.min,
+		r10_stats.max,
+		r10_stats.std_dev,
+		r10_stats.variance,
+		r10_stats.skewness,
+		r10_stats.kurtosis,
+		chi_squared_vs_uniform(&r10_stats.histogram, r10_stats.count).0
+	);
+	println!(
+		"| {:>10} | [{:>3}, {:>3}]   | {:>7.3} | {:>8.3} | {:>8.4} | {:>8.4} | {:>19.2} |",
+		100,
+		r100_stats.min,
+		r100_stats.max,
+		r100_stats.std_dev,
+		r100_stats.variance,
+		r100_stats.skewness,
+		r100_stats.kurtosis,
+		chi_squared_vs_uniform(&r100_stats.histogram, r100_stats.count).0
+	);
+
+	println!("\nInterpretation:");
+	println!("- DKG: Should be uniform over [-2, 2] (5 values)");
+	println!("- After resharing: Distribution changes but remains bounded");
+	println!("- High chi-squared = very non-uniform (peaked distribution)");
+	println!("- Negative kurtosis = flatter than normal (platykurtic)");
+	println!("- Positive kurtosis = more peaked than normal (leptokurtic)");
+
+	// Basic sanity checks
+	assert!(r1_stats.max <= 20, "After 1 resharing, max should be bounded");
+	assert!(r10_stats.max <= 20, "After 10 resharings, max should be bounded");
+	assert!(r100_stats.max <= 20, "After 100 resharings, max should be bounded");
+	assert!(r1_stats.skewness.abs() < 0.5, "Distribution should remain roughly symmetric");
+	assert!(r10_stats.skewness.abs() < 0.5, "Distribution should remain roughly symmetric");
+	assert!(r100_stats.skewness.abs() < 0.5, "Distribution should remain roughly symmetric");
+}
+
+/// Helper to run distribution analysis for any (t, n) configuration
+fn run_distribution_analysis(threshold: u32, parties: u32, max_resharings: usize) {
+	println!("\n======================================================================");
+	println!("COEFFICIENT DISTRIBUTION ANALYSIS: {}-of-{}", threshold, parties);
+	println!("======================================================================\n");
+
+	let config = ThresholdConfig::new(threshold, parties).expect("valid config");
+	let seed = [0xDDu8; 32];
+	let (public_key, dkg_shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let participants: Vec<u32> = (0..parties).collect();
+
+	// Convert to HashMap
+	let mut current_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &dkg_shares {
+		current_shares.insert(share.party_id(), share.clone());
+	}
+
+	// Collect stats at various checkpoints
+	let mut all_stats: Vec<(usize, DistributionStats)> = Vec::new();
+
+	// DKG baseline
+	let dkg_coeffs = collect_coefficients(&current_shares);
+	let dkg_stats = compute_distribution_stats(&dkg_coeffs);
+	println!("=== DKG Baseline (0 resharings) ===");
+	println!("Sample size: {} coefficients", dkg_stats.count);
+	println!("Range: [{}, {}]", dkg_stats.min, dkg_stats.max);
+	println!("Std Dev: {:.3}, Variance: {:.3}", dkg_stats.std_dev, dkg_stats.variance);
+	println!("Skewness: {:.4}, Kurtosis: {:.4}", dkg_stats.skewness, dkg_stats.kurtosis);
+	all_stats.push((0, dkg_stats));
+
+	// Checkpoints to measure
+	let checkpoints: Vec<usize> =
+		vec![1, 2, 5, 10, 20].into_iter().filter(|&x| x <= max_resharings).collect();
+
+	let mut resharing_count = 0;
+	for &checkpoint in &checkpoints {
+		// Run resharings up to this checkpoint
+		while resharing_count < checkpoint {
+			let new_shares = run_resharing_protocol(
+				threshold,
+				participants.clone(),
+				threshold,
+				participants.clone(),
+				&current_shares,
+				&public_key,
+			)
+			.expect("resharing should succeed");
+			current_shares = new_shares;
+			resharing_count += 1;
+		}
+
+		let coeffs = collect_coefficients(&current_shares);
+		let stats = compute_distribution_stats(&coeffs);
+		println!("\n=== After {} Resharing(s) ===", checkpoint);
+		println!("Range: [{}, {}]", stats.min, stats.max);
+		println!("Std Dev: {:.3}, Variance: {:.3}", stats.std_dev, stats.variance);
+		println!("Skewness: {:.4}, Kurtosis: {:.4}", stats.skewness, stats.kurtosis);
+		all_stats.push((checkpoint, stats));
+	}
+
+	// Print summary table
+	println!("\n\n=== SUMMARY: {}-of-{} ===\n", threshold, parties);
+	println!("| Resharings | Range        | Std Dev | Variance | Skewness | Kurtosis |");
+	println!("|------------|--------------|---------|----------|----------|----------|");
+	for (count, stats) in &all_stats {
+		println!(
+			"| {:>10} | [{:>3}, {:>3}]   | {:>7.3} | {:>8.3} | {:>8.4} | {:>8.4} |",
+			count,
+			stats.min,
+			stats.max,
+			stats.std_dev,
+			stats.variance,
+			stats.skewness,
+			stats.kurtosis
+		);
+	}
+
+	// Check idempotence: variance should stabilize
+	if all_stats.len() >= 3 {
+		let var_after_1 = all_stats[1].1.variance;
+		let var_last = all_stats.last().unwrap().1.variance;
+		let var_change = ((var_last - var_after_1) / var_after_1).abs();
+		println!(
+			"\nVariance change from resharing 1 to {}: {:.2}%",
+			all_stats.last().unwrap().0,
+			var_change * 100.0
+		);
+		println!("(Small change indicates idempotent distribution)");
+	}
+}
+
+#[test]
+fn test_coefficient_distribution_3_of_5() {
+	run_distribution_analysis(3, 5, 20);
+}
+
+#[test]
+fn test_coefficient_distribution_2_of_4() {
+	run_distribution_analysis(2, 4, 20);
+}
+
+#[test]
+fn test_coefficient_distribution_4_of_6() {
+	run_distribution_analysis(4, 6, 10);
+}

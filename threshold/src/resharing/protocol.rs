@@ -65,9 +65,11 @@ const ENTROPY_COMMIT_DOMAIN: &[u8] = b"resharing-entropy-commit-v1";
 /// Domain separator for session seed derivation.
 const SESSION_SEED_DOMAIN: &[u8] = b"resharing-session-seed-v1";
 
-/// Maximum resharing message size in bytes (256 KB).
+/// Maximum resharing message size in bytes (2 MB).
 /// This limits the size of serialized resharing protocol messages.
-pub const MAX_RESHARING_MESSAGE_SIZE: usize = 256 * 1024;
+/// Larger configurations (e.g., 4-of-6) require more space due to
+/// the number of subset pairs: for (t,n), there are C(n, n-t+1)² pairs.
+pub const MAX_RESHARING_MESSAGE_SIZE: usize = 2 * 1024 * 1024;
 
 // ============================================================================
 // Action Enum

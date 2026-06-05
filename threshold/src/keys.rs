@@ -210,6 +210,39 @@ impl PrivateKeyShare {
 		&self.shares
 	}
 
+	/// Collect all coefficients from all shares, centered in (-Q/2, Q/2].
+	///
+	/// Returns a vector of all centered coefficient values from all subset shares.
+	/// Useful for statistical analysis of coefficient distributions after resharing.
+	///
+	/// Note: This is primarily intended for testing and analysis, not for normal
+	/// protocol operation.
+	pub fn collect_all_coefficients(&self) -> Vec<i32> {
+		const Q: i64 = 8380417;
+		const HALF_Q: i64 = Q / 2;
+
+		let mut coeffs = Vec::new();
+		for share_data in self.shares.values() {
+			// Collect s1 coefficients
+			for poly in &share_data.s1 {
+				for &coeff in poly {
+					let c = coeff as i64;
+					let centered = if c > HALF_Q { c - Q } else { c };
+					coeffs.push(centered as i32);
+				}
+			}
+			// Collect s2 coefficients
+			for poly in &share_data.s2 {
+				for &coeff in poly {
+					let c = coeff as i64;
+					let centered = if c > HALF_Q { c - Q } else { c };
+					coeffs.push(centered as i32);
+				}
+			}
+		}
+		coeffs
+	}
+
 	/// Compute coefficient statistics across all shares.
 	///
 	/// Returns `(max_abs_coeff, min_coeff, max_coeff)` where coefficients are
