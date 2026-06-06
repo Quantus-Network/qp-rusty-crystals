@@ -19,8 +19,8 @@
 //!
 //! # Session Isolation (Caller Responsibility)
 //!
-//! This protocol follows the Mithril paper's security model which does **not** include
-//! cryptographic session identifiers. Instead, session isolation is the caller's responsibility:
+//! This protocol does **not** include cryptographic session identifiers. Instead, session
+//! isolation is the caller's responsibility:
 //!
 //! - **Fresh randomness**: Each signing attempt MUST use a fresh `round1_seed`
 //! - **Transport isolation**: Messages from different sessions must not be mixed (e.g., via
@@ -36,7 +36,7 @@
 //! the leader to silently reset all followers and re-run rounds 1-3 on the same
 //! protocol instance. That was removed because:
 //!
-//! 1. The Mithril paper (Section 2.2) defines threshold signatures *without* session identifiers,
+//! 1. Threshold signatures are defined *without* session identifiers,
 //!    relying on each honest party's local state to enforce per-attempt freshness. In-protocol
 //!    retries on a single instance violate that assumption because the receiver's state machine has
 //!    no way to bind incoming rounds to "the current attempt" without an explicit session id, which
@@ -53,9 +53,9 @@
 //!
 //! # Participant Set Requirement
 //!
-//! **IMPORTANT**: The Mithril threshold signing scheme requires **exactly T (threshold) active
+//! **IMPORTANT**: The threshold signing scheme requires **exactly T (threshold) active
 //! participants** to sign. This is a fundamental design limitation of the replicated secret
-//! sharing (RSS) scheme described in the Mithril paper (Section 2.2, Algorithm 6 `RSSRecover`).
+//! sharing (RSS) scheme (see `RSSRecover` algorithm).
 //!
 //! - Signing with **fewer than T** parties will fail (cannot reconstruct the secret).
 //! - Signing with **more than T** parties is **not supported** and will be rejected. The
@@ -583,14 +583,14 @@ impl DilithiumSignProtocol {
 		}
 
 		// Validate exactly threshold participants.
-		// The Mithril scheme (Section 2.2, Algorithm 6 RSSRecover) assumes exactly T active
-		// parties. The sharing patterns computed by `compute_sharing_patterns(T, parties)`
+		// The RSS scheme (RSSRecover algorithm) assumes exactly T active parties.
+		// The sharing patterns computed by `compute_sharing_patterns(T, parties)`
 		// return exactly T entries, so more than T active parties would cause index-out-of-bounds
 		// errors in `recover_share`. Fewer than T parties cannot reconstruct the secret.
 		let threshold = signer.config().threshold() as usize;
 		if participants.len() != threshold {
 			return Err(SignProtocolError::InvalidConfig(format!(
-				"Mithril threshold signing requires exactly {} (threshold) active participants, but {} were provided. \
+				"Threshold signing requires exactly {} (threshold) active participants, but {} were provided. \
 				The scheme does not support more or fewer than threshold parties.",
 				threshold,
 				participants.len()
@@ -710,7 +710,7 @@ impl DilithiumSignProtocol {
 	///
 	/// # Note on Participant Set
 	///
-	/// The Mithril threshold signing protocol assumes a **fixed participant set**
+	/// The threshold signing protocol assumes a **fixed participant set**
 	/// that is agreed upon before the protocol starts. The recommended approach
 	/// (used by NEAR MPC) is for the leader to pre-select exactly `threshold`
 	/// currently-alive participants and broadcast this list to all parties.
@@ -1091,7 +1091,7 @@ impl DilithiumSignProtocol {
 				// Round 1 messages don't need buffering - if we're past Round 1, they're late
 			},
 			SigningMessage::Round2(r2) => {
-				// Per the Mithril paper (Fig. 6, ShareSign_3) Round 2 reveals must hash
+				// Per the threshold signing protocol, Round 2 reveals must hash
 				// back to the Round 1 commitment from the same party. We enforce that
 				// check at receive time (rather than only later in round3_respond) so
 				// that a replayed or otherwise-stale Round 2 cannot occupy the slot for

@@ -1,8 +1,7 @@
-//! State structures for the Mithril DKG protocol.
+//! State structures for the DKG protocol.
 //!
-//! This module contains the state machine that drives the 4-round Mithril DKG protocol.
-//! The protocol follows the Mithril paper's distributed key generation scheme for
-//! threshold Dilithium (ML-DSA-87).
+//! This module contains the state machine that drives the 4-round DKG protocol
+//! for threshold Dilithium (ML-DSA-87).
 //!
 //! # Protocol Overview
 //!
@@ -52,11 +51,11 @@ use crate::{
 	participants::ParticipantId,
 };
 
-use super::protocol::MithrilDkgError;
+use super::protocol::DkgError;
 
 use super::types::{
-	MithrilDkgConfig, MithrilRound1Broadcast, MithrilRound2Broadcast, MithrilRound3Broadcast,
-	MithrilRound4Broadcast, PartialPublicKey, SubsetContribution, SubsetMask, TranscriptSigner,
+	DkgConfig, Round1Broadcast, Round2Broadcast, Round3Broadcast,
+	Round4Broadcast, PartialPublicKey, SubsetContribution, SubsetMask, TranscriptSigner,
 	RANDOMNESS_SIZE, SHARED_SECRET_SIZE,
 };
 
@@ -100,14 +99,14 @@ impl DkgPhase {
 /// Contains the threshold public key (shared by all parties) and this party's
 /// private key share (unique to this party).
 #[derive(Debug, Clone)]
-pub struct MithrilDkgOutput {
+pub struct DkgOutput {
 	/// The threshold public key, identical for all parties.
 	pub public_key: PublicKey,
 	/// This party's private key share for threshold signing.
 	pub private_share: PrivateKeyShare,
 }
 
-/// State machine for the Mithril DKG protocol.
+/// State machine for the DKG protocol.
 ///
 /// Uses a flat struct with Option fields instead of an enum with associated data.
 /// This design:
@@ -118,10 +117,10 @@ pub struct MithrilDkgOutput {
 /// # Usage
 ///
 /// ```ignore
-/// use qp_rusty_crystals_threshold::keygen::dkg::{MithrilDkgState, MithrilDkgConfig};
+/// use qp_rusty_crystals_threshold::keygen::dkg::{DkgState, DkgConfig};
 ///
 /// // Create initial state
-/// let state = MithrilDkgState::new(config);
+/// let state = DkgState::new(config);
 ///
 /// // Drive protocol with poke() and message() calls
 /// loop {
@@ -133,12 +132,12 @@ pub struct MithrilDkgOutput {
 ///     }
 /// }
 /// ```
-pub struct MithrilDkgState<S: TranscriptSigner> {
+pub struct DkgState<S: TranscriptSigner> {
 	/// Current phase of the protocol.
 	pub phase: DkgPhase,
 
 	/// Protocol configuration (persists across all phases).
-	pub config: Option<MithrilDkgConfig<S>>,
+	pub config: Option<DkgConfig<S>>,
 
 	// ========================================================================
 	// Round 1 data
@@ -150,7 +149,7 @@ pub struct MithrilDkgState<S: TranscriptSigner> {
 	/// Shared secrets for each subset this party is leader of.
 	pub my_shared_secrets: Option<BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>>,
 	/// Round 1 broadcasts received from other parties.
-	pub round1_broadcasts: Option<BTreeMap<ParticipantId, MithrilRound1Broadcast>>,
+	pub round1_broadcasts: Option<BTreeMap<ParticipantId, Round1Broadcast>>,
 	/// Shared secrets received from other parties (subset leaders).
 	pub received_shared_secrets: Option<BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>>,
 
@@ -160,7 +159,7 @@ pub struct MithrilDkgState<S: TranscriptSigner> {
 	/// Combined shared secrets for each subset (my + received).
 	pub shared_secrets: Option<BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>>,
 	/// Round 2 broadcasts received from other parties.
-	pub round2_broadcasts: Option<BTreeMap<ParticipantId, MithrilRound2Broadcast>>,
+	pub round2_broadcasts: Option<BTreeMap<ParticipantId, Round2Broadcast>>,
 
 	// ========================================================================
 	// Round 3 data
@@ -176,19 +175,19 @@ pub struct MithrilDkgState<S: TranscriptSigner> {
 	/// Commitments to this party's partial public keys.
 	pub my_pk_commitments: Option<BTreeMap<SubsetMask, [u8; 32]>>,
 	/// Round 3 broadcasts received from other parties.
-	pub round3_broadcasts: Option<BTreeMap<ParticipantId, MithrilRound3Broadcast>>,
+	pub round3_broadcasts: Option<BTreeMap<ParticipantId, Round3Broadcast>>,
 
 	// ========================================================================
 	// Round 4 data
 	// ========================================================================
 	/// Round 4 broadcasts received from other parties.
-	pub round4_broadcasts: Option<BTreeMap<ParticipantId, MithrilRound4Broadcast>>,
+	pub round4_broadcasts: Option<BTreeMap<ParticipantId, Round4Broadcast>>,
 
 	// ========================================================================
 	// Terminal states
 	// ========================================================================
 	/// DKG output (when Complete).
-	pub output: Option<Box<MithrilDkgOutput>>,
+	pub output: Option<Box<DkgOutput>>,
 	/// Error message (when Failed).
 	pub error_message: Option<String>,
 
@@ -201,7 +200,7 @@ pub struct MithrilDkgState<S: TranscriptSigner> {
 	pub privates_sent: bool,
 }
 
-impl<S: TranscriptSigner> Default for MithrilDkgState<S> {
+impl<S: TranscriptSigner> Default for DkgState<S> {
 	fn default() -> Self {
 		Self {
 			phase: DkgPhase::Initialized,
@@ -228,9 +227,9 @@ impl<S: TranscriptSigner> Default for MithrilDkgState<S> {
 	}
 }
 
-impl<S: TranscriptSigner> fmt::Debug for MithrilDkgState<S> {
+impl<S: TranscriptSigner> fmt::Debug for DkgState<S> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("MithrilDkgState")
+		f.debug_struct("DkgState")
 			.field("phase", &self.phase)
 			.field("broadcast_sent", &self.broadcast_sent)
 			.field("privates_sent", &self.privates_sent)
@@ -238,7 +237,7 @@ impl<S: TranscriptSigner> fmt::Debug for MithrilDkgState<S> {
 	}
 }
 
-impl<S: TranscriptSigner> Zeroize for MithrilDkgState<S> {
+impl<S: TranscriptSigner> Zeroize for DkgState<S> {
 	fn zeroize(&mut self) {
 		// Zeroize sensitive randomness
 		if let Some(ref mut r) = self.my_randomness {
@@ -300,19 +299,19 @@ impl<S: TranscriptSigner> Zeroize for MithrilDkgState<S> {
 	}
 }
 
-impl<S: TranscriptSigner> Drop for MithrilDkgState<S> {
+impl<S: TranscriptSigner> Drop for DkgState<S> {
 	fn drop(&mut self) {
 		self.zeroize();
 	}
 }
 
-impl<S: TranscriptSigner> ZeroizeOnDrop for MithrilDkgState<S> {}
+impl<S: TranscriptSigner> ZeroizeOnDrop for DkgState<S> {}
 
-impl<S: TranscriptSigner> MithrilDkgState<S> {
+impl<S: TranscriptSigner> DkgState<S> {
 	/// Create a new DKG state machine in the `Initialized` state.
 	///
 	/// The protocol will begin when `poke()` is called.
-	pub fn new(config: MithrilDkgConfig<S>) -> Self {
+	pub fn new(config: DkgConfig<S>) -> Self {
 		Self {
 			phase: DkgPhase::Initialized,
 			config: Some(config),
@@ -372,68 +371,68 @@ impl<S: TranscriptSigner> MithrilDkgState<S> {
 	// ========================================================================
 
 	/// Verify Initialized phase and return config reference.
-	pub fn expect_initialized(&self) -> Result<&MithrilDkgConfig<S>, MithrilDkgError> {
+	pub fn expect_initialized(&self) -> Result<&DkgConfig<S>, DkgError> {
 		if self.phase != DkgPhase::Initialized {
-			return Err(MithrilDkgError::InvalidState(format!(
+			return Err(DkgError::InvalidState(format!(
 				"expected Initialized, got {}",
 				self.phase.name()
 			)));
 		}
 		self.config
 			.as_ref()
-			.ok_or_else(|| MithrilDkgError::InvalidState("Initialized phase but no config".into()))
+			.ok_or_else(|| DkgError::InvalidState("Initialized phase but no config".into()))
 	}
 
 	/// Verify Round1 phase and return config reference.
-	pub fn expect_round1(&self) -> Result<&MithrilDkgConfig<S>, MithrilDkgError> {
+	pub fn expect_round1(&self) -> Result<&DkgConfig<S>, DkgError> {
 		if self.phase != DkgPhase::Round1 {
-			return Err(MithrilDkgError::InvalidState(format!(
+			return Err(DkgError::InvalidState(format!(
 				"expected Round1, got {}",
 				self.phase.name()
 			)));
 		}
 		self.config
 			.as_ref()
-			.ok_or_else(|| MithrilDkgError::InvalidState("Round1 phase but no config".into()))
+			.ok_or_else(|| DkgError::InvalidState("Round1 phase but no config".into()))
 	}
 
 	/// Verify Round2 phase and return config reference.
-	pub fn expect_round2(&self) -> Result<&MithrilDkgConfig<S>, MithrilDkgError> {
+	pub fn expect_round2(&self) -> Result<&DkgConfig<S>, DkgError> {
 		if self.phase != DkgPhase::Round2 {
-			return Err(MithrilDkgError::InvalidState(format!(
+			return Err(DkgError::InvalidState(format!(
 				"expected Round2, got {}",
 				self.phase.name()
 			)));
 		}
 		self.config
 			.as_ref()
-			.ok_or_else(|| MithrilDkgError::InvalidState("Round2 phase but no config".into()))
+			.ok_or_else(|| DkgError::InvalidState("Round2 phase but no config".into()))
 	}
 
 	/// Verify Round3 phase and return config reference.
-	pub fn expect_round3(&self) -> Result<&MithrilDkgConfig<S>, MithrilDkgError> {
+	pub fn expect_round3(&self) -> Result<&DkgConfig<S>, DkgError> {
 		if self.phase != DkgPhase::Round3 {
-			return Err(MithrilDkgError::InvalidState(format!(
+			return Err(DkgError::InvalidState(format!(
 				"expected Round3, got {}",
 				self.phase.name()
 			)));
 		}
 		self.config
 			.as_ref()
-			.ok_or_else(|| MithrilDkgError::InvalidState("Round3 phase but no config".into()))
+			.ok_or_else(|| DkgError::InvalidState("Round3 phase but no config".into()))
 	}
 
 	/// Verify Round4 phase and return config reference.
-	pub fn expect_round4(&self) -> Result<&MithrilDkgConfig<S>, MithrilDkgError> {
+	pub fn expect_round4(&self) -> Result<&DkgConfig<S>, DkgError> {
 		if self.phase != DkgPhase::Round4 {
-			return Err(MithrilDkgError::InvalidState(format!(
+			return Err(DkgError::InvalidState(format!(
 				"expected Round4, got {}",
 				self.phase.name()
 			)));
 		}
 		self.config
 			.as_ref()
-			.ok_or_else(|| MithrilDkgError::InvalidState("Round4 phase but no config".into()))
+			.ok_or_else(|| DkgError::InvalidState("Round4 phase but no config".into()))
 	}
 }
 

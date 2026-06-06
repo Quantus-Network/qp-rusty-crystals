@@ -25,7 +25,7 @@ pub enum ThresholdError {
 		/// Maximum valid party ID.
 		max_id: u32,
 	},
-	/// Wrong number of parties (Mithril requires exactly threshold).
+	/// Wrong number of parties (requires exactly threshold).
 	WrongPartyCount {
 		/// Number of parties provided.
 		provided: usize,
@@ -191,7 +191,7 @@ impl fmt::Display for ThresholdError {
 			ThresholdError::WrongPartyCount { provided, required } => {
 				write!(
 					f,
-					"Wrong party count: provided {}, but Mithril requires exactly {} (threshold)",
+					"Wrong party count: provided {}, requires exactly {} (threshold)",
 					provided, required
 				)
 			},

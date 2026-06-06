@@ -1,4 +1,4 @@
-//! Protocol implementation for the Mithril DKG.
+//! Protocol implementation for DKG.
 
 use alloc::{
 	boxed::Box,
@@ -22,14 +22,14 @@ use crate::{
 
 use super::{
 	state::{
-		all_broadcasts_received, all_private_messages_received, DkgPhase, MithrilDkgOutput,
-		MithrilDkgState,
+		all_broadcasts_received, all_private_messages_received, DkgPhase, DkgOutput,
+		DkgState,
 	},
 	types::{
 		compute_dkg_ssid, compute_partial_output_hash, compute_signing_message,
 		compute_transcript_hash, derive_subset_contribution, h_commit, h_commit_pk, h_keygen,
-		h_seed, MithrilDkgConfig, MithrilDkgMessage, MithrilRound1Broadcast, MithrilRound1Private,
-		MithrilRound2Broadcast, MithrilRound3Broadcast, MithrilRound4Broadcast, PartialPublicKey,
+		h_seed, DkgConfig, DkgMessage, Round1Broadcast, Round1Private,
+		Round2Broadcast, Round3Broadcast, Round4Broadcast, PartialPublicKey,
 		SubsetContribution, SubsetMask, TranscriptSigner, DKG_SSID_SIZE, RANDOMNESS_SIZE,
 		SHARED_SECRET_SIZE,
 	},
@@ -63,7 +63,7 @@ pub const MAX_DKG_MESSAGE_SIZE: usize = 256 * 1024;
 /// 1. Total allocation is bounded by `MAX_DKG_MESSAGE_SIZE`
 /// 2. Malicious length prefixes claiming more bytes than available are rejected with an error (not
 ///    OOM)
-fn deserialize_message(data: &[u8]) -> Result<MithrilDkgMessage, String> {
+fn deserialize_message(data: &[u8]) -> Result<DkgMessage, String> {
 	if data.len() > MAX_DKG_MESSAGE_SIZE {
 		return Err(format!("Message size {} exceeds maximum {}", data.len(), MAX_DKG_MESSAGE_SIZE));
 	}
@@ -76,7 +76,7 @@ fn deserialize_message(data: &[u8]) -> Result<MithrilDkgMessage, String> {
 
 /// Errors that can occur during the DKG protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MithrilDkgError {
+pub enum DkgError {
 	/// The protocol is in an invalid state for the requested operation.
 	InvalidState(String),
 	/// A party's revealed randomness doesn't match their Round 1 commitment.
@@ -128,7 +128,7 @@ pub enum MithrilDkgError {
 	},
 }
 
-impl fmt::Display for MithrilDkgError {
+impl fmt::Display for DkgError {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::InvalidState(msg) => write!(f, "invalid state: {}", msg),
@@ -169,11 +169,11 @@ impl fmt::Display for MithrilDkgError {
 /// - `SendPrivate`: Send the data to a specific participant via secure channel
 /// - `Return`: The DKG is complete, the output contains the keys
 ///
-/// `Return` carries a boxed [`MithrilDkgOutput`] because the output is ~2.8 KB
+/// `Return` carries a boxed [`DkgOutput`] because the output is ~2.8 KB
 /// (full Dilithium key material) and inlining it would balloon every other
 /// variant. See `clippy::large_enum_variant`.
 #[derive(Debug)]
-pub enum MithrilAction {
+pub enum DkgAction {
 	/// Wait for more messages before proceeding.
 	Wait,
 	/// Broadcast data to all other participants.
@@ -181,7 +181,7 @@ pub enum MithrilAction {
 	/// Send data privately to a specific participant.
 	SendPrivate(ParticipantId, Vec<u8>),
 	/// DKG is complete, return the output.
-	Return(Box<MithrilDkgOutput>),
+	Return(Box<DkgOutput>),
 }
 
 // ============================================================================
@@ -211,17 +211,17 @@ pub enum MithrilAction {
 #[derive(Default)]
 struct DkgMessageBuffer {
 	/// Round 1 broadcasts received while still in Initialized phase.
-	round1_broadcasts: BTreeMap<ParticipantId, MithrilRound1Broadcast>,
+	round1_broadcasts: BTreeMap<ParticipantId, Round1Broadcast>,
 	/// Round 1 private messages received while still in Initialized phase.
 	/// Key is (from_party_id, subset_mask) to allow multiple subsets per sender.
 	/// Messages are validated before buffering to prevent DoS via invalid subset masks.
-	round1_privates: BTreeMap<(ParticipantId, SubsetMask), MithrilRound1Private>,
+	round1_privates: BTreeMap<(ParticipantId, SubsetMask), Round1Private>,
 	/// Round 2 broadcasts received while still in Round 1.
-	round2: BTreeMap<ParticipantId, MithrilRound2Broadcast>,
+	round2: BTreeMap<ParticipantId, Round2Broadcast>,
 	/// Round 3 broadcasts received while still in Round 1-2.
-	round3: BTreeMap<ParticipantId, MithrilRound3Broadcast>,
+	round3: BTreeMap<ParticipantId, Round3Broadcast>,
 	/// Round 4 broadcasts received while still in Round 1-3.
-	round4: BTreeMap<ParticipantId, MithrilRound4Broadcast>,
+	round4: BTreeMap<ParticipantId, Round4Broadcast>,
 }
 
 impl DkgMessageBuffer {
@@ -232,7 +232,7 @@ impl DkgMessageBuffer {
 
 	/// Buffer a Round 1 broadcast for later processing.
 	/// Only keeps the first message from each sender.
-	fn buffer_round1_broadcast(&mut self, msg: MithrilRound1Broadcast) {
+	fn buffer_round1_broadcast(&mut self, msg: Round1Broadcast) {
 		self.round1_broadcasts.entry(msg.party_id).or_insert(msg);
 	}
 
@@ -242,52 +242,52 @@ impl DkgMessageBuffer {
 	/// # Security
 	/// Callers MUST validate the message before buffering (subset_mask validity,
 	/// sender is leader, receiver is member). This function does not validate.
-	fn buffer_round1_private(&mut self, msg: MithrilRound1Private) {
+	fn buffer_round1_private(&mut self, msg: Round1Private) {
 		self.round1_privates.entry((msg.from_party_id, msg.subset_mask)).or_insert(msg);
 	}
 
 	/// Buffer a Round 2 broadcast for later processing.
 	/// Only keeps the first message from each sender.
-	fn buffer_round2(&mut self, msg: MithrilRound2Broadcast) {
+	fn buffer_round2(&mut self, msg: Round2Broadcast) {
 		self.round2.entry(msg.party_id).or_insert(msg);
 	}
 
 	/// Buffer a Round 3 broadcast for later processing.
 	/// Only keeps the first message from each sender.
-	fn buffer_round3(&mut self, msg: MithrilRound3Broadcast) {
+	fn buffer_round3(&mut self, msg: Round3Broadcast) {
 		self.round3.entry(msg.party_id).or_insert(msg);
 	}
 
 	/// Buffer a Round 4 broadcast for later processing.
 	/// Only keeps the first message from each sender.
-	fn buffer_round4(&mut self, msg: MithrilRound4Broadcast) {
+	fn buffer_round4(&mut self, msg: Round4Broadcast) {
 		self.round4.entry(msg.party_id).or_insert(msg);
 	}
 
 	/// Take all buffered Round 1 broadcasts.
-	fn take_round1_broadcasts(&mut self) -> BTreeMap<ParticipantId, MithrilRound1Broadcast> {
+	fn take_round1_broadcasts(&mut self) -> BTreeMap<ParticipantId, Round1Broadcast> {
 		mem::take(&mut self.round1_broadcasts)
 	}
 
 	/// Take all buffered Round 1 private messages.
 	fn take_round1_privates(
 		&mut self,
-	) -> BTreeMap<(ParticipantId, SubsetMask), MithrilRound1Private> {
+	) -> BTreeMap<(ParticipantId, SubsetMask), Round1Private> {
 		mem::take(&mut self.round1_privates)
 	}
 
 	/// Take all buffered Round 2 messages.
-	fn take_round2(&mut self) -> BTreeMap<ParticipantId, MithrilRound2Broadcast> {
+	fn take_round2(&mut self) -> BTreeMap<ParticipantId, Round2Broadcast> {
 		mem::take(&mut self.round2)
 	}
 
 	/// Take all buffered Round 3 messages.
-	fn take_round3(&mut self) -> BTreeMap<ParticipantId, MithrilRound3Broadcast> {
+	fn take_round3(&mut self) -> BTreeMap<ParticipantId, Round3Broadcast> {
 		mem::take(&mut self.round3)
 	}
 
 	/// Take all buffered Round 4 messages.
-	fn take_round4(&mut self) -> BTreeMap<ParticipantId, MithrilRound4Broadcast> {
+	fn take_round4(&mut self) -> BTreeMap<ParticipantId, Round4Broadcast> {
 		mem::take(&mut self.round4)
 	}
 }
@@ -346,9 +346,9 @@ fn derive_round1_randomness(
 
 /// The main DKG protocol state machine.
 ///
-/// This implements the 4-round Mithril DKG protocol. Create an instance with
-/// [`MithrilDkg::new`], then repeatedly call [`MithrilDkg::poke`] and
-/// [`MithrilDkg::message`] to drive the protocol.
+/// This implements a 4-round DKG protocol. Create an instance with
+/// [`Dkg::new`], then repeatedly call [`Dkg::poke`] and
+/// [`Dkg::message`] to drive the protocol.
 ///
 /// # Message Buffering
 ///
@@ -360,16 +360,16 @@ fn derive_round1_randomness(
 /// # Example
 ///
 /// ```ignore
-/// let config = MithrilDkgConfig::new(...)?;
+/// let config = DkgConfig::new(...)?;
 /// let seed: [u8; 32] = get_random_seed(); // Must be cryptographically random
-/// let mut dkg = MithrilDkg::new(config, seed, &TEST_SESSION_NONCE);
+/// let mut dkg = Dkg::new(config, seed, &TEST_SESSION_NONCE);
 ///
 /// loop {
 ///     match dkg.poke()? {
-///         MithrilAction::Wait => { /* wait for messages */ }
-///         MithrilAction::SendMany(data) => { /* broadcast to all */ }
-///         MithrilAction::SendPrivate(to, data) => { /* send to one party */ }
-///         MithrilAction::Return(output) => {
+///         DkgAction::Wait => { /* wait for messages */ }
+///         DkgAction::SendMany(data) => { /* broadcast to all */ }
+///         DkgAction::SendPrivate(to, data) => { /* send to one party */ }
+///         DkgAction::Return(output) => {
 ///             // DKG complete!
 ///             return Ok(output);
 ///         }
@@ -377,8 +377,8 @@ fn derive_round1_randomness(
 ///     // When messages arrive: dkg.message(from, data);
 /// }
 /// ```
-pub struct MithrilDkg<S: TranscriptSigner> {
-	state: MithrilDkgState<S>,
+pub struct Dkg<S: TranscriptSigner> {
+	state: DkgState<S>,
 	/// Session identifier binding all messages to this specific DKG session.
 	ssid: [u8; DKG_SSID_SIZE],
 	/// Master seed for deriving all randomness (32 bytes, cryptographically random).
@@ -388,7 +388,7 @@ pub struct MithrilDkg<S: TranscriptSigner> {
 	message_buffer: DkgMessageBuffer,
 }
 
-impl<S: TranscriptSigner> Drop for MithrilDkg<S> {
+impl<S: TranscriptSigner> Drop for Dkg<S> {
 	fn drop(&mut self) {
 		// Zeroize sensitive data when the DKG is dropped
 		self.state.zeroize();
@@ -396,7 +396,7 @@ impl<S: TranscriptSigner> Drop for MithrilDkg<S> {
 	}
 }
 
-impl<S: TranscriptSigner> MithrilDkg<S> {
+impl<S: TranscriptSigner> Dkg<S> {
 	/// Create a new DKG instance.
 	///
 	/// # Arguments
@@ -417,7 +417,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	///
 	/// The `session_nonce` MUST be unique for each DKG session with the same participant set.
 	/// Using a counter, timestamp, or random value from the transport layer is acceptable.
-	pub fn new(config: MithrilDkgConfig<S>, seed: [u8; 32], session_nonce: &[u8; 32]) -> Self {
+	pub fn new(config: DkgConfig<S>, seed: [u8; 32], session_nonce: &[u8; 32]) -> Self {
 		let ssid = compute_dkg_ssid(
 			config.threshold_config.threshold(),
 			config.threshold_config.total_parties(),
@@ -425,7 +425,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			session_nonce,
 		);
 		Self {
-			state: MithrilDkgState::new(config),
+			state: DkgState::new(config),
 			ssid,
 			seed,
 			pending_privates: Vec::new(),
@@ -448,11 +448,11 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	/// or return the final output).
 	///
 	/// # Returns
-	/// * `Ok(MithrilAction)` - The action to perform
-	/// * `Err(MithrilDkgError)` - If the protocol encounters an error
-	pub fn poke(&mut self) -> Result<MithrilAction, MithrilDkgError> {
+	/// * `Ok(DkgAction)` - The action to perform
+	/// * `Err(DkgError)` - If the protocol encounters an error
+	pub fn poke(&mut self) -> Result<DkgAction, DkgError> {
 		if let Some((to, data)) = self.pending_privates.pop() {
-			return Ok(MithrilAction::SendPrivate(to, data));
+			return Ok(DkgAction::SendPrivate(to, data));
 		}
 
 		match self.state.phase {
@@ -463,9 +463,9 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			DkgPhase::Round4 => self.process_round4(),
 			DkgPhase::Complete => {
 				let output = self.state.output.as_ref().ok_or_else(|| {
-					MithrilDkgError::InvalidState("Complete but no output".into())
+					DkgError::InvalidState("Complete but no output".into())
 				})?;
-				Ok(MithrilAction::Return(output.clone()))
+				Ok(DkgAction::Return(output.clone()))
 			},
 			DkgPhase::Failed => {
 				let msg = self
@@ -474,7 +474,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					.as_ref()
 					.cloned()
 					.unwrap_or_else(|| "unknown error".into());
-				Err(MithrilDkgError::InvalidState(msg))
+				Err(DkgError::InvalidState(msg))
 			},
 		}
 	}
@@ -502,14 +502,14 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	///
 	/// # Errors
 	///
-	/// Returns `Err(MithrilDkgError::MalformedMessage)` if the message cannot be
+	/// Returns `Err(DkgError::MalformedMessage)` if the message cannot be
 	/// deserialized. This allows callers to detect and log malformed messages.
 	///
 	/// # Returns
 	///
 	/// * `Ok(())` - Message was processed, buffered, or legitimately ignored
 	/// * `Err(_)` - Message was malformed and could not be deserialized
-	pub fn message(&mut self, from: ParticipantId, data: Vec<u8>) -> Result<(), MithrilDkgError> {
+	pub fn message(&mut self, from: ParticipantId, data: Vec<u8>) -> Result<(), DkgError> {
 		// Validate sender is a known participant to prevent quorum inflation attacks
 		if let Some(participants) = self.state.all_participants() {
 			if !participants.contains(&from) {
@@ -530,10 +530,10 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			return Ok(());
 		}
 
-		let msg: MithrilDkgMessage = match deserialize_message(&data) {
+		let msg: DkgMessage = match deserialize_message(&data) {
 			Ok(m) => m,
 			Err(e) => {
-				return Err(MithrilDkgError::MalformedMessage { from, reason: e });
+				return Err(DkgError::MalformedMessage { from, reason: e });
 			},
 		};
 
@@ -547,7 +547,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 		}
 
 		match msg {
-			MithrilDkgMessage::Round1Broadcast(broadcast) => {
+			DkgMessage::Round1Broadcast(broadcast) => {
 				// Round 1 broadcasts: accept during Initialized, Round 1, or early Round 2
 				if broadcast.party_id != from {
 					warn!(
@@ -584,7 +584,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					},
 				}
 			},
-			MithrilDkgMessage::Round1Private(private) => {
+			DkgMessage::Round1Private(private) => {
 				// Round 1 private messages: accept during Initialized (buffered) or Round 1
 				// M2: Validate sender is the legitimate leader for this subset
 				if private.from_party_id != from {
@@ -600,7 +600,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 						// Early message - validate before buffering to prevent DoS.
 						// Config is available during Initialized phase.
 						let config = self.state.config.as_ref().ok_or_else(|| {
-							MithrilDkgError::InvalidState("Initialized but no config".into())
+							DkgError::InvalidState("Initialized but no config".into())
 						})?;
 
 						// Verify subset_mask is a valid subset for this threshold config
@@ -636,7 +636,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					},
 					DkgPhase::Round1 => {
 						let config = self.state.config.as_ref().ok_or_else(|| {
-							MithrilDkgError::InvalidState("Round1 but no config".into())
+							DkgError::InvalidState("Round1 but no config".into())
 						})?;
 
 						// Verify subset_mask is a valid subset for this threshold config
@@ -684,7 +684,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					},
 				}
 			},
-			MithrilDkgMessage::Round2Broadcast(broadcast) => {
+			DkgMessage::Round2Broadcast(broadcast) => {
 				if broadcast.party_id != from {
 					warn!(
 						"DKG: Round2Broadcast sender mismatch: envelope from {} but message claims party {}",
@@ -720,7 +720,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					},
 				}
 			},
-			MithrilDkgMessage::Round3Broadcast(broadcast) => {
+			DkgMessage::Round3Broadcast(broadcast) => {
 				if broadcast.party_id != from {
 					warn!(
 						"DKG: Round3Broadcast sender mismatch: envelope from {} but message claims party {}",
@@ -756,7 +756,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 					},
 				}
 			},
-			MithrilDkgMessage::Round4Broadcast(broadcast) => {
+			DkgMessage::Round4Broadcast(broadcast) => {
 				if broadcast.party_id != from {
 					warn!(
 						"DKG: Round4Broadcast sender mismatch: envelope from {} but message claims party {}",
@@ -829,7 +829,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	// Round 1
 	// ========================================================================
 
-	fn start_round1(&mut self) -> Result<MithrilAction, MithrilDkgError> {
+	fn start_round1(&mut self) -> Result<DkgAction, DkgError> {
 		let config = self.state.expect_initialized()?;
 
 		// Derive all randomness from the master seed
@@ -857,9 +857,9 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 
 	/// Drain buffered Round 1 messages into the protocol state.
 	/// Called after transitioning from Initialized to Round1.
-	fn drain_round1_buffer(&mut self) -> Result<(), MithrilDkgError> {
+	fn drain_round1_buffer(&mut self) -> Result<(), DkgError> {
 		let config = self.state.config.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("drain_round1_buffer but no config".into())
+			DkgError::InvalidState("drain_round1_buffer but no config".into())
 		})?;
 
 		// Drain buffered Round 1 broadcasts
@@ -916,7 +916,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 		Ok(())
 	}
 
-	fn process_round1(&mut self) -> Result<MithrilAction, MithrilDkgError> {
+	fn process_round1(&mut self) -> Result<DkgAction, DkgError> {
 		// Verify we're in Round1 and have config
 		self.state.expect_round1()?;
 
@@ -925,39 +925,39 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			let my_commitment = self
 				.state
 				.my_commitment
-				.ok_or_else(|| MithrilDkgError::InvalidState("Round1 but no commitment".into()))?;
+				.ok_or_else(|| DkgError::InvalidState("Round1 but no commitment".into()))?;
 
-			let broadcast = MithrilRound1Broadcast {
+			let broadcast = Round1Broadcast {
 				ssid: self.ssid,
 				party_id: config.my_party_id,
 				commitment: my_commitment,
 			};
-			let msg = MithrilDkgMessage::Round1Broadcast(broadcast);
+			let msg = DkgMessage::Round1Broadcast(broadcast);
 			let data =
-				borsh::to_vec(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+				borsh::to_vec(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
 			self.state.broadcast_sent = true;
-			return Ok(MithrilAction::SendMany(data));
+			return Ok(DkgAction::SendMany(data));
 		}
 
 		if !self.state.privates_sent {
 			let config = self.state.config.as_ref().unwrap(); // Safe: expect_round1 verified
 			let my_shared_secrets = self.state.my_shared_secrets.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round1 but no shared secrets".into())
+				DkgError::InvalidState("Round1 but no shared secrets".into())
 			})?;
 
 			for (&subset, &secret) in my_shared_secrets {
 				let parties = config.get_parties_in_subset(subset);
 				for &party in &parties {
 					if party != config.my_party_id {
-						let private = MithrilRound1Private {
+						let private = Round1Private {
 							ssid: self.ssid,
 							from_party_id: config.my_party_id,
 							subset_mask: subset,
 							shared_secret: secret,
 						};
-						let msg = MithrilDkgMessage::Round1Private(private);
+						let msg = DkgMessage::Round1Private(private);
 						let data = borsh::to_vec(&msg)
-							.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+							.map_err(|e| DkgError::InternalError(e.to_string()))?;
 						self.pending_privates.push((party, data));
 					}
 				}
@@ -966,7 +966,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			self.state.privates_sent = true;
 
 			if let Some((to, data)) = self.pending_privates.pop() {
-				return Ok(MithrilAction::SendPrivate(to, data));
+				return Ok(DkgAction::SendPrivate(to, data));
 			}
 		}
 
@@ -974,15 +974,15 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 		let config = self.state.config.as_ref().unwrap(); // Safe: expect_round1 verified
 		let round1_broadcasts =
 			self.state.round1_broadcasts.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round1 but no broadcasts map".into())
+				DkgError::InvalidState("Round1 but no broadcasts map".into())
 			})?;
 		let received_shared_secrets =
 			self.state.received_shared_secrets.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round1 but no received_shared_secrets".into())
+				DkgError::InvalidState("Round1 but no received_shared_secrets".into())
 			})?;
 		let my_shared_secrets =
 			self.state.my_shared_secrets.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round1 but no shared secrets".into())
+				DkgError::InvalidState("Round1 but no shared secrets".into())
 			})?;
 
 		let all_broadcasts = all_broadcasts_received(
@@ -999,15 +999,15 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			return self.poke();
 		}
 
-		Ok(MithrilAction::Wait)
+		Ok(DkgAction::Wait)
 	}
 
-	fn transition_to_round2(&mut self) -> Result<(), MithrilDkgError> {
+	fn transition_to_round2(&mut self) -> Result<(), DkgError> {
 		self.state.expect_round1()?;
 
 		// Combine our shared secrets with received ones
 		let mut combined_secrets = self.state.my_shared_secrets.take().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round1 but no my_shared_secrets".into())
+			DkgError::InvalidState("Round1 but no my_shared_secrets".into())
 		})?;
 		if let Some(received) = self.state.received_shared_secrets.take() {
 			for (subset, secret) in received {
@@ -1034,7 +1034,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	// Round 2
 	// ========================================================================
 
-	fn process_round2(&mut self) -> Result<MithrilAction, MithrilDkgError> {
+	fn process_round2(&mut self) -> Result<DkgAction, DkgError> {
 		self.state.expect_round2()?;
 
 		if !self.state.broadcast_sent {
@@ -1042,28 +1042,28 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			let my_randomness = self
 				.state
 				.my_randomness
-				.ok_or_else(|| MithrilDkgError::InvalidState("Round2 but no randomness".into()))?;
+				.ok_or_else(|| DkgError::InvalidState("Round2 but no randomness".into()))?;
 
-			let broadcast = MithrilRound2Broadcast {
+			let broadcast = Round2Broadcast {
 				ssid: self.ssid,
 				party_id: config.my_party_id,
 				randomness: my_randomness,
 			};
-			let msg = MithrilDkgMessage::Round2Broadcast(broadcast);
+			let msg = DkgMessage::Round2Broadcast(broadcast);
 			let data =
-				borsh::to_vec(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+				borsh::to_vec(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
 			self.state.broadcast_sent = true;
-			return Ok(MithrilAction::SendMany(data));
+			return Ok(DkgAction::SendMany(data));
 		}
 
 		// Check if we have all broadcasts
 		let config = self.state.config.as_ref().unwrap(); // Safe: expect_round2 verified
 		let round2_broadcasts =
 			self.state.round2_broadcasts.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round2 but no broadcasts map".into())
+				DkgError::InvalidState("Round2 but no broadcasts map".into())
 			})?;
 		let round1_broadcasts = self.state.round1_broadcasts.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round2 but no round1_broadcasts".into())
+			DkgError::InvalidState("Round2 but no round1_broadcasts".into())
 		})?;
 
 		let all_broadcasts = all_broadcasts_received(
@@ -1076,11 +1076,11 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			// Verify commitments
 			for (&party_id, broadcast) in round2_broadcasts {
 				let expected = round1_broadcasts.get(&party_id).ok_or_else(|| {
-					MithrilDkgError::MissingData(format!("missing Round 1 from party {}", party_id))
+					DkgError::MissingData(format!("missing Round 1 from party {}", party_id))
 				})?;
 				let actual = h_commit(&self.ssid, party_id, &broadcast.randomness);
 				if actual != expected.commitment {
-					return Err(MithrilDkgError::CommitmentMismatch { party_id });
+					return Err(DkgError::CommitmentMismatch { party_id });
 				}
 			}
 
@@ -1088,22 +1088,22 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			return self.poke();
 		}
 
-		Ok(MithrilAction::Wait)
+		Ok(DkgAction::Wait)
 	}
 
-	fn transition_to_round3(&mut self) -> Result<(), MithrilDkgError> {
+	fn transition_to_round3(&mut self) -> Result<(), DkgError> {
 		let config = self.state.expect_round2()?;
 		let my_party_id = config.my_party_id; // Copy before mutable borrows
 		let my_randomness = self
 			.state
 			.my_randomness
-			.ok_or_else(|| MithrilDkgError::InvalidState("Round2 but no randomness".into()))?;
+			.ok_or_else(|| DkgError::InvalidState("Round2 but no randomness".into()))?;
 		let round2_broadcasts = self.state.round2_broadcasts.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round2 but no round2_broadcasts".into())
+			DkgError::InvalidState("Round2 but no round2_broadcasts".into())
 		})?;
 		let shared_secrets =
 			self.state.shared_secrets.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round2 but no shared_secrets".into())
+				DkgError::InvalidState("Round2 but no shared_secrets".into())
 			})?;
 
 		// Compute global randomness from all parties' contributions
@@ -1120,7 +1120,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 		let mut round1_broadcasts = self.state.round1_broadcasts.take().unwrap_or_default();
 		round1_broadcasts.insert(
 			my_party_id,
-			MithrilRound1Broadcast {
+			Round1Broadcast {
 				ssid: self.ssid,
 				party_id: my_party_id,
 				commitment: h_commit(&self.ssid, my_party_id, &my_randomness),
@@ -1159,32 +1159,32 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	// Round 3
 	// ========================================================================
 
-	fn process_round3(&mut self) -> Result<MithrilAction, MithrilDkgError> {
+	fn process_round3(&mut self) -> Result<DkgAction, DkgError> {
 		self.state.expect_round3()?;
 
 		if !self.state.broadcast_sent {
 			let config = self.state.config.as_ref().unwrap(); // Safe: expect_round3 verified
 			let my_pk_commitments = self.state.my_pk_commitments.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round3 but no pk_commitments".into())
+				DkgError::InvalidState("Round3 but no pk_commitments".into())
 			})?;
 
-			let broadcast = MithrilRound3Broadcast {
+			let broadcast = Round3Broadcast {
 				ssid: self.ssid,
 				party_id: config.my_party_id,
 				partial_pk_commitments: my_pk_commitments.clone(),
 			};
-			let msg = MithrilDkgMessage::Round3Broadcast(broadcast);
+			let msg = DkgMessage::Round3Broadcast(broadcast);
 			let data =
-				borsh::to_vec(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+				borsh::to_vec(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
 			self.state.broadcast_sent = true;
-			return Ok(MithrilAction::SendMany(data));
+			return Ok(DkgAction::SendMany(data));
 		}
 
 		// Check if we have all broadcasts
 		let config = self.state.config.as_ref().unwrap(); // Safe: expect_round3 verified
 		let round3_broadcasts =
 			self.state.round3_broadcasts.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round3 but no broadcasts map".into())
+				DkgError::InvalidState("Round3 but no broadcasts map".into())
 			})?;
 
 		let all_broadcasts = all_broadcasts_received(
@@ -1198,18 +1198,18 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			return self.poke();
 		}
 
-		Ok(MithrilAction::Wait)
+		Ok(DkgAction::Wait)
 	}
 
-	fn transition_to_round4(&mut self) -> Result<(), MithrilDkgError> {
+	fn transition_to_round4(&mut self) -> Result<(), DkgError> {
 		let config = self.state.expect_round3()?;
 		let my_party_id = config.my_party_id; // Copy before mutable borrows
 		let my_pk_commitments =
 			self.state.my_pk_commitments.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round3 but no pk_commitments".into())
+				DkgError::InvalidState("Round3 but no pk_commitments".into())
 			})?;
 
-		let my_round3_broadcast = MithrilRound3Broadcast {
+		let my_round3_broadcast = Round3Broadcast {
 			ssid: self.ssid,
 			party_id: my_party_id,
 			partial_pk_commitments: my_pk_commitments.clone(),
@@ -1235,7 +1235,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	// Round 4
 	// ========================================================================
 
-	fn process_round4(&mut self) -> Result<MithrilAction, MithrilDkgError> {
+	fn process_round4(&mut self) -> Result<DkgAction, DkgError> {
 		self.state.expect_round4()?;
 
 		if !self.state.broadcast_sent {
@@ -1245,18 +1245,18 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 
 			// Sign and broadcast our partial PKs
 			let broadcast = self.create_round4_broadcast()?;
-			let msg = MithrilDkgMessage::Round4Broadcast(broadcast);
+			let msg = DkgMessage::Round4Broadcast(broadcast);
 			let data =
-				borsh::to_vec(&msg).map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+				borsh::to_vec(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
 			self.state.broadcast_sent = true;
-			return Ok(MithrilAction::SendMany(data));
+			return Ok(DkgAction::SendMany(data));
 		}
 
 		// Check if we have all broadcasts
 		let config = self.state.config.as_ref().unwrap(); // Safe: expect_round4 verified
 		let round4_broadcasts =
 			self.state.round4_broadcasts.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round4 but no broadcasts map".into())
+				DkgError::InvalidState("Round4 but no broadcasts map".into())
 			})?;
 
 		let all_broadcasts = all_broadcasts_received(
@@ -1270,10 +1270,10 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 			return self.poke();
 		}
 
-		Ok(MithrilAction::Wait)
+		Ok(DkgAction::Wait)
 	}
 
-	fn complete(&mut self) -> Result<(), MithrilDkgError> {
+	fn complete(&mut self) -> Result<(), DkgError> {
 		self.state.expect_round4()?;
 
 		// Compute the DKG output
@@ -1286,7 +1286,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 		match result {
 			Ok((public_key, private_share)) => {
 				self.state.phase = DkgPhase::Complete;
-				self.state.output = Some(Box::new(MithrilDkgOutput { public_key, private_share }));
+				self.state.output = Some(Box::new(DkgOutput { public_key, private_share }));
 				Ok(())
 			},
 			Err(e) => {
@@ -1297,41 +1297,41 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 		}
 	}
 
-	fn complete_inner(&self) -> Result<(PublicKey, PrivateKeyShare), MithrilDkgError> {
+	fn complete_inner(&self) -> Result<(PublicKey, PrivateKeyShare), DkgError> {
 		let config = self
 			.state
 			.config
 			.as_ref()
-			.ok_or_else(|| MithrilDkgError::InvalidState("Round4 but no config".into()))?;
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no config".into()))?;
 		let round1_broadcasts = self.state.round1_broadcasts.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round4 but no round1_broadcasts".into())
+			DkgError::InvalidState("Round4 but no round1_broadcasts".into())
 		})?;
 		let round2_broadcasts = self.state.round2_broadcasts.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round4 but no round2_broadcasts".into())
+			DkgError::InvalidState("Round4 but no round2_broadcasts".into())
 		})?;
 		let round3_broadcasts = self.state.round3_broadcasts.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round4 but no round3_broadcasts".into())
+			DkgError::InvalidState("Round4 but no round3_broadcasts".into())
 		})?;
 		let round4_broadcasts = self.state.round4_broadcasts.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round4 but no round4_broadcasts".into())
+			DkgError::InvalidState("Round4 but no round4_broadcasts".into())
 		})?;
 		let rho = self
 			.state
 			.rho
-			.ok_or_else(|| MithrilDkgError::InvalidState("Round4 but no rho".into()))?;
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no rho".into()))?;
 		let my_partial_pks =
 			self.state.my_partial_pks.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round4 but no my_partial_pks".into())
+				DkgError::InvalidState("Round4 but no my_partial_pks".into())
 			})?;
 		let my_contributions = self.state.my_contributions.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round4 but no my_contributions".into())
+			DkgError::InvalidState("Round4 but no my_contributions".into())
 		})?;
 		let global_randomness = self.state.global_randomness.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round4 but no global_randomness".into())
+			DkgError::InvalidState("Round4 but no global_randomness".into())
 		})?;
 		let shared_secrets =
 			self.state.shared_secrets.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round4 but no shared_secrets".into())
+				DkgError::InvalidState("Round4 but no shared_secrets".into())
 			})?;
 
 		let transcript_hash = compute_transcript_hash(
@@ -1365,26 +1365,26 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 
 	/// Verify that leader commitments match our expected values before signing.
 	/// Per Mithril paper DKGRound4 lines 11-16.
-	fn verify_leader_commitments_before_signing(&self) -> Result<(), MithrilDkgError> {
+	fn verify_leader_commitments_before_signing(&self) -> Result<(), DkgError> {
 		let config = self
 			.state
 			.config
 			.as_ref()
-			.ok_or_else(|| MithrilDkgError::InvalidState("Round4 but no config".into()))?;
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no config".into()))?;
 		let round3_broadcasts = self.state.round3_broadcasts.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round4 but no round3_broadcasts".into())
+			DkgError::InvalidState("Round4 but no round3_broadcasts".into())
 		})?;
 		let rho = self
 			.state
 			.rho
-			.ok_or_else(|| MithrilDkgError::InvalidState("Round4 but no rho".into()))?;
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no rho".into()))?;
 		let my_contributions = self.state.my_contributions.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round4 but no my_contributions".into())
+			DkgError::InvalidState("Round4 but no my_contributions".into())
 		})?;
 
 		for &subset in &config.my_subsets() {
 			let leader_id = config.get_leader(subset).ok_or_else(|| {
-				MithrilDkgError::InternalError(format!("no leader for subset {:b}", subset))
+				DkgError::InternalError(format!("no leader for subset {:b}", subset))
 			})?;
 
 			// Skip if we're the leader for this subset
@@ -1399,7 +1399,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 				let expected_commitment = h_commit_pk(&self.ssid, leader_id, subset, &expected_pk);
 
 				let round3 = round3_broadcasts.get(&leader_id).ok_or_else(|| {
-					MithrilDkgError::MissingData(format!(
+					DkgError::MissingData(format!(
 						"missing Round 3 from leader {} for subset {:b}",
 						leader_id, subset
 					))
@@ -1407,14 +1407,14 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 
 				let leader_commitment =
 					round3.partial_pk_commitments.get(&subset).ok_or_else(|| {
-						MithrilDkgError::MissingData(format!(
+						DkgError::MissingData(format!(
 							"missing PK commitment from leader {} for subset {:b}",
 							leader_id, subset
 						))
 					})?;
 
 				if *leader_commitment != expected_commitment {
-					return Err(MithrilDkgError::PkCommitmentMismatch {
+					return Err(DkgError::PkCommitmentMismatch {
 						party_id: leader_id,
 						subset,
 					});
@@ -1425,24 +1425,24 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 	}
 
 	/// Create the Round 4 broadcast message with our partial PKs and transcript signature.
-	fn create_round4_broadcast(&self) -> Result<MithrilRound4Broadcast, MithrilDkgError> {
+	fn create_round4_broadcast(&self) -> Result<Round4Broadcast, DkgError> {
 		let config = self
 			.state
 			.config
 			.as_ref()
-			.ok_or_else(|| MithrilDkgError::InvalidState("Round4 but no config".into()))?;
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no config".into()))?;
 		let round1_broadcasts = self.state.round1_broadcasts.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round4 but no round1_broadcasts".into())
+			DkgError::InvalidState("Round4 but no round1_broadcasts".into())
 		})?;
 		let round2_broadcasts = self.state.round2_broadcasts.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round4 but no round2_broadcasts".into())
+			DkgError::InvalidState("Round4 but no round2_broadcasts".into())
 		})?;
 		let round3_broadcasts = self.state.round3_broadcasts.as_ref().ok_or_else(|| {
-			MithrilDkgError::InvalidState("Round4 but no round3_broadcasts".into())
+			DkgError::InvalidState("Round4 but no round3_broadcasts".into())
 		})?;
 		let my_partial_pks =
 			self.state.my_partial_pks.as_ref().ok_or_else(|| {
-				MithrilDkgError::InvalidState("Round4 but no my_partial_pks".into())
+				DkgError::InvalidState("Round4 but no my_partial_pks".into())
 			})?;
 
 		let transcript_hash = compute_transcript_hash(
@@ -1455,7 +1455,7 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 		let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
 		let signature = config.my_signer.sign(&signing_message);
 
-		Ok(MithrilRound4Broadcast {
+		Ok(Round4Broadcast {
 			ssid: self.ssid,
 			party_id: config.my_party_id,
 			partial_public_keys: my_partial_pks.clone(),
@@ -1472,11 +1472,11 @@ impl<S: TranscriptSigner> MithrilDkg<S> {
 /// Returns the global randomness and a copy of this party's broadcast.
 fn compute_global_randomness<S: TranscriptSigner>(
 	ssid: &[u8; DKG_SSID_SIZE],
-	config: &MithrilDkgConfig<S>,
-	received_broadcasts: &BTreeMap<ParticipantId, MithrilRound2Broadcast>,
+	config: &DkgConfig<S>,
+	received_broadcasts: &BTreeMap<ParticipantId, Round2Broadcast>,
 	my_randomness: [u8; RANDOMNESS_SIZE],
-) -> (Vec<u8>, MithrilRound2Broadcast) {
-	let my_broadcast = MithrilRound2Broadcast {
+) -> (Vec<u8>, Round2Broadcast) {
+	let my_broadcast = Round2Broadcast {
 		ssid: *ssid,
 		party_id: config.my_party_id,
 		randomness: my_randomness,
@@ -1504,7 +1504,7 @@ type ContributionsResult = (
 /// Compute contributions and partial PKs for all subsets this party belongs to.
 fn compute_my_contributions<S: TranscriptSigner>(
 	ssid: &[u8; DKG_SSID_SIZE],
-	config: &MithrilDkgConfig<S>,
+	config: &DkgConfig<S>,
 	shared_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	global_randomness: &[u8],
 	rho: &[u8; 32],
@@ -1546,15 +1546,15 @@ fn compute_my_contributions<S: TranscriptSigner>(
 #[allow(clippy::too_many_arguments)]
 fn collect_and_verify_all_partial_pks<S: TranscriptSigner>(
 	ssid: &[u8; DKG_SSID_SIZE],
-	config: &MithrilDkgConfig<S>,
-	round3_broadcasts: &BTreeMap<ParticipantId, MithrilRound3Broadcast>,
-	round4_broadcasts: &BTreeMap<ParticipantId, MithrilRound4Broadcast>,
+	config: &DkgConfig<S>,
+	round3_broadcasts: &BTreeMap<ParticipantId, Round3Broadcast>,
+	round4_broadcasts: &BTreeMap<ParticipantId, Round4Broadcast>,
 	my_partial_pks: &BTreeMap<SubsetMask, PartialPublicKey>,
 	shared_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	global_randomness: &[u8],
 	rho: &[u8; 32],
 	transcript_hash: &[u8; 32],
-) -> Result<BTreeMap<SubsetMask, PartialPublicKey>, MithrilDkgError> {
+) -> Result<BTreeMap<SubsetMask, PartialPublicKey>, DkgError> {
 	let mut all_partial_pks: BTreeMap<SubsetMask, PartialPublicKey> = BTreeMap::new();
 
 	// Add our own partial PKs (only for subsets where we are the leader)
@@ -1614,7 +1614,7 @@ fn collect_and_verify_all_partial_pks<S: TranscriptSigner>(
 	let expected_subsets = config.all_subsets();
 	for subset in &expected_subsets {
 		if !all_partial_pks.contains_key(subset) {
-			return Err(MithrilDkgError::MissingData(format!(
+			return Err(DkgError::MissingData(format!(
 				"missing partial public key for subset {:b}",
 				subset
 			)));
@@ -1628,15 +1628,15 @@ fn collect_and_verify_all_partial_pks<S: TranscriptSigner>(
 #[allow(clippy::too_many_arguments)]
 fn verify_party_broadcast<S: TranscriptSigner>(
 	ssid: &[u8; DKG_SSID_SIZE],
-	config: &MithrilDkgConfig<S>,
-	round3_broadcasts: &BTreeMap<ParticipantId, MithrilRound3Broadcast>,
+	config: &DkgConfig<S>,
+	round3_broadcasts: &BTreeMap<ParticipantId, Round3Broadcast>,
 	shared_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	global_randomness: &[u8],
 	rho: &[u8; 32],
 	party_id: ParticipantId,
-	broadcast: &MithrilRound4Broadcast,
+	broadcast: &Round4Broadcast,
 	transcript_hash: &[u8; 32],
-) -> Result<(), MithrilDkgError> {
+) -> Result<(), DkgError> {
 	// Verify transcript signature using OUR transcript_hash.
 	// If the other party signed a different transcript, this verification will fail,
 	// ensuring all parties that complete DKG have the same view of Round 1-3 messages.
@@ -1644,16 +1644,16 @@ fn verify_party_broadcast<S: TranscriptSigner>(
 	let signing_message = compute_signing_message(transcript_hash, &partial_output_hash);
 
 	let public_key = config.participant_public_keys.get(&party_id).ok_or_else(|| {
-		MithrilDkgError::MissingData(format!("missing public key for party {}", party_id))
+		DkgError::MissingData(format!("missing public key for party {}", party_id))
 	})?;
 
 	if !S::verify_bytes(public_key, &signing_message, &broadcast.transcript_signature) {
-		return Err(MithrilDkgError::SignatureVerificationFailed { party_id });
+		return Err(DkgError::SignatureVerificationFailed { party_id });
 	}
 
 	// Verify PK commitments match Round 3
 	let round3 = round3_broadcasts.get(&party_id).ok_or_else(|| {
-		MithrilDkgError::MissingData(format!("missing Round 3 from party {}", party_id))
+		DkgError::MissingData(format!("missing Round 3 from party {}", party_id))
 	})?;
 
 	for (&subset, pk) in &broadcast.partial_public_keys {
@@ -1687,11 +1687,11 @@ fn verify_partial_pk_commitment(
 	party_id: ParticipantId,
 	subset: SubsetMask,
 	pk: &PartialPublicKey,
-	round3: &MithrilRound3Broadcast,
-) -> Result<(), MithrilDkgError> {
+	round3: &Round3Broadcast,
+) -> Result<(), DkgError> {
 	// Check commitment matches
 	let expected = round3.partial_pk_commitments.get(&subset).ok_or_else(|| {
-		MithrilDkgError::MissingData(format!(
+		DkgError::MissingData(format!(
 			"missing PK commitment from party {} for subset {:b}",
 			party_id, subset
 		))
@@ -1699,7 +1699,7 @@ fn verify_partial_pk_commitment(
 
 	let actual = h_commit_pk(ssid, party_id, subset, pk);
 	if actual != *expected {
-		return Err(MithrilDkgError::PkCommitmentMismatch { party_id, subset });
+		return Err(DkgError::PkCommitmentMismatch { party_id, subset });
 	}
 
 	// If we have the shared secret, verify the PK is correct
@@ -1709,7 +1709,7 @@ fn verify_partial_pk_commitment(
 		let expected_t =
 			compute_partial_pk_t(rho, &expected_contribution.s1, &expected_contribution.s2);
 		if pk.t != expected_t {
-			return Err(MithrilDkgError::PkVerificationFailed { party_id, subset });
+			return Err(DkgError::PkVerificationFailed { party_id, subset });
 		}
 	}
 
@@ -1717,13 +1717,13 @@ fn verify_partial_pk_commitment(
 }
 
 fn build_private_share<S: TranscriptSigner>(
-	config: &MithrilDkgConfig<S>,
+	config: &DkgConfig<S>,
 	my_contributions: &BTreeMap<SubsetMask, SubsetContribution>,
 	rho: &[u8; 32],
 	public_key: &PublicKey,
-) -> Result<PrivateKeyShare, MithrilDkgError> {
+) -> Result<PrivateKeyShare, DkgError> {
 	let dkg_participants = ParticipantList::new(&config.all_participants)
-		.ok_or_else(|| MithrilDkgError::InternalError("invalid participants".into()))?;
+		.ok_or_else(|| DkgError::InternalError("invalid participants".into()))?;
 
 	let mut combined_shares: BTreeMap<SubsetMask, SecretShareData> = BTreeMap::new();
 	for (subset_mask, contribution) in my_contributions {
@@ -1802,7 +1802,7 @@ fn build_private_share<S: TranscriptSigner>(
 /// * `master_seed` - A 32-byte seed used to derive unique seeds for each party
 ///
 /// # Returns
-/// A vector of `MithrilDkgOutput` structs, one for each party, containing
+/// A vector of `DkgOutput` structs, one for each party, containing
 /// the shared public key and each party's private key share.
 ///
 /// # Example
@@ -1813,23 +1813,23 @@ fn build_private_share<S: TranscriptSigner>(
 /// let master_seed = [42u8; 32];
 /// let session_nonce = [0u8; 32];
 ///
-/// let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, master_seed, &session_nonce)?;
+/// let outputs = run_local_dkg(2, 3, signers, public_keys, master_seed, &session_nonce)?;
 /// // All parties have the same public key
 /// assert_eq!(outputs[0].public_key, outputs[1].public_key);
 /// ```
-pub fn run_local_mithril_dkg<S>(
+pub fn run_local_dkg<S>(
 	threshold: u32,
 	total_parties: u32,
 	signers: Vec<S>,
 	public_keys: Vec<S::PublicKey>,
 	master_seed: [u8; 32],
 	session_nonce: &[u8; 32],
-) -> Result<Vec<MithrilDkgOutput>, MithrilDkgError>
+) -> Result<Vec<DkgOutput>, DkgError>
 where
 	S: TranscriptSigner + Clone,
 {
 	let threshold_config = ThresholdConfig::new(threshold, total_parties)
-		.map_err(|e| MithrilDkgError::InternalError(e.to_string()))?;
+		.map_err(|e| DkgError::InternalError(e.to_string()))?;
 
 	let participants: Vec<ParticipantId> = (0..total_parties).collect();
 
@@ -1839,11 +1839,11 @@ where
 	}
 
 	// Derive unique seed for each party from master_seed
-	let mut dkgs: Vec<MithrilDkg<S>> = signers
+	let mut dkgs: Vec<Dkg<S>> = signers
 		.into_iter()
 		.enumerate()
 		.map(|(i, signer)| {
-			let config = MithrilDkgConfig::new(
+			let config = DkgConfig::new(
 				threshold_config,
 				i as ParticipantId,
 				participants.clone(),
@@ -1863,11 +1863,11 @@ where
 			let mut party_seed = [0u8; 32];
 			fips202::shake256_squeeze(&mut party_seed, &mut state);
 
-			MithrilDkg::new(config, party_seed, session_nonce)
+			Dkg::new(config, party_seed, session_nonce)
 		})
 		.collect();
 
-	let mut outputs: Vec<Option<MithrilDkgOutput>> = vec![None; total_parties as usize];
+	let mut outputs: Vec<Option<DkgOutput>> = vec![None; total_parties as usize];
 	let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> =
 		vec![Vec::new(); total_parties as usize];
 
@@ -1877,7 +1877,7 @@ where
 	while outputs.iter().any(|o| o.is_none()) {
 		iterations += 1;
 		if iterations > MAX_ITERATIONS {
-			return Err(MithrilDkgError::InternalError("DKG did not complete in time".into()));
+			return Err(DkgError::InternalError("DKG did not complete in time".into()));
 		}
 
 		// Deliver pending messages
@@ -1899,8 +1899,8 @@ where
 				}
 
 				match dkgs[party_id].poke()? {
-					MithrilAction::Wait => {},
-					MithrilAction::SendMany(data) => {
+					DkgAction::Wait => {},
+					DkgAction::SendMany(data) => {
 						made_progress = true;
 						let from = party_id as ParticipantId;
 						for (other, pending) in pending_messages.iter_mut().enumerate() {
@@ -1909,12 +1909,12 @@ where
 							}
 						}
 					},
-					MithrilAction::SendPrivate(to, data) => {
+					DkgAction::SendPrivate(to, data) => {
 						made_progress = true;
 						let from = party_id as ParticipantId;
 						pending_messages[to as usize].push((from, data));
 					},
-					MithrilAction::Return(output) => {
+					DkgAction::Return(output) => {
 						made_progress = true;
 						outputs[party_id] = Some(*output);
 					},
@@ -1968,12 +1968,12 @@ mod tests {
 	}
 
 	#[test]
-	fn test_mithril_dkg_2_of_3() {
+	fn test_dkg_2_of_3() {
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
 		let seed = [42u8; 32];
 
-		let result = run_local_mithril_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE);
+		let result = run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE);
 
 		match &result {
 			Ok(outputs) => {
@@ -1993,13 +1993,13 @@ mod tests {
 	}
 
 	#[test]
-	fn test_mithril_dkg_eta_bounded() {
+	fn test_dkg_eta_bounded() {
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
 		let seed = [123u8; 32];
 
 		let outputs =
-			run_local_mithril_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
+			run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		for (party_id, output) in outputs.iter().enumerate() {
 			let shares = output.private_share.shares();
@@ -2039,7 +2039,7 @@ mod tests {
 	/// This verifies that the TranscriptSigner trait works correctly with
 	/// a real post-quantum signature scheme.
 	#[test]
-	fn test_mithril_dkg_with_dilithium_signing() {
+	fn test_dkg_with_dilithium_signing() {
 		use qp_rusty_crystals_dilithium::{
 			ml_dsa_87::{Keypair, PublicKey, SecretKey, SIGNBYTES},
 			SensitiveBytes32,
@@ -2116,7 +2116,7 @@ mod tests {
 
 		let seed = [56u8; 32];
 		let outputs =
-			run_local_mithril_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
+			run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		// Verify DKG succeeded
 		assert_eq!(outputs.len(), 3);
@@ -2149,7 +2149,7 @@ mod tests {
 	/// This is a security-critical test: malicious parties should not be able
 	/// to complete DKG with forged signatures.
 	#[test]
-	fn test_mithril_dkg_rejects_bad_signature() {
+	fn test_dkg_rejects_bad_signature() {
 		// A signer that produces bad signatures for party 2
 		#[derive(Clone, Debug)]
 		struct BadSigner {
@@ -2205,11 +2205,11 @@ mod tests {
 
 		let seed = [89u8; 32];
 
-		let mut dkgs: Vec<MithrilDkg<BadSigner>> = signers
+		let mut dkgs: Vec<Dkg<BadSigner>> = signers
 			.into_iter()
 			.enumerate()
 			.map(|(i, signer)| {
-				let config = MithrilDkgConfig::new(
+				let config = DkgConfig::new(
 					threshold_config,
 					i as ParticipantId,
 					participants.clone(),
@@ -2217,13 +2217,13 @@ mod tests {
 					pk_map.clone(),
 				)
 				.unwrap();
-				MithrilDkg::new(config, seed, &TEST_SESSION_NONCE)
+				Dkg::new(config, seed, &TEST_SESSION_NONCE)
 			})
 			.collect();
 
-		let mut outputs: Vec<Option<MithrilDkgOutput>> = vec![None; 3];
+		let mut outputs: Vec<Option<DkgOutput>> = vec![None; 3];
 		let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> = vec![Vec::new(); 3];
-		let mut errors: Vec<Option<MithrilDkgError>> = vec![None; 3];
+		let mut errors: Vec<Option<DkgError>> = vec![None; 3];
 
 		let mut iterations = 0;
 		const MAX_ITERATIONS: usize = 1000;
@@ -2254,8 +2254,8 @@ mod tests {
 					}
 
 					match dkgs[party_id].poke() {
-						Ok(MithrilAction::Wait) => {},
-						Ok(MithrilAction::SendMany(data)) => {
+						Ok(DkgAction::Wait) => {},
+						Ok(DkgAction::SendMany(data)) => {
 							made_progress = true;
 							let from = party_id as ParticipantId;
 							for (other, pending) in pending_messages.iter_mut().enumerate() {
@@ -2264,12 +2264,12 @@ mod tests {
 								}
 							}
 						},
-						Ok(MithrilAction::SendPrivate(to, data)) => {
+						Ok(DkgAction::SendPrivate(to, data)) => {
 							made_progress = true;
 							let from = party_id as ParticipantId;
 							pending_messages[to as usize].push((from, data));
 						},
-						Ok(MithrilAction::Return(output)) => {
+						Ok(DkgAction::Return(output)) => {
 							made_progress = true;
 							outputs[party_id] = Some(*output);
 						},
@@ -2286,7 +2286,7 @@ mod tests {
 
 		// At least one honest party should have received an error
 		let has_sig_error = errors.iter().any(|e| {
-			matches!(e, Some(MithrilDkgError::SignatureVerificationFailed { party_id: 2 }))
+			matches!(e, Some(DkgError::SignatureVerificationFailed { party_id: 2 }))
 		});
 
 		assert!(has_sig_error, "At least one honest party should reject party 2's bad signature");
@@ -2295,7 +2295,7 @@ mod tests {
 	/// Test that DKG rejects bad randomness commitment (Round 2 reveal doesn't match Round 1
 	/// commit).
 	#[test]
-	fn test_mithril_dkg_rejects_bad_commitment() {
+	fn test_dkg_rejects_bad_commitment() {
 		// We'll intercept and modify party 2's Round 2 message to have wrong randomness
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
@@ -2310,11 +2310,11 @@ mod tests {
 
 		let seed = [55u8; 32];
 
-		let mut dkgs: Vec<MithrilDkg<TestSigner>> = signers
+		let mut dkgs: Vec<Dkg<TestSigner>> = signers
 			.into_iter()
 			.enumerate()
 			.map(|(i, signer)| {
-				let config = MithrilDkgConfig::new(
+				let config = DkgConfig::new(
 					threshold_config,
 					i as ParticipantId,
 					participants.clone(),
@@ -2322,13 +2322,13 @@ mod tests {
 					pk_map.clone(),
 				)
 				.unwrap();
-				MithrilDkg::new(config, seed, &TEST_SESSION_NONCE)
+				Dkg::new(config, seed, &TEST_SESSION_NONCE)
 			})
 			.collect();
 
-		let mut outputs: Vec<Option<MithrilDkgOutput>> = vec![None; 3];
+		let mut outputs: Vec<Option<DkgOutput>> = vec![None; 3];
 		let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> = vec![Vec::new(); 3];
-		let mut errors: Vec<Option<MithrilDkgError>> = vec![None; 3];
+		let mut errors: Vec<Option<DkgError>> = vec![None; 3];
 
 		let mut iterations = 0;
 		const MAX_ITERATIONS: usize = 1000;
@@ -2345,12 +2345,12 @@ mod tests {
 				for (from, mut data) in messages {
 					// Tamper with party 2's Round 2 message
 					if from == 2 {
-						if let Ok(MithrilDkgMessage::Round2Broadcast(mut r2)) =
-							borsh::from_slice::<MithrilDkgMessage>(&data)
+						if let Ok(DkgMessage::Round2Broadcast(mut r2)) =
+							borsh::from_slice::<DkgMessage>(&data)
 						{
 							// Corrupt the randomness
 							r2.randomness[0] ^= 0xFF;
-							let tampered = MithrilDkgMessage::Round2Broadcast(r2);
+							let tampered = DkgMessage::Round2Broadcast(r2);
 							data = borsh::to_vec(&tampered).unwrap();
 						}
 					}
@@ -2369,8 +2369,8 @@ mod tests {
 					}
 
 					match dkgs[party_id].poke() {
-						Ok(MithrilAction::Wait) => {},
-						Ok(MithrilAction::SendMany(data)) => {
+						Ok(DkgAction::Wait) => {},
+						Ok(DkgAction::SendMany(data)) => {
 							made_progress = true;
 							let from = party_id as ParticipantId;
 							for (other, pending) in pending_messages.iter_mut().enumerate() {
@@ -2379,12 +2379,12 @@ mod tests {
 								}
 							}
 						},
-						Ok(MithrilAction::SendPrivate(to, data)) => {
+						Ok(DkgAction::SendPrivate(to, data)) => {
 							made_progress = true;
 							let from = party_id as ParticipantId;
 							pending_messages[to as usize].push((from, data));
 						},
-						Ok(MithrilAction::Return(output)) => {
+						Ok(DkgAction::Return(output)) => {
 							made_progress = true;
 							outputs[party_id] = Some(*output);
 						},
@@ -2399,7 +2399,7 @@ mod tests {
 		// At least one honest party should have detected the commitment mismatch
 		let has_commitment_error = errors
 			.iter()
-			.any(|e| matches!(e, Some(MithrilDkgError::CommitmentMismatch { party_id: 2 })));
+			.any(|e| matches!(e, Some(DkgError::CommitmentMismatch { party_id: 2 })));
 
 		assert!(has_commitment_error, "At least one party should reject party 2's bad commitment");
 	}
@@ -2407,7 +2407,7 @@ mod tests {
 	/// Test that non-leaders detect tampered PK commitments in Round 4 before signing.
 	/// Per Mithril paper DKGRound4 lines 11-16: non-leaders verify PK commitments BEFORE signing.
 	#[test]
-	fn test_mithril_dkg_rejects_bad_pk_commitment() {
+	fn test_dkg_rejects_bad_pk_commitment() {
 		// For 2-of-3: subset size k = 3-2+1 = 2
 		// Subsets: {0,1}=0b011, {0,2}=0b101, {1,2}=0b110
 		// Leaders: min of each subset
@@ -2434,11 +2434,11 @@ mod tests {
 
 		let seed = [88u8; 32];
 
-		let mut dkgs: Vec<MithrilDkg<TestSigner>> = signers
+		let mut dkgs: Vec<Dkg<TestSigner>> = signers
 			.into_iter()
 			.enumerate()
 			.map(|(i, signer)| {
-				let config = MithrilDkgConfig::new(
+				let config = DkgConfig::new(
 					threshold_config,
 					i as ParticipantId,
 					participants.clone(),
@@ -2446,13 +2446,13 @@ mod tests {
 					pk_map.clone(),
 				)
 				.unwrap();
-				MithrilDkg::new(config, seed, &TEST_SESSION_NONCE)
+				Dkg::new(config, seed, &TEST_SESSION_NONCE)
 			})
 			.collect();
 
-		let mut outputs: Vec<Option<MithrilDkgOutput>> = vec![None; 3];
+		let mut outputs: Vec<Option<DkgOutput>> = vec![None; 3];
 		let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> = vec![Vec::new(); 3];
-		let mut errors: Vec<Option<MithrilDkgError>> = vec![None; 3];
+		let mut errors: Vec<Option<DkgError>> = vec![None; 3];
 
 		let mut iterations = 0;
 		const MAX_ITERATIONS: usize = 1000;
@@ -2469,15 +2469,15 @@ mod tests {
 				for (from, mut data) in messages {
 					// Tamper with party 0's Round 3 message (PK commitments)
 					if from == 0 {
-						if let Ok(MithrilDkgMessage::Round3Broadcast(mut r3)) =
-							borsh::from_slice::<MithrilDkgMessage>(&data)
+						if let Ok(DkgMessage::Round3Broadcast(mut r3)) =
+							borsh::from_slice::<DkgMessage>(&data)
 						{
 							// Corrupt a PK commitment for subset 0b101 where party 2 is a
 							// member
 							if let Some(commitment) = r3.partial_pk_commitments.get_mut(&0b101) {
 								commitment[0] ^= 0xFF;
 							}
-							let tampered = MithrilDkgMessage::Round3Broadcast(r3);
+							let tampered = DkgMessage::Round3Broadcast(r3);
 							data = borsh::to_vec(&tampered).unwrap();
 						}
 					}
@@ -2496,8 +2496,8 @@ mod tests {
 					}
 
 					match dkgs[party_id].poke() {
-						Ok(MithrilAction::Wait) => {},
-						Ok(MithrilAction::SendMany(data)) => {
+						Ok(DkgAction::Wait) => {},
+						Ok(DkgAction::SendMany(data)) => {
 							made_progress = true;
 							let from = party_id as ParticipantId;
 							for (other, pending) in pending_messages.iter_mut().enumerate() {
@@ -2506,12 +2506,12 @@ mod tests {
 								}
 							}
 						},
-						Ok(MithrilAction::SendPrivate(to, data)) => {
+						Ok(DkgAction::SendPrivate(to, data)) => {
 							made_progress = true;
 							let from = party_id as ParticipantId;
 							pending_messages[to as usize].push((from, data));
 						},
-						Ok(MithrilAction::Return(output)) => {
+						Ok(DkgAction::Return(output)) => {
 							made_progress = true;
 							outputs[party_id] = Some(*output);
 						},
@@ -2529,7 +2529,7 @@ mod tests {
 		assert!(
 			matches!(
 				party2_error,
-				Some(MithrilDkgError::PkCommitmentMismatch { party_id: 0, subset: 0b101 })
+				Some(DkgError::PkCommitmentMismatch { party_id: 0, subset: 0b101 })
 			),
 			"Party 2 should detect party 0's bad PK commitment for subset 0b101, got: {:?}",
 			party2_error
@@ -2538,13 +2538,13 @@ mod tests {
 
 	/// Test DKG with 3-of-5 threshold.
 	#[test]
-	fn test_mithril_dkg_3_of_5() {
+	fn test_dkg_3_of_5() {
 		let signers: Vec<TestSigner> = (0..5).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..5).collect();
 		let seed = [45u8; 32];
 
 		let outputs =
-			run_local_mithril_dkg(3, 5, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
+			run_local_dkg(3, 5, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		assert_eq!(outputs.len(), 5);
 
@@ -2586,13 +2586,13 @@ mod tests {
 
 	/// Test that parties in the same subset have identical shares.
 	#[test]
-	fn test_mithril_dkg_subset_share_consistency() {
+	fn test_dkg_subset_share_consistency() {
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();
 		let seed = [77u8; 32];
 
 		let outputs =
-			run_local_mithril_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
+			run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		// For 2-of-3: subsets are {0,1}=0b011, {0,2}=0b101, {1,2}=0b110
 
@@ -2649,7 +2649,7 @@ mod tests {
 
 	/// Test config validation rejects invalid parameters.
 	#[test]
-	fn test_mithril_dkg_config_validation() {
+	fn test_dkg_config_validation() {
 		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
 		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
 		pk_map.insert(0, 0);
@@ -2657,7 +2657,7 @@ mod tests {
 		pk_map.insert(2, 2);
 
 		// Valid config should work
-		let result = MithrilDkgConfig::new(
+		let result = DkgConfig::new(
 			threshold_config,
 			0,
 			vec![0, 1, 2],
@@ -2667,7 +2667,7 @@ mod tests {
 		assert!(result.is_ok());
 
 		// Wrong participant count
-		let result = MithrilDkgConfig::new(
+		let result = DkgConfig::new(
 			threshold_config,
 			0,
 			vec![0, 1], // Only 2 participants but config says 3
@@ -2677,7 +2677,7 @@ mod tests {
 		assert!(result.is_err());
 
 		// Party not in participants
-		let result = MithrilDkgConfig::new(
+		let result = DkgConfig::new(
 			threshold_config,
 			99, // Not in the list
 			vec![0, 1, 2],
@@ -2689,7 +2689,7 @@ mod tests {
 		// Missing public key
 		let mut incomplete_pk_map = pk_map.clone();
 		incomplete_pk_map.remove(&2);
-		let result = MithrilDkgConfig::new(
+		let result = DkgConfig::new(
 			threshold_config,
 			0,
 			vec![0, 1, 2],
@@ -2711,7 +2711,7 @@ mod tests {
 		}
 
 		// Create two DKG instances
-		let config0 = MithrilDkgConfig::new(
+		let config0 = DkgConfig::new(
 			threshold_config,
 			0,
 			participants.clone(),
@@ -2720,7 +2720,7 @@ mod tests {
 		)
 		.unwrap();
 
-		let config1 = MithrilDkgConfig::new(
+		let config1 = DkgConfig::new(
 			threshold_config,
 			1,
 			participants.clone(),
@@ -2732,15 +2732,15 @@ mod tests {
 		let seed0 = [100u8; 32];
 		let seed1 = [101u8; 32];
 
-		let mut dkg0 = MithrilDkg::new(config0, seed0, &TEST_SESSION_NONCE);
-		let mut dkg1 = MithrilDkg::new(config1, seed1, &TEST_SESSION_NONCE);
+		let mut dkg0 = Dkg::new(config0, seed0, &TEST_SESSION_NONCE);
+		let mut dkg1 = Dkg::new(config1, seed1, &TEST_SESSION_NONCE);
 
 		// Get the computed SSID for use in test messages
 		let ssid = *dkg0.ssid();
 
 		// Start DKG0 - it will be in Round 1 after first poke
 		let action0 = dkg0.poke().unwrap();
-		assert!(matches!(action0, MithrilAction::SendMany(_)));
+		assert!(matches!(action0, DkgAction::SendMany(_)));
 
 		// Advance DKG1 quickly through Round 1 by giving it fake Round 1 messages
 		// and capture its Round 2 broadcast
@@ -2750,8 +2750,8 @@ mod tests {
 		// it should be buffered by DKG0.
 
 		// Create a fake Round 2 broadcast from party 1
-		let round2_broadcast = MithrilRound2Broadcast { ssid, party_id: 1, randomness: [42u8; 32] };
-		let round2_msg = MithrilDkgMessage::Round2Broadcast(round2_broadcast);
+		let round2_broadcast = Round2Broadcast { ssid, party_id: 1, randomness: [42u8; 32] };
+		let round2_msg = DkgMessage::Round2Broadcast(round2_broadcast);
 		let round2_data = borsh::to_vec(&round2_msg).unwrap();
 
 		// Send it to DKG0 while it's still in Round 1
@@ -2763,8 +2763,8 @@ mod tests {
 
 		// Similarly test Round 3 buffering
 		let round3_broadcast =
-			MithrilRound3Broadcast { ssid, party_id: 2, partial_pk_commitments: BTreeMap::new() };
-		let round3_msg = MithrilDkgMessage::Round3Broadcast(round3_broadcast);
+			Round3Broadcast { ssid, party_id: 2, partial_pk_commitments: BTreeMap::new() };
+		let round3_msg = DkgMessage::Round3Broadcast(round3_broadcast);
 		let round3_data = borsh::to_vec(&round3_msg).unwrap();
 
 		dkg0.message(2, round3_data).unwrap();
@@ -2772,13 +2772,13 @@ mod tests {
 		assert_eq!(dkg0.message_buffer.round3.get(&2).unwrap().party_id, 2);
 
 		// And Round 4 buffering
-		let round4_broadcast = MithrilRound4Broadcast {
+		let round4_broadcast = Round4Broadcast {
 			ssid,
 			party_id: 1,
 			partial_public_keys: BTreeMap::new(),
 			transcript_signature: vec![],
 		};
-		let round4_msg = MithrilDkgMessage::Round4Broadcast(round4_broadcast);
+		let round4_msg = DkgMessage::Round4Broadcast(round4_broadcast);
 		let round4_data = borsh::to_vec(&round4_msg).unwrap();
 
 		dkg0.message(1, round4_data).unwrap();
@@ -2798,19 +2798,19 @@ mod tests {
 		}
 
 		let config =
-			MithrilDkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
+			DkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
 				.unwrap();
 
 		let seed = [100u8; 32];
-		let mut dkg = MithrilDkg::new(config, seed, &TEST_SESSION_NONCE);
+		let mut dkg = Dkg::new(config, seed, &TEST_SESSION_NONCE);
 
 		// Start the DKG
 		let _ = dkg.poke().unwrap();
 
 		// Create a Round 1 broadcast claiming to be from party 1
 		let broadcast =
-			MithrilRound1Broadcast { ssid: TEST_SESSION_NONCE, party_id: 1, commitment: [0u8; 32] };
-		let msg = MithrilDkgMessage::Round1Broadcast(broadcast);
+			Round1Broadcast { ssid: TEST_SESSION_NONCE, party_id: 1, commitment: [0u8; 32] };
+		let msg = DkgMessage::Round1Broadcast(broadcast);
 		let data = borsh::to_vec(&msg).unwrap();
 
 		// Send it claiming to be from party 2 (mismatch!)
@@ -2848,7 +2848,7 @@ mod tests {
 		}
 
 		// Create party 0's DKG
-		let config = MithrilDkgConfig::new(
+		let config = DkgConfig::new(
 			threshold_config,
 			0, // We are party 0
 			participants,
@@ -2858,7 +2858,7 @@ mod tests {
 		.unwrap();
 
 		let seed = [100u8; 32];
-		let mut dkg = MithrilDkg::new(config, seed, &TEST_SESSION_NONCE);
+		let mut dkg = Dkg::new(config, seed, &TEST_SESSION_NONCE);
 
 		// Start the DKG to get into Round1 state
 		let _ = dkg.poke().unwrap();
@@ -2866,13 +2866,13 @@ mod tests {
 		// Party 1 is the leader of subset 0b110 = {1, 2}
 		// Party 0 is NOT in subset 0b110
 		// Create a Round1Private from party 1 for subset 0b110
-		let private = MithrilRound1Private {
+		let private = Round1Private {
 			ssid: TEST_SESSION_NONCE,
 			from_party_id: 1,
 			subset_mask: 0b110, // Subset {1, 2} - party 0 is not a member
 			shared_secret: [42u8; 32],
 		};
-		let msg = MithrilDkgMessage::Round1Private(private);
+		let msg = DkgMessage::Round1Private(private);
 		let data = borsh::to_vec(&msg).unwrap();
 
 		// Send it from party 1 (legitimate leader of this subset)
@@ -2906,7 +2906,7 @@ mod tests {
 		}
 
 		// Create party 1's DKG
-		let config = MithrilDkgConfig::new(
+		let config = DkgConfig::new(
 			threshold_config,
 			1, // We are party 1
 			participants,
@@ -2916,7 +2916,7 @@ mod tests {
 		.unwrap();
 
 		let seed = [101u8; 32];
-		let mut dkg = MithrilDkg::new(config, seed, &TEST_SESSION_NONCE);
+		let mut dkg = Dkg::new(config, seed, &TEST_SESSION_NONCE);
 
 		// Get the computed SSID for use in test messages
 		let ssid = *dkg.ssid();
@@ -2927,13 +2927,13 @@ mod tests {
 		// Party 0 is the leader of subset 0b011 = {0, 1}
 		// Party 1 IS in subset 0b011
 		// Create a Round1Private from party 0 for subset 0b011
-		let private = MithrilRound1Private {
+		let private = Round1Private {
 			ssid,
 			from_party_id: 0,
 			subset_mask: 0b011, // Subset {0, 1} - party 1 is a member
 			shared_secret: [42u8; 32],
 		};
-		let msg = MithrilDkgMessage::Round1Private(private);
+		let msg = DkgMessage::Round1Private(private);
 		let data = borsh::to_vec(&msg).unwrap();
 
 		// Send it from party 0 (legitimate leader of this subset)
@@ -2971,7 +2971,7 @@ mod tests {
 		}
 
 		// Create party 1's DKG
-		let config = MithrilDkgConfig::new(
+		let config = DkgConfig::new(
 			threshold_config,
 			1, // We are party 1
 			participants,
@@ -2981,7 +2981,7 @@ mod tests {
 		.unwrap();
 
 		let seed = [102u8; 32];
-		let mut dkg = MithrilDkg::new(config, seed, &TEST_SESSION_NONCE);
+		let mut dkg = Dkg::new(config, seed, &TEST_SESSION_NONCE);
 
 		// Get the computed SSID for use in test messages
 		let ssid = *dkg.ssid();
@@ -2990,13 +2990,13 @@ mod tests {
 		let _ = dkg.poke().unwrap();
 
 		// Test 1: subset 0b111 (size 3, but k=2 required) - party 0 would be leader
-		let private = MithrilRound1Private {
+		let private = Round1Private {
 			ssid,
 			from_party_id: 0,
 			subset_mask: 0b111, // Invalid: size 3, not 2
 			shared_secret: [42u8; 32],
 		};
-		let msg = MithrilDkgMessage::Round1Private(private);
+		let msg = DkgMessage::Round1Private(private);
 		let data = borsh::to_vec(&msg).unwrap();
 		dkg.message(0, data).unwrap();
 
@@ -3009,13 +3009,13 @@ mod tests {
 		);
 
 		// Test 2: subset 0b001 (size 1, but k=2 required) - party 0 would be leader
-		let private = MithrilRound1Private {
+		let private = Round1Private {
 			ssid,
 			from_party_id: 0,
 			subset_mask: 0b001, // Invalid: size 1, not 2
 			shared_secret: [43u8; 32],
 		};
-		let msg = MithrilDkgMessage::Round1Private(private);
+		let msg = DkgMessage::Round1Private(private);
 		let data = borsh::to_vec(&msg).unwrap();
 		dkg.message(0, data).unwrap();
 
@@ -3048,7 +3048,7 @@ mod tests {
 			.iter()
 			.enumerate()
 			.map(|(i, signer)| {
-				MithrilDkgConfig::new(
+				DkgConfig::new(
 					threshold_config,
 					i as ParticipantId,
 					participants.clone(),
@@ -3066,7 +3066,7 @@ mod tests {
 				// Derive unique seed per party
 				let mut party_seed = [0u8; 32];
 				party_seed[0] = (100 + i) as u8;
-				MithrilDkg::new(config, party_seed, &TEST_SESSION_NONCE)
+				Dkg::new(config, party_seed, &TEST_SESSION_NONCE)
 			})
 			.collect();
 
@@ -3080,17 +3080,17 @@ mod tests {
 		for (from, dkg) in dkgs.iter_mut().enumerate() {
 			loop {
 				match dkg.poke().unwrap() {
-					MithrilAction::SendMany(data) =>
+					DkgAction::SendMany(data) =>
 						for (to, queue) in pending.iter_mut().enumerate() {
 							if to != from {
 								queue.push((from as ParticipantId, data.clone()));
 							}
 						},
-					MithrilAction::SendPrivate(to, data) => {
+					DkgAction::SendPrivate(to, data) => {
 						pending[to as usize].push((from as ParticipantId, data));
 					},
-					MithrilAction::Wait => break,
-					MithrilAction::Return(_) => break,
+					DkgAction::Wait => break,
+					DkgAction::Return(_) => break,
 				}
 			}
 		}
@@ -3114,7 +3114,7 @@ mod tests {
 		for dkg_idx in 1..3 {
 			loop {
 				match dkgs[dkg_idx].poke().unwrap() {
-					MithrilAction::SendMany(data) => {
+					DkgAction::SendMany(data) => {
 						// This is a Round 2 broadcast - send to party 0 (who is still in Round 1)
 						// It should be buffered!
 						dkgs[0].message(dkg_idx as ParticipantId, data.clone()).unwrap();
@@ -3122,7 +3122,7 @@ mod tests {
 						let other = if dkg_idx == 1 { 2 } else { 1 };
 						pending[other].push((dkg_idx as ParticipantId, data));
 					},
-					MithrilAction::SendPrivate(to, data) => {
+					DkgAction::SendPrivate(to, data) => {
 						if to == 0 {
 							// Send to party 0 - should be buffered if it's a future round message
 							dkgs[0].message(dkg_idx as ParticipantId, data).unwrap();
@@ -3130,8 +3130,8 @@ mod tests {
 							pending[to as usize].push((dkg_idx as ParticipantId, data));
 						}
 					},
-					MithrilAction::Wait => break,
-					MithrilAction::Return(_) => break,
+					DkgAction::Wait => break,
+					DkgAction::Return(_) => break,
 				}
 			}
 		}
@@ -3153,9 +3153,9 @@ mod tests {
 		// messages
 		loop {
 			match dkgs[0].poke().unwrap() {
-				MithrilAction::SendMany(_) | MithrilAction::SendPrivate(_, _) => {},
-				MithrilAction::Wait => break,
-				MithrilAction::Return(_) => break,
+				DkgAction::SendMany(_) | DkgAction::SendPrivate(_, _) => {},
+				DkgAction::Wait => break,
+				DkgAction::Return(_) => break,
 			}
 		}
 
@@ -3197,11 +3197,11 @@ mod tests {
 		}
 
 		let config =
-			MithrilDkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
+			DkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
 				.unwrap();
 
 		let seed = [100u8; 32];
-		let mut dkg = MithrilDkg::new(config, seed, &TEST_SESSION_NONCE);
+		let mut dkg = Dkg::new(config, seed, &TEST_SESSION_NONCE);
 
 		// Get the computed SSID for use in test messages
 		let ssid = *dkg.ssid();
@@ -3210,8 +3210,8 @@ mod tests {
 		let _ = dkg.poke().unwrap();
 
 		// Create a Round 2 broadcast from party 1
-		let round2_broadcast = MithrilRound2Broadcast { ssid, party_id: 1, randomness: [42u8; 32] };
-		let round2_msg = MithrilDkgMessage::Round2Broadcast(round2_broadcast.clone());
+		let round2_broadcast = Round2Broadcast { ssid, party_id: 1, randomness: [42u8; 32] };
+		let round2_msg = DkgMessage::Round2Broadcast(round2_broadcast.clone());
 		let round2_data = borsh::to_vec(&round2_msg).unwrap();
 
 		// Send same message twice
@@ -3225,8 +3225,8 @@ mod tests {
 
 		// Create a different Round 2 broadcast from party 2
 		let round2_broadcast2 =
-			MithrilRound2Broadcast { ssid, party_id: 2, randomness: [99u8; 32] };
-		let round2_msg2 = MithrilDkgMessage::Round2Broadcast(round2_broadcast2);
+			Round2Broadcast { ssid, party_id: 2, randomness: [99u8; 32] };
+		let round2_msg2 = DkgMessage::Round2Broadcast(round2_broadcast2);
 		let round2_data2 = borsh::to_vec(&round2_msg2).unwrap();
 
 		dkg.message(2, round2_data2).unwrap();
@@ -3254,7 +3254,7 @@ mod tests {
 			.iter()
 			.enumerate()
 			.map(|(i, signer)| {
-				MithrilDkgConfig::new(
+				DkgConfig::new(
 					threshold_config,
 					i as ParticipantId,
 					participants.clone(),
@@ -3272,14 +3272,14 @@ mod tests {
 				// Derive unique seed per party
 				let mut party_seed = [0u8; 32];
 				party_seed[0] = (200 + i) as u8;
-				MithrilDkg::new(config, party_seed, &TEST_SESSION_NONCE)
+				Dkg::new(config, party_seed, &TEST_SESSION_NONCE)
 			})
 			.collect();
 
 		// Start all DKGs and collect Round 1 broadcasts
 		let mut round1_broadcasts: Vec<Vec<u8>> = Vec::new();
 		for dkg in &mut dkgs {
-			if let MithrilAction::SendMany(data) = dkg.poke().unwrap() {
+			if let DkgAction::SendMany(data) = dkg.poke().unwrap() {
 				round1_broadcasts.push(data);
 			}
 		}
@@ -3296,10 +3296,10 @@ mod tests {
 		// Advance party 0 to Round 2
 		loop {
 			match dkgs[0].poke().unwrap() {
-				MithrilAction::SendMany(_) => {
+				DkgAction::SendMany(_) => {
 					break;
 				},
-				MithrilAction::Wait => break,
+				DkgAction::Wait => break,
 				_ => {},
 			}
 		}
@@ -3308,12 +3308,12 @@ mod tests {
 		assert!(dkgs[0].state.phase == DkgPhase::Round2, "Party 0 should be in Round 2");
 
 		// Now try to send a Round 1 message to party 0 (it's already past Round 1)
-		let late_round1 = MithrilRound1Broadcast {
+		let late_round1 = Round1Broadcast {
 			ssid: TEST_SESSION_NONCE,
 			party_id: 1,
 			commitment: [77u8; 32],
 		};
-		let late_msg = MithrilDkgMessage::Round1Broadcast(late_round1);
+		let late_msg = DkgMessage::Round1Broadcast(late_round1);
 		let late_data = borsh::to_vec(&late_msg).unwrap();
 
 		// This should not cause an error - just silently ignored
@@ -3341,7 +3341,7 @@ mod tests {
 			.iter()
 			.enumerate()
 			.map(|(i, signer)| {
-				MithrilDkgConfig::new(
+				DkgConfig::new(
 					threshold_config,
 					i as ParticipantId,
 					participants.clone(),
@@ -3358,7 +3358,7 @@ mod tests {
 			.map(|(i, config)| {
 				let mut party_seed = [0u8; 32];
 				party_seed[0] = (30 + i) as u8;
-				MithrilDkg::new(config, party_seed, &TEST_SESSION_NONCE)
+				Dkg::new(config, party_seed, &TEST_SESSION_NONCE)
 			})
 			.collect();
 
@@ -3368,7 +3368,7 @@ mod tests {
 		// Start all DKGs and collect Round 1 broadcasts
 		let mut round1_broadcasts: Vec<Vec<u8>> = Vec::new();
 		for dkg in &mut dkgs {
-			if let MithrilAction::SendMany(data) = dkg.poke().unwrap() {
+			if let DkgAction::SendMany(data) = dkg.poke().unwrap() {
 				round1_broadcasts.push(data);
 			}
 		}
@@ -3385,8 +3385,8 @@ mod tests {
 		// Advance party 0 to Round 2
 		loop {
 			match dkgs[0].poke().unwrap() {
-				MithrilAction::SendMany(_) => break,
-				MithrilAction::Wait => break,
+				DkgAction::SendMany(_) => break,
+				DkgAction::Wait => break,
 				_ => {},
 			}
 		}
@@ -3394,13 +3394,13 @@ mod tests {
 		assert!(dkgs[0].state.phase == DkgPhase::Round2, "Party 0 should be in Round 2");
 
 		// Create a Round 4 message and send it to party 0 while in Round 2
-		let round4_broadcast = MithrilRound4Broadcast {
+		let round4_broadcast = Round4Broadcast {
 			ssid,
 			party_id: 1,
 			partial_public_keys: BTreeMap::new(),
 			transcript_signature: vec![1, 2, 3, 4],
 		};
-		let round4_msg = MithrilDkgMessage::Round4Broadcast(round4_broadcast);
+		let round4_msg = DkgMessage::Round4Broadcast(round4_broadcast);
 		let round4_data = borsh::to_vec(&round4_msg).unwrap();
 
 		dkgs[0].message(1, round4_data).unwrap();
@@ -3415,8 +3415,8 @@ mod tests {
 
 		// Also buffer a Round 3 message
 		let round3_broadcast =
-			MithrilRound3Broadcast { ssid, party_id: 2, partial_pk_commitments: BTreeMap::new() };
-		let round3_msg = MithrilDkgMessage::Round3Broadcast(round3_broadcast);
+			Round3Broadcast { ssid, party_id: 2, partial_pk_commitments: BTreeMap::new() };
+		let round3_msg = DkgMessage::Round3Broadcast(round3_broadcast);
 		let round3_data = borsh::to_vec(&round3_msg).unwrap();
 
 		dkgs[0].message(2, round3_data).unwrap();
@@ -3440,11 +3440,11 @@ mod tests {
 		}
 
 		let config =
-			MithrilDkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
+			DkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
 				.unwrap();
 
 		let seed = [40u8; 32];
-		let mut dkg = MithrilDkg::new(config, seed, &TEST_SESSION_NONCE);
+		let mut dkg = Dkg::new(config, seed, &TEST_SESSION_NONCE);
 
 		// Get the computed SSID for use in test messages
 		let ssid = *dkg.ssid();
@@ -3455,8 +3455,8 @@ mod tests {
 		// Send many Round 2 messages from the same party
 		for i in 0..100 {
 			let round2_broadcast =
-				MithrilRound2Broadcast { ssid, party_id: 1, randomness: [i as u8; 32] };
-			let round2_msg = MithrilDkgMessage::Round2Broadcast(round2_broadcast);
+				Round2Broadcast { ssid, party_id: 1, randomness: [i as u8; 32] };
+			let round2_msg = DkgMessage::Round2Broadcast(round2_broadcast);
 			let round2_data = borsh::to_vec(&round2_msg).unwrap();
 			dkg.message(1, round2_data).unwrap();
 		}
@@ -3469,8 +3469,8 @@ mod tests {
 		// Send messages from different (fake) parties to verify buffer accepts multiple senders
 		for party_id in 0..10u32 {
 			let round3_broadcast =
-				MithrilRound3Broadcast { ssid, party_id, partial_pk_commitments: BTreeMap::new() };
-			let round3_msg = MithrilDkgMessage::Round3Broadcast(round3_broadcast);
+				Round3Broadcast { ssid, party_id, partial_pk_commitments: BTreeMap::new() };
+			let round3_msg = DkgMessage::Round3Broadcast(round3_broadcast);
 			let round3_data = borsh::to_vec(&round3_msg).unwrap();
 			// Use party_id as sender to avoid sender mismatch
 			let _ = dkg.message(party_id, round3_data);
@@ -3500,7 +3500,7 @@ mod tests {
 			.iter()
 			.enumerate()
 			.map(|(i, signer)| {
-				MithrilDkgConfig::new(
+				DkgConfig::new(
 					threshold_config,
 					i as ParticipantId,
 					participants.clone(),
@@ -3517,7 +3517,7 @@ mod tests {
 			.map(|(i, config)| {
 				let mut party_seed = [0u8; 32];
 				party_seed[0] = (50 + i) as u8;
-				MithrilDkg::new(config, party_seed, &TEST_SESSION_NONCE)
+				Dkg::new(config, party_seed, &TEST_SESSION_NONCE)
 			})
 			.collect();
 
@@ -3527,7 +3527,7 @@ mod tests {
 		// Start all DKGs
 		let mut round1_broadcasts: Vec<Vec<u8>> = Vec::new();
 		for dkg in &mut dkgs {
-			if let MithrilAction::SendMany(data) = dkg.poke().unwrap() {
+			if let DkgAction::SendMany(data) = dkg.poke().unwrap() {
 				round1_broadcasts.push(data);
 			}
 		}
@@ -3535,12 +3535,12 @@ mod tests {
 		// Buffer a Round 2 message with invalid data (empty partial_pk_commitments is technically
 		// valid but will fail verification later - that's fine, we just want to test graceful
 		// handling)
-		let round2_broadcast = MithrilRound2Broadcast {
+		let round2_broadcast = Round2Broadcast {
 			ssid,
 			party_id: 1,
 			randomness: [0u8; 32], // All zeros - may or may not be valid depending on protocol
 		};
-		let round2_msg = MithrilDkgMessage::Round2Broadcast(round2_broadcast);
+		let round2_msg = DkgMessage::Round2Broadcast(round2_broadcast);
 		let round2_data = borsh::to_vec(&round2_msg).unwrap();
 
 		// Buffer it before delivering Round 1 messages
@@ -3581,11 +3581,11 @@ mod tests {
 			pk_map.insert(i as ParticipantId, pk);
 		}
 
-		let mut dkgs: Vec<MithrilDkg<TestSigner>> = signers
+		let mut dkgs: Vec<Dkg<TestSigner>> = signers
 			.into_iter()
 			.enumerate()
 			.map(|(i, signer)| {
-				let config = MithrilDkgConfig::new(
+				let config = DkgConfig::new(
 					threshold_config,
 					i as ParticipantId,
 					participants.clone(),
@@ -3593,7 +3593,7 @@ mod tests {
 					pk_map.clone(),
 				)
 				.unwrap();
-				MithrilDkg::new(config, seed, &TEST_SESSION_NONCE)
+				Dkg::new(config, seed, &TEST_SESSION_NONCE)
 			})
 			.collect();
 
@@ -3611,8 +3611,8 @@ mod tests {
 				for (from, data) in messages {
 					// For party 0, hold back party 1's Round 4 broadcast
 					if party_id == 0 && from == 1 {
-						if let Ok(msg) = borsh::from_slice::<MithrilDkgMessage>(&data) {
-							if matches!(msg, MithrilDkgMessage::Round4Broadcast(_)) {
+						if let Ok(msg) = borsh::from_slice::<DkgMessage>(&data) {
+							if matches!(msg, DkgMessage::Round4Broadcast(_)) {
 								// Don't deliver - we'll deliver a sabotaged version
 								party0_round4_from_party1_received = true;
 								continue;
@@ -3626,18 +3626,18 @@ mod tests {
 			// Poke all parties
 			for (party_id, dkg) in dkgs.iter_mut().enumerate() {
 				match dkg.poke().unwrap() {
-					MithrilAction::SendMany(data) => {
+					DkgAction::SendMany(data) => {
 						for (other, pending) in pending_messages.iter_mut().enumerate() {
 							if other != party_id {
 								pending.push((party_id as ParticipantId, data.clone()));
 							}
 						}
 					},
-					MithrilAction::SendPrivate(to, data) => {
+					DkgAction::SendPrivate(to, data) => {
 						pending_messages[to as usize].push((party_id as ParticipantId, data));
 					},
-					MithrilAction::Wait => {},
-					MithrilAction::Return(_) => {},
+					DkgAction::Wait => {},
+					DkgAction::Return(_) => {},
 				}
 			}
 
@@ -3687,7 +3687,7 @@ mod tests {
 		let signer = TestSigner { id: 1 }; // Party 1's signer
 		let valid_signature = signer.sign(&signing_message);
 
-		let sabotaged_broadcast = MithrilRound4Broadcast {
+		let sabotaged_broadcast = Round4Broadcast {
 			ssid: TEST_SESSION_NONCE,
 			party_id: 1,
 			partial_public_keys: sabotaged_partial_pks,
@@ -3709,7 +3709,7 @@ mod tests {
 					compute_signing_message(&transcript_hash, &partial_output_hash);
 				let signer = TestSigner { id: 2 };
 				let sig = signer.sign(&signing_message);
-				MithrilRound4Broadcast {
+				Round4Broadcast {
 					ssid: TEST_SESSION_NONCE,
 					party_id: 2,
 					partial_public_keys: empty_pks,
@@ -3737,7 +3737,7 @@ mod tests {
 		// Per Mithril DKGAggregate line 6: only accept PKs where j = min(S).
 		//
 		// We directly test collect_and_verify_all_partial_pks by constructing a
-		// MithrilDkgState in Round4 phase where a non-leader has submitted a PK
+		// DkgState in Round4 phase where a non-leader has submitted a PK
 		// for a subset they don't lead.
 
 		// In 2-of-3, subsets are: 3 (parties 0,1), 5 (parties 0,2), 6 (parties 1,2)
@@ -3755,11 +3755,11 @@ mod tests {
 			pk_map.insert(i as ParticipantId, pk);
 		}
 
-		let mut dkgs: Vec<MithrilDkg<TestSigner>> = signers
+		let mut dkgs: Vec<Dkg<TestSigner>> = signers
 			.into_iter()
 			.enumerate()
 			.map(|(i, signer)| {
-				let config = MithrilDkgConfig::new(
+				let config = DkgConfig::new(
 					threshold_config,
 					i as ParticipantId,
 					participants.clone(),
@@ -3767,13 +3767,13 @@ mod tests {
 					pk_map.clone(),
 				)
 				.unwrap();
-				MithrilDkg::new(config, seed, &TEST_SESSION_NONCE)
+				Dkg::new(config, seed, &TEST_SESSION_NONCE)
 			})
 			.collect();
 
 		// Run DKG to completion normally first to get valid outputs
 		let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> = vec![Vec::new(); 3];
-		let mut outputs: Vec<Option<MithrilDkgOutput>> = vec![None; 3];
+		let mut outputs: Vec<Option<DkgOutput>> = vec![None; 3];
 
 		for _ in 0..200 {
 			for party_id in 0..3 {
@@ -3788,18 +3788,18 @@ mod tests {
 					continue;
 				}
 				match dkgs[party_id].poke().unwrap() {
-					MithrilAction::SendMany(data) => {
+					DkgAction::SendMany(data) => {
 						for (other, pending) in pending_messages.iter_mut().enumerate() {
 							if other != party_id {
 								pending.push((party_id as ParticipantId, data.clone()));
 							}
 						}
 					},
-					MithrilAction::SendPrivate(to, data) => {
+					DkgAction::SendPrivate(to, data) => {
 						pending_messages[to as usize].push((party_id as ParticipantId, data));
 					},
-					MithrilAction::Wait => {},
-					MithrilAction::Return(output) => {
+					DkgAction::Wait => {},
+					DkgAction::Return(output) => {
 						outputs[party_id] = Some(*output);
 					},
 				}
@@ -3817,7 +3817,7 @@ mod tests {
 		assert_eq!(outputs[1].public_key.as_bytes(), outputs[2].public_key.as_bytes());
 
 		// Now verify the is_leader check works correctly
-		let config = MithrilDkgConfig::new(
+		let config = DkgConfig::new(
 			threshold_config,
 			0,
 			participants.clone(),
@@ -3865,11 +3865,11 @@ mod tests {
 			pk_map.insert(i as ParticipantId, pk);
 		}
 
-		let mut dkgs: Vec<MithrilDkg<TestSigner>> = signers
+		let mut dkgs: Vec<Dkg<TestSigner>> = signers
 			.into_iter()
 			.enumerate()
 			.map(|(i, signer)| {
-				let config = MithrilDkgConfig::new(
+				let config = DkgConfig::new(
 					threshold_config,
 					i as ParticipantId,
 					participants.clone(),
@@ -3877,7 +3877,7 @@ mod tests {
 					pk_map.clone(),
 				)
 				.unwrap();
-				MithrilDkg::new(config, seed, &TEST_SESSION_NONCE)
+				Dkg::new(config, seed, &TEST_SESSION_NONCE)
 			})
 			.collect();
 
@@ -3895,18 +3895,18 @@ mod tests {
 
 			for (party_id, dkg) in dkgs.iter_mut().enumerate() {
 				match dkg.poke().unwrap() {
-					MithrilAction::SendMany(data) => {
+					DkgAction::SendMany(data) => {
 						for (other, pending) in pending_messages.iter_mut().enumerate() {
 							if other != party_id {
 								pending.push((party_id as ParticipantId, data.clone()));
 							}
 						}
 					},
-					MithrilAction::SendPrivate(to, data) => {
+					DkgAction::SendPrivate(to, data) => {
 						pending_messages[to as usize].push((party_id as ParticipantId, data));
 					},
-					MithrilAction::Wait => {},
-					MithrilAction::Return(_) => {},
+					DkgAction::Wait => {},
+					DkgAction::Return(_) => {},
 				}
 			}
 
@@ -3947,7 +3947,7 @@ mod tests {
 
 		// Now complete the DKG normally and verify it succeeds
 		// (this confirms the filtering works correctly with normal data)
-		let mut outputs: Vec<Option<MithrilDkgOutput>> = vec![None; 3];
+		let mut outputs: Vec<Option<DkgOutput>> = vec![None; 3];
 
 		for _ in 0..50 {
 			for party_id in 0..3 {
@@ -3962,17 +3962,17 @@ mod tests {
 					continue;
 				}
 				match dkgs[party_id].poke().unwrap() {
-					MithrilAction::Return(output) => {
+					DkgAction::Return(output) => {
 						outputs[party_id] = Some(*output);
 					},
-					MithrilAction::SendMany(data) => {
+					DkgAction::SendMany(data) => {
 						for (other, pending) in pending_messages.iter_mut().enumerate() {
 							if other != party_id {
 								pending.push((party_id as ParticipantId, data.clone()));
 							}
 						}
 					},
-					MithrilAction::SendPrivate(to, data) => {
+					DkgAction::SendPrivate(to, data) => {
 						pending_messages[to as usize].push((party_id as ParticipantId, data));
 					},
 					_ => {},
@@ -4016,7 +4016,7 @@ mod tests {
 			pk_map.insert(i as ParticipantId, pk);
 		}
 
-		let config = MithrilDkgConfig::new(
+		let config = DkgConfig::new(
 			threshold_config,
 			0,
 			participants.clone(),
@@ -4025,19 +4025,19 @@ mod tests {
 		)
 		.unwrap();
 
-		let mut dkg: MithrilDkg<TestSigner> = MithrilDkg::new(config, seed, &TEST_SESSION_NONCE);
+		let mut dkg: Dkg<TestSigner> = Dkg::new(config, seed, &TEST_SESSION_NONCE);
 
 		// Start the DKG to get to Round 1
 		let action = dkg.poke().unwrap();
-		assert!(matches!(action, MithrilAction::SendMany(_)));
+		assert!(matches!(action, DkgAction::SendMany(_)));
 
 		// Now we're in Round 1. Try to inject a message from a non-participant (party 99)
-		let fake_broadcast = MithrilRound1Broadcast {
+		let fake_broadcast = Round1Broadcast {
 			ssid: TEST_SESSION_NONCE,
 			party_id: 99,
 			commitment: [0u8; 32],
 		};
-		let fake_msg = MithrilDkgMessage::Round1Broadcast(fake_broadcast);
+		let fake_msg = DkgMessage::Round1Broadcast(fake_broadcast);
 		let fake_data = borsh::to_vec(&fake_msg).unwrap();
 
 		// This should be silently ignored (not error, just ignored)
@@ -4055,12 +4055,12 @@ mod tests {
 
 		// Also test that a message claiming to be from participant 1 but sent by non-participant 99
 		// is rejected (this tests the envelope 'from' vs message 'party_id' check)
-		let spoofed_broadcast = MithrilRound1Broadcast {
+		let spoofed_broadcast = Round1Broadcast {
 			ssid: TEST_SESSION_NONCE,
 			party_id: 1, // Claims to be from party 1
 			commitment: [0u8; 32],
 		};
-		let spoofed_msg = MithrilDkgMessage::Round1Broadcast(spoofed_broadcast);
+		let spoofed_msg = DkgMessage::Round1Broadcast(spoofed_broadcast);
 		let spoofed_data = borsh::to_vec(&spoofed_msg).unwrap();
 
 		// Send with envelope 'from' = 99 (non-participant)
@@ -4095,7 +4095,7 @@ mod tests {
 			pk_map.insert(i as ParticipantId, pk);
 		}
 
-		let config = MithrilDkgConfig::new(
+		let config = DkgConfig::new(
 			threshold_config,
 			0, // We are party 0
 			participants.clone(),
@@ -4104,19 +4104,19 @@ mod tests {
 		)
 		.unwrap();
 
-		let mut dkg: MithrilDkg<TestSigner> = MithrilDkg::new(config, seed, &TEST_SESSION_NONCE);
+		let mut dkg: Dkg<TestSigner> = Dkg::new(config, seed, &TEST_SESSION_NONCE);
 
 		// Start the DKG to get to Round 1
 		let action = dkg.poke().unwrap();
-		assert!(matches!(action, MithrilAction::SendMany(_)));
+		assert!(matches!(action, DkgAction::SendMany(_)));
 
 		// Try to send a message "from" ourselves (party 0)
-		let self_broadcast = MithrilRound1Broadcast {
+		let self_broadcast = Round1Broadcast {
 			ssid: TEST_SESSION_NONCE,
 			party_id: 0,
 			commitment: [42u8; 32],
 		};
-		let self_msg = MithrilDkgMessage::Round1Broadcast(self_broadcast);
+		let self_msg = DkgMessage::Round1Broadcast(self_broadcast);
 		let self_data = borsh::to_vec(&self_msg).unwrap();
 
 		// This should be silently ignored
@@ -4144,7 +4144,7 @@ mod tests {
 			pk_map.insert(i as ParticipantId, pk);
 		}
 
-		let config = MithrilDkgConfig::new(
+		let config = DkgConfig::new(
 			threshold_config,
 			0,
 			participants.clone(),
@@ -4153,11 +4153,11 @@ mod tests {
 		)
 		.unwrap();
 
-		let mut dkg: MithrilDkg<TestSigner> = MithrilDkg::new(config, seed, &TEST_SESSION_NONCE);
+		let mut dkg: Dkg<TestSigner> = Dkg::new(config, seed, &TEST_SESSION_NONCE);
 
 		// Start the DKG to get to Round 1
 		let action = dkg.poke().unwrap();
-		assert!(matches!(action, MithrilAction::SendMany(_)));
+		assert!(matches!(action, DkgAction::SendMany(_)));
 
 		// Create an oversized message (larger than MAX_DKG_MESSAGE_SIZE)
 		let oversized_data = vec![0u8; MAX_DKG_MESSAGE_SIZE + 1];
@@ -4193,7 +4193,7 @@ mod tests {
 
 		let mut malicious: Vec<u8> = Vec::new();
 
-		// MithrilDkgMessage enum tag for Round4Broadcast = 4
+		// DkgMessage enum tag for Round4Broadcast = 4
 		malicious.push(4);
 
 		// party_id: u32
@@ -4245,7 +4245,7 @@ mod tests {
 		}
 
 		// Create DKG for party 0 - starts in Initialized state
-		let config = MithrilDkgConfig::new(
+		let config = DkgConfig::new(
 			threshold_config,
 			0,
 			participants.clone(),
@@ -4253,10 +4253,10 @@ mod tests {
 			pk_map.clone(),
 		)
 		.unwrap();
-		let mut dkg0: MithrilDkg<TestSigner> = MithrilDkg::new(config, seed, &TEST_SESSION_NONCE);
+		let mut dkg0: Dkg<TestSigner> = Dkg::new(config, seed, &TEST_SESSION_NONCE);
 
 		// Create DKG for party 1
-		let config1 = MithrilDkgConfig::new(
+		let config1 = DkgConfig::new(
 			threshold_config,
 			1,
 			participants.clone(),
@@ -4264,12 +4264,12 @@ mod tests {
 			pk_map.clone(),
 		)
 		.unwrap();
-		let mut dkg1: MithrilDkg<TestSigner> = MithrilDkg::new(config1, seed, &TEST_SESSION_NONCE);
+		let mut dkg1: Dkg<TestSigner> = Dkg::new(config1, seed, &TEST_SESSION_NONCE);
 
 		// Party 1 starts first and sends messages
 		let action1 = dkg1.poke().unwrap();
 		let round1_data = match action1 {
-			MithrilAction::SendMany(data) => data,
+			DkgAction::SendMany(data) => data,
 			_ => panic!("Expected SendMany"),
 		};
 
@@ -4324,7 +4324,7 @@ mod tests {
 		}
 
 		// Create DKG for party 1 - starts in Initialized state
-		let config = MithrilDkgConfig::new(
+		let config = DkgConfig::new(
 			threshold_config,
 			1,
 			participants.clone(),
@@ -4332,8 +4332,8 @@ mod tests {
 			pk_map.clone(),
 		)
 		.unwrap();
-		let mut dkg1: MithrilDkg<TestSigner> =
-			MithrilDkg::new(config.clone(), seed, &TEST_SESSION_NONCE);
+		let mut dkg1: Dkg<TestSigner> =
+			Dkg::new(config.clone(), seed, &TEST_SESSION_NONCE);
 
 		// Get the computed SSID for use in test messages
 		let ssid = *dkg1.ssid();
@@ -4346,13 +4346,13 @@ mod tests {
 
 		// Party 0 should send private message to party 1 for subset 0b011
 		let subset_mask: SubsetMask = 0b011; // {0, 1}
-		let private = MithrilRound1Private {
+		let private = Round1Private {
 			ssid,
 			from_party_id: 0,
 			subset_mask,
 			shared_secret: [0xAB; SHARED_SECRET_SIZE],
 		};
-		let msg = MithrilDkgMessage::Round1Private(private);
+		let msg = DkgMessage::Round1Private(private);
 		let data = borsh::to_vec(&msg).unwrap();
 
 		// Party 1 receives the private message BEFORE calling poke()
@@ -4415,7 +4415,7 @@ mod tests {
 		}
 
 		// Create DKG for party 1 - starts in Initialized state
-		let config = MithrilDkgConfig::new(
+		let config = DkgConfig::new(
 			threshold_config,
 			1,
 			participants.clone(),
@@ -4423,8 +4423,8 @@ mod tests {
 			pk_map.clone(),
 		)
 		.unwrap();
-		let mut dkg1: MithrilDkg<TestSigner> =
-			MithrilDkg::new(config.clone(), seed, &TEST_SESSION_NONCE);
+		let mut dkg1: Dkg<TestSigner> =
+			Dkg::new(config.clone(), seed, &TEST_SESSION_NONCE);
 
 		// Get the computed SSID for use in test messages
 		let ssid = *dkg1.ssid();
@@ -4440,13 +4440,13 @@ mod tests {
 		// - 0b111 (7): invalid - 3 bits set (too many)
 		// - etc.
 		for invalid_subset in [0u16, 1, 2, 4, 7, 8, 15, 16, 100, 0xFFFF] {
-			let private = MithrilRound1Private {
+			let private = Round1Private {
 				ssid,
 				from_party_id: 0,
 				subset_mask: invalid_subset,
 				shared_secret: [0xDE; SHARED_SECRET_SIZE],
 			};
-			let msg = MithrilDkgMessage::Round1Private(private);
+			let msg = DkgMessage::Round1Private(private);
 			let data = borsh::to_vec(&msg).unwrap();
 
 			// Message should be accepted (no protocol error) but not buffered
@@ -4464,13 +4464,13 @@ mod tests {
 		// For 2-of-3: valid subsets are 0b011, 0b101, 0b110 (exactly 2 bits set)
 		// Party 0 is leader for subset 0b011 (contains parties 0 and 1, leader = min = 0)
 		let valid_subset = 0b011u16;
-		let private = MithrilRound1Private {
+		let private = Round1Private {
 			ssid,
 			from_party_id: 0,
 			subset_mask: valid_subset,
 			shared_secret: [0xAB; SHARED_SECRET_SIZE],
 		};
-		let msg = MithrilDkgMessage::Round1Private(private);
+		let msg = DkgMessage::Round1Private(private);
 		let data = borsh::to_vec(&msg).unwrap();
 
 		let result = dkg1.message(0, data);

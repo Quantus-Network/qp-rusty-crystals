@@ -1,6 +1,6 @@
 //! Types for Distributed Key Generation (DKG) protocol.
 //!
-//! This module implements the 4-round DKG protocol from the Mithril paper (Appendix D).
+//! This module implements a 4-round DKG protocol for threshold ML-DSA.
 //!
 //! ## Protocol Overview
 //!
@@ -98,22 +98,22 @@ pub const RANDOMNESS_SIZE: usize = 32;
 
 // Domain separators for hash functions
 /// Domain separator for commitment hash.
-pub const DOMAIN_COMMIT: &[u8] = b"MITHRIL_DKG_COMMIT_V1";
+pub const DOMAIN_COMMIT: &[u8] = b"THRESHOLD_DKG_COMMIT_V1";
 
 /// Domain separator for seed derivation.
-pub const DOMAIN_SEED: &[u8] = b"MITHRIL_DKG_SEED_V1";
+pub const DOMAIN_SEED: &[u8] = b"THRESHOLD_DKG_SEED_V1";
 
 /// Domain separator for keygen.
-pub const DOMAIN_KEYGEN: &[u8] = b"MITHRIL_DKG_KEYGEN_V1";
+pub const DOMAIN_KEYGEN: &[u8] = b"THRESHOLD_DKG_KEYGEN_V1";
 
 /// Domain separator for partial PK commitment.
-pub const DOMAIN_PK_COMMIT: &[u8] = b"MITHRIL_DKG_PK_COMMIT_V1";
+pub const DOMAIN_PK_COMMIT: &[u8] = b"THRESHOLD_DKG_PK_COMMIT_V1";
 
 /// Domain separator for transcript hash.
-pub const DOMAIN_TRANSCRIPT: &[u8] = b"MITHRIL_DKG_TRANSCRIPT_V1";
+pub const DOMAIN_TRANSCRIPT: &[u8] = b"THRESHOLD_DKG_TRANSCRIPT_V1";
 
 /// Domain separator for DKG session identifier.
-pub const DOMAIN_DKG_SSID: &[u8] = b"MITHRIL_DKG_SSID_V1";
+pub const DOMAIN_DKG_SSID: &[u8] = b"THRESHOLD_DKG_SSID_V1";
 
 /// Size of the DKG session identifier in bytes.
 pub const DKG_SSID_SIZE: usize = 32;
@@ -129,7 +129,7 @@ use qp_rusty_crystals_dilithium::{
 
 /// Configuration for the DKG protocol.
 #[derive(Clone)]
-pub struct MithrilDkgConfig<S: TranscriptSigner> {
+pub struct DkgConfig<S: TranscriptSigner> {
 	/// The threshold configuration (t, n).
 	pub threshold_config: ThresholdConfig,
 	/// This party's identifier.
@@ -142,7 +142,7 @@ pub struct MithrilDkgConfig<S: TranscriptSigner> {
 	pub participant_public_keys: BTreeMap<ParticipantId, S::PublicKey>,
 }
 
-impl<S: TranscriptSigner> MithrilDkgConfig<S> {
+impl<S: TranscriptSigner> DkgConfig<S> {
 	/// Create a new DKG configuration.
 	pub fn new(
 		threshold_config: ThresholdConfig,
@@ -288,12 +288,12 @@ impl<S: TranscriptSigner> MithrilDkgConfig<S> {
 	}
 }
 
-impl<S: TranscriptSigner + fmt::Debug> fmt::Debug for MithrilDkgConfig<S>
+impl<S: TranscriptSigner + fmt::Debug> fmt::Debug for DkgConfig<S>
 where
 	S::PublicKey: fmt::Debug,
 {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("MithrilDkgConfig")
+		f.debug_struct("DkgConfig")
 			.field("threshold_config", &self.threshold_config)
 			.field("my_party_id", &self.my_party_id)
 			.field("all_participants", &self.all_participants)
@@ -372,7 +372,7 @@ impl PartialPublicKey {
 
 /// Round 1 broadcast: Commitment to randomness.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub struct MithrilRound1Broadcast {
+pub struct Round1Broadcast {
 	/// Session identifier binding this message to a specific DKG session.
 	pub ssid: [u8; DKG_SSID_SIZE],
 	/// The party sending this message.
@@ -383,7 +383,7 @@ pub struct MithrilRound1Broadcast {
 
 /// Round 1 private: Shared secret K_S (leader to subset members).
 #[derive(Clone, BorshSerialize, BorshDeserialize)]
-pub struct MithrilRound1Private {
+pub struct Round1Private {
 	/// Session identifier binding this message to a specific DKG session.
 	pub ssid: [u8; DKG_SSID_SIZE],
 	/// The party sending this message.
@@ -396,7 +396,7 @@ pub struct MithrilRound1Private {
 
 /// Round 2 broadcast: Reveal randomness.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub struct MithrilRound2Broadcast {
+pub struct Round2Broadcast {
 	/// Session identifier binding this message to a specific DKG session.
 	pub ssid: [u8; DKG_SSID_SIZE],
 	/// The party sending this message.
@@ -407,7 +407,7 @@ pub struct MithrilRound2Broadcast {
 
 /// Round 3 broadcast: Commitment to partial PKs (leaders only).
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub struct MithrilRound3Broadcast {
+pub struct Round3Broadcast {
 	/// Session identifier binding this message to a specific DKG session.
 	pub ssid: [u8; DKG_SSID_SIZE],
 	/// The party sending this message.
@@ -418,7 +418,7 @@ pub struct MithrilRound3Broadcast {
 
 /// Round 4 broadcast: Reveal partial PKs + transcript signature.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub struct MithrilRound4Broadcast {
+pub struct Round4Broadcast {
 	/// Session identifier binding this message to a specific DKG session.
 	pub ssid: [u8; DKG_SSID_SIZE],
 	/// The party sending this message.
@@ -431,39 +431,39 @@ pub struct MithrilRound4Broadcast {
 
 /// Message wrapper enum.
 #[derive(Clone, BorshSerialize, BorshDeserialize)]
-pub enum MithrilDkgMessage {
+pub enum DkgMessage {
 	/// Round 1 broadcast.
-	Round1Broadcast(MithrilRound1Broadcast),
+	Round1Broadcast(Round1Broadcast),
 	/// Round 1 private.
-	Round1Private(MithrilRound1Private),
+	Round1Private(Round1Private),
 	/// Round 2 broadcast.
-	Round2Broadcast(MithrilRound2Broadcast),
+	Round2Broadcast(Round2Broadcast),
 	/// Round 3 broadcast.
-	Round3Broadcast(MithrilRound3Broadcast),
+	Round3Broadcast(Round3Broadcast),
 	/// Round 4 broadcast.
-	Round4Broadcast(MithrilRound4Broadcast),
+	Round4Broadcast(Round4Broadcast),
 }
 
-impl MithrilDkgMessage {
+impl DkgMessage {
 	/// Get the SSID from any message type.
 	pub fn ssid(&self) -> &[u8; DKG_SSID_SIZE] {
 		match self {
-			MithrilDkgMessage::Round1Broadcast(msg) => &msg.ssid,
-			MithrilDkgMessage::Round1Private(msg) => &msg.ssid,
-			MithrilDkgMessage::Round2Broadcast(msg) => &msg.ssid,
-			MithrilDkgMessage::Round3Broadcast(msg) => &msg.ssid,
-			MithrilDkgMessage::Round4Broadcast(msg) => &msg.ssid,
+			DkgMessage::Round1Broadcast(msg) => &msg.ssid,
+			DkgMessage::Round1Private(msg) => &msg.ssid,
+			DkgMessage::Round2Broadcast(msg) => &msg.ssid,
+			DkgMessage::Round3Broadcast(msg) => &msg.ssid,
+			DkgMessage::Round4Broadcast(msg) => &msg.ssid,
 		}
 	}
 
 	/// Get the party ID from any message type.
 	pub fn party_id(&self) -> ParticipantId {
 		match self {
-			MithrilDkgMessage::Round1Broadcast(msg) => msg.party_id,
-			MithrilDkgMessage::Round1Private(msg) => msg.from_party_id,
-			MithrilDkgMessage::Round2Broadcast(msg) => msg.party_id,
-			MithrilDkgMessage::Round3Broadcast(msg) => msg.party_id,
-			MithrilDkgMessage::Round4Broadcast(msg) => msg.party_id,
+			DkgMessage::Round1Broadcast(msg) => msg.party_id,
+			DkgMessage::Round1Private(msg) => msg.from_party_id,
+			DkgMessage::Round2Broadcast(msg) => msg.party_id,
+			DkgMessage::Round3Broadcast(msg) => msg.party_id,
+			DkgMessage::Round4Broadcast(msg) => msg.party_id,
 		}
 	}
 }
@@ -484,7 +484,7 @@ impl MithrilDkgMessage {
 ///
 /// ```text
 /// ssid = SHAKE256(
-///     "MITHRIL_DKG_SSID_V1" ||
+///     "THRESHOLD_DKG_SSID_V1" ||
 ///     threshold (u32 LE) ||
 ///     total_parties (u32 LE) ||
 ///     num_participants (u32 LE) ||
@@ -615,9 +615,9 @@ pub fn h_keygen(
 /// one DKG session could be replayed into another.
 pub fn compute_transcript_hash(
 	ssid: &[u8; DKG_SSID_SIZE],
-	round1_broadcasts: &BTreeMap<ParticipantId, MithrilRound1Broadcast>,
-	round2_broadcasts: &BTreeMap<ParticipantId, MithrilRound2Broadcast>,
-	round3_broadcasts: &BTreeMap<ParticipantId, MithrilRound3Broadcast>,
+	round1_broadcasts: &BTreeMap<ParticipantId, Round1Broadcast>,
+	round2_broadcasts: &BTreeMap<ParticipantId, Round2Broadcast>,
+	round3_broadcasts: &BTreeMap<ParticipantId, Round3Broadcast>,
 ) -> [u8; 32] {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, DOMAIN_TRANSCRIPT);
@@ -758,7 +758,7 @@ mod tests {
 		public_keys.insert(1, 1u32);
 		public_keys.insert(2, 2u32);
 
-		let config: MithrilDkgConfig<TestSigner> = MithrilDkgConfig::new(
+		let config: DkgConfig<TestSigner> = DkgConfig::new(
 			threshold_config,
 			0,
 			vec![0, 1, 2],
@@ -787,7 +787,7 @@ mod tests {
 		// The public_keys check passes since all 3 IDs (0,1,2) have keys but vec is [0,1,1].
 		// Wait - the for loop checks each p in all_participants has a key. [0,1,1] all have keys.
 		// So we should hit the duplicate check!
-		let result: Result<MithrilDkgConfig<TestSigner>, _> = MithrilDkgConfig::new(
+		let result: Result<DkgConfig<TestSigner>, _> = DkgConfig::new(
 			threshold_config,
 			0,
 			vec![0, 1, 1], // duplicate!
@@ -808,7 +808,7 @@ mod tests {
 		public_keys.insert(2, 2u32);
 
 		// Duplicate at non-adjacent positions before sorting
-		let result: Result<MithrilDkgConfig<TestSigner>, _> = MithrilDkgConfig::new(
+		let result: Result<DkgConfig<TestSigner>, _> = DkgConfig::new(
 			threshold_config,
 			0,
 			vec![0, 2, 0], // duplicate 0, not adjacent before sort
@@ -828,7 +828,7 @@ mod tests {
 		public_keys.insert(1, 1u32);
 		public_keys.insert(2, 2u32);
 
-		let config: MithrilDkgConfig<TestSigner> = MithrilDkgConfig::new(
+		let config: DkgConfig<TestSigner> = DkgConfig::new(
 			threshold_config,
 			0,
 			vec![0, 1, 2],

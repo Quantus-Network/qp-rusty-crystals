@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use qp_rusty_crystals_threshold::{
 	generate_with_dealer,
-	keygen::dkg::{run_local_mithril_dkg, TranscriptSigner},
+	keygen::dkg::{run_local_dkg, TranscriptSigner},
 	signing_protocol::{run_local_signing, DilithiumSignProtocol, SignProtocolError},
 	verify_signature, ParticipantId, Signature, ThresholdConfig, ThresholdSigner,
 };
@@ -666,7 +666,7 @@ fn test_threshold_matrix_dkg() {
 		let session_nonce = [0x42u8; 32];
 
 		// Run DKG to generate keys
-		let dkg_outputs = match run_local_mithril_dkg(
+		let dkg_outputs = match run_local_dkg(
 			*threshold,
 			*total_parties,
 			dkg_signers,
@@ -1038,8 +1038,8 @@ fn test_subset_signing_3_of_5() {
 
 /// Test that signing with MORE than threshold parties is correctly rejected.
 ///
-/// The Mithril scheme (Section 2.2, Algorithm 6 RSSRecover) assumes exactly T active
-/// parties. The `compute_sharing_patterns(T, parties)` function returns exactly T entries,
+/// The RSS scheme (RSSRecover algorithm) assumes exactly T active parties.
+/// The `compute_sharing_patterns(T, parties)` function returns exactly T entries,
 /// so the scheme fundamentally does not support more than T active participants.
 #[test]
 fn test_signing_rejects_more_than_threshold_parties() {

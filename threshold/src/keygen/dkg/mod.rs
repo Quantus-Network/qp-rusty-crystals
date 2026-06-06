@@ -1,6 +1,6 @@
 //! Distributed Key Generation (DKG) for threshold ML-DSA-87.
 //!
-//! This module implements the 4-round DKG protocol from the Mithril paper (Appendix D).
+//! This module implements a 4-round DKG protocol for threshold Dilithium.
 //!
 //! # Protocol Overview
 //!
@@ -30,11 +30,11 @@
 //!
 //! ```ignore
 //! use qp_rusty_crystals_threshold::keygen::dkg::{
-//!     MithrilDkg, MithrilDkgConfig, MithrilAction,
+//!     Dkg, DkgConfig, DkgAction,
 //! };
 //!
 //! // Create configuration with a transcript signer
-//! let config = MithrilDkgConfig::new(
+//! let config = DkgConfig::new(
 //!     threshold_config,
 //!     my_party_id,
 //!     all_participants,
@@ -42,14 +42,14 @@
 //!     participant_public_keys,
 //! )?;
 //!
-//! let mut dkg = MithrilDkg::new(config, rng);
+//! let mut dkg = Dkg::new(config, rng);
 //!
 //! loop {
 //!     match dkg.poke()? {
-//!         MithrilAction::Wait => { /* wait for messages */ }
-//!         MithrilAction::SendMany(data) => { /* broadcast */ }
-//!         MithrilAction::SendPrivate(to, data) => { /* P2P send */ }
-//!         MithrilAction::Return(output) => {
+//!         DkgAction::Wait => { /* wait for messages */ }
+//!         DkgAction::SendMany(data) => { /* broadcast */ }
+//!         DkgAction::SendPrivate(to, data) => { /* P2P send */ }
+//!         DkgAction::Return(output) => {
 //!             // DKG complete!
 //!             break;
 //!         }
@@ -72,7 +72,7 @@
 //!
 //! # NEAR MPC Compatibility
 //!
-//! The `MithrilDkg` struct follows the poke/message pattern used by NEAR's
+//! The `Dkg` struct follows the poke/message pattern used by NEAR's
 //! `cait-sith` crate, making it compatible with NEAR MPC's `run_protocol`
 //! infrastructure.
 //!
@@ -88,7 +88,7 @@
 //!   If a leader fails to send these messages, members of that subset will wait indefinitely.
 //!
 //! - **Broadcast delays**: If any party fails to broadcast in any round, other parties will wait at
-//!   `MithrilAction::Wait`.
+//!   `DkgAction::Wait`.
 //!
 //! - **Partial failures**: If some parties complete while others fail, the protocol may need to be
 //!   restarted with a new participant set.
@@ -104,7 +104,7 @@
 //! let result = tokio::time::timeout(timeout, async {
 //!     loop {
 //!         match dkg.poke()? {
-//!             MithrilAction::Wait => {
+//!             DkgAction::Wait => {
 //!                 // Check connection liveness while waiting
 //!                 if !all_participants_connected() {
 //!                     return Err("participant disconnected");
@@ -113,9 +113,9 @@
 //!                 let (from, data) = receive_message().await?;
 //!                 dkg.message(from, data)?;
 //!             }
-//!             MithrilAction::SendMany(data) => broadcast(data).await?,
-//!             MithrilAction::SendPrivate(to, data) => send_to(to, data).await?,
-//!             MithrilAction::Return(output) => return Ok(output),
+//!             DkgAction::SendMany(data) => broadcast(data).await?,
+//!             DkgAction::SendPrivate(to, data) => send_to(to, data).await?,
+//!             DkgAction::Return(output) => return Ok(output),
 //!         }
 //!     }
 //! }).await??;
@@ -126,10 +126,10 @@ mod state;
 mod types;
 
 // Re-export public types
-pub use protocol::{run_local_mithril_dkg, MithrilAction, MithrilDkg, MithrilDkgError};
+pub use protocol::{run_local_dkg, DkgAction, Dkg, DkgError};
 pub use state::{
-	all_broadcasts_received, all_private_messages_received, DkgPhase, MithrilDkgOutput,
-	MithrilDkgState,
+	all_broadcasts_received, all_private_messages_received, DkgPhase, DkgOutput,
+	DkgState,
 };
 pub use types::{
 	compute_dkg_ssid,
@@ -143,14 +143,14 @@ pub use types::{
 	h_keygen,
 	h_seed,
 	// Configuration
-	MithrilDkgConfig,
+	DkgConfig,
 	// Message types
-	MithrilDkgMessage,
-	MithrilRound1Broadcast,
-	MithrilRound1Private,
-	MithrilRound2Broadcast,
-	MithrilRound3Broadcast,
-	MithrilRound4Broadcast,
+	DkgMessage,
+	Round1Broadcast,
+	Round1Private,
+	Round2Broadcast,
+	Round3Broadcast,
+	Round4Broadcast,
 	PartialPublicKey,
 	// Core types
 	SubsetContribution,
@@ -218,7 +218,7 @@ mod tests {
 		let public_keys: Vec<u32> = (0..3).collect();
 		let seed = [42u8; 32];
 
-		let result = run_local_mithril_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE);
+		let result = run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE);
 
 		match &result {
 			Ok(outputs) => {
@@ -246,7 +246,7 @@ mod tests {
 		let seed = [123u8; 32];
 
 		let outputs =
-			run_local_mithril_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
+			run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		for (party_id, output) in outputs.iter().enumerate() {
 			let shares = output.private_share.shares();
@@ -294,7 +294,7 @@ mod tests {
 		let seed = [99u8; 32];
 
 		let dkg_outputs =
-			run_local_mithril_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
+			run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		// All parties should have the same public key
 		let public_key = dkg_outputs[0].public_key.clone();

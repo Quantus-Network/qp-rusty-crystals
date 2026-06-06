@@ -2,9 +2,15 @@
 
 A Rust implementation of threshold ML-DSA-87 (Dilithium) signatures for the NEAR MPC network, allowing multiple parties to collectively sign messages without any single party having access to the complete signing key.
 
-## ⚠️ Warning
+## Security Status
 
-**This implementation is for research and experimentation purposes only. It has not undergone a security audit and should not be used in production without thorough review.**
+| Component | Audit Status |
+|-----------|--------------|
+| Threshold signing protocol | ✅ Audited |
+| Distributed Key Generation (DKG) | ✅ Audited |
+| Resharing protocol | ⚠️ Not audited |
+
+The threshold signing and DKG protocols have undergone security review. The resharing (committee handoff) protocol has not been audited and should be used with caution in production environments. See `src/resharing/README.md` for security analysis and empirical verification of the resharing protocol's safety properties.
 
 ## Overview
 

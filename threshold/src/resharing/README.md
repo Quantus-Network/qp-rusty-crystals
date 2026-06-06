@@ -119,7 +119,7 @@ Earlier versions of this module sampled all but one `r_{I→J}` as `η`-bounded 
 r_{I→J_residual} = s_I^old - Σ_{J≠J_residual} r_{I→J} mod Q.
 ```
 
-That preserves the secret, but the residual can become a full-ring coefficient. After repeated handoffs, those large coefficients can appear in the recovered partial secrets used by Mithril-style hyperball rejection sampling, which moves signing outside the original proof regime.
+That preserves the secret, but the residual can become a full-ring coefficient. After repeated handoffs, those large coefficients can appear in the recovered partial secrets used by hyperball rejection sampling, which moves signing outside the original proof regime.
 
 The current protocol instead uses a bounded conditional splitter. For each coefficient of `s_I^old` and for `m = |new_subsets|`, the dealer:
 
@@ -139,7 +139,7 @@ and therefore also the required modular equation. No single sub-share absorbs a 
 ceil(|centered(s_I^old)| / m) + (m - 1)η.
 ```
 
-This is a practical bounded conditional sampler over the sum constraint. It is not an `η`-bounded sharing and it is not claimed to be a discrete Gaussian sampler. The security proof obligation is instead the same one used by Mithril's hyperball rejection analysis: every recovered signing partial must remain within the norm bound used to choose the hyperball parameters.
+This is a practical bounded conditional sampler over the sum constraint. It is not an `η`-bounded sharing and it is not claimed to be a discrete Gaussian sampler. The security proof obligation is instead the same one used by the hyperball rejection analysis: every recovered signing partial must remain within the norm bound used to choose the hyperball parameters.
 
 ## Usage
 
@@ -260,7 +260,7 @@ NewOnly parties skip Rounds 1-2 (entropy commit-reveal) and go directly to `Roun
 
 ## Coefficient Growth and Signing Security
 
-ML-DSA's base secret has `η`-bounded coefficients, but Mithril-style RSS key generation and a posteriori sharing do not require each stored RSS subset share to be `η`-bounded forever. The relevant proof condition is on the recovered partial secret used by signing.
+ML-DSA's base secret has `η`-bounded coefficients, but RSS key generation and a posteriori sharing do not require each stored RSS subset share to be `η`-bounded forever. The relevant proof condition is on the recovered partial secret used by signing.
 
 For a signing set `A` and party `i`, let `p_i(A) = (p_{i,1}, p_{i,2})` be the result of RSS recovery. The hyperball rejection proof assumes the shift
 

@@ -21,9 +21,9 @@ let (public_key, shares) = generate_with_dealer(&seed, config)?;
 
 The DKG protocol allows parties to collaboratively generate key shares without any single party ever knowing the complete secret. This is the recommended approach for production use.
 
-### Protocol Overview (Mithril 4-Round DKG)
+### Protocol Overview (4-Round DKG)
 
-The protocol follows the Mithril paper (Appendix D) with 4 rounds plus aggregation:
+The protocol uses 4 rounds plus aggregation:
 
 ```
 Round 1: Shared secret establishment + commitment
@@ -61,7 +61,7 @@ The leader is responsible for:
 
 The critical innovation is how secrets are derived. In a naive approach where k parties each contribute η-bounded values that get summed, the result would have coefficients in [-k·η, k·η], violating the Dilithium security requirements.
 
-The Mithril approach solves this:
+The DKG approach solves this:
 
 1. The leader generates a **shared secret** K_S (random bytes)
 2. All parties in subset S receive K_S via secure P2P
@@ -102,13 +102,13 @@ Example for (2, 3):
 - `dkg/mod.rs` - Module exports and documentation
 - `dkg/types.rs` - Message types, configuration, TranscriptSigner trait
 - `dkg/state.rs` - Protocol state structures
-- `dkg/protocol.rs` - Main protocol implementation (`MithrilDkg`)
+- `dkg/protocol.rs` - Main protocol implementation (`Dkg`)
 
 ### Usage
 
 ```rust
 use qp_rusty_crystals_threshold::keygen::dkg::{
-    MithrilDkg, MithrilDkgConfig, MithrilAction, run_local_mithril_dkg,
+    Dkg, DkgConfig, DkgAction, run_local_dkg,
 };
 
 // For testing/local use with a simple signer:
@@ -116,10 +116,10 @@ let signers: Vec<MySigner> = (0..3).map(|id| MySigner::new(id)).collect();
 let public_keys: Vec<_> = signers.iter().map(|s| s.public_key()).collect();
 let seed = [42u8; 32]; // Caller provides randomness as 32-byte seed
 
-let outputs = run_local_mithril_dkg(2, 3, signers, public_keys, seed)?;
+let outputs = run_local_dkg(2, 3, signers, public_keys, seed)?;
 
-// For distributed use, create MithrilDkg instances and drive with poke()/message():
-let config = MithrilDkgConfig::new(
+// For distributed use, create Dkg instances and drive with poke()/message():
+let config = DkgConfig::new(
     threshold_config,
     my_party_id,
     all_participants,
@@ -127,14 +127,14 @@ let config = MithrilDkgConfig::new(
     participant_public_keys,
 )?;
 
-let mut dkg = MithrilDkg::new(config, seed);
+let mut dkg = Dkg::new(config, seed);
 
 loop {
     match dkg.poke()? {
-        MithrilAction::Wait => { /* wait for messages */ }
-        MithrilAction::SendMany(data) => { /* broadcast to all parties */ }
-        MithrilAction::SendPrivate(to, data) => { /* send via secure P2P */ }
-        MithrilAction::Return(output) => {
+        DkgAction::Wait => { /* wait for messages */ }
+        DkgAction::SendMany(data) => { /* broadcast to all parties */ }
+        DkgAction::SendPrivate(to, data) => { /* send via secure P2P */ }
+        DkgAction::Return(output) => {
             // DKG complete!
             let public_key = output.public_key;
             let private_share = output.private_share;
@@ -164,11 +164,11 @@ For NEAR MPC, this would typically be Ed25519 or ML-DSA-87 for long-term keys.
 
 ### NEAR MPC Compatibility
 
-The `MithrilDkg` struct follows the poke/message pattern used by NEAR's
+The `Dkg` struct follows the poke/message pattern used by NEAR's
 `threshold-signatures` crate, making it compatible with NEAR MPC's
 `run_protocol` infrastructure.
 
 ### References
 
-- [Mithril Paper](https://iohk.io/en/research/library/papers/mithril-stake-based-threshold-multisignatures/) - IOG's threshold signature scheme
 - [ML-DSA (FIPS 204)](https://csrc.nist.gov/pubs/fips/204/final) - The underlying signature scheme
+- [Threshold ML-DSA Research](https://mithril-th.org/) - Threshold signature research
