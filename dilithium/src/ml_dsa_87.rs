@@ -275,7 +275,7 @@ mod tests {
 	use super::{Keypair, MAX_MESSAGE_SIZE, SIGNBYTES};
 	use crate::{errors::SignatureError, SensitiveBytes32};
 	use alloc::vec;
-	use rand::Rng;
+	use rand::RngExt;
 
 	fn get_random_bytes() -> SensitiveBytes32 {
 		let mut rng = rand::rng();

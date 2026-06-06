@@ -7,7 +7,7 @@
 use qp_rusty_crystals_dilithium::{ml_dsa_87, SensitiveBytes32};
 use std::{panic, sync::mpsc, thread, time::Duration};
 
-use rand::Rng;
+use rand::RngExt;
 
 fn get_random_bytes() -> SensitiveBytes32 {
 	let mut rng = rand::rng();

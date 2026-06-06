@@ -152,6 +152,40 @@ fn unpack_secret_key_for_signing(
 	}
 }
 
+/// Compute the message representative μ = H(tr || M').
+fn derive_message_hash(
+	public_key_hash_tr: &[u8; params::TR_BYTES],
+	message: &[u8],
+) -> [u8; params::CRHBYTES] {
+	let mut keccak_state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut keccak_state, public_key_hash_tr);
+	fips202::shake256_absorb(&mut keccak_state, message);
+	fips202::shake256_finalize(&mut keccak_state);
+	let mut message_hash_mu = [0u8; params::CRHBYTES];
+	fips202::shake256_squeeze(&mut message_hash_mu, &mut keccak_state);
+	message_hash_mu
+}
+
+/// Derive the mask seed ρ' = H(K || rnd || μ) (FIPS 204 ExpandMask seed).
+///
+/// `K`, `rnd` and `μ` are always absorbed at their full length, so distinct messages
+/// (distinct `μ`) or distinct `rnd` always yield distinct mask seeds, and hence distinct
+/// masks `y`. This is the single chokepoint that prevents nonce reuse across signatures.
+fn derive_mask_seed(
+	private_key_seed: &[u8; params::SEEDBYTES],
+	hedge_bytes: &[u8; params::SEEDBYTES],
+	message_hash_mu: &[u8; params::CRHBYTES],
+) -> [u8; params::CRHBYTES] {
+	let mut keccak_state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut keccak_state, private_key_seed);
+	fips202::shake256_absorb(&mut keccak_state, hedge_bytes);
+	fips202::shake256_absorb(&mut keccak_state, message_hash_mu);
+	fips202::shake256_finalize(&mut keccak_state);
+	let mut signing_entropy_rho_prime = [0u8; params::CRHBYTES];
+	fips202::shake256_squeeze(&mut signing_entropy_rho_prime, &mut keccak_state);
+	signing_entropy_rho_prime
+}
+
 /// Compute message hash and signing randomness
 fn prepare_signing_context(
 	unpacked_sk: &UnpackedSecretKey,
@@ -159,22 +193,12 @@ fn prepare_signing_context(
 	hedge_randomness: Option<[u8; params::SEEDBYTES]>,
 ) -> SigningContext {
 	// Compute message hash μ = H(tr || pre || msg) where pre = (0, 0) for pure signatures
-	let mut keccak_state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut keccak_state, &unpacked_sk.public_key_hash_tr);
-	fips202::shake256_absorb(&mut keccak_state, message);
-	fips202::shake256_finalize(&mut keccak_state);
-	let mut message_hash_mu = [0u8; params::CRHBYTES];
-	fips202::shake256_squeeze(&mut message_hash_mu, &mut keccak_state);
+	let message_hash_mu = derive_message_hash(&unpacked_sk.public_key_hash_tr, message);
 
 	// Generate signing randomness ρ' = H(K || rnd || μ)
 	let mut hedge_bytes = hedge_randomness.unwrap_or([0u8; params::SEEDBYTES]);
-	keccak_state.init();
-	fips202::shake256_absorb(&mut keccak_state, &unpacked_sk.private_key_seed);
-	fips202::shake256_absorb(&mut keccak_state, &hedge_bytes);
-	fips202::shake256_absorb(&mut keccak_state, &message_hash_mu);
-	fips202::shake256_finalize(&mut keccak_state);
-	let mut signing_entropy_rho_prime = [0u8; params::CRHBYTES];
-	fips202::shake256_squeeze(&mut signing_entropy_rho_prime, &mut keccak_state);
+	let signing_entropy_rho_prime =
+		derive_mask_seed(&unpacked_sk.private_key_seed, &hedge_bytes, &message_hash_mu);
 
 	// Zeroize sensitive hedge bytes after use
 	hedge_bytes.zeroize();
@@ -334,9 +358,20 @@ pub(crate) fn signature(
 	let mut valid_hint_h = Polyveck::default();
 	let mut attempt_nonce = 0;
 
+	// Largest attempt_nonce for which the per-polynomial mask nonce (L*attempt_nonce + i,
+	// i < L) still fits in u16. Reaching this requires an astronomically improbable run of
+	// rejection-sampling failures, which would signal a broken RNG/entropy source.
+	const MAX_SAFE_ATTEMPT_NONCE: u16 = (u16::MAX - (L as u16 - 1)) / L as u16;
+
 	// this outer loop should run exactly once in the vast majority of cases
 	loop {
 		for _ in 0..MIN_SIGNING_ATTEMPTS {
+			// Fail loudly rather than silently wrap the nonce and reuse a mask y.
+			assert!(
+				attempt_nonce <= MAX_SAFE_ATTEMPT_NONCE,
+				"ML-DSA signing nonce overflow: rejection sampling failed implausibly many times"
+			);
+
 			// Generate masking vector and compute commitment
 			let mut signature_z = Polyvecl::default();
 			generate_masking_vector_and_commitment(
@@ -500,10 +535,9 @@ pub(crate) fn verify(
 
 #[cfg(test)]
 mod tests {
+	use super::*;
 	use alloc::{string::String, vec};
-	use rand::Rng;
-
-	use crate::SensitiveBytes32;
+	use rand::RngExt;
 
 	fn get_random_bytes() -> SensitiveBytes32 {
 		let mut rng = rand::rng();
@@ -755,4 +789,124 @@ mod tests {
 	// Note: Test vector validation is handled in integration tests
 	// (tests/src/verify_integration_tests.rs) which use proper NIST KAT test vectors for
 	// comprehensive validation.
+
+	/// Recover the masking vector y = z - c·s1 that the signer actually used, directly from a
+	/// produced signature plus the secret key. Used to observe y without exposing it in the API.
+	fn recover_masking_y(
+		sig: &[u8; params::SIGNBYTES],
+		sk: &[u8; params::SECRETKEYBYTES],
+	) -> Polyvecl {
+		let mut challenge_seed = [0u8; params::C_DASH_BYTES];
+		let mut z = Polyvecl::default();
+		let mut h = Polyveck::default();
+		assert!(packing::unpack_sig(&mut challenge_seed, &mut z, &mut h, sig));
+
+		let unpacked = unpack_secret_key_for_signing(sk); // s1 already in NTT domain
+		let mut challenge_poly = Poly::default();
+		poly::challenge(&mut challenge_poly, &challenge_seed);
+		poly::ntt(&mut challenge_poly);
+
+		let mut cs1 = Polyvecl::default();
+		polyvec::l_pointwise_poly_montgomery(
+			&mut cs1,
+			&challenge_poly,
+			&unpacked.secret_poly_s1_ntt,
+		);
+		polyvec::l_invntt_tomont(&mut cs1);
+
+		// y ≡ z - c·s1 (mod q); normalise to the canonical [0, Q) representative for comparison.
+		for i in 0..L {
+			poly::sub_ip(&mut z.vec[i], &cs1.vec[i]);
+			poly::reduce(&mut z.vec[i]);
+			poly::caddq(&mut z.vec[i]);
+		}
+		z
+	}
+
+	fn polyvecl_eq(a: &Polyvecl, b: &Polyvecl) -> bool {
+		(0..L).all(|i| a.vec[i].coeffs == b.vec[i].coeffs)
+	}
+
+	// Bug Class 3 (repeated y nonce across messages): two different messages signed
+	// deterministically (hedge=None) with the same key must use different masks y.
+	#[test]
+	fn test_y_differs_across_messages_deterministic() {
+		let mut pk = [0u8; params::PUBLICKEYBYTES];
+		let mut sk = [0u8; params::SECRETKEYBYTES];
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
+
+		let mut sig1 = [0u8; params::SIGNBYTES];
+		let mut sig2 = [0u8; params::SIGNBYTES];
+		super::signature(&mut sig1, b"message one", &sk, None);
+		super::signature(&mut sig2, b"message two", &sk, None);
+
+		assert_ne!(sig1, sig2, "deterministic signatures of different messages must differ");
+
+		let y1 = recover_masking_y(&sig1, &sk);
+		let y2 = recover_masking_y(&sig2, &sk);
+		assert!(
+			!polyvecl_eq(&y1, &y2),
+			"mask y was reused across two different messages (Bug Class 3)"
+		);
+	}
+
+	// Bug Class 2 (K zeroing/omission): K seeds the mask ρ', so mutating one byte of the
+	// stored K must change the produced signature while still yielding a valid signature.
+	#[test]
+	fn test_secret_key_k_affects_signature() {
+		let mut pk = [0u8; params::PUBLICKEYBYTES];
+		let mut sk = [0u8; params::SECRETKEYBYTES];
+		super::keypair(&mut pk, &mut sk, get_random_bytes());
+
+		let msg = b"K must influence the mask";
+		let mut sig_original = [0u8; params::SIGNBYTES];
+		super::signature(&mut sig_original, msg, &sk, None);
+
+		// K is stored at offset [SEEDBYTES, 2*SEEDBYTES) in the packed secret key.
+		let mut sk_flipped = sk;
+		sk_flipped[params::SEEDBYTES] ^= 0x01;
+		assert_ne!(sk, sk_flipped, "test setup should change the stored K");
+
+		let mut sig_flipped = [0u8; params::SIGNBYTES];
+		super::signature(&mut sig_flipped, msg, &sk_flipped, None);
+
+		assert_ne!(
+			sig_original, sig_flipped,
+			"flipping a byte of K did not change the signature (Bug Class 2)"
+		);
+		// K only seeds the mask; the signature stays valid under the unchanged public key.
+		assert!(super::verify(&sig_flipped, msg, &pk));
+	}
+
+	// Bug Class 3 (truncated/incorrect hash-input assembly): pin ρ' = H(K || rnd || μ) for
+	// fixed inputs against an independent Python reference (hashlib.shake_256), and cross-check
+	// the incremental-absorb production path against a one-shot SHAKE256 over the concatenation.
+	#[test]
+	fn test_mask_seed_golden_vector() {
+		let key = [1u8; params::SEEDBYTES];
+		let rnd = [2u8; params::SEEDBYTES];
+		let mu = [3u8; params::CRHBYTES];
+
+		// python3 -c "import hashlib;
+		// print(hashlib.shake_256(bytes([1]*32)+bytes([2]*32)+bytes([3]*64)).hexdigest(64))"
+		let expected: [u8; params::CRHBYTES] = [
+			0x4d, 0xfd, 0xda, 0xba, 0x94, 0x98, 0x12, 0xaa, 0xc7, 0x9f, 0xc8, 0xc2, 0xa7, 0xa6,
+			0x2e, 0x36, 0xc6, 0xd2, 0x69, 0x58, 0xbb, 0x73, 0x9e, 0x81, 0xd7, 0x48, 0xdc, 0xec,
+			0x0b, 0x85, 0x2d, 0x9c, 0x24, 0x4d, 0x08, 0x07, 0xa3, 0xa2, 0x3c, 0x44, 0x98, 0x89,
+			0xba, 0x59, 0x2c, 0xa4, 0x47, 0x0d, 0x8e, 0xb6, 0x96, 0xd7, 0x20, 0xa4, 0xc3, 0x4e,
+			0x2c, 0x30, 0x98, 0xf5, 0xc7, 0xaa, 0xea, 0xc3,
+		];
+
+		let rho_prime = super::derive_mask_seed(&key, &rnd, &mu);
+		assert_eq!(rho_prime, expected, "rho' diverged from the independent SHAKE256 reference");
+
+		// Independent internal path: one-shot SHAKE256 over K || rnd || μ.
+		let mut concatenated = [0u8; 2 * params::SEEDBYTES + params::CRHBYTES];
+		concatenated[..params::SEEDBYTES].copy_from_slice(&key);
+		concatenated[params::SEEDBYTES..2 * params::SEEDBYTES].copy_from_slice(&rnd);
+		concatenated[2 * params::SEEDBYTES..].copy_from_slice(&mu);
+		let mut one_shot = [0u8; params::CRHBYTES];
+		fips202::shake256(&mut one_shot, &concatenated);
+		assert_eq!(rho_prime, one_shot, "incremental absorb diverged from one-shot SHAKE256");
+	}
 }

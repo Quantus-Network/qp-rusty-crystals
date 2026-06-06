@@ -800,7 +800,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_produces_valid_coefficients() {
-		use rand::{rngs::StdRng, RngCore, SeedableRng};
+		use rand::{rngs::StdRng, Rng, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0x123456789ABCDEF0);
 		const NUM_TESTS: usize = 100;
@@ -837,7 +837,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_different_seeds() {
-		use rand::{rngs::StdRng, RngCore, SeedableRng};
+		use rand::{rngs::StdRng, Rng, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0xFEDCBA9876543210);
 		const NUM_TESTS: usize = 50;
@@ -880,7 +880,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_deterministic() {
-		use rand::{rngs::StdRng, RngCore, SeedableRng};
+		use rand::{rngs::StdRng, Rng, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0x1122334455667788);
 		const NUM_TESTS: usize = 25;
@@ -910,7 +910,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_nonce_variations() {
-		use rand::{rngs::StdRng, RngCore, SeedableRng};
+		use rand::{rngs::StdRng, Rng, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0x9999888877776666);
 		const NUM_TESTS: usize = 30;
@@ -1120,7 +1120,7 @@ mod tests {
 
 	#[test]
 	fn test_uniform_eta_coefficient_efficiency() {
-		use rand::{rngs::StdRng, RngCore, SeedableRng};
+		use rand::{rngs::StdRng, Rng, SeedableRng};
 
 		let mut rng = StdRng::seed_from_u64(0xABCDEF0123456789);
 		const NUM_TESTS: usize = 100;
@@ -1213,6 +1213,63 @@ mod tests {
 			assert!(poly.coeffs[i] >= -(params::GAMMA1 as i32));
 			assert!(poly.coeffs[i] <= params::GAMMA1 as i32);
 		}
+	}
+
+	// Bug Class 1 (AABBCC repetition): paired coefficients coeffs[2i] and coeffs[2i+1] are
+	// unpacked from disjoint bits, so over many seeds they collide only at the ~1/2^20 rate.
+	// A structural repetition bug (AABBCC / ABAB) would force a collision rate near 1, and an
+	// A0B0 bug would zero every second coefficient.
+	#[test]
+	fn test_uniform_gamma1_no_paired_coefficient_repetition() {
+		use rand::{rngs::StdRng, Rng, SeedableRng};
+
+		let mut rng = StdRng::seed_from_u64(0x5EED_1234_ABCD_0001);
+		const NUM_POLYS: usize = 256;
+		let total_pairs = NUM_POLYS * (N / 2);
+
+		let mut equal_pairs = 0usize;
+		let mut positional_zero_polys = 0usize;
+		for _ in 0..NUM_POLYS {
+			let mut seed = [0u8; params::CRHBYTES];
+			rng.fill_bytes(&mut seed);
+			let nonce = rng.next_u32() as u16;
+
+			let mut poly = Poly::default();
+			uniform_gamma1(&mut poly, &seed, nonce);
+
+			let mut even_all_zero = true;
+			let mut odd_all_zero = true;
+			for i in 0..N / 2 {
+				if poly.coeffs[2 * i] == poly.coeffs[2 * i + 1] {
+					equal_pairs += 1;
+				}
+				if poly.coeffs[2 * i] != 0 {
+					even_all_zero = false;
+				}
+				if poly.coeffs[2 * i + 1] != 0 {
+					odd_all_zero = false;
+				}
+			}
+			if even_all_zero || odd_all_zero {
+				positional_zero_polys += 1;
+			}
+		}
+
+		// A correct implementation collides at ~1/2^20; AABBCC/ABAB bugs collide at >= 1/2.
+		// The 1% bound is ~10000x the expected rate: robust against chance, yet unambiguous.
+		let collision_rate = equal_pairs as f64 / total_pairs as f64;
+		assert!(
+			collision_rate < 0.01,
+			"paired-coefficient collision rate {:.6} too high ({} / {}); possible AABBCC repetition",
+			collision_rate,
+			equal_pairs,
+			total_pairs
+		);
+		// Catches A0B0-style bugs where every second coefficient is structurally cleared.
+		assert_eq!(
+			positional_zero_polys, 0,
+			"some polynomials had all even- or all odd-index coefficients zero; possible A0B0 repetition"
+		);
 	}
 
 	#[test]
