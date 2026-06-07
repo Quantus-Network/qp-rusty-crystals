@@ -261,10 +261,13 @@ pub(crate) fn generate_round1(
 	config: &ThresholdConfig,
 	seed: &[u8; 32],
 ) -> ThresholdResult<Round1Data> {
-	// Generate deterministic random bytes for commitment
+	// Generate deterministic random bytes for commitment.
+	// We bind the SSID into the derivation so that a fresh attempt_nonce
+	// (which changes the SSID) forces fresh nonces even if seed is reused.
 	let mut rho_prime = [0u8; 64];
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, seed);
+	fips202::shake256_absorb(&mut state, ssid);
 	fips202::shake256_absorb(&mut state, b"rho_prime");
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut rho_prime, &mut state);
@@ -292,6 +295,7 @@ pub(crate) fn generate_round1(
 		let mut iter_rho_prime = [0u8; 64];
 		let mut state = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut state, &iter_seed);
+		fips202::shake256_absorb(&mut state, ssid);
 		fips202::shake256_absorb(&mut state, b"rho_prime");
 		fips202::shake256_absorb(&mut state, &[k_iter as u8]);
 		fips202::shake256_finalize(&mut state);
