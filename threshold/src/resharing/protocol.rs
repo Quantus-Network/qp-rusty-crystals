@@ -6,16 +6,19 @@
 //! See `resharing/mod.rs` for a full description of the cryptographic protocol.
 //! In short:
 //!
-//! - **Round 1 (Commitments)**: Each old committee member that is the designated dealer for one or
-//!   more old RSS subsets broadcasts hash commitments to the per-subset sub-shares `r_{I→J}` they
-//!   will deliver in Round 2. Sub-shares are derived deterministically from `s_I^old`, so all
-//!   members of `I` can independently recompute and verify these commitments.
-//! - **Round 2 (Reveal)**: Each designated dealer privately delivers `r_{I→J}` to every member of
-//!   new subset `J`.
-//! - **Round 3 (Verification)**: Each new committee member verifies received sub-shares against the
-//!   broadcast commitments, sums them into new shares `s_J^new`, and broadcasts a commitment to
-//!   each computed `s_J^new` so the members of `J` can cross-verify. Old committee members file
-//!   dealer accusations if any broadcast commitment fails their independent recomputation.
+//! - **Round 1 (Entropy commitment)**: Old committee members commit to fresh entropy.
+//! - **Round 2 (Entropy reveal)**: Old committee members reveal entropy. All parties compute the
+//!   public session seed from these reveals after checking the commitments.
+//! - **Round 3 (Sub-share commitments)**: Each designated dealer broadcasts hash commitments to
+//!   deterministic sub-shares `r_{I→J}` derived from `s_I^old` and the public session seed.
+//! - **Round 4 (Private delivery)**: Dealers privately deliver `r_{I→J}` to new committee members.
+//! - **Round 5 (Verification)**: New committee members verify received sub-shares, sum them into
+//!   new shares `s_J^new`, and broadcast commitments so each new subset can cross-verify.
+//!
+//! The SSID binds every message to the resharing configuration and session nonce for replay
+//! protection. The entropy commit-reveal provides public per-session randomization and pre-reveal
+//! unpredictability, not post-compromise forward secrecy: a recorded transcript plus later access
+//! to old subset shares is enough to recompute deterministic sub-share derivation.
 //!
 //! # State Machine
 //!
@@ -49,7 +52,7 @@ use super::types::{
 	ENTROPY_SIZE, RESHARING_SSID_SIZE,
 };
 
-/// Domain separator for the per-subset PRF seed (includes session seed for forward secrecy).
+/// Domain separator for the per-subset PRF seed (includes public session seed for randomization).
 const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
 
 /// Domain separator for bounded conditional splitting noise.
@@ -187,7 +190,7 @@ impl fmt::Display for ResharingProtocolError {
 
 /// Current state of the resharing protocol.
 ///
-/// # Protocol Rounds (5-round forward-secrecy protocol)
+/// # Protocol Rounds (5-round session-randomized protocol)
 ///
 /// - **Round 1**: Entropy commitment (old committee broadcasts `H(entropy)`)
 /// - **Round 2**: Entropy reveal (old committee reveals entropy, session seed computed)
@@ -253,7 +256,7 @@ pub struct ResharingProtocol {
 	new_subset_order: Vec<SubsetMask>,
 
 	// ========================================================================
-	// Round 1-2: Entropy commit-reveal (forward secrecy)
+	// Round 1-2: Entropy commit-reveal (public session randomization)
 	// ========================================================================
 	/// This party's generated entropy (old committee members only).
 	my_entropy: Option<[u8; ENTROPY_SIZE]>,
@@ -300,7 +303,7 @@ impl ResharingProtocol {
 	///
 	/// * `existing_share` - Required for old committee members (`OldOnly`/`Both`), `None` for
 	///   `NewOnly`.
-	/// * `seed` - 32 bytes of cryptographic randomness for forward secrecy.
+	/// * `seed` - 32 bytes of cryptographic randomness for this party's entropy contribution.
 	/// * `session_nonce` - Unique nonce for SSID computation (prevents cross-session replay).
 	pub fn new(
 		config: ResharingConfig,
@@ -485,7 +488,7 @@ impl ResharingProtocol {
 	}
 
 	// ========================================================================
-	// Round 1: Entropy Commitment (Forward Secrecy)
+	// Round 1: Entropy Commitment (Session Randomization)
 	// ========================================================================
 
 	fn handle_round1_generate(
@@ -569,7 +572,7 @@ impl ResharingProtocol {
 	}
 
 	// ========================================================================
-	// Round 2: Entropy Reveal (Forward Secrecy)
+	// Round 2: Entropy Reveal (Public Session Seed)
 	// ========================================================================
 
 	fn handle_round2_generate(
@@ -686,7 +689,7 @@ impl ResharingProtocol {
 			return Ok(Action::Wait);
 		}
 
-		// Compute sub-shares (now using session seed for forward secrecy)
+		// Compute sub-shares using the public session seed for per-session randomization.
 		self.compute_my_subshares()?;
 		let commitments = self.commit_to_my_subshares();
 
@@ -957,7 +960,7 @@ impl ResharingProtocol {
 	// ========================================================================
 
 	/// Pre-compute every sub-share `r_{I→J}` we are responsible for dealing.
-	/// Uses the session seed for forward secrecy.
+	/// Uses the public session seed for per-session randomization.
 	fn compute_my_subshares(&mut self) -> Result<(), ResharingProtocolError> {
 		let existing = self.existing_share.as_ref().ok_or_else(|| {
 			ResharingProtocolError::InternalError("Missing existing share".to_string())
@@ -971,7 +974,7 @@ impl ResharingProtocol {
 			));
 		}
 
-		// Get session seed for forward-secrecy PRF derivation
+		// Get session seed for deterministic per-session PRF derivation.
 		let session_seed = self.session_seed.ok_or_else(|| {
 			ResharingProtocolError::InternalError("Missing session seed".to_string())
 		})?;
@@ -1520,7 +1523,7 @@ fn sample_uniform_usize(state: &mut fips202::KeccakState, upper: usize) -> usize
 	}
 }
 
-/// Build subset seed incorporating session seed for forward secrecy.
+/// Build subset seed incorporating the public session seed.
 fn build_subset_seed_with_session(
 	i_mask: SubsetMask,
 	s_i: &SecretShareData,
@@ -1528,7 +1531,7 @@ fn build_subset_seed_with_session(
 ) -> [u8; 64] {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, SUBSET_SEED_DOMAIN);
-	// Mix in session seed for forward secrecy
+	// Mix in session seed for per-session randomization.
 	fips202::shake256_absorb(&mut state, session_seed);
 	fips202::shake256_absorb(&mut state, &i_mask.to_le_bytes());
 	let mut buf: Vec<u8> = Vec::new();

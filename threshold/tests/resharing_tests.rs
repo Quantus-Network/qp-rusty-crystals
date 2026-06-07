@@ -1279,20 +1279,22 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 			Err(_) => return data,
 		};
 		let modified = match msg {
-			ResharingMessage::Round3(mut b) =>
+			ResharingMessage::Round3(mut b) => {
 				if let Some(c) = b.commitments.get_mut(&target_pair) {
 					*c = bogus_commit;
 					ResharingMessage::Round3(b)
 				} else {
 					ResharingMessage::Round3(b)
-				},
-			ResharingMessage::Round4(mut m) =>
+				}
+			},
+			ResharingMessage::Round4(mut m) => {
 				if m.from_party_id == 0 && m.contributions.contains_key(&target_pair) {
 					m.contributions.insert(target_pair, bogus_r_capt.clone());
 					ResharingMessage::Round4(m)
 				} else {
 					ResharingMessage::Round4(m)
-				},
+				}
+			},
 			other => other,
 		};
 		borsh::to_vec(&modified).expect("re-serialize tampered msg")
@@ -1323,7 +1325,7 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 }
 
 // ============================================================================
-// Forward Secrecy Tests
+// Session Randomization Tests
 // ============================================================================
 
 /// Helper function to run resharing with custom seeds for each party.
@@ -1448,8 +1450,8 @@ fn run_resharing_protocol_with_seeds(
 }
 
 #[test]
-fn test_forward_secrecy_different_sessions_produce_different_subshares() {
-	// This test verifies forward secrecy: running the resharing protocol twice
+fn test_session_randomization_different_sessions_produce_different_subshares() {
+	// This test verifies session randomization: running the resharing protocol twice
 	// with different entropy seeds should produce different intermediate subshares.
 	// Even with the same old shares and same committee configuration, the new shares
 	// should differ because the session seed (derived from all parties' entropy)
@@ -1524,7 +1526,7 @@ fn test_forward_secrecy_different_sessions_produce_different_subshares() {
 		run_signing_and_verify(&signing_shares_2, &public_key, config, b"test message 2", b"");
 	assert!(is_valid_2, "Signature with session 2 shares should verify");
 
-	// The key forward secrecy test: the shares should be different!
+	// The key session-randomization test: the shares should be different.
 	// We compare the serialized shares to detect any difference in the internal structure.
 	// If the entropy wasn't being used, the shares would be identical.
 	let share_0_session_1 = borsh::to_vec(new_shares_1.get(&0).unwrap()).unwrap();
@@ -1532,7 +1534,7 @@ fn test_forward_secrecy_different_sessions_produce_different_subshares() {
 
 	assert_ne!(
 		share_0_session_1, share_0_session_2,
-		"Shares from different sessions should differ due to forward secrecy entropy"
+		"Shares from different sessions should differ due to session-randomization entropy"
 	);
 
 	// Also verify that shares from different parties within the same session differ
@@ -1540,7 +1542,7 @@ fn test_forward_secrecy_different_sessions_produce_different_subshares() {
 	let share_1_session_1 = borsh::to_vec(new_shares_1.get(&1).unwrap()).unwrap();
 	assert_ne!(share_0_session_1, share_1_session_1, "Shares for different parties should differ");
 
-	println!("Forward secrecy verified: different entropy seeds produce different shares");
+	println!("Session randomization verified: different entropy seeds produce different shares");
 	println!(
 		"  Session 1 share 0 bytes: {} (first 32: {:?}...)",
 		share_0_session_1.len(),
@@ -1554,7 +1556,7 @@ fn test_forward_secrecy_different_sessions_produce_different_subshares() {
 }
 
 #[test]
-fn test_forward_secrecy_identical_seeds_produce_identical_shares() {
+fn test_session_randomization_identical_seeds_produce_identical_shares() {
 	// This test verifies that the protocol is deterministic when given the same
 	// entropy seeds - running twice with identical seeds should produce identical shares.
 	// This confirms that the randomness is properly derived from the seeds.
@@ -1616,11 +1618,11 @@ fn test_forward_secrecy_identical_seeds_produce_identical_shares() {
 }
 
 #[test]
-fn test_forward_secrecy_single_party_entropy_change_affects_all() {
+fn test_session_randomization_single_party_entropy_change_affects_all() {
 	// This test verifies that even if only ONE party changes their entropy,
-	// all resulting shares change. This is important for forward secrecy:
-	// even if an attacker compromises n-1 parties' entropy, they still can't
-	// predict the session seed because the honest party's entropy is unknown.
+	// all resulting shares change. This is important for pre-reveal unpredictability:
+	// before Round 2, the session seed cannot be predicted without every old
+	// committee member's entropy contribution.
 
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
 	let seed = [55u8; 32];
@@ -1694,7 +1696,9 @@ fn test_forward_secrecy_single_party_entropy_change_affects_all() {
 	let is_valid_2 = run_signing_and_verify(&signing_shares_2, &public_key, config, b"test", b"");
 	assert!(is_valid_2, "Session 2 shares should produce valid signatures");
 
-	println!("Forward secrecy cascade verified: one party's entropy change affects all shares");
+	println!(
+		"Session-randomization cascade verified: one party's entropy change affects all shares"
+	);
 }
 
 // ============================================================================

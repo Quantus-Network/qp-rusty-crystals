@@ -354,7 +354,7 @@ impl fmt::Display for ResharingConfigError {
 /// This allows messages to be serialized/deserialized without knowing
 /// the specific round at deserialization time.
 ///
-/// # Protocol Rounds (5-round forward-secrecy protocol)
+/// # Protocol Rounds (5-round session-randomized protocol)
 ///
 /// - **Round 1**: Entropy commitment (old committee broadcasts `H(entropy)`)
 /// - **Round 2**: Entropy reveal (old committee reveals entropy, session seed computed)
@@ -411,22 +411,22 @@ impl ResharingMessage {
 }
 
 // ============================================================================
-// Round 1: Entropy Commitment (Forward Secrecy)
+// Round 1: Entropy Commitment (Session Randomization)
 // ============================================================================
 
 /// Round 1 broadcast from old committee members.
 ///
 /// Each old committee member generates fresh entropy and broadcasts a hash
 /// commitment to it. This is the first step of the commit-reveal scheme that
-/// provides forward secrecy by ensuring the session seed cannot be predicted
-/// before all commitments are published.
+/// makes the session seed unpredictable before reveals and prevents parties
+/// from choosing their entropy after seeing others' revealed values.
 ///
-/// # Forward Secrecy
+/// # Threat Model
 ///
-/// By having all old committee members contribute entropy via commit-reveal,
-/// an attacker who compromises old shares after resharing cannot determine
-/// the randomness used to derive new shares, even if they observe all protocol
-/// messages.
+/// The entropy is revealed publicly in Round 2. This provides session
+/// randomization and anti-bias properties, but not post-compromise forward
+/// secrecy: an attacker who records the transcript and later compromises old
+/// subset shares can recompute deterministic resharing randomness.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound1EntropyCommitment {
 	/// Session identifier binding this message to the resharing session.
@@ -438,7 +438,7 @@ pub struct ResharingRound1EntropyCommitment {
 }
 
 // ============================================================================
-// Round 2: Entropy Reveal (Forward Secrecy)
+// Round 2: Entropy Reveal (Public Session Seed)
 // ============================================================================
 
 /// Round 2 broadcast from old committee members.
@@ -488,12 +488,15 @@ pub struct ResharingRound2EntropyReveal {
 /// `5^256 ≈ 2^594` bits of entropy (the η-bounded sample space) or is itself
 /// a function of secret share material.
 ///
-/// # Forward Secrecy
+/// # Session Randomization
 ///
 /// The session seed (computed from Round 1-2 entropy contributions) is mixed
-/// into the PRF that derives sub-shares, ensuring that even if old shares are
-/// later compromised, the specific randomness used in this resharing cannot
-/// be reconstructed.
+/// into the PRF that derives sub-shares, so fresh entropy changes the
+/// deterministic split for this session.
+///
+/// After Round 2, the session seed is public transcript material. This protocol
+/// does not provide post-compromise forward secrecy against an attacker who
+/// records the transcript and later obtains old subset shares.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound3Broadcast {
 	/// Session identifier binding this message to the resharing session.

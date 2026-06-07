@@ -20,16 +20,16 @@ Without resharing, any change would require generating a new key and migrating a
 - **New Committee**: Parties that will hold new shares (threshold `t_new` of `n_new`)
 - **Overlap**: Parties may be in both committees
 
-### Protocol Rounds (5-round forward-secrecy protocol)
+### Protocol Rounds (5-round session-randomized protocol)
 
-This module uses **distributed per-subset re-sharing** with **forward secrecy** — at no point does any party ever assemble the full secret `s`, and at no point is any individual share exposed in clear on the wire.
+This module uses **distributed per-subset re-sharing** with SSID-based replay protection and public session randomization. At no point does any party ever assemble the full secret `s`, and no individual share is exposed on public broadcast traffic. Round 4 private traffic does contain secret share material and requires an authenticated-encrypted channel.
 
 ```
-Round 1: Entropy Commitment (Forward Secrecy)
+Round 1: Entropy Commitment (Session Randomization)
 ├── Each old committee member generates fresh entropy and broadcasts H(entropy).
 └── Commit-reveal prevents any party from biasing the session seed.
 
-Round 2: Entropy Reveal (Forward Secrecy)
+Round 2: Entropy Reveal (Public Session Seed)
 ├── Old committee members reveal their entropy.
 ├── All parties verify reveals against Round 1 commitments.
 └── Session seed = SHAKE256("resharing-session-seed-v1" || party_1 || entropy_1 || ...)
@@ -38,7 +38,8 @@ Round 2: Entropy Reveal (Forward Secrecy)
 Round 3: Per-Subset Commitments
 ├── For each old subset I, the designated dealer D_I (lowest-ID old participant in I)
 │   deterministically derives bounded sub-shares r_{I→J} for every new subset J such that
-│   Σ_J r_{I→J} = s_I^old. The derivation incorporates the session seed for forward secrecy.
+│   Σ_J r_{I→J} = s_I^old. The derivation incorporates the public session seed for
+│   per-session randomization.
 └── D_I broadcasts H(r_{I→J}) for each (I, J). Members of I can independently
     recompute the same r_{I→J} from s_I^old and verify D_I's commitments.
 
@@ -61,42 +62,40 @@ Round 5: Verification + Public-Key Invariant
 
 Because `Σ_J s_J^new = Σ_J Σ_I r_{I→J} = Σ_I s_I^old = s`, the secret — and hence the public key `t = A·s1 + s2` — is preserved.
 
-## Forward Secrecy
+## Session Randomization and Threat Model
 
-The 5-round protocol provides **forward secrecy**: even if old shares are later compromised, an attacker cannot reconstruct the randomness used to derive new shares.
+The 5-round protocol provides public session randomization, replay protection, and anti-bias commit-reveal. It does **not** provide post-compromise forward secrecy.
+
+Round 2 entropy reveals are part of the public transcript. After Round 2, the `session_seed` is public transcript material. Because sub-shares are derived deterministically from `session_seed`, `i_mask`, and `s_I^old`, an attacker who records the transcript and later compromises old subset shares can recompute the resharing randomness and derive the corresponding new shares.
 
 ### How It Works
 
 1. **Entropy Generation**: Each old committee member generates fresh random entropy from their provided seed.
 
-2. **Commit-Reveal**: Round 1-2 use a commit-reveal scheme to ensure no party can bias the session seed based on others' contributions.
+2. **Commit-Reveal**: Round 1-2 use a commit-reveal scheme to make the session seed unpredictable before reveals and prevent parties from choosing entropy after seeing others' revealed values.
 
-3. **Session Seed Derivation**: The session seed is computed as:
+3. **Public Session Seed Derivation**: The session seed is computed as:
    ```
    session_seed = SHAKE256("resharing-session-seed-v1" || party_id_1 || entropy_1 || party_id_2 || entropy_2 || ...)
    ```
    where parties are processed in sorted order by ID.
 
-4. **PRF Mixing**: The session seed is mixed into the PRF that derives sub-shares:
+4. **PRF Mixing**: The public session seed is mixed into the PRF that derives sub-shares:
    ```
    prf_seed = SHAKE256("resharing-subset-prf-v3" || session_seed || i_mask || s_I^old)
    ```
 
-### Security Guarantee
+### Security Boundary
 
-Even if an attacker:
-- Compromises all old shares after resharing
-- Observes all protocol messages
-- Knows n-1 parties' entropy contributions
-
-They still cannot reconstruct the session seed (and thus the new shares) because the honest party's entropy contribution is unknown.
+Before Round 2 reveals are known, an attacker cannot predict the session seed unless they know every old committee member's entropy contribution. After Round 2, the seed is public. The protocol's replay protection comes from the SSID, which binds messages to the old committee, new committee, public key, and session nonce. The protocol's confidentiality depends on keeping Round 4 private messages encrypted and authenticated.
 
 ## Security Properties
 
 | Property | Guarantee |
 |----------|-----------|
 | **Secrecy of `s`** | No party — not even any dealer — ever holds `s` in clear. Each `D_I` only handles `s_I^old`, which they already had. |
-| **Forward Secrecy** | Session seed incorporates fresh entropy from all old committee members via commit-reveal. Even if old shares are later compromised, the randomness used to derive new shares cannot be reconstructed. |
+| **Replay protection** | Every message carries an SSID derived from the old/new committees, public key, and session nonce. Messages with a mismatched SSID are ignored. |
+| **Session randomization** | Session seed incorporates fresh entropy from all old committee members via commit-reveal, so fresh sessions produce different deterministic sub-share splits. This does not provide post-compromise forward secrecy once the transcript is recorded. |
 | **Confidentiality of contributions** | Rounds 1-3, 5 broadcast only hash commitments; Round 4 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
 | **Cheating-dealer detection** | New-subset members cross-verify computed `s_J^new` against broadcast commitments, and a final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching a malicious dealer even when their old subset has size 1. If any verification fails, the protocol aborts. |
 | **PK Preservation** | Public key `t = A·s1 + s2` unchanged, verified at the end of Round 5 via a deterministic byte-equality check against the original PK. |
@@ -149,9 +148,13 @@ use qp_rusty_crystals_threshold::resharing::{
 };
 use rand::RngCore;
 
-// Generate fresh entropy for this party (CRITICAL for forward secrecy)
+// Generate fresh entropy for this party's session-randomization contribution.
 let mut seed = [0u8; 32];
 rand::rngs::OsRng.fill_bytes(&mut seed);
+
+// Generate or receive a unique nonce shared by all parties in this resharing session.
+let mut session_nonce = [0u8; 32];
+rand::rngs::OsRng.fill_bytes(&mut session_nonce);
 
 // Configure resharing
 let config = ResharingConfig::new(
@@ -160,12 +163,11 @@ let config = ResharingConfig::new(
     new_threshold,      // e.g., 3
     new_participants,   // e.g., vec![1, 2, 3, 4]
     my_party_id,
-    my_existing_share,  // Some(share) if in old committee, None if joining
     public_key,
 )?;
 
-// Create protocol with fresh entropy seed
-let mut protocol = ResharingProtocol::new(config, seed);
+// Old committee members pass Some(existing_share); new-only parties pass None.
+let mut protocol = ResharingProtocol::new(config, my_existing_share, seed, &session_nonce);
 
 // Run protocol loop
 loop {
@@ -211,8 +213,7 @@ the sub-shares `r_{I→J}` and potentially reconstruct secret key material.
 
 ## ⚠️ Entropy Requirements
 
-**CRITICAL**: Each party must provide cryptographically random entropy via the `seed` parameter
-to `ResharingProtocol::new()`. Using predictable, weak, or reused entropy compromises forward secrecy.
+**CRITICAL**: Each old committee member must provide cryptographically random entropy via the `seed` parameter to `ResharingProtocol::new()`. Fresh entropy makes the public session seed unpredictable before Round 2 and avoids repeated deterministic sub-share splits. It does not provide post-compromise secrecy once the transcript has been recorded.
 
 | Requirement | Why |
 |-------------|-----|
@@ -220,8 +221,7 @@ to `ResharingProtocol::new()`. Using predictable, weak, or reused entropy compro
 | **Independent per party** | Each party must generate their own entropy; don't share seeds |
 | **Fresh per session** | Generate new entropy for each resharing; don't reuse across sessions |
 
-If all parties use the same seed, or if seeds are predictable, an attacker who later compromises
-old shares can reconstruct the session seed and derive the new shares.
+If all parties reuse the same seeds with the same inputs, the protocol can repeat the same deterministic split. If seeds are predictable, the session seed can be predicted before Round 2.
 
 ## Roles
 
@@ -235,7 +235,7 @@ Each party has a role determined by committee membership:
 
 ## Message Types
 
-- `Round1EntropyCommitment`: Hash commitment to entropy `H(entropy)` for forward secrecy
+- `Round1EntropyCommitment`: Hash commitment to entropy `H(entropy)` for session randomization
 - `Round2EntropyReveal`: Revealed entropy (32 bytes) — verified against Round 1 commitment
 - `Round3Broadcast`: Per-subset commitment hashes `H(r_{I→J})` (no plaintext shares)
 - `Round4Message`: Private sub-share reveal (**requires secure channel**) — one message per (dealer, recipient) carrying every `r_{I→J}` the dealer owes that recipient. Dealers handle self-deals locally and never emit `SendPrivate(self, _)`.

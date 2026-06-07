@@ -19,12 +19,14 @@
 //!
 //! # Overview
 //!
-//! Resharing uses **distributed per-subset re-sharing** with **forward secrecy**:
+//! Resharing uses **distributed per-subset re-sharing** with replay protection and public session
+//! randomization:
 //!
-//! ## Protocol Rounds (5-round forward-secrecy protocol)
+//! ## Protocol Rounds (5-round session-randomized protocol)
 //!
-//! - **Round 1**: Entropy commitment - old committee broadcasts `H(entropy)` for forward secrecy
-//! - **Round 2**: Entropy reveal - old committee reveals entropy, session seed computed
+//! - **Round 1**: Entropy commitment - old committee broadcasts `H(entropy)`
+//! - **Round 2**: Entropy reveal - old committee reveals entropy and a public session seed is
+//!   computed
 //! - **Round 3**: Sub-share commitments - designated dealers broadcast `H(r_{I→J})`
 //! - **Round 4**: Private delivery - dealers send `r_{I→J}` to new committee (**secure channel**)
 //! - **Round 5**: Verification - share commitments, partial PKs, accusations
@@ -34,8 +36,8 @@
 //! re-shares `s_I^old` to the new committee:
 //!
 //! 1. `D_I` deterministically derives sub-shares `r_{I→J}` for every new RSS subset `J`, such that
-//!    `Σ_J r_{I→J} = s_I^old`. The derivation incorporates the session seed (from Rounds 1-2) for
-//!    forward secrecy.
+//!    `Σ_J r_{I→J} = s_I^old`. The derivation incorporates the public session seed from Rounds 1-2
+//!    so fresh entropy produces a different deterministic split.
 //! 2. `D_I` broadcasts a hash commitment to each `r_{I→J}` (Round 3) and privately delivers
 //!    `r_{I→J}` to every member of new subset `J` (Round 4, **over secure channel**).
 //! 3. New committee members verify each received `r_{I→J}` against `D_I`'s commitment, sum `s_J^new
@@ -49,9 +51,12 @@
 //!
 //! - **Secrecy of `s`**: No party — not even the designated dealers — ever reconstructs the full
 //!   secret `s`. Each `D_I` only handles `s_I^old`, which they already had.
-//! - **Forward secrecy**: Even if old shares are later compromised, an attacker cannot reconstruct
-//!   the randomness used to derive new shares because the session seed includes fresh entropy
-//!   contributions from all old committee members.
+//! - **Replay protection**: Each message includes an SSID derived from the old/new committees, the
+//!   public key, and a session nonce. Messages with a different SSID are ignored.
+//! - **Session randomization**: Rounds 1-2 commit to and reveal fresh entropy before deriving a
+//!   public session seed, making sub-share splits unpredictable before reveal and different across
+//!   fresh sessions. This is not post-compromise forward secrecy: a recorded transcript plus later
+//!   compromise of old subset shares lets an attacker recompute the deterministic sub-shares.
 //! - **Confidentiality of share contributions**: Rounds 1-3 only broadcast hash commitments; Round
 //!   4 sub-shares travel privately (**caller must provide secure channel**).
 //! - **Cheating-dealer detection**: Old subset members cross-verify dealers' commitments; new
@@ -72,9 +77,13 @@
 //! };
 //! use rand::RngCore;
 //!
-//! // Generate fresh entropy for this party
+//! // Generate fresh entropy for this party's session-randomization contribution.
 //! let mut seed = [0u8; 32];
 //! rand::rngs::OsRng.fill_bytes(&mut seed);
+//!
+//! // Generate or receive a unique session nonce shared by this resharing session.
+//! let mut session_nonce = [0u8; 32];
+//! rand::rngs::OsRng.fill_bytes(&mut session_nonce);
 //!
 //! // Configure resharing
 //! let config = ResharingConfig::new(
@@ -83,11 +92,11 @@
 //!     new_threshold,
 //!     new_participants,
 //!     my_party_id,
-//!     my_private_share,  // None if joining as new party
+//!     public_key,
 //! )?;
 //!
-//! // Create and run the protocol with fresh entropy
-//! let mut protocol = ResharingProtocol::new(config, seed);
+//! // Old committee members pass Some(existing_share); new-only parties pass None.
+//! let mut protocol = ResharingProtocol::new(config, existing_share, seed, &session_nonce);
 //!
 //! loop {
 //!     match protocol.poke()? {
