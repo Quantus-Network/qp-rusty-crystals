@@ -11,8 +11,6 @@ categories = ["cryptography"]
 
 [dependencies]
 # Core dependencies
-rand = { workspace = true }
-rand_core = { workspace = true }
 zeroize = { workspace = true, features = ["alloc"] }
 
 # Logging (no_std compatible)
@@ -31,10 +29,11 @@ libm = { workspace = true }
 criterion = { workspace = true }
 hex = { workspace = true }
 hex-literal = { workspace = true }
+rand = { workspace = true }
 
 [features]
 default = ["std"]
-std = ["rand/std", "rand/std_rng", "zeroize/std"]
+std = ["zeroize/std"]
 
 [[bench]]
 name = "threshold_benchmarks"

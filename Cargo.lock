@@ -985,7 +985,6 @@ dependencies = [
  "log",
  "qp-rusty-crystals-dilithium",
  "rand 0.10.1",
- "rand_core 0.10.0",
  "zeroize",
 ]
 
