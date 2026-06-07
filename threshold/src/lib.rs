@@ -24,7 +24,7 @@
 //!
 //! // 1. Setup: Generate keys with a trusted dealer
 //! let config = ThresholdConfig::new(2, 3)?;  // 2-of-3 threshold
-//! let seed = [0u8; 32];  // Use a secure random seed!
+//! let seed: [u8; 32] = rand::random();  // Use cryptographically secure randomness!
 //! let (public_key, shares) = generate_with_dealer(&seed, config)?;
 //!
 //! // 2. Create signers (in practice, each party runs on a different machine)
@@ -35,12 +35,11 @@
 //! // 3. Round 1: Generate commitments (each party needs unique random seed)
 //! let r1_broadcasts: Vec<_> = signers.iter_mut()
 //!     .take(2)  // Only need t=2 parties
-//!     .enumerate()
-//!     .map(|(i, s)| {
-//!         let mut round1_seed = [0u8; 32];
-//!         // In production, use cryptographically secure randomness!
-//!         round1_seed[0] = i as u8;
-//!         s.round1_commit_with_seed(&round1_seed)
+//!     .map(|s| {
+//!         // CRITICAL: Use cryptographically secure randomness for round1_seed!
+//!         // Reusing seeds across sessions enables full key recovery.
+//!         let round1_seed: [u8; 32] = rand::random();
+//!         s.round1_commit_with_seed(&ssid, &round1_seed)
 //!     })
 //!     .collect::<Result<_, _>>()?;
 //!

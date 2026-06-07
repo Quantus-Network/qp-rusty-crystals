@@ -16,7 +16,7 @@
 //! use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig};
 //!
 //! let config = ThresholdConfig::new(2, 3)?;
-//! let seed = [0u8; 32]; // Use a cryptographically secure random seed!
+//! let seed: [u8; 32] = rand::random(); // Use cryptographically secure randomness!
 //!
 //! let (public_key, shares) = generate_with_dealer(&seed, config)?;
 //!

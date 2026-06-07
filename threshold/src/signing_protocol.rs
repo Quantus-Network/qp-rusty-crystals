@@ -1576,16 +1576,14 @@ mod tests {
 
 		// Try multiple times due to rejection sampling
 		let mut success = false;
-		for i in 0..100 {
+		for _ in 0..100 {
 			let signers: Vec<_> = shares
 				.iter()
 				.take(2)
 				.map(|s| ThresholdSigner::new(s.clone(), pk.clone(), config).unwrap())
 				.collect();
 
-			// Use a different seed for each attempt
-			let mut session_seed = [0u8; 32];
-			session_seed[0] = i as u8;
+			let session_seed: [u8; 32] = rand::random();
 			match run_local_signing(signers, message, context, &session_seed) {
 				Ok(signature) => {
 					// Verify the signature
@@ -1613,16 +1611,14 @@ mod tests {
 
 		// Try multiple times due to rejection sampling
 		let mut success = false;
-		for i in 0..100 {
+		for _ in 0..100 {
 			let signers: Vec<_> = shares
 				.iter()
 				.take(3)
 				.map(|s| ThresholdSigner::new(s.clone(), pk.clone(), config).unwrap())
 				.collect();
 
-			// Use a different seed for each attempt
-			let mut session_seed = [0u8; 32];
-			session_seed[0] = i as u8;
+			let session_seed: [u8; 32] = rand::random();
 			match run_local_signing(signers, message, context, &session_seed) {
 				Ok(signature) => {
 					assert!(
@@ -1886,15 +1882,14 @@ mod tests {
 
 		// Run a full signing protocol to get a valid signature
 		let mut valid_sig = None;
-		for attempt in 0..100 {
+		for _ in 0..100 {
 			let signers: Vec<_> = shares
 				.iter()
 				.take(2)
 				.map(|s| ThresholdSigner::new(s.clone(), pk.clone(), config).unwrap())
 				.collect();
 
-			let mut session_seed = [0u8; 32];
-			session_seed[0] = attempt as u8;
+			let session_seed: [u8; 32] = rand::random();
 
 			match run_local_signing(signers, &message, &context, &session_seed) {
 				Ok(sig) => {
@@ -2095,15 +2090,14 @@ mod tests {
 		// Run a full signing protocol to get a valid signature using run_local_signing
 		// Try multiple times due to rejection sampling
 		let mut valid_sig = None;
-		for attempt in 0..100 {
+		for _ in 0..100 {
 			let signers: Vec<_> = shares
 				.iter()
 				.take(2)
 				.map(|s| ThresholdSigner::new(s.clone(), pk.clone(), config).unwrap())
 				.collect();
 
-			let mut session_seed = [0u8; 32];
-			session_seed[0] = attempt as u8;
+			let session_seed: [u8; 32] = rand::random();
 
 			match run_local_signing(signers, &message, &context, &session_seed) {
 				Ok(sig) => {
