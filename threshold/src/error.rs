@@ -74,8 +74,6 @@ pub enum ThresholdError {
 		/// Party ID.
 		party_id: u32,
 	},
-	/// Random number generation failed.
-	RandomnessError,
 	/// Context too long (must be ≤ 255 bytes).
 	ContextTooLong {
 		/// Length provided.
@@ -214,13 +212,10 @@ impl fmt::Display for ThresholdError {
 			ThresholdError::InvalidPublicKeySize { expected, actual } => {
 				write!(f, "Invalid public key size: expected {}, got {}", expected, actual)
 			},
-			ThresholdError::CommitmentVerificationFailed { party_id } => {
-				write!(f, "Commitment verification failed for party {}", party_id)
-			},
-			ThresholdError::RandomnessError => {
-				write!(f, "Failed to generate random bytes")
-			},
-			ThresholdError::ContextTooLong { length } => {
+		ThresholdError::CommitmentVerificationFailed { party_id } => {
+			write!(f, "Commitment verification failed for party {}", party_id)
+		},
+		ThresholdError::ContextTooLong { length } => {
 				write!(f, "Context too long: {} bytes (max: 255)", length)
 			},
 			ThresholdError::CombinationFailed => {
