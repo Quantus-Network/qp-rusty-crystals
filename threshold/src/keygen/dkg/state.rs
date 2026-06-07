@@ -54,9 +54,9 @@ use crate::{
 use super::protocol::DkgError;
 
 use super::types::{
-	DkgConfig, Round1Broadcast, Round2Broadcast, Round3Broadcast,
-	Round4Broadcast, PartialPublicKey, SubsetContribution, SubsetMask, TranscriptSigner,
-	RANDOMNESS_SIZE, SHARED_SECRET_SIZE,
+	DkgConfig, PartialPublicKey, Round1Broadcast, Round2Broadcast, Round3Broadcast,
+	Round4Broadcast, SubsetContribution, SubsetMask, TranscriptSigner, RANDOMNESS_SIZE,
+	SHARED_SECRET_SIZE,
 };
 
 /// Current phase of the DKG protocol.

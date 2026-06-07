@@ -3082,7 +3082,8 @@ fn analyze_recovered_partials(threshold: u32, parties: u32, num_resharings: usiz
 	for signing_set in &signing_sets {
 		for &party_id in signing_set {
 			let share = current_shares.get(&party_id).expect("share exists");
-			if let Some((s1_coeffs, s2_coeffs)) = extract_recovered_coefficients(share, signing_set) {
+			if let Some((s1_coeffs, s2_coeffs)) = extract_recovered_coefficients(share, signing_set)
+			{
 				let mut stats = compute_partial_stats(&s1_coeffs, &s2_coeffs, nu);
 
 				// Count how many shares were summed (from sharing pattern)

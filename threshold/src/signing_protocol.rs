@@ -36,11 +36,11 @@
 //! the leader to silently reset all followers and re-run rounds 1-3 on the same
 //! protocol instance. That was removed because:
 //!
-//! 1. Threshold signatures are defined *without* session identifiers,
-//!    relying on each honest party's local state to enforce per-attempt freshness. In-protocol
-//!    retries on a single instance violate that assumption because the receiver's state machine has
-//!    no way to bind incoming rounds to "the current attempt" without an explicit session id, which
-//!    the wire format does not carry.
+//! 1. Threshold signatures are defined *without* session identifiers, relying on each honest
+//!    party's local state to enforce per-attempt freshness. In-protocol retries on a single
+//!    instance violate that assumption because the receiver's state machine has no way to bind
+//!    incoming rounds to "the current attempt" without an explicit session id, which the wire
+//!    format does not carry.
 //! 2. NEAR MPC already drives retries externally by allocating a fresh `ChannelId`, a fresh
 //!    `round1_seed`, and a fresh `DilithiumSignProtocol` per attempt (up to
 //!    `MAX_ATTEMPTS_PER_REQUEST_AS_LEADER`). Stale messages from a previous attempt are silently

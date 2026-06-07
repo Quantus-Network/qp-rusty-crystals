@@ -22,16 +22,14 @@ use crate::{
 
 use super::{
 	state::{
-		all_broadcasts_received, all_private_messages_received, DkgPhase, DkgOutput,
-		DkgState,
+		all_broadcasts_received, all_private_messages_received, DkgOutput, DkgPhase, DkgState,
 	},
 	types::{
 		compute_dkg_ssid, compute_partial_output_hash, compute_signing_message,
 		compute_transcript_hash, derive_subset_contribution, h_commit, h_commit_pk, h_keygen,
-		h_seed, DkgConfig, DkgMessage, Round1Broadcast, Round1Private,
-		Round2Broadcast, Round3Broadcast, Round4Broadcast, PartialPublicKey,
-		SubsetContribution, SubsetMask, TranscriptSigner, DKG_SSID_SIZE, RANDOMNESS_SIZE,
-		SHARED_SECRET_SIZE,
+		h_seed, DkgConfig, DkgMessage, PartialPublicKey, Round1Broadcast, Round1Private,
+		Round2Broadcast, Round3Broadcast, Round4Broadcast, SubsetContribution, SubsetMask,
+		TranscriptSigner, DKG_SSID_SIZE, RANDOMNESS_SIZE, SHARED_SECRET_SIZE,
 	},
 };
 
@@ -270,9 +268,7 @@ impl DkgMessageBuffer {
 	}
 
 	/// Take all buffered Round 1 private messages.
-	fn take_round1_privates(
-		&mut self,
-	) -> BTreeMap<(ParticipantId, SubsetMask), Round1Private> {
+	fn take_round1_privates(&mut self) -> BTreeMap<(ParticipantId, SubsetMask), Round1Private> {
 		mem::take(&mut self.round1_privates)
 	}
 
@@ -462,9 +458,11 @@ impl<S: TranscriptSigner> Dkg<S> {
 			DkgPhase::Round3 => self.process_round3(),
 			DkgPhase::Round4 => self.process_round4(),
 			DkgPhase::Complete => {
-				let output = self.state.output.as_ref().ok_or_else(|| {
-					DkgError::InvalidState("Complete but no output".into())
-				})?;
+				let output = self
+					.state
+					.output
+					.as_ref()
+					.ok_or_else(|| DkgError::InvalidState("Complete but no output".into()))?;
 				Ok(DkgAction::Return(output.clone()))
 			},
 			DkgPhase::Failed => {
@@ -635,9 +633,10 @@ impl<S: TranscriptSigner> Dkg<S> {
 						self.message_buffer.buffer_round1_private(private);
 					},
 					DkgPhase::Round1 => {
-						let config = self.state.config.as_ref().ok_or_else(|| {
-							DkgError::InvalidState("Round1 but no config".into())
-						})?;
+						let config =
+							self.state.config.as_ref().ok_or_else(|| {
+								DkgError::InvalidState("Round1 but no config".into())
+							})?;
 
 						// Verify subset_mask is a valid subset for this threshold config
 						// (prevents attacker from using fake subset masks)
@@ -858,9 +857,10 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// Drain buffered Round 1 messages into the protocol state.
 	/// Called after transitioning from Initialized to Round1.
 	fn drain_round1_buffer(&mut self) -> Result<(), DkgError> {
-		let config = self.state.config.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("drain_round1_buffer but no config".into())
-		})?;
+		let config =
+			self.state.config.as_ref().ok_or_else(|| {
+				DkgError::InvalidState("drain_round1_buffer but no config".into())
+			})?;
 
 		// Drain buffered Round 1 broadcasts
 		let buffered_broadcasts = self.message_buffer.take_round1_broadcasts();
@@ -933,17 +933,18 @@ impl<S: TranscriptSigner> Dkg<S> {
 				commitment: my_commitment,
 			};
 			let msg = DkgMessage::Round1Broadcast(broadcast);
-			let data =
-				borsh::to_vec(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
+			let data = borsh::to_vec(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
 			self.state.broadcast_sent = true;
 			return Ok(DkgAction::SendMany(data));
 		}
 
 		if !self.state.privates_sent {
 			let config = self.state.config.as_ref().unwrap(); // Safe: expect_round1 verified
-			let my_shared_secrets = self.state.my_shared_secrets.as_ref().ok_or_else(|| {
-				DkgError::InvalidState("Round1 but no shared secrets".into())
-			})?;
+			let my_shared_secrets = self
+				.state
+				.my_shared_secrets
+				.as_ref()
+				.ok_or_else(|| DkgError::InvalidState("Round1 but no shared secrets".into()))?;
 
 			for (&subset, &secret) in my_shared_secrets {
 				let parties = config.get_parties_in_subset(subset);
@@ -972,18 +973,20 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 		// Check if we have all required messages
 		let config = self.state.config.as_ref().unwrap(); // Safe: expect_round1 verified
-		let round1_broadcasts =
-			self.state.round1_broadcasts.as_ref().ok_or_else(|| {
-				DkgError::InvalidState("Round1 but no broadcasts map".into())
-			})?;
+		let round1_broadcasts = self
+			.state
+			.round1_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round1 but no broadcasts map".into()))?;
 		let received_shared_secrets =
 			self.state.received_shared_secrets.as_ref().ok_or_else(|| {
 				DkgError::InvalidState("Round1 but no received_shared_secrets".into())
 			})?;
-		let my_shared_secrets =
-			self.state.my_shared_secrets.as_ref().ok_or_else(|| {
-				DkgError::InvalidState("Round1 but no shared secrets".into())
-			})?;
+		let my_shared_secrets = self
+			.state
+			.my_shared_secrets
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round1 but no shared secrets".into()))?;
 
 		let all_broadcasts = all_broadcasts_received(
 			round1_broadcasts,
@@ -1006,9 +1009,11 @@ impl<S: TranscriptSigner> Dkg<S> {
 		self.state.expect_round1()?;
 
 		// Combine our shared secrets with received ones
-		let mut combined_secrets = self.state.my_shared_secrets.take().ok_or_else(|| {
-			DkgError::InvalidState("Round1 but no my_shared_secrets".into())
-		})?;
+		let mut combined_secrets = self
+			.state
+			.my_shared_secrets
+			.take()
+			.ok_or_else(|| DkgError::InvalidState("Round1 but no my_shared_secrets".into()))?;
 		if let Some(received) = self.state.received_shared_secrets.take() {
 			for (subset, secret) in received {
 				combined_secrets.insert(subset, secret);
@@ -1050,21 +1055,23 @@ impl<S: TranscriptSigner> Dkg<S> {
 				randomness: my_randomness,
 			};
 			let msg = DkgMessage::Round2Broadcast(broadcast);
-			let data =
-				borsh::to_vec(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
+			let data = borsh::to_vec(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
 			self.state.broadcast_sent = true;
 			return Ok(DkgAction::SendMany(data));
 		}
 
 		// Check if we have all broadcasts
 		let config = self.state.config.as_ref().unwrap(); // Safe: expect_round2 verified
-		let round2_broadcasts =
-			self.state.round2_broadcasts.as_ref().ok_or_else(|| {
-				DkgError::InvalidState("Round2 but no broadcasts map".into())
-			})?;
-		let round1_broadcasts = self.state.round1_broadcasts.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round2 but no round1_broadcasts".into())
-		})?;
+		let round2_broadcasts = self
+			.state
+			.round2_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round2 but no broadcasts map".into()))?;
+		let round1_broadcasts = self
+			.state
+			.round1_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round2 but no round1_broadcasts".into()))?;
 
 		let all_broadcasts = all_broadcasts_received(
 			round2_broadcasts,
@@ -1098,13 +1105,16 @@ impl<S: TranscriptSigner> Dkg<S> {
 			.state
 			.my_randomness
 			.ok_or_else(|| DkgError::InvalidState("Round2 but no randomness".into()))?;
-		let round2_broadcasts = self.state.round2_broadcasts.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round2 but no round2_broadcasts".into())
-		})?;
-		let shared_secrets =
-			self.state.shared_secrets.as_ref().ok_or_else(|| {
-				DkgError::InvalidState("Round2 but no shared_secrets".into())
-			})?;
+		let round2_broadcasts = self
+			.state
+			.round2_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round2 but no round2_broadcasts".into()))?;
+		let shared_secrets = self
+			.state
+			.shared_secrets
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round2 but no shared_secrets".into()))?;
 
 		// Compute global randomness from all parties' contributions
 		let (global_randomness, my_broadcast) =
@@ -1164,9 +1174,11 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 		if !self.state.broadcast_sent {
 			let config = self.state.config.as_ref().unwrap(); // Safe: expect_round3 verified
-			let my_pk_commitments = self.state.my_pk_commitments.as_ref().ok_or_else(|| {
-				DkgError::InvalidState("Round3 but no pk_commitments".into())
-			})?;
+			let my_pk_commitments = self
+				.state
+				.my_pk_commitments
+				.as_ref()
+				.ok_or_else(|| DkgError::InvalidState("Round3 but no pk_commitments".into()))?;
 
 			let broadcast = Round3Broadcast {
 				ssid: self.ssid,
@@ -1174,18 +1186,18 @@ impl<S: TranscriptSigner> Dkg<S> {
 				partial_pk_commitments: my_pk_commitments.clone(),
 			};
 			let msg = DkgMessage::Round3Broadcast(broadcast);
-			let data =
-				borsh::to_vec(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
+			let data = borsh::to_vec(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
 			self.state.broadcast_sent = true;
 			return Ok(DkgAction::SendMany(data));
 		}
 
 		// Check if we have all broadcasts
 		let config = self.state.config.as_ref().unwrap(); // Safe: expect_round3 verified
-		let round3_broadcasts =
-			self.state.round3_broadcasts.as_ref().ok_or_else(|| {
-				DkgError::InvalidState("Round3 but no broadcasts map".into())
-			})?;
+		let round3_broadcasts = self
+			.state
+			.round3_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round3 but no broadcasts map".into()))?;
 
 		let all_broadcasts = all_broadcasts_received(
 			round3_broadcasts,
@@ -1204,10 +1216,11 @@ impl<S: TranscriptSigner> Dkg<S> {
 	fn transition_to_round4(&mut self) -> Result<(), DkgError> {
 		let config = self.state.expect_round3()?;
 		let my_party_id = config.my_party_id; // Copy before mutable borrows
-		let my_pk_commitments =
-			self.state.my_pk_commitments.as_ref().ok_or_else(|| {
-				DkgError::InvalidState("Round3 but no pk_commitments".into())
-			})?;
+		let my_pk_commitments = self
+			.state
+			.my_pk_commitments
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round3 but no pk_commitments".into()))?;
 
 		let my_round3_broadcast = Round3Broadcast {
 			ssid: self.ssid,
@@ -1246,18 +1259,18 @@ impl<S: TranscriptSigner> Dkg<S> {
 			// Sign and broadcast our partial PKs
 			let broadcast = self.create_round4_broadcast()?;
 			let msg = DkgMessage::Round4Broadcast(broadcast);
-			let data =
-				borsh::to_vec(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
+			let data = borsh::to_vec(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
 			self.state.broadcast_sent = true;
 			return Ok(DkgAction::SendMany(data));
 		}
 
 		// Check if we have all broadcasts
 		let config = self.state.config.as_ref().unwrap(); // Safe: expect_round4 verified
-		let round4_broadcasts =
-			self.state.round4_broadcasts.as_ref().ok_or_else(|| {
-				DkgError::InvalidState("Round4 but no broadcasts map".into())
-			})?;
+		let round4_broadcasts = self
+			.state
+			.round4_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no broadcasts map".into()))?;
 
 		let all_broadcasts = all_broadcasts_received(
 			round4_broadcasts,
@@ -1303,36 +1316,50 @@ impl<S: TranscriptSigner> Dkg<S> {
 			.config
 			.as_ref()
 			.ok_or_else(|| DkgError::InvalidState("Round4 but no config".into()))?;
-		let round1_broadcasts = self.state.round1_broadcasts.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round4 but no round1_broadcasts".into())
-		})?;
-		let round2_broadcasts = self.state.round2_broadcasts.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round4 but no round2_broadcasts".into())
-		})?;
-		let round3_broadcasts = self.state.round3_broadcasts.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round4 but no round3_broadcasts".into())
-		})?;
-		let round4_broadcasts = self.state.round4_broadcasts.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round4 but no round4_broadcasts".into())
-		})?;
+		let round1_broadcasts = self
+			.state
+			.round1_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no round1_broadcasts".into()))?;
+		let round2_broadcasts = self
+			.state
+			.round2_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no round2_broadcasts".into()))?;
+		let round3_broadcasts = self
+			.state
+			.round3_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no round3_broadcasts".into()))?;
+		let round4_broadcasts = self
+			.state
+			.round4_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no round4_broadcasts".into()))?;
 		let rho = self
 			.state
 			.rho
 			.ok_or_else(|| DkgError::InvalidState("Round4 but no rho".into()))?;
-		let my_partial_pks =
-			self.state.my_partial_pks.as_ref().ok_or_else(|| {
-				DkgError::InvalidState("Round4 but no my_partial_pks".into())
-			})?;
-		let my_contributions = self.state.my_contributions.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round4 but no my_contributions".into())
-		})?;
-		let global_randomness = self.state.global_randomness.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round4 but no global_randomness".into())
-		})?;
-		let shared_secrets =
-			self.state.shared_secrets.as_ref().ok_or_else(|| {
-				DkgError::InvalidState("Round4 but no shared_secrets".into())
-			})?;
+		let my_partial_pks = self
+			.state
+			.my_partial_pks
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no my_partial_pks".into()))?;
+		let my_contributions = self
+			.state
+			.my_contributions
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no my_contributions".into()))?;
+		let global_randomness = self
+			.state
+			.global_randomness
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no global_randomness".into()))?;
+		let shared_secrets = self
+			.state
+			.shared_secrets
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no shared_secrets".into()))?;
 
 		let transcript_hash = compute_transcript_hash(
 			&self.ssid,
@@ -1371,16 +1398,20 @@ impl<S: TranscriptSigner> Dkg<S> {
 			.config
 			.as_ref()
 			.ok_or_else(|| DkgError::InvalidState("Round4 but no config".into()))?;
-		let round3_broadcasts = self.state.round3_broadcasts.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round4 but no round3_broadcasts".into())
-		})?;
+		let round3_broadcasts = self
+			.state
+			.round3_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no round3_broadcasts".into()))?;
 		let rho = self
 			.state
 			.rho
 			.ok_or_else(|| DkgError::InvalidState("Round4 but no rho".into()))?;
-		let my_contributions = self.state.my_contributions.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round4 but no my_contributions".into())
-		})?;
+		let my_contributions = self
+			.state
+			.my_contributions
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no my_contributions".into()))?;
 
 		for &subset in &config.my_subsets() {
 			let leader_id = config.get_leader(subset).ok_or_else(|| {
@@ -1414,10 +1445,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 					})?;
 
 				if *leader_commitment != expected_commitment {
-					return Err(DkgError::PkCommitmentMismatch {
-						party_id: leader_id,
-						subset,
-					});
+					return Err(DkgError::PkCommitmentMismatch { party_id: leader_id, subset });
 				}
 			}
 		}
@@ -1431,19 +1459,26 @@ impl<S: TranscriptSigner> Dkg<S> {
 			.config
 			.as_ref()
 			.ok_or_else(|| DkgError::InvalidState("Round4 but no config".into()))?;
-		let round1_broadcasts = self.state.round1_broadcasts.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round4 but no round1_broadcasts".into())
-		})?;
-		let round2_broadcasts = self.state.round2_broadcasts.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round4 but no round2_broadcasts".into())
-		})?;
-		let round3_broadcasts = self.state.round3_broadcasts.as_ref().ok_or_else(|| {
-			DkgError::InvalidState("Round4 but no round3_broadcasts".into())
-		})?;
-		let my_partial_pks =
-			self.state.my_partial_pks.as_ref().ok_or_else(|| {
-				DkgError::InvalidState("Round4 but no my_partial_pks".into())
-			})?;
+		let round1_broadcasts = self
+			.state
+			.round1_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no round1_broadcasts".into()))?;
+		let round2_broadcasts = self
+			.state
+			.round2_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no round2_broadcasts".into()))?;
+		let round3_broadcasts = self
+			.state
+			.round3_broadcasts
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no round3_broadcasts".into()))?;
+		let my_partial_pks = self
+			.state
+			.my_partial_pks
+			.as_ref()
+			.ok_or_else(|| DkgError::InvalidState("Round4 but no my_partial_pks".into()))?;
 
 		let transcript_hash = compute_transcript_hash(
 			&self.ssid,
@@ -1476,11 +1511,8 @@ fn compute_global_randomness<S: TranscriptSigner>(
 	received_broadcasts: &BTreeMap<ParticipantId, Round2Broadcast>,
 	my_randomness: [u8; RANDOMNESS_SIZE],
 ) -> (Vec<u8>, Round2Broadcast) {
-	let my_broadcast = Round2Broadcast {
-		ssid: *ssid,
-		party_id: config.my_party_id,
-		randomness: my_randomness,
-	};
+	let my_broadcast =
+		Round2Broadcast { ssid: *ssid, party_id: config.my_party_id, randomness: my_randomness };
 
 	let mut all_randomness: Vec<_> = received_broadcasts.iter().collect();
 	all_randomness.push((&config.my_party_id, &my_broadcast));
@@ -1652,9 +1684,9 @@ fn verify_party_broadcast<S: TranscriptSigner>(
 	}
 
 	// Verify PK commitments match Round 3
-	let round3 = round3_broadcasts.get(&party_id).ok_or_else(|| {
-		DkgError::MissingData(format!("missing Round 3 from party {}", party_id))
-	})?;
+	let round3 = round3_broadcasts
+		.get(&party_id)
+		.ok_or_else(|| DkgError::MissingData(format!("missing Round 3 from party {}", party_id)))?;
 
 	for (&subset, pk) in &broadcast.partial_public_keys {
 		// Skip invalid subsets (they will be filtered in collect_and_verify_all_partial_pks,
@@ -1998,8 +2030,7 @@ mod tests {
 		let public_keys: Vec<u32> = (0..3).collect();
 		let seed = [123u8; 32];
 
-		let outputs =
-			run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
+		let outputs = run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		for (party_id, output) in outputs.iter().enumerate() {
 			let shares = output.private_share.shares();
@@ -2115,8 +2146,7 @@ mod tests {
 		}
 
 		let seed = [56u8; 32];
-		let outputs =
-			run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
+		let outputs = run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		// Verify DKG succeeded
 		assert_eq!(outputs.len(), 3);
@@ -2285,9 +2315,9 @@ mod tests {
 		// Party 2's bad signature will be detected when other parties verify it in complete()
 
 		// At least one honest party should have received an error
-		let has_sig_error = errors.iter().any(|e| {
-			matches!(e, Some(DkgError::SignatureVerificationFailed { party_id: 2 }))
-		});
+		let has_sig_error = errors
+			.iter()
+			.any(|e| matches!(e, Some(DkgError::SignatureVerificationFailed { party_id: 2 })));
 
 		assert!(has_sig_error, "At least one honest party should reject party 2's bad signature");
 	}
@@ -2543,8 +2573,7 @@ mod tests {
 		let public_keys: Vec<u32> = (0..5).collect();
 		let seed = [45u8; 32];
 
-		let outputs =
-			run_local_dkg(3, 5, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
+		let outputs = run_local_dkg(3, 5, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		assert_eq!(outputs.len(), 5);
 
@@ -2591,8 +2620,7 @@ mod tests {
 		let public_keys: Vec<u32> = (0..3).collect();
 		let seed = [77u8; 32];
 
-		let outputs =
-			run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
+		let outputs = run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		// For 2-of-3: subsets are {0,1}=0b011, {0,2}=0b101, {1,2}=0b110
 
@@ -3224,8 +3252,7 @@ mod tests {
 		assert!(buffer_count >= 1, "At least one message should be buffered, got {}", buffer_count);
 
 		// Create a different Round 2 broadcast from party 2
-		let round2_broadcast2 =
-			Round2Broadcast { ssid, party_id: 2, randomness: [99u8; 32] };
+		let round2_broadcast2 = Round2Broadcast { ssid, party_id: 2, randomness: [99u8; 32] };
 		let round2_msg2 = DkgMessage::Round2Broadcast(round2_broadcast2);
 		let round2_data2 = borsh::to_vec(&round2_msg2).unwrap();
 
@@ -3308,11 +3335,8 @@ mod tests {
 		assert!(dkgs[0].state.phase == DkgPhase::Round2, "Party 0 should be in Round 2");
 
 		// Now try to send a Round 1 message to party 0 (it's already past Round 1)
-		let late_round1 = Round1Broadcast {
-			ssid: TEST_SESSION_NONCE,
-			party_id: 1,
-			commitment: [77u8; 32],
-		};
+		let late_round1 =
+			Round1Broadcast { ssid: TEST_SESSION_NONCE, party_id: 1, commitment: [77u8; 32] };
 		let late_msg = DkgMessage::Round1Broadcast(late_round1);
 		let late_data = borsh::to_vec(&late_msg).unwrap();
 
@@ -3454,8 +3478,7 @@ mod tests {
 
 		// Send many Round 2 messages from the same party
 		for i in 0..100 {
-			let round2_broadcast =
-				Round2Broadcast { ssid, party_id: 1, randomness: [i as u8; 32] };
+			let round2_broadcast = Round2Broadcast { ssid, party_id: 1, randomness: [i as u8; 32] };
 			let round2_msg = DkgMessage::Round2Broadcast(round2_broadcast);
 			let round2_data = borsh::to_vec(&round2_msg).unwrap();
 			dkg.message(1, round2_data).unwrap();
@@ -4032,11 +4055,8 @@ mod tests {
 		assert!(matches!(action, DkgAction::SendMany(_)));
 
 		// Now we're in Round 1. Try to inject a message from a non-participant (party 99)
-		let fake_broadcast = Round1Broadcast {
-			ssid: TEST_SESSION_NONCE,
-			party_id: 99,
-			commitment: [0u8; 32],
-		};
+		let fake_broadcast =
+			Round1Broadcast { ssid: TEST_SESSION_NONCE, party_id: 99, commitment: [0u8; 32] };
 		let fake_msg = DkgMessage::Round1Broadcast(fake_broadcast);
 		let fake_data = borsh::to_vec(&fake_msg).unwrap();
 
@@ -4111,11 +4131,8 @@ mod tests {
 		assert!(matches!(action, DkgAction::SendMany(_)));
 
 		// Try to send a message "from" ourselves (party 0)
-		let self_broadcast = Round1Broadcast {
-			ssid: TEST_SESSION_NONCE,
-			party_id: 0,
-			commitment: [42u8; 32],
-		};
+		let self_broadcast =
+			Round1Broadcast { ssid: TEST_SESSION_NONCE, party_id: 0, commitment: [42u8; 32] };
 		let self_msg = DkgMessage::Round1Broadcast(self_broadcast);
 		let self_data = borsh::to_vec(&self_msg).unwrap();
 
@@ -4332,8 +4349,7 @@ mod tests {
 			pk_map.clone(),
 		)
 		.unwrap();
-		let mut dkg1: Dkg<TestSigner> =
-			Dkg::new(config.clone(), seed, &TEST_SESSION_NONCE);
+		let mut dkg1: Dkg<TestSigner> = Dkg::new(config.clone(), seed, &TEST_SESSION_NONCE);
 
 		// Get the computed SSID for use in test messages
 		let ssid = *dkg1.ssid();
@@ -4423,8 +4439,7 @@ mod tests {
 			pk_map.clone(),
 		)
 		.unwrap();
-		let mut dkg1: Dkg<TestSigner> =
-			Dkg::new(config.clone(), seed, &TEST_SESSION_NONCE);
+		let mut dkg1: Dkg<TestSigner> = Dkg::new(config.clone(), seed, &TEST_SESSION_NONCE);
 
 		// Get the computed SSID for use in test messages
 		let ssid = *dkg1.ssid();

@@ -758,14 +758,9 @@ mod tests {
 		public_keys.insert(1, 1u32);
 		public_keys.insert(2, 2u32);
 
-		let config: DkgConfig<TestSigner> = DkgConfig::new(
-			threshold_config,
-			0,
-			vec![0, 1, 2],
-			TestSigner { id: 0 },
-			public_keys,
-		)
-		.unwrap();
+		let config: DkgConfig<TestSigner> =
+			DkgConfig::new(threshold_config, 0, vec![0, 1, 2], TestSigner { id: 0 }, public_keys)
+				.unwrap();
 
 		assert!(config.is_leader(0b011));
 		assert!(config.is_leader(0b101));
@@ -828,14 +823,9 @@ mod tests {
 		public_keys.insert(1, 1u32);
 		public_keys.insert(2, 2u32);
 
-		let config: DkgConfig<TestSigner> = DkgConfig::new(
-			threshold_config,
-			0,
-			vec![0, 1, 2],
-			TestSigner { id: 0 },
-			public_keys,
-		)
-		.unwrap();
+		let config: DkgConfig<TestSigner> =
+			DkgConfig::new(threshold_config, 0, vec![0, 1, 2], TestSigner { id: 0 }, public_keys)
+				.unwrap();
 
 		// For 2-of-3: k = 3 - 2 + 1 = 2, so valid subsets have exactly 2 members
 		// Valid subsets: 0b011, 0b101, 0b110

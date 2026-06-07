@@ -126,10 +126,9 @@ mod state;
 mod types;
 
 // Re-export public types
-pub use protocol::{run_local_dkg, DkgAction, Dkg, DkgError};
+pub use protocol::{run_local_dkg, Dkg, DkgAction, DkgError};
 pub use state::{
-	all_broadcasts_received, all_private_messages_received, DkgPhase, DkgOutput,
-	DkgState,
+	all_broadcasts_received, all_private_messages_received, DkgOutput, DkgPhase, DkgState,
 };
 pub use types::{
 	compute_dkg_ssid,
@@ -146,12 +145,12 @@ pub use types::{
 	DkgConfig,
 	// Message types
 	DkgMessage,
+	PartialPublicKey,
 	Round1Broadcast,
 	Round1Private,
 	Round2Broadcast,
 	Round3Broadcast,
 	Round4Broadcast,
-	PartialPublicKey,
 	// Core types
 	SubsetContribution,
 	SubsetMask,
@@ -245,8 +244,7 @@ mod tests {
 		let public_keys: Vec<u32> = (0..3).collect();
 		let seed = [123u8; 32];
 
-		let outputs =
-			run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
+		let outputs = run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE).unwrap();
 
 		for (party_id, output) in outputs.iter().enumerate() {
 			let shares = output.private_share.shares();

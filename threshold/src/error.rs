@@ -212,10 +212,10 @@ impl fmt::Display for ThresholdError {
 			ThresholdError::InvalidPublicKeySize { expected, actual } => {
 				write!(f, "Invalid public key size: expected {}, got {}", expected, actual)
 			},
-		ThresholdError::CommitmentVerificationFailed { party_id } => {
-			write!(f, "Commitment verification failed for party {}", party_id)
-		},
-		ThresholdError::ContextTooLong { length } => {
+			ThresholdError::CommitmentVerificationFailed { party_id } => {
+				write!(f, "Commitment verification failed for party {}", party_id)
+			},
+			ThresholdError::ContextTooLong { length } => {
 				write!(f, "Context too long: {} bytes (max: 255)", length)
 			},
 			ThresholdError::CombinationFailed => {

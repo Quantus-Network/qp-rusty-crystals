@@ -302,8 +302,8 @@ pub(crate) fn generate_round1(
 		fips202::shake256_squeeze(&mut iter_rho_prime, &mut state);
 
 		// Sample from hyperball using threshold parameters
-		let (_, r_prime, nu) =
-			get_hyperball_params(config.threshold(), config.total_parties()).ok_or_else(|| {
+		let (_, r_prime, nu) = get_hyperball_params(config.threshold(), config.total_parties())
+			.ok_or_else(|| {
 				ThresholdError::InvalidConfiguration(alloc::format!(
 					"No hyperball parameters for ({}, {}) configuration",
 					config.threshold(),
@@ -395,7 +395,7 @@ fn pack_w_dilithium(w: &polyvec::Polyveck, buf: &mut [u8]) {
 ///
 /// Returns `Some((r, r_prime, nu))` where:
 /// - `r` is the rejection sampling radius
-/// - `r_prime` is the hyperball sampling radius  
+/// - `r_prime` is the hyperball sampling radius
 /// - `nu` is the scaling factor (7 for ML-DSA-87)
 ///
 /// Returns `None` if the configuration doesn't have pre-computed parameters.
