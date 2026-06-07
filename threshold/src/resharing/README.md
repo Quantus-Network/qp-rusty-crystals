@@ -76,9 +76,9 @@ Round 2 entropy reveals are part of the public transcript. After Round 2, the `s
 
 3. **Public Session Seed Derivation**: The session seed is computed as:
    ```
-   session_seed = SHAKE256("resharing-session-seed-v1" || party_id_1 || entropy_1 || party_id_2 || entropy_2 || ...)
+   session_seed = SHAKE256("resharing-session-seed-v1" || ssid || party_id_1 || entropy_1 || party_id_2 || entropy_2 || ...)
    ```
-   where parties are processed in sorted order by ID.
+   where parties are processed in sorted order by ID. The SSID is included so that even if parties accidentally reuse entropy seeds across different resharing sessions, the session seed (and thus sub-share derivation) will differ.
 
 4. **PRF Mixing**: The public session seed is mixed into the PRF that derives sub-shares:
    ```
@@ -95,7 +95,7 @@ Before Round 2 reveals are known, an attacker cannot predict the session seed un
 |----------|-----------|
 | **Secrecy of `s`** | No party — not even any dealer — ever holds `s` in clear. Each `D_I` only handles `s_I^old`, which they already had. |
 | **Replay protection** | Every message carries an SSID derived from the old/new committees, public key, and session nonce. Messages with a mismatched SSID are ignored. |
-| **Session randomization** | Session seed incorporates fresh entropy from all old committee members via commit-reveal, so fresh sessions produce different deterministic sub-share splits. This does not provide post-compromise forward secrecy once the transcript is recorded. |
+| **Session randomization** | Session seed incorporates the SSID and fresh entropy from all old committee members via commit-reveal, so different sessions produce different deterministic sub-share splits even if entropy is accidentally reused. This does not provide post-compromise forward secrecy once the transcript is recorded. |
 | **Confidentiality of contributions** | Rounds 1-3, 5 broadcast only hash commitments; Round 4 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
 | **Cheating-dealer detection** | New-subset members cross-verify computed `s_J^new` against broadcast commitments, and a final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching a malicious dealer even when their old subset has size 1. If any verification fails, the protocol aborts. |
 | **PK Preservation** | Public key `t = A·s1 + s2` unchanged, verified at the end of Round 5 via a deterministic byte-equality check against the original PK. |

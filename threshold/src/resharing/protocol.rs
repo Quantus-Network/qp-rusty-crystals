@@ -657,13 +657,16 @@ impl ResharingProtocol {
 			}
 		}
 
-		// Compute session seed: SHAKE256("resharing-session-seed-v1" || party_id_1 || entropy_1 ||
-		// ...) Process parties in sorted order for determinism
+		// Compute session seed: SHAKE256("resharing-session-seed-v1" || ssid || party_id_1 ||
+		// entropy_1 || ...). The SSID is included so that even if parties reuse entropy seeds
+		// across different resharing sessions, the session_seed (and thus the sub-share
+		// derivation) will differ. Process parties in sorted order for determinism.
 		let mut sorted_parties: Vec<_> = self.round2_entropy_reveals.iter().collect();
 		sorted_parties.sort_by_key(|(party_id, _)| *party_id);
 
 		let mut state = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut state, SESSION_SEED_DOMAIN);
+		fips202::shake256_absorb(&mut state, &self.ssid);
 		for (&party_id, entropy) in &sorted_parties {
 			fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
 			fips202::shake256_absorb(&mut state, *entropy);
