@@ -140,7 +140,7 @@ pub use types::{
 	compute_resharing_ssid, NewShareData, ResharingConfig, ResharingMessage, ResharingOutput,
 	ResharingRole, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
 	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast, SubsetMask,
-	SubsetPair, ENTROPY_SIZE, RESHARING_SSID_SIZE,
+	SubsetPair, ENTROPY_SIZE, RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
 };
 
 pub use protocol::{Action, ResharingProtocol, ResharingProtocolError, ResharingState};

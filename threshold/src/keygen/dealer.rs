@@ -65,6 +65,25 @@ use crate::{
 /// - The seed is securely erased
 /// - Each share is only accessible to its designated party
 /// - The dealer does not retain copies of any shares
+///
+/// # Coefficient Distribution
+///
+/// The reconstructed secret `s = (s1, s2)` is the sum of `C(n, n-t+1)` independent
+/// η-bounded shares (η=2 for ML-DSA-87). This produces a wider coefficient distribution
+/// than standard ML-DSA's single η-bounded secret:
+///
+/// - **Individual shares**: Each RSS subset share has η-bounded coefficients in `[-2, 2]`
+/// - **Recovered partial**: Sum of up to `C(n, n-t+1)` shares, e.g., 10 subsets for 3-of-5
+/// - **Distribution**: Approximately Gaussian with σ ≈ √(2·m·(m-1)) where m = #subsets
+///
+/// This coefficient growth is intrinsic to the Replicated Secret Sharing (RSS) design
+/// and cannot be exploited by malicious participants: each subset share is derived
+/// deterministically via `H_keygen(S, K_S, R)` using `uniform_eta`, guaranteeing
+/// η-bounded coefficients regardless of adversarial input.
+///
+/// The hyperball sampling parameters are pre-computed to accommodate this wider
+/// distribution with substantial safety margins (>99% headroom in tested configurations).
+/// See `protocol::signing::get_hyperball_params` for the configuration-specific parameters.
 pub fn generate_with_dealer(
 	seed: &[u8; 32],
 	config: ThresholdConfig,

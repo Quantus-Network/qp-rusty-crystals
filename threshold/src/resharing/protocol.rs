@@ -50,7 +50,7 @@ use super::types::{
 	compute_resharing_ssid, NewShareData, ResharingConfig, ResharingMessage, ResharingOutput,
 	ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal, ResharingRound3Broadcast,
 	ResharingRound4Message, ResharingRound5Broadcast, SubsetMask, SubsetPair, COMMITMENT_HASH_SIZE,
-	ENTROPY_SIZE, RESHARING_SSID_SIZE,
+	ENTROPY_SIZE, RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
 };
 
 /// Domain separator for the per-subset PRF seed (includes public session seed for randomization).
@@ -1129,6 +1129,22 @@ impl ResharingProtocol {
 						reason: format!("did not deliver r_{{{:b}->{:b}}}", i_mask, j_mask),
 					}
 				})?;
+
+				// Check coefficient bounds to defend against malicious dealers injecting
+				// large coefficients that could push signing partials beyond hyperball bounds.
+				if !r.coefficients_within_bound(SUBSHARE_COEFF_BOUND) {
+					return Err(ResharingProtocolError::DealerDeliveryFailed {
+						dealer,
+						reason: format!(
+							"r_{{{:b}->{:b}}} has coefficient exceeding bound {} (max: {})",
+							i_mask,
+							j_mask,
+							SUBSHARE_COEFF_BOUND,
+							r.max_abs_coefficient()
+						),
+					});
+				}
+
 				let expected_commit = commit_subshare(i_mask, j_mask, r);
 				let dealer_commit =
 					dealer_r3.commitments.get(&(i_mask, j_mask)).ok_or_else(|| {
@@ -1956,5 +1972,71 @@ mod tests {
 		let err = ResharingProtocolError::InsufficientParties { required: 3, received: 2 };
 		assert!(err.to_string().contains("3"));
 		assert!(err.to_string().contains("2"));
+	}
+
+	#[test]
+	fn test_new_share_data_coefficients_within_bound() {
+		let mut share = NewShareData::new();
+		// All zeros - should pass any positive bound
+		assert!(share.coefficients_within_bound(1));
+		assert!(share.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+
+		// Set one coefficient to exactly the bound
+		share.s1[0][0] = SUBSHARE_COEFF_BOUND;
+		assert!(share.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+		assert!(!share.coefficients_within_bound(SUBSHARE_COEFF_BOUND - 1));
+
+		// Set one coefficient to exceed the bound
+		share.s1[0][0] = SUBSHARE_COEFF_BOUND + 1;
+		assert!(!share.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+
+		// Negative coefficients
+		share.s1[0][0] = -SUBSHARE_COEFF_BOUND;
+		assert!(share.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+		share.s1[0][0] = -SUBSHARE_COEFF_BOUND - 1;
+		assert!(!share.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+	}
+
+	#[test]
+	fn test_new_share_data_max_abs_coefficient() {
+		let mut share = NewShareData::new();
+		assert_eq!(share.max_abs_coefficient(), 0);
+
+		share.s1[0][0] = 100;
+		assert_eq!(share.max_abs_coefficient(), 100);
+
+		share.s2[3][128] = -200;
+		assert_eq!(share.max_abs_coefficient(), 200);
+
+		share.s1[L - 1][N as usize - 1] = 500;
+		assert_eq!(share.max_abs_coefficient(), 500);
+	}
+
+	#[test]
+	fn test_honest_subshares_within_bound() {
+		// Verify that honestly-derived sub-shares are well within the coefficient bound
+		let s = SecretShareData { s1: [[100i32; N as usize]; L], s2: [[50i32; N as usize]; K] };
+		let new_subsets = generate_subset_masks(3, 2);
+		let session_seed = [42u8; 32];
+		let subshares = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+
+		for (i, share) in subshares.iter().enumerate() {
+			let max_coeff = share.max_abs_coefficient();
+			assert!(
+				share.coefficients_within_bound(SUBSHARE_COEFF_BOUND),
+				"Honestly-derived subshare {} has max coeff {} exceeding bound {}",
+				i,
+				max_coeff,
+				SUBSHARE_COEFF_BOUND
+			);
+			// For input coefficients of ~100 and m=3, expected max is ~35 + noise ≈ 40
+			// Should be well under 100, let alone 500
+			assert!(
+				max_coeff < 100,
+				"Subshare {} has unexpectedly large max coeff {}",
+				i,
+				max_coeff
+			);
+		}
 	}
 }

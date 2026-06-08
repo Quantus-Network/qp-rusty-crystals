@@ -28,6 +28,23 @@ pub const ENTROPY_SIZE: usize = 32;
 /// Size of session identifier (SSID) in bytes.
 pub const RESHARING_SSID_SIZE: usize = 32;
 
+/// Maximum absolute value for sub-share coefficients in resharing.
+///
+/// This bound defends against malicious dealers who might inject arbitrarily large
+/// coefficients into `r_{I→J}` sub-shares. While the PK preservation check ensures
+/// `Σ_J r_{I→J} ≡ s_I^old (mod Q)`, it does not prevent large individual coefficients
+/// that could push recovered signing partials beyond hyperball bounds.
+///
+/// The bound is derived from honest behavior analysis:
+/// - For input coefficient `c` split across `m` new subsets: base = `|c|/m`
+/// - Plus pairwise noise: `(m-1) * η` where η=2
+/// - Post-resharing coefficients typically |coeff| < 150 (4σ bound for 4-of-6)
+/// - For m=20 (4-of-6): max honest sub-share ≈ 150/20 + 19*2 ≈ 46
+///
+/// Bound of 500 provides ~10x margin over expected honest behavior while catching
+/// attacks that could compromise hyperball security (e.g., injecting Q/2 ≈ 4.2M).
+pub const SUBSHARE_COEFF_BOUND: i32 = 500;
+
 /// Domain separator for SSID computation.
 const DOMAIN_RESHARING_SSID: &[u8] = b"RESHARING_SSID_V1";
 
@@ -597,11 +614,19 @@ pub struct ResharingRound4Message {
 impl fmt::Debug for ResharingRound4Message {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("ResharingRound4Message")
-			.field("ssid", &format_args!("[{:02x}{:02x}{:02x}{:02x}...]", 
-				self.ssid[0], self.ssid[1], self.ssid[2], self.ssid[3]))
+			.field(
+				"ssid",
+				&format_args!(
+					"[{:02x}{:02x}{:02x}{:02x}...]",
+					self.ssid[0], self.ssid[1], self.ssid[2], self.ssid[3]
+				),
+			)
 			.field("from_party_id", &self.from_party_id)
 			.field("to_party_id", &self.to_party_id)
-			.field("contributions", &format_args!("<{} entries, REDACTED>", self.contributions.len()))
+			.field(
+				"contributions",
+				&format_args!("<{} entries, REDACTED>", self.contributions.len()),
+			)
 			.finish()
 	}
 }
@@ -619,6 +644,46 @@ impl NewShareData {
 	/// Create a new empty share data (all zeros).
 	pub fn new() -> Self {
 		Self { s1: [[0i32; N as usize]; L], s2: [[0i32; N as usize]; K] }
+	}
+
+	/// Check if all coefficients are within the allowed bound.
+	///
+	/// Returns `true` if all coefficients satisfy `|coeff| <= bound`.
+	/// This is used to reject malicious sub-shares with excessively large coefficients.
+	pub fn coefficients_within_bound(&self, bound: i32) -> bool {
+		for poly in &self.s1 {
+			for &coeff in poly {
+				if coeff.abs() > bound {
+					return false;
+				}
+			}
+		}
+		for poly in &self.s2 {
+			for &coeff in poly {
+				if coeff.abs() > bound {
+					return false;
+				}
+			}
+		}
+		true
+	}
+
+	/// Find the maximum absolute coefficient value.
+	///
+	/// Useful for debugging and diagnostics.
+	pub fn max_abs_coefficient(&self) -> i32 {
+		let mut max_abs = 0i32;
+		for poly in &self.s1 {
+			for &coeff in poly {
+				max_abs = max_abs.max(coeff.abs());
+			}
+		}
+		for poly in &self.s2 {
+			for &coeff in poly {
+				max_abs = max_abs.max(coeff.abs());
+			}
+		}
+		max_abs
 	}
 }
 
@@ -645,8 +710,8 @@ impl Default for NewShareData {
 ///    `t_J^new = A·s1_J^new + s2_J^new mod Q` for every new subset `J` it belongs to. Anyone can
 ///    sum these `t_J` and check that the result reconstructs the original public key. This catches
 ///    a malicious dealer that lies about the residual `r_{I→J}` in a *size-1* old subset (`t = n`
-///    configurations), where there is no other old-subset member to cross-verify.
-///    Publishing `t_J^new` is safe: recovering `s_J^new` from `t_J^new` is the LWE problem.
+///    configurations), where there is no other old-subset member to cross-verify. Publishing
+///    `t_J^new` is safe: recovering `s_J^new` from `t_J^new` is the LWE problem.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound5Broadcast {
 	/// Session identifier binding this message to the resharing session.
