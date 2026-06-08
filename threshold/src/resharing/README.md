@@ -40,8 +40,7 @@ Round 3: Per-Subset Commitments
 │   deterministically derives bounded sub-shares r_{I→J} for every new subset J such that
 │   Σ_J r_{I→J} = s_I^old. The derivation incorporates the public session seed for
 │   per-session randomization.
-└── D_I broadcasts H(r_{I→J}) for each (I, J). Members of I can independently
-    recompute the same r_{I→J} from s_I^old and verify D_I's commitments.
+└── D_I broadcasts H(r_{I→J}) for each (I, J).
 
 Round 4: Private Sub-Share Reveal (⚠️ REQUIRES SECURE CHANNEL)
 ├── D_I privately delivers r_{I→J} to each member of new subset J.
@@ -50,12 +49,11 @@ Round 4: Private Sub-Share Reveal (⚠️ REQUIRES SECURE CHANNEL)
 Round 5: Verification + Public-Key Invariant
 ├── Each new party verifies received r_{I→J} against the Round 3 commitment, then
 │   sums s_J^new = Σ_I r_{I→J} for each new subset J they're in, and broadcasts
-│   a commitment to s_J^new so that the membership of J can cross-verify.
+│   a commitment to s_J^new so that other members of J can cross-verify.
 ├── Each new party also broadcasts t_J^new = A·s1_J^new + s2_J^new (mod Q) for
 │   every J they hold. After Round 5, anyone can sum these and confirm
 │   Σ_J t_J^new = T (the original public key). This catches a malicious dealer
-│   that owns a *size-1* old subset (e.g. t = n configurations), where there is
-│   no other I-member to cross-verify the dealer's commitments.
+│   even when their old subset has size 1.
 └── If any verification fails, the protocol aborts. (No blame attribution is
     attempted since it's not always possible to identify the misbehaving party.)
 ```
