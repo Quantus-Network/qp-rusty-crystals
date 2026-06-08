@@ -424,9 +424,7 @@ mod tests {
 				.collect();
 
 			// Try to combine signature (may fail due to rejection sampling)
-			if let Ok(signature) =
-				signers[0].combine_with_message(message, context, &r2_broadcasts, &r3_broadcasts)
-			{
+			if let Ok(signature) = signers[0].combine(&r2_broadcasts, &r3_broadcasts) {
 				// Verify signature
 				assert!(
 					verify_signature(&public_key, message, context, &signature),

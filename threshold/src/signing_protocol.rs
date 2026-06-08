@@ -935,12 +935,7 @@ impl DilithiumSignProtocol {
 				let r2_vec: Vec<Round2Broadcast> = self.r2_broadcasts.values().cloned().collect();
 				let r3_vec: Vec<Round3Broadcast> = self.r3_broadcasts.values().cloned().collect();
 
-				match self.signer.combine_with_message(
-					&self.message,
-					&self.context,
-					&r2_vec,
-					&r3_vec,
-				) {
+				match self.signer.combine(&r2_vec, &r3_vec) {
 					Ok(signature) => {
 						// Success! Broadcast signature to all parties
 						let r4 = Round4Broadcast {
@@ -1137,7 +1132,7 @@ impl DilithiumSignProtocol {
 			SigningMessage::Round3(r3) => {
 				// Accept Round 3 messages during Round 3 waiting or later.
 				// The Round 3 response is implicitly bound to the same attempt's Round 1
-				// and Round 2 because it's verified during combine_with_message against
+				// and Round 2 because it's verified during combine() against
 				// the aggregated commitments (which only validate if r3 was computed
 				// from the same c = SampleInBall(H(mu || HighBits(w))) the honest party
 				// derived from the now-fixed r2_broadcasts in this instance).
@@ -2283,7 +2278,7 @@ mod tests {
 		);
 	}
 
-	/// A leader whose `combine_with_message` fails must surface that as a hard
+	/// A leader whose `combine()` fails must surface that as a hard
 	/// error and transition to `Failed`. There is no in-protocol retry; the
 	/// caller is expected to spawn a fresh DilithiumSignProtocol instance to
 	/// retry, on a fresh transport channel.
