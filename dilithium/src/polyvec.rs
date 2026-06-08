@@ -1,11 +1,11 @@
 use crate::{params, poly, poly::Poly};
 use core::{array, mem::swap};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const K: usize = params::K;
 const L: usize = params::L;
 
-#[derive(Clone, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct Polyveck {
 	pub vec: [Poly; K],
 }
@@ -16,7 +16,7 @@ impl Default for Polyveck {
 	}
 }
 
-#[derive(Clone, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct Polyvecl {
 	pub vec: [Poly; L],
 }

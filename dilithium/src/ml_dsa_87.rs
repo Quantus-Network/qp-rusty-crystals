@@ -131,7 +131,7 @@ impl fmt::Debug for Keypair {
 /// which makes the duplication of secret material visible at every call site.
 #[derive(ZeroizeOnDrop)]
 pub struct SecretKey {
-	pub bytes: [u8; SECRETKEYBYTES],
+	bytes: [u8; SECRETKEYBYTES],
 }
 
 impl SecretKey {

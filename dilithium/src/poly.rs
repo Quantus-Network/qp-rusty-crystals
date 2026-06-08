@@ -1,11 +1,11 @@
 use crate::{fips202, ntt, params, reduce, rounding};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 const N: usize = params::N as usize;
 const UNIFORM_NBLOCKS: usize = (767 + fips202::SHAKE128_RATE) / fips202::SHAKE128_RATE;
 const D_SHL: i32 = 1 << (params::D - 1);
 
 /// Represents a polynomial
-#[derive(Clone, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct Poly {
 	pub coeffs: [i32; N],
 }

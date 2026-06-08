@@ -1,0 +1,329 @@
+//! Tests for `ThresholdSigner` state machine behavior.
+//!
+//! These tests verify the signer's state transitions and error handling.
+//! End-to-end signing tests are in `integration_tests.rs`.
+//! Key generation tests are in the `keygen/dealer.rs` module.
+
+use qp_rusty_crystals_threshold::{
+	compute_ssid, generate_with_dealer, ParticipantList, Round1Broadcast, Round2Broadcast,
+	ThresholdConfig, ThresholdSigner,
+};
+
+/// Test SSID for state machine tests (all parties use same SSID).
+const TEST_SSID: [u8; 32] = [0xCC; 32];
+
+/// Helper to create test signers for state machine tests.
+fn create_test_signer() -> ThresholdSigner {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("key generation");
+	ThresholdSigner::new(shares[0].clone(), public_key, config).expect("signer creation")
+}
+
+/// Test Round 1 commitment generation produces valid output.
+#[test]
+fn test_round1_commit() {
+	let mut signer = create_test_signer();
+	let seed = [0xAAu8; 32];
+
+	let r1 = signer.round1_commit_with_seed(&seed, &TEST_SSID).expect("round1");
+
+	assert_eq!(r1.party_id, 0);
+	assert_eq!(r1.commitment_hash.len(), 32);
+}
+
+/// Test state machine enforcement - can't call round2 before round1.
+#[test]
+fn test_state_machine_round2_before_round1() {
+	let mut signer = create_test_signer();
+
+	let result = signer.round2_reveal(&TEST_SSID, b"message", b"context", &[]);
+	assert!(result.is_err(), "round2 should fail without prior round1");
+}
+
+/// Test state machine enforcement - can't call round1 twice.
+#[test]
+fn test_state_machine_round1_twice() {
+	let mut signer = create_test_signer();
+	let seed = [0xAAu8; 32];
+
+	let _r1 = signer.round1_commit_with_seed(&seed, &TEST_SSID).expect("round1");
+
+	let result = signer.round1_commit_with_seed(&seed, &TEST_SSID);
+	assert!(result.is_err(), "round1 should fail when called twice");
+}
+
+/// Test that tampering with Round 2 commitment data is detected (HQ2).
+///
+/// This test verifies the fix for the rushing adversary attack where a malicious
+/// party could alter their commitment data after seeing others' commitments.
+#[test]
+fn test_commitment_tampering_detected() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("key generation");
+
+	// Create signers for exactly threshold (2) parties - parties 0 and 1
+	let mut signers: Vec<_> = shares
+		.iter()
+		.take(2) // Only use threshold parties
+		.map(|share| ThresholdSigner::new(share.clone(), public_key.clone(), config).unwrap())
+		.collect();
+
+	let message = b"test message";
+	let context = b"test context";
+
+	// Compute SSID for this signing session
+	let participants = vec![0u32, 1u32];
+	let participant_list = ParticipantList::new(&participants).unwrap();
+	let attempt_nonce = [0xDD; 32];
+	let ssid = compute_ssid(&public_key, 2, 3, &participant_list, message, context, &attempt_nonce);
+
+	// Round 1: Both parties generate commitments (each with unique seed)
+	let r1_broadcasts: Vec<Round1Broadcast> = signers
+		.iter_mut()
+		.enumerate()
+		.map(|(i, s)| {
+			let mut party_seed = [0u8; 32];
+			party_seed[0] = i as u8;
+			s.round1_commit_with_seed(&party_seed, &ssid).unwrap()
+		})
+		.collect();
+
+	// Round 2: Both parties reveal commitments
+	// Each party receives only the other party's R1 broadcast (threshold - 1 = 1)
+	let mut r2_broadcasts: Vec<Round2Broadcast> = signers
+		.iter_mut()
+		.enumerate()
+		.map(|(i, s)| {
+			let others: Vec<_> =
+				r1_broadcasts.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+			s.round2_reveal(&ssid, message, context, &others).unwrap()
+		})
+		.collect();
+
+	// ATTACK: Party 1 tampers with their commitment data after broadcasting
+	// This simulates a rushing adversary trying to change their values
+	if !r2_broadcasts[1].commitment_data.is_empty() {
+		// Flip some bits in the commitment data
+		r2_broadcasts[1].commitment_data[0] ^= 0xFF;
+		r2_broadcasts[1].commitment_data[1] ^= 0xFF;
+	}
+
+	// Round 3: Party 0 tries to process the tampered data
+	// This should fail because the tampered R2 data doesn't match the R1 hash
+	let others_r1: Vec<_> = r1_broadcasts.iter().filter(|r| r.party_id != 0).cloned().collect();
+	let others_r2: Vec<_> = r2_broadcasts.iter().filter(|r| r.party_id != 0).cloned().collect();
+
+	let result = signers[0].round3_respond(&ssid, &others_r1, &others_r2);
+
+	assert!(result.is_err(), "round3_respond should detect tampered commitment data");
+
+	// Verify it's specifically a commitment mismatch error
+	let err = result.unwrap_err();
+	let err_str = format!("{}", err);
+	assert!(
+		err_str.contains("ommitment") && err_str.contains("mismatch"),
+		"Error should indicate commitment mismatch, got: {}",
+		err_str
+	);
+}
+
+/// Test state machine enforcement - can't call round3 before round2.
+#[test]
+fn test_state_machine_round3_before_round2() {
+	let mut signer = create_test_signer();
+	let seed = [0xAAu8; 32];
+
+	let _r1 = signer.round1_commit_with_seed(&seed, &TEST_SSID).expect("round1");
+
+	let result = signer.round3_respond(&TEST_SSID, &[], &[]);
+	assert!(result.is_err(), "round3 should fail without prior round2");
+}
+
+/// Test state machine enforcement - can't call combine before round3.
+#[test]
+fn test_state_machine_combine_before_round3() {
+	let mut signer = create_test_signer();
+	let seed = [0xAAu8; 32];
+
+	let _r1 = signer.round1_commit_with_seed(&seed, &TEST_SSID).expect("round1");
+
+	let result = signer.combine(&[], &[]);
+	assert!(result.is_err(), "combine should fail without completing round3");
+}
+
+mod borsh_tests {
+	use super::*;
+	use qp_rusty_crystals_threshold::{Round1Broadcast, Round2Broadcast, Round3Broadcast};
+
+	const BORSH_TEST_SSID: [u8; 32] = [0xEE; 32];
+
+	#[test]
+	fn test_round1_broadcast_serialization() {
+		let broadcast = Round1Broadcast::new(BORSH_TEST_SSID, 0, [42u8; 32]);
+		let bytes = borsh::to_vec(&broadcast).expect("serialize");
+		let recovered: Round1Broadcast = borsh::from_slice(&bytes).expect("deserialize");
+		assert_eq!(broadcast, recovered);
+	}
+
+	#[test]
+	fn test_round2_broadcast_serialization() {
+		let broadcast = Round2Broadcast::new(BORSH_TEST_SSID, 1, vec![1, 2, 3, 4, 5]);
+		let bytes = borsh::to_vec(&broadcast).expect("serialize");
+		let recovered: Round2Broadcast = borsh::from_slice(&bytes).expect("deserialize");
+		assert_eq!(broadcast, recovered);
+	}
+
+	#[test]
+	fn test_round3_broadcast_serialization() {
+		let broadcast = Round3Broadcast::new(BORSH_TEST_SSID, 2, vec![6, 7, 8, 9, 10]);
+		let bytes = borsh::to_vec(&broadcast).expect("serialize");
+		let recovered: Round3Broadcast = borsh::from_slice(&bytes).expect("deserialize");
+		assert_eq!(broadcast, recovered);
+	}
+
+	#[test]
+	fn test_config_serialization() {
+		let config = ThresholdConfig::new(2, 3).expect("valid config");
+		let bytes = borsh::to_vec(&config).expect("serialize");
+		let recovered: ThresholdConfig = borsh::from_slice(&bytes).expect("deserialize");
+		assert_eq!(config.threshold(), recovered.threshold());
+		assert_eq!(config.total_parties(), recovered.total_parties());
+	}
+}
+
+/// Tests for DilithiumSignProtocol party management.
+mod party_management_tests {
+	use qp_rusty_crystals_threshold::{
+		generate_with_dealer, signing_protocol::DilithiumSignProtocol, ThresholdConfig,
+		ThresholdSigner,
+	};
+
+	/// Test that waiting_for() returns correct parties in Round1Waiting state.
+	#[test]
+	fn test_waiting_for_round1() {
+		let config = ThresholdConfig::new(2, 3).expect("valid config");
+		let seed = [42u8; 32];
+		let (public_key, shares) = generate_with_dealer(&seed, config).expect("key generation");
+
+		let signer =
+			ThresholdSigner::new(shares[0].clone(), public_key.clone(), config).expect("signer");
+
+		// Use exactly threshold (2) participants
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1], // exactly threshold participants
+			0,          // my_id
+			0,          // leader_id
+			[0xAA; 32], // round1_seed
+			[0xBB; 32], // attempt_nonce
+		)
+		.expect("protocol");
+
+		// Generate our Round 1
+		let _ = protocol.poke().expect("poke");
+
+		// Now in Round1Waiting, should be waiting for party 1 only
+		let waiting = protocol.waiting_for();
+		assert_eq!(waiting.len(), 1);
+		assert!(waiting.contains(&1));
+	}
+}
+
+/// Test that round2_reveal preserves state when validation fails.
+///
+/// The flat-struct state design (with phase enum + Option fields) ensures
+/// that state is never lost on validation errors. This test verifies that
+/// calling round2_reveal with insufficient parties doesn't corrupt state.
+#[test]
+fn test_round2_preserves_state_on_insufficient_parties() {
+	let mut signer = create_test_signer();
+	let seed = [0xAAu8; 32];
+
+	// Complete round 1
+	let _r1 = signer.round1_commit_with_seed(&seed, &TEST_SSID).expect("round1");
+
+	// Call round2 with no other parties (threshold is 2, so this should fail)
+	let result = signer.round2_reveal(&TEST_SSID, b"message", b"context", &[]);
+	assert!(result.is_err(), "round2 should fail with insufficient parties");
+
+	// Key test: the signer should still be in AfterRound1 state, not Fresh
+	// If state was lost, this second call would fail with "expected AfterRound1, got Fresh"
+	let result2 = signer.round2_reveal(&TEST_SSID, b"message", b"context", &[]);
+	assert!(result2.is_err(), "round2 should still fail");
+
+	// Verify it's the same error (WrongPartyCount), not InvalidState
+	match result2 {
+		Err(qp_rusty_crystals_threshold::ThresholdError::WrongPartyCount { .. }) => {
+			// Expected - state was preserved
+		},
+		Err(qp_rusty_crystals_threshold::ThresholdError::InvalidState { .. }) => {
+			panic!("State was lost! Signer should still be in AfterRound1 state");
+		},
+		_ => panic!("Unexpected result: {:?}", result2),
+	}
+}
+
+/// `combine_with_message` must reject a message/context that differs from the values
+/// bound in Round 2, rather than silently combining responses for the wrong message.
+#[test]
+fn test_combine_with_message_rejects_mismatched_message() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("key generation");
+
+	let mut signers: Vec<_> = shares
+		.iter()
+		.take(2)
+		.map(|share| ThresholdSigner::new(share.clone(), public_key.clone(), config).unwrap())
+		.collect();
+
+	let message = b"bound message";
+	let context = b"bound context";
+
+	let participant_list = ParticipantList::new(&[0u32, 1u32]).unwrap();
+	let ssid = compute_ssid(&public_key, 2, 3, &participant_list, message, context, &[0xDD; 32]);
+
+	let r1: Vec<_> = signers
+		.iter_mut()
+		.enumerate()
+		.map(|(i, s)| {
+			let mut party_seed = [0u8; 32];
+			party_seed[0] = (i as u8) + 1;
+			s.round1_commit_with_seed(&ssid, &party_seed).unwrap()
+		})
+		.collect();
+
+	let r2: Vec<_> = signers
+		.iter_mut()
+		.enumerate()
+		.map(|(i, s)| {
+			let others: Vec<_> = r1.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+			s.round2_reveal(&ssid, message, context, &others).unwrap()
+		})
+		.collect();
+
+	let r3: Vec<_> = signers
+		.iter_mut()
+		.enumerate()
+		.map(|(i, s)| {
+			let o1: Vec<_> = r1.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+			let o2: Vec<_> = r2.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+			s.round3_respond(&ssid, &o1, &o2).unwrap()
+		})
+		.collect();
+
+	// A different message is rejected loudly before any signature is produced.
+	let mismatched = signers[0].combine_with_message(b"different message", context, &r2, &r3);
+	assert!(mismatched.is_err(), "mismatched message must be rejected");
+
+	// The bound message/context never triggers that rejection (a CombinationFailed from
+	// this attempt's rejection sampling is acceptable; the mismatch error is not).
+	if let Err(e) = signers[0].combine_with_message(message, context, &r2, &r3) {
+		let msg = format!("{}", e);
+		assert!(!msg.contains("does not match"), "bound message must not be rejected: {}", msg);
+	}
+}

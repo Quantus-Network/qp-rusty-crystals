@@ -1,0 +1,958 @@
+//! Types for Distributed Key Generation (DKG) protocol.
+//!
+//! This module implements a 4-round DKG protocol for threshold ML-DSA.
+//!
+//! ## Protocol Overview
+//!
+//! **Round 1: Shared secret establishment + commitment**
+//! - Leaders (min(S) for each subset S) generate K_S and distribute via secure P2P
+//! - All parties commit to random r_i: broadcast c_i = H(i, r_i)
+//!
+//! **Round 2: Reveal randomness**
+//! - All parties reveal r_i
+//! - Verify commitments: c_j = H(j, r_j)
+//!
+//! **Round 3: Derive secrets + commit to partial PKs (leaders only)**
+//! - Compute global randomness R = r_1 || ... || r_N
+//! - Leaders derive s_S = H_keygen(S, K_S, R) and compute t_S = A·s_S
+//! - Leaders broadcast commitment to partial PK
+//!
+//! **Round 4: Reveal partial PKs + transcript signing**
+//! - Leaders reveal t_S
+//! - Non-leaders verify: recompute s_S from K_S and R, verify commitment
+//! - All parties sign transcript with long-term key
+//!
+//! **Aggregate: Verify signatures + combine PKs**
+//! - Verify all transcript signatures
+//! - Compute final public key: t = Σ t_S
+
+use alloc::{collections::BTreeMap, vec, vec::Vec};
+use core::fmt;
+
+use borsh::{BorshDeserialize, BorshSerialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+use crate::{
+	config::ThresholdConfig,
+	error::{MAX_PARTIES, MAX_SUBSETS},
+};
+
+use qp_rusty_crystals_dilithium::fips202;
+
+// ============================================================================
+// Transcript Signing Trait
+// ============================================================================
+
+/// Trait for signing DKG transcripts.
+///
+/// This allows the DKG protocol to be agnostic to the signature scheme used.
+/// Implementors can use Ed25519, ML-DSA, or any other scheme.
+pub trait TranscriptSigner {
+	/// The signature type produced by this signer.
+	type Signature: Clone + AsRef<[u8]>;
+
+	/// The public key type for verification.
+	type PublicKey: Clone + PartialEq;
+
+	/// Sign a transcript hash.
+	fn sign(&self, transcript_hash: &[u8; 32]) -> Self::Signature;
+
+	/// Verify a signature on a transcript hash.
+	fn verify(
+		public_key: &Self::PublicKey,
+		transcript_hash: &[u8; 32],
+		signature: &Self::Signature,
+	) -> bool;
+
+	/// Verify a signature from raw bytes.
+	///
+	/// This is used when deserializing signatures from the wire.
+	/// Implementors should parse the bytes into their Signature type and verify.
+	fn verify_bytes(
+		public_key: &Self::PublicKey,
+		transcript_hash: &[u8; 32],
+		signature_bytes: &[u8],
+	) -> bool;
+
+	/// Get this signer's public key.
+	fn public_key(&self) -> Self::PublicKey;
+}
+
+// ============================================================================
+// Type Aliases and Constants
+// ============================================================================
+
+use crate::participants::ParticipantId;
+
+/// Subset mask - a bitmask indicating which parties are in a subset.
+pub type SubsetMask = u16;
+
+/// Size of commitment hash in bytes.
+pub const COMMITMENT_HASH_SIZE: usize = 32;
+
+/// Size of subset seed in bytes.
+pub const SUBSET_SEED_SIZE: usize = 64;
+
+/// Size of shared secret K_S in bytes.
+pub const SHARED_SECRET_SIZE: usize = 32;
+
+/// Size of randomness r_i in bytes.
+pub const RANDOMNESS_SIZE: usize = 32;
+
+// Domain separators for hash functions
+/// Domain separator for commitment hash.
+pub const DOMAIN_COMMIT: &[u8] = b"THRESHOLD_DKG_COMMIT_V1";
+
+/// Domain separator for seed derivation.
+pub const DOMAIN_SEED: &[u8] = b"THRESHOLD_DKG_SEED_V1";
+
+/// Domain separator for keygen.
+pub const DOMAIN_KEYGEN: &[u8] = b"THRESHOLD_DKG_KEYGEN_V1";
+
+/// Domain separator for partial PK commitment.
+pub const DOMAIN_PK_COMMIT: &[u8] = b"THRESHOLD_DKG_PK_COMMIT_V1";
+
+/// Domain separator for transcript hash.
+pub const DOMAIN_TRANSCRIPT: &[u8] = b"THRESHOLD_DKG_TRANSCRIPT_V1";
+
+/// Domain separator for DKG session identifier.
+pub const DOMAIN_DKG_SSID: &[u8] = b"THRESHOLD_DKG_SSID_V1";
+
+/// Size of the DKG session identifier in bytes.
+pub const DKG_SSID_SIZE: usize = 32;
+
+use qp_rusty_crystals_dilithium::{
+	params::{K, L, N},
+	poly,
+};
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+/// Configuration for the DKG protocol.
+#[derive(Clone)]
+pub struct DkgConfig<S: TranscriptSigner> {
+	/// The threshold configuration (t, n).
+	pub threshold_config: ThresholdConfig,
+	/// This party's identifier.
+	pub my_party_id: ParticipantId,
+	/// All participants in the DKG (sorted).
+	pub all_participants: Vec<ParticipantId>,
+	/// This party's signing key for transcript authentication.
+	pub my_signer: S,
+	/// Public keys of all participants for signature verification.
+	pub participant_public_keys: BTreeMap<ParticipantId, S::PublicKey>,
+}
+
+impl<S: TranscriptSigner> DkgConfig<S> {
+	/// Create a new DKG configuration.
+	pub fn new(
+		threshold_config: ThresholdConfig,
+		my_party_id: ParticipantId,
+		all_participants: Vec<ParticipantId>,
+		my_signer: S,
+		participant_public_keys: BTreeMap<ParticipantId, S::PublicKey>,
+	) -> Result<Self, &'static str> {
+		if all_participants.len() != threshold_config.total_parties() as usize {
+			return Err("participant count doesn't match threshold config");
+		}
+		if !all_participants.contains(&my_party_id) {
+			return Err("my_party_id not in all_participants");
+		}
+		if participant_public_keys.len() != all_participants.len() {
+			return Err("must provide public keys for all participants");
+		}
+		for p in &all_participants {
+			if !participant_public_keys.contains_key(p) {
+				return Err("missing public key for participant");
+			}
+		}
+
+		let mut sorted_participants = all_participants;
+		sorted_participants.sort();
+
+		// Check for duplicate participant IDs after sorting (duplicates will be adjacent)
+		for i in 1..sorted_participants.len() {
+			if sorted_participants[i] == sorted_participants[i - 1] {
+				return Err("duplicate participant ID in all_participants");
+			}
+		}
+
+		Ok(Self {
+			threshold_config,
+			my_party_id,
+			all_participants: sorted_participants,
+			my_signer,
+			participant_public_keys,
+		})
+	}
+
+	/// Get the threshold value.
+	pub fn threshold(&self) -> u32 {
+		self.threshold_config.threshold()
+	}
+
+	/// Get total number of parties.
+	pub fn total_parties(&self) -> u32 {
+		self.threshold_config.total_parties()
+	}
+
+	/// Get this party's index in the sorted participant list.
+	pub fn my_index(&self) -> Option<usize> {
+		self.all_participants.iter().position(|&p| p == self.my_party_id)
+	}
+
+	/// Check if this party is in a subset.
+	pub fn is_in_subset(&self, subset_mask: SubsetMask) -> bool {
+		if let Some(my_idx) = self.my_index() {
+			(subset_mask & (1 << my_idx)) != 0
+		} else {
+			false
+		}
+	}
+
+	/// Get the leader (minimum party ID) for a subset.
+	pub fn get_leader(&self, subset_mask: SubsetMask) -> Option<ParticipantId> {
+		self.all_participants
+			.iter()
+			.enumerate()
+			.filter(|(idx, _)| (subset_mask & (1 << idx)) != 0)
+			.map(|(_, &pid)| pid)
+			.min()
+	}
+
+	/// Check if this party is the leader for a subset.
+	pub fn is_leader(&self, subset_mask: SubsetMask) -> bool {
+		self.get_leader(subset_mask) == Some(self.my_party_id)
+	}
+
+	/// Get all parties in a subset.
+	pub fn get_parties_in_subset(&self, subset_mask: SubsetMask) -> Vec<ParticipantId> {
+		self.all_participants
+			.iter()
+			.enumerate()
+			.filter(|(idx, _)| (subset_mask & (1 << idx)) != 0)
+			.map(|(_, &pid)| pid)
+			.collect()
+	}
+
+	/// Get all subsets where this party is the leader.
+	pub fn my_leader_subsets(&self) -> Vec<SubsetMask> {
+		self.all_subsets().into_iter().filter(|&mask| self.is_leader(mask)).collect()
+	}
+
+	/// Get all subsets this party belongs to.
+	pub fn my_subsets(&self) -> Vec<SubsetMask> {
+		self.all_subsets().into_iter().filter(|&mask| self.is_in_subset(mask)).collect()
+	}
+
+	/// Check if a subset mask is valid for this threshold configuration.
+	///
+	/// A valid subset has exactly `k = n - t + 1` members, where each member
+	/// is a participant in the DKG.
+	pub fn is_valid_subset(&self, subset_mask: SubsetMask) -> bool {
+		let n = self.total_parties();
+		let t = self.threshold();
+		let k = n - t + 1;
+
+		// Check correct number of bits set
+		if subset_mask.count_ones() != k {
+			return false;
+		}
+
+		// Check all set bits correspond to valid participant indices
+		let max_valid_mask = (1u16 << n) - 1;
+		(subset_mask & !max_valid_mask) == 0
+	}
+
+	/// Get all valid subsets for this threshold configuration.
+	///
+	/// # Panics
+	/// Panics if `n > MAX_PARTIES`. This should never happen since
+	/// `ThresholdConfig::new()` enforces this constraint.
+	pub fn all_subsets(&self) -> Vec<SubsetMask> {
+		let n = self.total_parties();
+		let t = self.threshold();
+
+		// This is a programmer error if violated - ThresholdConfig enforces n <= MAX_PARTIES.
+		assert!(n <= MAX_PARTIES, "all_subsets: n={} exceeds MAX_PARTIES ({})", n, MAX_PARTIES);
+
+		let k = n - t + 1;
+		let max_mask: u32 = 1u32 << n;
+		let mut subsets = Vec::new();
+		for mask in 0..max_mask {
+			if mask.count_ones() == k {
+				subsets.push(mask as SubsetMask);
+			}
+		}
+		subsets.sort();
+		subsets
+	}
+}
+
+impl<S: TranscriptSigner + fmt::Debug> fmt::Debug for DkgConfig<S>
+where
+	S::PublicKey: fmt::Debug,
+{
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("DkgConfig")
+			.field("threshold_config", &self.threshold_config)
+			.field("my_party_id", &self.my_party_id)
+			.field("all_participants", &self.all_participants)
+			.finish()
+	}
+}
+
+// ============================================================================
+// Contribution Types
+// ============================================================================
+
+/// Contribution for a single subset (η-bounded secret polynomials).
+#[derive(Clone, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
+pub struct SubsetContribution {
+	/// Share of s1 polynomial vector.
+	pub s1: Vec<[i32; N as usize]>,
+	/// Share of s2 polynomial vector.
+	pub s2: Vec<[i32; N as usize]>,
+}
+
+impl SubsetContribution {
+	/// Create a new empty subset contribution.
+	pub fn new() -> Self {
+		Self { s1: vec![[0i32; N as usize]; L], s2: vec![[0i32; N as usize]; K] }
+	}
+
+	/// Check if all coefficients are within the η bound.
+	pub fn verify_bounds(&self, eta: i32) -> bool {
+		for poly in &self.s1 {
+			for &coeff in poly {
+				if coeff < -eta || coeff > eta {
+					return false;
+				}
+			}
+		}
+		for poly in &self.s2 {
+			for &coeff in poly {
+				if coeff < -eta || coeff > eta {
+					return false;
+				}
+			}
+		}
+		true
+	}
+}
+
+impl Default for SubsetContribution {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+/// Partial public key for a single subset.
+///
+/// The partial public key `t = A·s1 + s2` has exactly `K` polynomials,
+/// each with `N` coefficients. The fixed-size array enforces this at compile time.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct PartialPublicKey {
+	/// The subset this partial public key corresponds to.
+	pub subset_mask: SubsetMask,
+	/// The partial public key t = A·s1 + s2.
+	/// Exactly K polynomials, each with N coefficients.
+	pub t: [[i32; N as usize]; K],
+}
+
+impl PartialPublicKey {
+	/// Create a new partial public key with zero coefficients.
+	pub fn new(subset_mask: SubsetMask) -> Self {
+		Self { subset_mask, t: [[0i32; N as usize]; K] }
+	}
+}
+
+// ============================================================================
+// Round Messages
+// ============================================================================
+
+/// Round 1 broadcast: Commitment to randomness.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct Round1Broadcast {
+	/// Session identifier binding this message to a specific DKG session.
+	pub ssid: [u8; DKG_SSID_SIZE],
+	/// The party sending this message.
+	pub party_id: ParticipantId,
+	/// Commitment c_i = H(ssid, i, r_i).
+	pub commitment: [u8; COMMITMENT_HASH_SIZE],
+}
+
+/// Round 1 private: Shared secret K_S (leader to subset members).
+#[derive(Clone, BorshSerialize, BorshDeserialize)]
+pub struct Round1Private {
+	/// Session identifier binding this message to a specific DKG session.
+	pub ssid: [u8; DKG_SSID_SIZE],
+	/// The party sending this message.
+	pub from_party_id: ParticipantId,
+	/// The subset this shared secret is for.
+	pub subset_mask: SubsetMask,
+	/// The shared secret K_S.
+	pub shared_secret: [u8; SHARED_SECRET_SIZE],
+}
+
+/// Round 2 broadcast: Reveal randomness.
+#[derive(Clone, BorshSerialize, BorshDeserialize)]
+pub struct Round2Broadcast {
+	/// Session identifier binding this message to a specific DKG session.
+	pub ssid: [u8; DKG_SSID_SIZE],
+	/// The party sending this message.
+	pub party_id: ParticipantId,
+	/// The revealed randomness r_i.
+	pub randomness: [u8; RANDOMNESS_SIZE],
+}
+
+impl fmt::Debug for Round2Broadcast {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("Round2Broadcast")
+			.field(
+				"ssid",
+				&format_args!(
+					"[{:02x}{:02x}{:02x}{:02x}...]",
+					self.ssid[0], self.ssid[1], self.ssid[2], self.ssid[3]
+				),
+			)
+			.field("party_id", &self.party_id)
+			.field("randomness", &"<REDACTED>")
+			.finish()
+	}
+}
+
+/// Round 3 broadcast: Commitment to partial PKs (leaders only).
+#[derive(Debug, Clone, BorshSerialize)]
+pub struct Round3Broadcast {
+	/// Session identifier binding this message to a specific DKG session.
+	pub ssid: [u8; DKG_SSID_SIZE],
+	/// The party sending this message.
+	pub party_id: ParticipantId,
+	/// Commitments to partial public keys.
+	pub partial_pk_commitments: BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>,
+}
+
+impl BorshDeserialize for Round3Broadcast {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; DKG_SSID_SIZE]>::deserialize_reader(reader)?;
+		let party_id = ParticipantId::deserialize_reader(reader)?;
+
+		// Read map length and validate against MAX_SUBSETS
+		let len = u32::deserialize_reader(reader)? as usize;
+		if len > MAX_SUBSETS {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"Round3Broadcast.partial_pk_commitments exceeds MAX_SUBSETS",
+			));
+		}
+
+		let mut partial_pk_commitments = BTreeMap::new();
+		for _ in 0..len {
+			let key = SubsetMask::deserialize_reader(reader)?;
+			let value = <[u8; COMMITMENT_HASH_SIZE]>::deserialize_reader(reader)?;
+			partial_pk_commitments.insert(key, value);
+		}
+
+		Ok(Self { ssid, party_id, partial_pk_commitments })
+	}
+}
+
+/// Round 4 broadcast: Reveal partial PKs + transcript signature.
+#[derive(Debug, Clone, BorshSerialize)]
+pub struct Round4Broadcast {
+	/// Session identifier binding this message to a specific DKG session.
+	pub ssid: [u8; DKG_SSID_SIZE],
+	/// The party sending this message.
+	pub party_id: ParticipantId,
+	/// Partial public keys for subsets where this party is leader.
+	pub partial_public_keys: BTreeMap<SubsetMask, PartialPublicKey>,
+	/// Signature on transcript.
+	pub transcript_signature: Vec<u8>,
+}
+
+impl BorshDeserialize for Round4Broadcast {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; DKG_SSID_SIZE]>::deserialize_reader(reader)?;
+		let party_id = ParticipantId::deserialize_reader(reader)?;
+
+		// Read map length and validate against MAX_SUBSETS
+		let len = u32::deserialize_reader(reader)? as usize;
+		if len > MAX_SUBSETS {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"Round4Broadcast.partial_public_keys exceeds MAX_SUBSETS",
+			));
+		}
+
+		let mut partial_public_keys = BTreeMap::new();
+		for _ in 0..len {
+			let key = SubsetMask::deserialize_reader(reader)?;
+			let value = PartialPublicKey::deserialize_reader(reader)?;
+			partial_public_keys.insert(key, value);
+		}
+
+		let transcript_signature = Vec::<u8>::deserialize_reader(reader)?;
+
+		Ok(Self { ssid, party_id, partial_public_keys, transcript_signature })
+	}
+}
+
+/// Message wrapper enum.
+#[derive(Clone, BorshSerialize, BorshDeserialize)]
+pub enum DkgMessage {
+	/// Round 1 broadcast.
+	Round1Broadcast(Round1Broadcast),
+	/// Round 1 private.
+	Round1Private(Round1Private),
+	/// Round 2 broadcast.
+	Round2Broadcast(Round2Broadcast),
+	/// Round 3 broadcast.
+	Round3Broadcast(Round3Broadcast),
+	/// Round 4 broadcast.
+	Round4Broadcast(Round4Broadcast),
+}
+
+impl DkgMessage {
+	/// Get the SSID from any message type.
+	pub fn ssid(&self) -> &[u8; DKG_SSID_SIZE] {
+		match self {
+			DkgMessage::Round1Broadcast(msg) => &msg.ssid,
+			DkgMessage::Round1Private(msg) => &msg.ssid,
+			DkgMessage::Round2Broadcast(msg) => &msg.ssid,
+			DkgMessage::Round3Broadcast(msg) => &msg.ssid,
+			DkgMessage::Round4Broadcast(msg) => &msg.ssid,
+		}
+	}
+
+	/// Get the party ID from any message type.
+	pub fn party_id(&self) -> ParticipantId {
+		match self {
+			DkgMessage::Round1Broadcast(msg) => msg.party_id,
+			DkgMessage::Round1Private(msg) => msg.from_party_id,
+			DkgMessage::Round2Broadcast(msg) => msg.party_id,
+			DkgMessage::Round3Broadcast(msg) => msg.party_id,
+			DkgMessage::Round4Broadcast(msg) => msg.party_id,
+		}
+	}
+}
+
+// ============================================================================
+// Hash Functions
+// ============================================================================
+
+/// Compute the DKG session identifier (SSID).
+///
+/// The SSID binds:
+/// - The threshold configuration (t, n)
+/// - All participant IDs (sorted)
+/// - A session nonce (caller-provided, e.g., from transport layer)
+///
+/// This prevents cross-session replay attacks where messages from one DKG
+/// session could be replayed into another session with different parameters.
+///
+/// ```text
+/// ssid = SHAKE256(
+///     "THRESHOLD_DKG_SSID_V1" ||
+///     threshold (u32 LE) ||
+///     total_parties (u32 LE) ||
+///     num_participants (u32 LE) ||
+///     sorted_participant_ids (each u32 LE) ||
+///     session_nonce[32]
+/// )
+/// ```
+pub fn compute_dkg_ssid(
+	threshold: u32,
+	total_parties: u32,
+	participants: &[ParticipantId],
+	session_nonce: &[u8; 32],
+) -> [u8; DKG_SSID_SIZE] {
+	let mut ssid = [0u8; DKG_SSID_SIZE];
+	let mut state = fips202::KeccakState::default();
+
+	// Domain separator
+	fips202::shake256_absorb(&mut state, DOMAIN_DKG_SSID);
+
+	// Threshold configuration
+	fips202::shake256_absorb(&mut state, &threshold.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &total_parties.to_le_bytes());
+
+	// Number of participants
+	let num_participants = participants.len() as u32;
+	fips202::shake256_absorb(&mut state, &num_participants.to_le_bytes());
+
+	// Sorted participant IDs (caller should ensure sorted order)
+	let mut sorted_participants = participants.to_vec();
+	sorted_participants.sort();
+	for participant_id in &sorted_participants {
+		fips202::shake256_absorb(&mut state, &participant_id.to_le_bytes());
+	}
+
+	// Session nonce
+	fips202::shake256_absorb(&mut state, session_nonce);
+
+	fips202::shake256_finalize(&mut state);
+	fips202::shake256_squeeze(&mut ssid, &mut state);
+
+	ssid
+}
+
+/// Compute commitment hash: H_commit(ssid, party_id, data).
+///
+/// The SSID binds this commitment to the specific DKG session, preventing
+/// cross-session replay attacks (CVE-2022-47930 class vulnerabilities).
+pub fn h_commit(
+	ssid: &[u8; DKG_SSID_SIZE],
+	party_id: ParticipantId,
+	data: &[u8],
+) -> [u8; COMMITMENT_HASH_SIZE] {
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, DOMAIN_COMMIT);
+	fips202::shake256_absorb(&mut state, ssid);
+	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
+	fips202::shake256_absorb(&mut state, data);
+	fips202::shake256_finalize(&mut state);
+
+	let mut hash = [0u8; COMMITMENT_HASH_SIZE];
+	fips202::shake256_squeeze(&mut hash, &mut state);
+	hash
+}
+
+/// Compute commitment hash for partial PK.
+///
+/// The SSID and party_id bind this commitment to the specific DKG session
+/// and the party producing it, preventing cross-session replay attacks.
+pub fn h_commit_pk(
+	ssid: &[u8; DKG_SSID_SIZE],
+	party_id: ParticipantId,
+	subset_mask: SubsetMask,
+	partial_pk: &PartialPublicKey,
+) -> [u8; COMMITMENT_HASH_SIZE] {
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, DOMAIN_PK_COMMIT);
+	fips202::shake256_absorb(&mut state, ssid);
+	fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &subset_mask.to_le_bytes());
+
+	for poly in &partial_pk.t {
+		for coeff in poly {
+			fips202::shake256_absorb(&mut state, &coeff.to_le_bytes());
+		}
+	}
+
+	fips202::shake256_finalize(&mut state);
+
+	let mut hash = [0u8; COMMITMENT_HASH_SIZE];
+	fips202::shake256_squeeze(&mut hash, &mut state);
+	hash
+}
+
+/// Derive ρ from global randomness.
+pub fn h_seed(global_randomness: &[u8]) -> [u8; 32] {
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, DOMAIN_SEED);
+	fips202::shake256_absorb(&mut state, global_randomness);
+	fips202::shake256_finalize(&mut state);
+
+	let mut rho = [0u8; 32];
+	fips202::shake256_squeeze(&mut rho, &mut state);
+	rho
+}
+
+/// Derive subset secret: H_keygen(S, K_S, R).
+pub fn h_keygen(
+	subset_mask: SubsetMask,
+	shared_secret: &[u8; SHARED_SECRET_SIZE],
+	global_randomness: &[u8],
+) -> [u8; SUBSET_SEED_SIZE] {
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, DOMAIN_KEYGEN);
+	fips202::shake256_absorb(&mut state, &subset_mask.to_le_bytes());
+	fips202::shake256_absorb(&mut state, shared_secret);
+	fips202::shake256_absorb(&mut state, global_randomness);
+	fips202::shake256_finalize(&mut state);
+
+	let mut seed = [0u8; SUBSET_SEED_SIZE];
+	fips202::shake256_squeeze(&mut seed, &mut state);
+	seed
+}
+
+/// Compute transcript hash from rounds 1-3.
+///
+/// The SSID is included to bind the transcript to the specific DKG session,
+/// preventing cross-session replay attacks where transcript signatures from
+/// one DKG session could be replayed into another.
+pub fn compute_transcript_hash(
+	ssid: &[u8; DKG_SSID_SIZE],
+	round1_broadcasts: &BTreeMap<ParticipantId, Round1Broadcast>,
+	round2_broadcasts: &BTreeMap<ParticipantId, Round2Broadcast>,
+	round3_broadcasts: &BTreeMap<ParticipantId, Round3Broadcast>,
+) -> [u8; 32] {
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, DOMAIN_TRANSCRIPT);
+	fips202::shake256_absorb(&mut state, ssid);
+
+	// BTreeMap iterates in sorted order, so no need to sort
+	for (party_id, msg) in round1_broadcasts {
+		fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
+		fips202::shake256_absorb(&mut state, &msg.commitment);
+	}
+
+	for (party_id, msg) in round2_broadcasts {
+		fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
+		fips202::shake256_absorb(&mut state, &msg.randomness);
+	}
+
+	for (party_id, msg) in round3_broadcasts {
+		fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
+		// partial_pk_commitments is already a BTreeMap, iterates in sorted order
+		for (mask, commitment) in &msg.partial_pk_commitments {
+			fips202::shake256_absorb(&mut state, &mask.to_le_bytes());
+			fips202::shake256_absorb(&mut state, commitment);
+		}
+	}
+
+	fips202::shake256_finalize(&mut state);
+
+	let mut hash = [0u8; 32];
+	fips202::shake256_squeeze(&mut hash, &mut state);
+	hash
+}
+
+/// Compute hash of partial output.
+pub fn compute_partial_output_hash(
+	partial_pks: &BTreeMap<SubsetMask, PartialPublicKey>,
+) -> [u8; 32] {
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, b"PARTIAL_OUTPUT");
+
+	// BTreeMap iterates in sorted order by key, so no need to sort
+	for (mask, pk) in partial_pks {
+		fips202::shake256_absorb(&mut state, &mask.to_le_bytes());
+		for poly in &pk.t {
+			for coeff in poly {
+				fips202::shake256_absorb(&mut state, &coeff.to_le_bytes());
+			}
+		}
+	}
+
+	fips202::shake256_finalize(&mut state);
+
+	let mut hash = [0u8; 32];
+	fips202::shake256_squeeze(&mut hash, &mut state);
+	hash
+}
+
+/// Compute the message to sign.
+pub fn compute_signing_message(
+	transcript_hash: &[u8; 32],
+	partial_output_hash: &[u8; 32],
+) -> [u8; 32] {
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, b"SIGN_MESSAGE");
+	fips202::shake256_absorb(&mut state, transcript_hash);
+	fips202::shake256_absorb(&mut state, partial_output_hash);
+	fips202::shake256_finalize(&mut state);
+
+	let mut hash = [0u8; 32];
+	fips202::shake256_squeeze(&mut hash, &mut state);
+	hash
+}
+
+/// Derive an η-bounded SubsetContribution from a seed.
+///
+/// Uses ETA=2 (ML-DSA-87 parameter) via the dilithium crate's `uniform_eta`.
+pub fn derive_subset_contribution(combined_seed: &[u8; SUBSET_SEED_SIZE]) -> SubsetContribution {
+	let mut contribution = SubsetContribution::new();
+	let mut temp_poly = poly::Poly::default();
+
+	for i in 0..L {
+		poly::uniform_eta(&mut temp_poly, combined_seed, i as u16);
+		contribution.s1[i].copy_from_slice(&temp_poly.coeffs);
+	}
+
+	for i in 0..K {
+		poly::uniform_eta(&mut temp_poly, combined_seed, (L + i) as u16);
+		contribution.s2[i].copy_from_slice(&temp_poly.coeffs);
+	}
+
+	contribution
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Test SSID for DKG type tests.
+	const TEST_SSID: [u8; DKG_SSID_SIZE] = [0xDD; DKG_SSID_SIZE];
+
+	#[derive(Clone, Debug)]
+	struct TestSigner {
+		id: u32,
+	}
+
+	impl TranscriptSigner for TestSigner {
+		type Signature = Vec<u8>;
+		type PublicKey = u32;
+
+		fn sign(&self, hash: &[u8; 32]) -> Self::Signature {
+			let mut sig = vec![0u8; 36];
+			sig[..4].copy_from_slice(&self.id.to_le_bytes());
+			sig[4..36].copy_from_slice(hash);
+			sig
+		}
+
+		fn verify(pk: &Self::PublicKey, hash: &[u8; 32], sig: &Self::Signature) -> bool {
+			Self::verify_bytes(pk, hash, sig)
+		}
+
+		fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
+			if sig.len() < 36 {
+				return false;
+			}
+			let sig_id = u32::from_le_bytes(sig[..4].try_into().unwrap());
+			sig_id == *pk && &sig[4..36] == hash
+		}
+
+		fn public_key(&self) -> Self::PublicKey {
+			self.id
+		}
+	}
+
+	#[test]
+	fn test_config_leader_detection() {
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let mut public_keys = BTreeMap::new();
+		public_keys.insert(0, 0u32);
+		public_keys.insert(1, 1u32);
+		public_keys.insert(2, 2u32);
+
+		let config: DkgConfig<TestSigner> =
+			DkgConfig::new(threshold_config, 0, vec![0, 1, 2], TestSigner { id: 0 }, public_keys)
+				.unwrap();
+
+		assert!(config.is_leader(0b011));
+		assert!(config.is_leader(0b101));
+		assert!(!config.is_leader(0b110));
+	}
+
+	#[test]
+	fn test_config_rejects_duplicate_participants() {
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let mut public_keys = BTreeMap::new();
+		public_keys.insert(0, 0u32);
+		public_keys.insert(1, 1u32);
+		public_keys.insert(2, 2u32);
+		// 3 unique public keys, but participant list has duplicate
+
+		// Duplicate participant ID (1 appears twice) - will fail participant count check first
+		// since 3 participants but vec has [0,1,1] which after dedup would be 2 unique
+		// Actually the check is on vec length vs config, so [0,1,1].len() == 3 passes that.
+		// The public_keys check passes since all 3 IDs (0,1,2) have keys but vec is [0,1,1].
+		// Wait - the for loop checks each p in all_participants has a key. [0,1,1] all have keys.
+		// So we should hit the duplicate check!
+		let result: Result<DkgConfig<TestSigner>, _> = DkgConfig::new(
+			threshold_config,
+			0,
+			vec![0, 1, 1], // duplicate!
+			TestSigner { id: 0 },
+			public_keys,
+		);
+
+		assert!(result.is_err());
+		assert_eq!(result.unwrap_err(), "duplicate participant ID in all_participants");
+	}
+
+	#[test]
+	fn test_config_rejects_duplicate_participants_unsorted() {
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let mut public_keys = BTreeMap::new();
+		public_keys.insert(0, 0u32);
+		public_keys.insert(1, 1u32);
+		public_keys.insert(2, 2u32);
+
+		// Duplicate at non-adjacent positions before sorting
+		let result: Result<DkgConfig<TestSigner>, _> = DkgConfig::new(
+			threshold_config,
+			0,
+			vec![0, 2, 0], // duplicate 0, not adjacent before sort
+			TestSigner { id: 0 },
+			public_keys,
+		);
+
+		assert!(result.is_err());
+		assert_eq!(result.unwrap_err(), "duplicate participant ID in all_participants");
+	}
+
+	#[test]
+	fn test_is_valid_subset() {
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let mut public_keys = BTreeMap::new();
+		public_keys.insert(0, 0u32);
+		public_keys.insert(1, 1u32);
+		public_keys.insert(2, 2u32);
+
+		let config: DkgConfig<TestSigner> =
+			DkgConfig::new(threshold_config, 0, vec![0, 1, 2], TestSigner { id: 0 }, public_keys)
+				.unwrap();
+
+		// For 2-of-3: k = 3 - 2 + 1 = 2, so valid subsets have exactly 2 members
+		// Valid subsets: 0b011, 0b101, 0b110
+		assert!(config.is_valid_subset(0b011), "0b011 should be valid");
+		assert!(config.is_valid_subset(0b101), "0b101 should be valid");
+		assert!(config.is_valid_subset(0b110), "0b110 should be valid");
+
+		// Invalid: wrong size
+		assert!(!config.is_valid_subset(0b111), "0b111 invalid: size 3, need 2");
+		assert!(!config.is_valid_subset(0b001), "0b001 invalid: size 1, need 2");
+		assert!(!config.is_valid_subset(0b010), "0b010 invalid: size 1, need 2");
+		assert!(!config.is_valid_subset(0b100), "0b100 invalid: size 1, need 2");
+		assert!(!config.is_valid_subset(0b000), "0b000 invalid: size 0, need 2");
+
+		// Invalid: bits outside valid participant range (only 3 participants, so bits 0-2 valid)
+		assert!(!config.is_valid_subset(0b1001), "0b1001 invalid: bit 3 set, only 3 participants");
+		assert!(!config.is_valid_subset(0b1010), "0b1010 invalid: bit 3 set, only 3 participants");
+	}
+
+	#[test]
+	fn test_h_commit_deterministic() {
+		let hash1 = h_commit(&TEST_SSID, 42, b"test");
+		let hash2 = h_commit(&TEST_SSID, 42, b"test");
+		assert_eq!(hash1, hash2);
+	}
+
+	#[test]
+	fn test_derive_contribution_bounded() {
+		let seed = [42u8; SUBSET_SEED_SIZE];
+		let contribution = derive_subset_contribution(&seed);
+		assert!(contribution.verify_bounds(2));
+	}
+
+	#[test]
+	fn test_partial_pk_serialization_roundtrip() {
+		use borsh::{BorshDeserialize, BorshSerialize};
+
+		// Create a partial PK with valid data
+		let mut pk = PartialPublicKey::new(0b011);
+		pk.t[0][0] = 42;
+		pk.t[K - 1][N as usize - 1] = 123;
+
+		// Serialize and deserialize
+		let mut data = Vec::new();
+		pk.serialize(&mut data).unwrap();
+		let pk2 = PartialPublicKey::try_from_slice(&data).unwrap();
+
+		assert_eq!(pk.subset_mask, pk2.subset_mask);
+		assert_eq!(pk.t, pk2.t);
+	}
+
+	#[test]
+	fn test_partial_pk_fixed_size() {
+		// Verify that PartialPublicKey.t has exactly K polynomials at compile time
+		let pk = PartialPublicKey::new(0b011);
+		assert_eq!(pk.t.len(), K);
+		assert_eq!(pk.t[0].len(), N as usize);
+	}
+}
