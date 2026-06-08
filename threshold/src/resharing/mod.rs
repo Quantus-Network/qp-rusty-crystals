@@ -63,6 +63,24 @@
 //!   public-key invariant verification catches inconsistent dealing.
 //! - **Public key preservation**: `t = A·s1 + s2` is unchanged.
 //!
+//! # Proactive Security Model
+//!
+//! Resharing provides **mobile/snapshot adversary protection**, not permanent-compromise recovery:
+//!
+//! - **What resharing provides**: If an attacker exfiltrates `t-1` share files but later loses
+//!   access to those devices, resharing invalidates the stolen shares. The attacker must compromise
+//!   `t` current shares to sign — they "start over."
+//!
+//! - **What resharing does NOT provide**: If the attacker permanently controls `t-1` devices that
+//!   remain in the new committee, those devices receive fresh shares. The attacker remains one
+//!   compromise away from threshold, not `t` away.
+//!
+//! - **To recover from persistent compromise**: Remove compromised parties from `new_participants`.
+//!   Excluded parties receive no new shares and cannot sign in the new epoch.
+//!
+//! This matches the standard proactive secret sharing model: security holds if fewer than `t`
+//! parties are compromised in any single epoch, with proper old-state erasure between epochs.
+//!
 //! # Why Custom Protocol?
 //!
 //! Existing resharing protocols (CHURP, MPSS) are designed for Shamir polynomial
