@@ -32,7 +32,10 @@ use core::fmt;
 use borsh::{BorshDeserialize, BorshSerialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{config::ThresholdConfig, error::MAX_PARTIES};
+use crate::{
+	config::ThresholdConfig,
+	error::{MAX_PARTIES, MAX_SUBSETS},
+};
 
 use qp_rusty_crystals_dilithium::fips202;
 
@@ -422,7 +425,7 @@ impl fmt::Debug for Round2Broadcast {
 }
 
 /// Round 3 broadcast: Commitment to partial PKs (leaders only).
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, BorshSerialize)]
 pub struct Round3Broadcast {
 	/// Session identifier binding this message to a specific DKG session.
 	pub ssid: [u8; DKG_SSID_SIZE],
@@ -432,8 +435,33 @@ pub struct Round3Broadcast {
 	pub partial_pk_commitments: BTreeMap<SubsetMask, [u8; COMMITMENT_HASH_SIZE]>,
 }
 
+impl BorshDeserialize for Round3Broadcast {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; DKG_SSID_SIZE]>::deserialize_reader(reader)?;
+		let party_id = ParticipantId::deserialize_reader(reader)?;
+
+		// Read map length and validate against MAX_SUBSETS
+		let len = u32::deserialize_reader(reader)? as usize;
+		if len > MAX_SUBSETS {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"Round3Broadcast.partial_pk_commitments exceeds MAX_SUBSETS",
+			));
+		}
+
+		let mut partial_pk_commitments = BTreeMap::new();
+		for _ in 0..len {
+			let key = SubsetMask::deserialize_reader(reader)?;
+			let value = <[u8; COMMITMENT_HASH_SIZE]>::deserialize_reader(reader)?;
+			partial_pk_commitments.insert(key, value);
+		}
+
+		Ok(Self { ssid, party_id, partial_pk_commitments })
+	}
+}
+
 /// Round 4 broadcast: Reveal partial PKs + transcript signature.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, BorshSerialize)]
 pub struct Round4Broadcast {
 	/// Session identifier binding this message to a specific DKG session.
 	pub ssid: [u8; DKG_SSID_SIZE],
@@ -443,6 +471,33 @@ pub struct Round4Broadcast {
 	pub partial_public_keys: BTreeMap<SubsetMask, PartialPublicKey>,
 	/// Signature on transcript.
 	pub transcript_signature: Vec<u8>,
+}
+
+impl BorshDeserialize for Round4Broadcast {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; DKG_SSID_SIZE]>::deserialize_reader(reader)?;
+		let party_id = ParticipantId::deserialize_reader(reader)?;
+
+		// Read map length and validate against MAX_SUBSETS
+		let len = u32::deserialize_reader(reader)? as usize;
+		if len > MAX_SUBSETS {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"Round4Broadcast.partial_public_keys exceeds MAX_SUBSETS",
+			));
+		}
+
+		let mut partial_public_keys = BTreeMap::new();
+		for _ in 0..len {
+			let key = SubsetMask::deserialize_reader(reader)?;
+			let value = PartialPublicKey::deserialize_reader(reader)?;
+			partial_public_keys.insert(key, value);
+		}
+
+		let transcript_signature = Vec::<u8>::deserialize_reader(reader)?;
+
+		Ok(Self { ssid, party_id, partial_public_keys, transcript_signature })
+	}
 }
 
 /// Message wrapper enum.

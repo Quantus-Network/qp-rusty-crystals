@@ -11,7 +11,10 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use borsh::{BorshDeserialize, BorshSerialize};
 use qp_rusty_crystals_dilithium::params::{K, L};
 
-use crate::participants::{ParticipantId, ParticipantList};
+use crate::{
+	error::MAX_SUBSETS,
+	participants::{ParticipantId, ParticipantList},
+};
 
 /// Size of the packed ML-DSA-87 public key in bytes.
 pub const PUBLIC_KEY_SIZE: usize = 2592;
@@ -117,7 +120,7 @@ impl PublicKey {
 /// - Never log or print this value
 /// - Store securely (encrypted at rest)
 /// - The `Zeroize` trait ensures memory is cleared on drop
-#[derive(Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, PartialEq, Eq, BorshSerialize)]
 pub struct PrivateKeyShare {
 	/// Party identifier (can be arbitrary u32, e.g., NEAR participant ID).
 	party_id: ParticipantId,
@@ -139,6 +142,36 @@ pub struct PrivateKeyShare {
 	/// Uses u16 as subset mask to support up to 16 parties.
 	/// BTreeMap ensures deterministic serialization order.
 	shares: BTreeMap<u16, SecretShareData>,
+}
+
+impl BorshDeserialize for PrivateKeyShare {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let party_id = ParticipantId::deserialize_reader(reader)?;
+		let total_parties = u32::deserialize_reader(reader)?;
+		let threshold = u32::deserialize_reader(reader)?;
+		let dkg_participants = ParticipantList::deserialize_reader(reader)?;
+		let key = <[u8; 32]>::deserialize_reader(reader)?;
+		let rho = <[u8; 32]>::deserialize_reader(reader)?;
+		let tr = <[u8; TR_SIZE]>::deserialize_reader(reader)?;
+
+		// Read shares map with bound check
+		let len = u32::deserialize_reader(reader)? as usize;
+		if len > MAX_SUBSETS {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"PrivateKeyShare.shares exceeds MAX_SUBSETS",
+			));
+		}
+
+		let mut shares = BTreeMap::new();
+		for _ in 0..len {
+			let key = u16::deserialize_reader(reader)?;
+			let value = SecretShareData::deserialize_reader(reader)?;
+			shares.insert(key, value);
+		}
+
+		Ok(Self { party_id, total_parties, threshold, dkg_participants, key, rho, tr, shares })
+	}
 }
 
 /// Internal secret share data for a specific signer subset.

@@ -285,6 +285,19 @@ impl fmt::Display for ThresholdError {
 /// (K > 3000 for middle thresholds).
 pub const MAX_PARTIES: u32 = 6;
 
+/// Maximum number of subsets for any valid threshold configuration.
+///
+/// This is C(MAX_PARTIES, MAX_PARTIES - MIN_THRESHOLD + 1) = C(6, 5) = 6
+/// for the smallest threshold, but the worst case is C(6, 3) = 20 for 4-of-6.
+/// We use 20 as the maximum.
+pub const MAX_SUBSETS: usize = 20;
+
+/// Maximum number of subset pairs (old_subset, new_subset) in resharing.
+///
+/// This is MAX_SUBSETS * MAX_SUBSETS = 400 for the worst case where both
+/// old and new committees are 4-of-6.
+pub const MAX_SUBSET_PAIRS: usize = MAX_SUBSETS * MAX_SUBSETS;
+
 /// Minimum threshold value (at least 2 parties required).
 pub const MIN_THRESHOLD: u32 = 2;
 

@@ -13,7 +13,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use qp_rusty_crystals_dilithium::params::{K, L, N};
 
 use crate::{
-	error::MAX_PARTIES,
+	error::{MAX_PARTIES, MAX_SUBSETS, MAX_SUBSET_PAIRS},
 	keys::{PrivateKeyShare, PublicKey},
 	participants::{ParticipantId, ParticipantList},
 	ThresholdConfig,
@@ -559,7 +559,7 @@ pub struct ResharingRound2EntropyReveal {
 /// After Round 2, the session seed is public transcript material. This protocol
 /// does not provide post-compromise forward secrecy against an attacker who
 /// records the transcript and later obtains old subset shares.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, BorshSerialize)]
 pub struct ResharingRound3Broadcast {
 	/// Session identifier binding this message to the resharing session.
 	pub ssid: [u8; RESHARING_SSID_SIZE],
@@ -570,6 +570,31 @@ pub struct ResharingRound3Broadcast {
 	/// The sender is the designated dealer for `old_subset_mask`. Each commitment is
 	/// `SHAKE256("resharing-commit-v3" || old_subset || new_subset || pack(r))`.
 	pub commitments: BTreeMap<SubsetPair, [u8; COMMITMENT_HASH_SIZE]>,
+}
+
+impl BorshDeserialize for ResharingRound3Broadcast {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; RESHARING_SSID_SIZE]>::deserialize_reader(reader)?;
+		let party_id = ParticipantId::deserialize_reader(reader)?;
+
+		// Read map length and validate against MAX_SUBSET_PAIRS
+		let len = u32::deserialize_reader(reader)? as usize;
+		if len > MAX_SUBSET_PAIRS {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingRound3Broadcast.commitments exceeds MAX_SUBSET_PAIRS",
+			));
+		}
+
+		let mut commitments = BTreeMap::new();
+		for _ in 0..len {
+			let key = SubsetPair::deserialize_reader(reader)?;
+			let value = <[u8; COMMITMENT_HASH_SIZE]>::deserialize_reader(reader)?;
+			commitments.insert(key, value);
+		}
+
+		Ok(Self { ssid, party_id, commitments })
+	}
 }
 
 /// Composite key identifying a contribution from one old subset to one new subset.
@@ -599,7 +624,7 @@ pub type SubsetPair = (SubsetMask, SubsetMask);
 ///
 /// Transmitting this message over an unencrypted channel exposes sub-shares to
 /// eavesdroppers and compromises the threshold scheme's security.
-#[derive(Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, BorshSerialize)]
 pub struct ResharingRound4Message {
 	/// Session identifier binding this message to the resharing session.
 	pub ssid: [u8; RESHARING_SSID_SIZE],
@@ -609,6 +634,32 @@ pub struct ResharingRound4Message {
 	pub to_party_id: ParticipantId,
 	/// Per-`(old_subset, new_subset)` contributions destined for the recipient.
 	pub contributions: BTreeMap<SubsetPair, NewShareData>,
+}
+
+impl BorshDeserialize for ResharingRound4Message {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; RESHARING_SSID_SIZE]>::deserialize_reader(reader)?;
+		let from_party_id = ParticipantId::deserialize_reader(reader)?;
+		let to_party_id = ParticipantId::deserialize_reader(reader)?;
+
+		// Read map length and validate against MAX_SUBSET_PAIRS
+		let len = u32::deserialize_reader(reader)? as usize;
+		if len > MAX_SUBSET_PAIRS {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingRound4Message.contributions exceeds MAX_SUBSET_PAIRS",
+			));
+		}
+
+		let mut contributions = BTreeMap::new();
+		for _ in 0..len {
+			let key = SubsetPair::deserialize_reader(reader)?;
+			let value = NewShareData::deserialize_reader(reader)?;
+			contributions.insert(key, value);
+		}
+
+		Ok(Self { ssid, from_party_id, to_party_id, contributions })
+	}
 }
 
 impl fmt::Debug for ResharingRound4Message {
@@ -712,7 +763,7 @@ impl Default for NewShareData {
 ///    a malicious dealer that lies about the residual `r_{I→J}` in a *size-1* old subset (`t = n`
 ///    configurations), where there is no other old-subset member to cross-verify. Publishing
 ///    `t_J^new` is safe: recovering `s_J^new` from `t_J^new` is the LWE problem.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, BorshSerialize)]
 pub struct ResharingRound5Broadcast {
 	/// Session identifier binding this message to the resharing session.
 	pub ssid: [u8; RESHARING_SSID_SIZE],
@@ -728,6 +779,48 @@ pub struct ResharingRound5Broadcast {
 	pub success: bool,
 	/// Optional error message if `success` is false.
 	pub error_message: Option<String>,
+}
+
+impl BorshDeserialize for ResharingRound5Broadcast {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; RESHARING_SSID_SIZE]>::deserialize_reader(reader)?;
+		let party_id = ParticipantId::deserialize_reader(reader)?;
+
+		// Read share_commitments with bound check
+		let len1 = u32::deserialize_reader(reader)? as usize;
+		if len1 > MAX_SUBSETS {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingRound5Broadcast.share_commitments exceeds MAX_SUBSETS",
+			));
+		}
+		let mut share_commitments = BTreeMap::new();
+		for _ in 0..len1 {
+			let key = SubsetMask::deserialize_reader(reader)?;
+			let value = <[u8; COMMITMENT_HASH_SIZE]>::deserialize_reader(reader)?;
+			share_commitments.insert(key, value);
+		}
+
+		// Read partial_pks with bound check
+		let len2 = u32::deserialize_reader(reader)? as usize;
+		if len2 > MAX_SUBSETS {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingRound5Broadcast.partial_pks exceeds MAX_SUBSETS",
+			));
+		}
+		let mut partial_pks = BTreeMap::new();
+		for _ in 0..len2 {
+			let key = SubsetMask::deserialize_reader(reader)?;
+			let value = <[[i32; N as usize]; K]>::deserialize_reader(reader)?;
+			partial_pks.insert(key, value);
+		}
+
+		let success = bool::deserialize_reader(reader)?;
+		let error_message = Option::<String>::deserialize_reader(reader)?;
+
+		Ok(Self { ssid, party_id, share_commitments, partial_pks, success, error_message })
+	}
 }
 
 // ============================================================================
