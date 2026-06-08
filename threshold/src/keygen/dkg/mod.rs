@@ -383,7 +383,15 @@ mod tests {
 			let mut attempt_nonce = [0u8; 32];
 			attempt_nonce[0] = attempt;
 			attempt_nonce[1] = 0xD2; // marker for dkg tests
-			let ssid = compute_ssid(&public_key, 2, 3, &participant_list, &attempt_nonce);
+			let ssid = compute_ssid(
+				&public_key,
+				2,
+				3,
+				&participant_list,
+				message,
+				context,
+				&attempt_nonce,
+			);
 
 			// Round 1: Generate commitments using deterministic seeds
 			let r1_broadcasts: Vec<_> = signers

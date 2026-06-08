@@ -630,6 +630,8 @@ impl DilithiumSignProtocol {
 			signer.config().threshold(),
 			signer.config().total_parties(),
 			&participant_list,
+			&message,
+			&context,
 			&attempt_nonce,
 		);
 

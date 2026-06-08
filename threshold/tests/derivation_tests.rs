@@ -221,6 +221,8 @@ fn test_derived_key_generation_and_signing() {
 			2,
 			3,
 			&participant_list,
+			message,
+			context,
 			&attempt_nonce,
 		);
 
@@ -263,9 +265,7 @@ fn test_derived_key_generation_and_signing() {
 			.collect();
 
 		// Try to combine signature
-		if let Ok(sig) =
-			signers[0].combine_with_message(message, context, &r2_broadcasts, &r3_broadcasts)
-		{
+		if let Ok(sig) = signers[0].combine(&r2_broadcasts, &r3_broadcasts) {
 			signature = Some(sig);
 			if attempt > 0 {
 				println!("Signing succeeded on attempt {}", attempt + 1);

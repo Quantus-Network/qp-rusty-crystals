@@ -247,6 +247,8 @@ fn run_signing_and_verify_with_retries(
 			config.threshold(),
 			config.total_parties(),
 			&participant_list,
+			message,
+			context,
 			&attempt_nonce,
 		);
 
@@ -317,12 +319,10 @@ fn run_signing_and_verify_with_retries(
 		};
 
 		// Combine
-		let signature =
-			match signers[0].combine_with_message(message, context, &r2_broadcasts, &r3_broadcasts)
-			{
-				Ok(sig) => sig,
-				Err(_) => continue,
-			};
+		let signature = match signers[0].combine(&r2_broadcasts, &r3_broadcasts) {
+			Ok(sig) => sig,
+			Err(_) => continue,
+		};
 
 		// Verify
 		if verify_signature(public_key, message, context, &signature) {
@@ -1984,6 +1984,8 @@ fn run_signing_with_stats(
 				config.threshold(),
 				config.total_parties(),
 				&participant_list,
+				message.as_bytes(),
+				b"",
 				&attempt_nonce,
 			);
 
@@ -2054,12 +2056,7 @@ fn run_signing_with_stats(
 			};
 
 			// Combine
-			let signature = match signers[0].combine_with_message(
-				message.as_bytes(),
-				b"",
-				&r2_broadcasts,
-				&r3_broadcasts,
-			) {
+			let signature = match signers[0].combine(&r2_broadcasts, &r3_broadcasts) {
 				Ok(sig) => sig,
 				Err(_) => continue,
 			};

@@ -74,16 +74,21 @@ pub const SSID_SIZE: usize = 32;
 /// - The public key (prevents cross-key replay)
 /// - The threshold configuration (t, n)
 /// - The signing participant set (prevents cross-session replay with different participants)
+/// - The message and context (prevents cross-message replay)
 /// - An attempt nonce (prevents replay across signing attempts for the same message)
 ///
 /// ```text
 /// ssid = SHAKE256(
-///     "dilithium-threshold-ssid-v1" ||
+///     "dilithium-threshold-ssid-v2" ||
 ///     pubkey_bytes[2592] ||
 ///     threshold (u32 LE) ||
 ///     total_parties (u32 LE) ||
 ///     num_participants (u32 LE) ||
 ///     sorted_participant_ids (each u32 LE) ||
+///     message_len (u64 LE) ||
+///     message ||
+///     context_len (u8) ||
+///     context ||
 ///     attempt_nonce[32]
 /// )
 /// ```
@@ -92,9 +97,11 @@ pub fn compute_ssid(
 	threshold: u32,
 	total_parties: u32,
 	participants: &ParticipantList,
+	message: &[u8],
+	context: &[u8],
 	attempt_nonce: &[u8; 32],
 ) -> [u8; SSID_SIZE] {
-	const DOMAIN_SEPARATOR: &[u8] = b"dilithium-threshold-ssid-v1";
+	const DOMAIN_SEPARATOR: &[u8] = b"dilithium-threshold-ssid-v2";
 
 	let mut ssid = [0u8; SSID_SIZE];
 	let mut state = fips202::KeccakState::default();
@@ -116,6 +123,17 @@ pub fn compute_ssid(
 	// Sorted participant IDs (ParticipantList maintains sorted order internally)
 	for participant_id in participants.iter() {
 		fips202::shake256_absorb(&mut state, &participant_id.to_le_bytes());
+	}
+
+	// Message (length-prefixed to prevent ambiguity)
+	let message_len = message.len() as u64;
+	fips202::shake256_absorb(&mut state, &message_len.to_le_bytes());
+	fips202::shake256_absorb(&mut state, message);
+
+	// Context (length-prefixed, max 255 bytes per ML-DSA spec)
+	fips202::shake256_absorb(&mut state, &[context.len() as u8]);
+	if !context.is_empty() {
+		fips202::shake256_absorb(&mut state, context);
 	}
 
 	// Attempt nonce

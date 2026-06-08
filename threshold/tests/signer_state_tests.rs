@@ -77,7 +77,7 @@ fn test_commitment_tampering_detected() {
 	let participants = vec![0u32, 1u32];
 	let participant_list = ParticipantList::new(&participants).unwrap();
 	let attempt_nonce = [0xDD; 32];
-	let ssid = compute_ssid(&public_key, 2, 3, &participant_list, &attempt_nonce);
+	let ssid = compute_ssid(&public_key, 2, 3, &participant_list, message, context, &attempt_nonce);
 
 	// Round 1: Both parties generate commitments (each with unique seed)
 	let r1_broadcasts: Vec<Round1Broadcast> = signers
