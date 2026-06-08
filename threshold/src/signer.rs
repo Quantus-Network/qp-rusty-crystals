@@ -559,8 +559,6 @@ impl ThresholdSigner {
 
 	/// Collect all Round 3 responses with duplicate detection.
 	///
-	/// This helper extracts the shared logic between `combine` and `combine_with_message`.
-	///
 	/// # Note
 	///
 	/// This method accepts any `party_id` in the broadcasts and does not validate
@@ -636,58 +634,6 @@ impl ThresholdSigner {
 		all_round3: &[Round3Broadcast],
 	) -> ThresholdResult<Signature> {
 		let (round2_data, my_responses, message, context) = self.state.expect_round3()?;
-
-		let all_responses = self.collect_responses(my_responses, all_round3)?;
-
-		let signature_bytes = combine_signature(
-			&self.public_key,
-			&self.config,
-			message,
-			context,
-			&round2_data.w_aggregated,
-			&all_responses,
-		)?;
-
-		Ok(Signature::from_vec(signature_bytes))
-	}
-
-	/// Combine with explicit message and context.
-	///
-	/// Use this version when you need to provide the message and context
-	/// again for the combine step.
-	///
-	/// # Arguments
-	///
-	/// * `message` - The message that was signed
-	/// * `context` - The context string used during signing
-	/// * `_all_round2` - All Round 2 broadcasts (currently unused, kept for API compatibility)
-	/// * `all_round3` - All Round 3 broadcasts from participating parties
-	///
-	/// # Caller Responsibility
-	///
-	/// **Important:** This method does not validate that Round 3 broadcasts come from
-	/// authorized participants. The caller must ensure that `all_round3` contains only
-	/// broadcasts from parties that are part of the agreed signing set.
-	///
-	/// For network usage, use
-	/// [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol) which handles
-	/// participant validation automatically.
-	///
-	/// # Errors
-	///
-	/// Returns an error if:
-	/// - The signer is not in the `AfterRound3` state
-	/// - Not enough valid responses
-	/// - Signature constraint validation fails
-	/// - Duplicate Round 3 broadcast from same party
-	pub fn combine_with_message(
-		&self,
-		message: &[u8],
-		context: &[u8],
-		_all_round2: &[Round2Broadcast],
-		all_round3: &[Round3Broadcast],
-	) -> ThresholdResult<Signature> {
-		let (round2_data, my_responses, _, _) = self.state.expect_round3()?;
 
 		let all_responses = self.collect_responses(my_responses, all_round3)?;
 

@@ -74,9 +74,7 @@
 //!     .collect::<Result<_, _>>()?;
 //!
 //! // 6. Combine into final signature
-//! let signature = signers[0].combine_with_message(
-//!     b"message", b"context", &r2_broadcasts, &r3_broadcasts
-//! )?;
+//! let signature = signers[0].combine(&r2_broadcasts, &r3_broadcasts)?;
 //!
 //! // 7. Verify (works with standard ML-DSA-87 verification)
 //! assert!(verify_signature(&public_key, b"message", b"context", &signature));
