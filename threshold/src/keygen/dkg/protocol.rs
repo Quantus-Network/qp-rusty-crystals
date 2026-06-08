@@ -177,6 +177,16 @@ pub enum DkgAction {
 	/// Broadcast data to all other participants.
 	SendMany(Vec<u8>),
 	/// Send data privately to a specific participant.
+	///
+	/// **IMPORTANT: This message MUST be sent over an authenticated and encrypted channel.**
+	///
+	/// The caller is responsible for ensuring:
+	/// - **Confidentiality**: Only the recipient can read the message content
+	/// - **Authenticity**: The recipient can verify this message came from us
+	/// - **Integrity**: The message cannot be modified in transit
+	///
+	/// This is used in Round 1 to distribute the per-subset secret K_S to subset members.
+	/// Without proper channel security, the threshold scheme's security is compromised.
 	SendPrivate(ParticipantId, Vec<u8>),
 	/// DKG is complete, return the output.
 	Return(Box<DkgOutput>),
@@ -648,7 +658,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 							return Ok(()); // Invalid subset, ignore
 						}
 
-						// M2: Verify sender is the leader for this subset
+						// Verify sender is the leader for this subset
 						let expected_leader = config.get_leader(private.subset_mask);
 						if expected_leader != Some(from) {
 							warn!(
@@ -658,7 +668,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 							return Ok(()); // Not the leader, ignore
 						}
 
-						// M2: Verify we are actually a member of this subset
+						// Verify we are actually a member of this subset
 						// (prevents malicious leader from sending K_S to non-member parties)
 						if !config.is_in_subset(private.subset_mask) {
 							warn!(
@@ -668,6 +678,11 @@ impl<S: TranscriptSigner> Dkg<S> {
 							return Ok(()); // Not in subset, ignore
 						}
 
+						// Accept the first K_S received for this subset (first-message-wins).
+						// Note: K_S is NOT commitment-bound in Round 1. Correctness is verified
+						// algebraically in Round 4 when we check that our independently-derived
+						// partial PK matches the leader's commitment. A malicious leader sending
+						// inconsistent K_S values will cause a Round 4 abort.
 						self.state
 							.received_shared_secrets
 							.get_or_insert_with(BTreeMap::new)

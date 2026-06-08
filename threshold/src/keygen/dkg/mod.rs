@@ -26,6 +26,52 @@
 //! - Verify all transcript signatures
 //! - Compute final public key: t = Σ t_S
 //!
+//! # Channel Requirements
+//!
+//! **IMPORTANT: `SendPrivate` messages (Round 1 K_S distribution) require an
+//! authenticated and encrypted channel.**
+//!
+//! The caller must ensure that when handling `DkgAction::SendPrivate(to, data)`:
+//! - **Confidentiality**: The message is encrypted so only the recipient can read it
+//! - **Authenticity**: The recipient can verify the sender's identity
+//! - **Integrity**: The message cannot be modified in transit
+//!
+//! Failure to provide these guarantees compromises the threshold scheme's security:
+//! - Without encryption, an eavesdropper learns K_S and can compute subset shares
+//! - Without authentication, an attacker could inject fake K_S values
+//!
+//! # Security Properties and Limitations
+//!
+//! ## Provided guarantees
+//! - Each party contributes randomness, so no single party controls the key
+//! - Commitment scheme (Round 1/2) prevents parties from adapting r_i based on others
+//! - Algebraic verification (Round 4) detects inconsistent partial public keys
+//! - Transcript signing provides non-repudiation
+//!
+//! ## Known limitations
+//!
+//! **K_S is not commitment-bound (late-abort griefing possible):**
+//!
+//! The per-subset secret K_S sent in Round 1 is not covered by the Round 1
+//! commitment scheme. Instead, K_S correctness is verified algebraically in
+//! Round 4 when subset members check that their independently-derived partial
+//! public keys match the leader's commitment.
+//!
+//! This means a malicious or faulty leader can:
+//! 1. Send different K_S values to different subset members
+//! 2. Send K_S to some members but not others
+//! 3. Send an invalid K_S
+//!
+//! All of these are detected in Round 4 and cause the protocol to abort, but:
+//! - Detection is abort-only (no blame attribution)
+//! - The abort happens late in the protocol (after 4 rounds of communication)
+//! - A malicious leader can grief by forcing repeated late aborts
+//!
+//! For environments where late-abort griefing is a concern, consider:
+//! - Adding reputation/staking mechanisms at the application layer
+//! - Implementing leader rotation on repeated failures
+//! - Using a complaint round with blame attribution (not currently implemented)
+//!
 //! # Usage
 //!
 //! ```ignore
@@ -48,7 +94,10 @@
 //!     match dkg.poke()? {
 //!         DkgAction::Wait => { /* wait for messages */ }
 //!         DkgAction::SendMany(data) => { /* broadcast */ }
-//!         DkgAction::SendPrivate(to, data) => { /* P2P send */ }
+//!         DkgAction::SendPrivate(to, data) => {
+//!             // MUST use authenticated + encrypted channel!
+//!             secure_send_to(to, data).await?;
+//!         }
 //!         DkgAction::Return(output) => {
 //!             // DKG complete!
 //!             break;
@@ -62,13 +111,6 @@
 //! The DKG produces `PrivateKeyShare` and `PublicKey` types that are fully
 //! compatible with the existing threshold signing protocol. Shares generated
 //! by DKG can be used directly with `ThresholdSigner`.
-//!
-//! # Security
-//!
-//! - Each party contributes randomness, so no single party controls the key
-//! - Commitment scheme prevents parties from adapting contributions based on others
-//! - Consensus verification ensures all parties agree on the public key
-//! - Transcript signing provides non-repudiation
 //!
 //! # NEAR MPC Compatibility
 //!
