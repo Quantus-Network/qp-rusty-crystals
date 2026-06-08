@@ -395,7 +395,7 @@ pub struct Round1Private {
 }
 
 /// Round 2 broadcast: Reveal randomness.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, BorshSerialize, BorshDeserialize)]
 pub struct Round2Broadcast {
 	/// Session identifier binding this message to a specific DKG session.
 	pub ssid: [u8; DKG_SSID_SIZE],
@@ -403,6 +403,22 @@ pub struct Round2Broadcast {
 	pub party_id: ParticipantId,
 	/// The revealed randomness r_i.
 	pub randomness: [u8; RANDOMNESS_SIZE],
+}
+
+impl fmt::Debug for Round2Broadcast {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("Round2Broadcast")
+			.field(
+				"ssid",
+				&format_args!(
+					"[{:02x}{:02x}{:02x}{:02x}...]",
+					self.ssid[0], self.ssid[1], self.ssid[2], self.ssid[3]
+				),
+			)
+			.field("party_id", &self.party_id)
+			.field("randomness", &"<REDACTED>")
+			.finish()
+	}
 }
 
 /// Round 3 broadcast: Commitment to partial PKs (leaders only).
