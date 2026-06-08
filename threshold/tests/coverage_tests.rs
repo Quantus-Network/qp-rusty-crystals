@@ -755,49 +755,65 @@ mod protocol_integration {
 	#[test]
 	fn test_full_signing_2_of_2() {
 		let config = ThresholdConfig::new(2, 2).expect("Valid config");
-		let seed = [42u8; 32];
-		let (public_key, shares) = generate_with_dealer(&seed, config).expect("Key gen");
-
-		let signers: Vec<ThresholdSigner> = shares
-			.into_iter()
-			.map(|share| ThresholdSigner::new(share, public_key.clone(), config).expect("signer"))
-			.collect();
+		let base_seed = [42u8; 32];
+		let (public_key, shares) = generate_with_dealer(&base_seed, config).expect("Key gen");
 
 		let message = b"test message for 2-of-2";
 		let context = b"";
 
-		let result = run_local_signing(signers, message, context, &seed);
-		assert!(result.is_ok(), "2-of-2 signing should succeed: {:?}", result.err());
+		// Retry with different seeds (ML-DSA rejection sampling is probabilistic)
+		for attempt in 0..100u8 {
+			let mut seed = base_seed;
+			seed[0] ^= attempt;
 
-		let signature = result.unwrap();
-		assert!(
-			verify_signature(&public_key, message, context, &signature),
-			"Signature should verify"
-		);
+			let signers: Vec<ThresholdSigner> = shares
+				.iter()
+				.map(|share| {
+					ThresholdSigner::new(share.clone(), public_key.clone(), config).expect("signer")
+				})
+				.collect();
+
+			if let Ok(signature) = run_local_signing(signers, message, context, &seed) {
+				assert!(
+					verify_signature(&public_key, message, context, &signature),
+					"Signature should verify"
+				);
+				return; // Success
+			}
+		}
+		panic!("2-of-2 signing should succeed within 100 attempts");
 	}
 
 	/// Test complete signing flow with t=n (all parties required).
 	#[test]
 	fn test_full_signing_t_equals_n() {
 		let config = ThresholdConfig::new(4, 4).expect("Valid config");
-		let seed = [42u8; 32];
-		let (public_key, shares) = generate_with_dealer(&seed, config).expect("Key gen");
-
-		let signers: Vec<ThresholdSigner> = shares
-			.into_iter()
-			.map(|share| ThresholdSigner::new(share, public_key.clone(), config).expect("signer"))
-			.collect();
+		let base_seed = [42u8; 32];
+		let (public_key, shares) = generate_with_dealer(&base_seed, config).expect("Key gen");
 
 		let message = b"test message for 4-of-4";
 		let context = b"test context";
 
-		let result = run_local_signing(signers, message, context, &seed);
-		assert!(result.is_ok(), "4-of-4 signing should succeed: {:?}", result.err());
+		// Retry with different seeds (ML-DSA rejection sampling is probabilistic)
+		for attempt in 0..100u8 {
+			let mut seed = base_seed;
+			seed[0] ^= attempt;
 
-		let signature = result.unwrap();
-		assert!(
-			verify_signature(&public_key, message, context, &signature),
-			"Signature should verify"
-		);
+			let signers: Vec<ThresholdSigner> = shares
+				.iter()
+				.map(|share| {
+					ThresholdSigner::new(share.clone(), public_key.clone(), config).expect("signer")
+				})
+				.collect();
+
+			if let Ok(signature) = run_local_signing(signers, message, context, &seed) {
+				assert!(
+					verify_signature(&public_key, message, context, &signature),
+					"Signature should verify"
+				);
+				return; // Success
+			}
+		}
+		panic!("4-of-4 signing should succeed within 100 attempts");
 	}
 }
