@@ -687,15 +687,26 @@ impl ThresholdSigner {
 		_all_round2: &[Round2Broadcast],
 		all_round3: &[Round3Broadcast],
 	) -> ThresholdResult<Signature> {
-		let (round2_data, my_responses, _, _) = self.state.expect_round3()?;
+		let (round2_data, my_responses, bound_message, bound_context) =
+			self.state.expect_round3()?;
+
+		// Round 3 responses are bound to the message/context captured in Round 2.
+		// Combining against anything else would silently yield an invalid signature,
+		// so reject the mismatch instead of proceeding.
+		if message != bound_message || context != bound_context {
+			return Err(ThresholdError::InvalidData(
+				"combine_with_message message/context does not match the values bound in round 2"
+					.to_string(),
+			));
+		}
 
 		let all_responses = self.collect_responses(my_responses, all_round3)?;
 
 		let signature_bytes = combine_signature(
 			&self.public_key,
 			&self.config,
-			message,
-			context,
+			bound_message,
+			bound_context,
 			&round2_data.w_aggregated,
 			&all_responses,
 		)?;

@@ -11,7 +11,7 @@
 //! - Any t or more parties can cooperate to produce a valid signature
 //! - Fewer than t parties cannot produce a signature or learn the secret key
 //!
-//! This implementation supports configurations up to (7, 7) and produces
+//! This implementation supports configurations up to (6, 6) and produces
 //! signatures that are compatible with standard ML-DSA-87 verification.
 //!
 //! ## Quick Start
