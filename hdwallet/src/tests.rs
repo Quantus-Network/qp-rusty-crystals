@@ -290,6 +290,45 @@ mod hdwallet_tests {
 		assert_eq!(ext.secret(), child_ext.secret());
 	}
 
+	// End-to-end known-answer test: pins the full mnemonic -> seed -> wormhole pipeline.
+	// Regenerate with `print_wormhole_golden` if the derivation is intentionally changed.
+	#[test]
+	fn test_wormhole_known_values() {
+		use crate::derive_wormhole_from_mnemonic;
+		use hex_literal::hex;
+
+		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let w = derive_wormhole_from_mnemonic(mnemonic, None, "m/44'/189189189'/0'").unwrap();
+
+		assert_eq!(
+			w.address,
+			hex!("6a2f0d3abe4390e0b05f6dea4ba10670676cda7c00d49526ddde59f16c85269f"),
+			"wormhole address derivation changed"
+		);
+		assert_eq!(
+			w.first_hash,
+			hex!("890ff21aa4fda75dc56c6c322c164d3c21a18ca7853d368c28cf158affc8b5b1"),
+			"wormhole first_hash derivation changed"
+		);
+		assert_eq!(
+			w.secret,
+			hex!("30051cfa3abd462d3bc26da2d660e90ba8af6080b7fe95d9fd3f3b37c7d9ce4b"),
+			"wormhole secret derivation changed"
+		);
+	}
+
+	#[test]
+	#[ignore]
+	fn print_wormhole_golden() {
+		use crate::derive_wormhole_from_mnemonic;
+		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let w = derive_wormhole_from_mnemonic(mnemonic, None, "m/44'/189189189'/0'").unwrap();
+		let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+		println!("address    = {}", hex(&w.address));
+		println!("first_hash = {}", hex(&w.first_hash));
+		println!("secret     = {}", hex(&w.secret));
+	}
+
 	#[test]
 	fn test_wormhole_derivation() {
 		let mnemonic =
