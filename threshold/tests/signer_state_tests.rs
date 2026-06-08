@@ -266,3 +266,64 @@ fn test_round2_preserves_state_on_insufficient_parties() {
 		_ => panic!("Unexpected result: {:?}", result2),
 	}
 }
+
+/// `combine_with_message` must reject a message/context that differs from the values
+/// bound in Round 2, rather than silently combining responses for the wrong message.
+#[test]
+fn test_combine_with_message_rejects_mismatched_message() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("key generation");
+
+	let mut signers: Vec<_> = shares
+		.iter()
+		.take(2)
+		.map(|share| ThresholdSigner::new(share.clone(), public_key.clone(), config).unwrap())
+		.collect();
+
+	let message = b"bound message";
+	let context = b"bound context";
+
+	let participant_list = ParticipantList::new(&[0u32, 1u32]).unwrap();
+	let ssid = compute_ssid(&public_key, 2, 3, &participant_list, &[0xDD; 32]);
+
+	let r1: Vec<_> = signers
+		.iter_mut()
+		.enumerate()
+		.map(|(i, s)| {
+			let mut party_seed = [0u8; 32];
+			party_seed[0] = (i as u8) + 1;
+			s.round1_commit_with_seed(&ssid, &party_seed).unwrap()
+		})
+		.collect();
+
+	let r2: Vec<_> = signers
+		.iter_mut()
+		.enumerate()
+		.map(|(i, s)| {
+			let others: Vec<_> = r1.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+			s.round2_reveal(&ssid, message, context, &others).unwrap()
+		})
+		.collect();
+
+	let r3: Vec<_> = signers
+		.iter_mut()
+		.enumerate()
+		.map(|(i, s)| {
+			let o1: Vec<_> = r1.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+			let o2: Vec<_> = r2.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+			s.round3_respond(&ssid, &o1, &o2).unwrap()
+		})
+		.collect();
+
+	// A different message is rejected loudly before any signature is produced.
+	let mismatched = signers[0].combine_with_message(b"different message", context, &r2, &r3);
+	assert!(mismatched.is_err(), "mismatched message must be rejected");
+
+	// The bound message/context never triggers that rejection (a CombinationFailed from
+	// this attempt's rejection sampling is acceptable; the mismatch error is not).
+	if let Err(e) = signers[0].combine_with_message(message, context, &r2, &r3) {
+		let msg = format!("{}", e);
+		assert!(!msg.contains("does not match"), "bound message must not be rejected: {}", msg);
+	}
+}
