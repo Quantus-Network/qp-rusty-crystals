@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use qp_rusty_crystals_threshold::{
 	generate_with_dealer,
-	keygen::dkg::{run_local_mithril_dkg, TranscriptSigner},
+	keygen::dkg::{run_local_dkg, TranscriptSigner},
 	signing_protocol::run_local_signing,
 	verify_signature, ThresholdConfig, ThresholdSigner,
 };
@@ -131,7 +131,7 @@ fn bench_dkg(c: &mut Criterion) {
 					let public_keys: Vec<u32> = (0..n).collect();
 					let seed = [42u8; 32];
 					let session_nonce = [0xAAu8; 32];
-					run_local_mithril_dkg(t, n, signers, public_keys, seed, &session_nonce).unwrap()
+					run_local_dkg(t, n, signers, public_keys, seed, &session_nonce).unwrap()
 				});
 			},
 		);
