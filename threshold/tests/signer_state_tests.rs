@@ -285,7 +285,7 @@ fn test_combine_with_message_rejects_mismatched_message() {
 	let context = b"bound context";
 
 	let participant_list = ParticipantList::new(&[0u32, 1u32]).unwrap();
-	let ssid = compute_ssid(&public_key, 2, 3, &participant_list, &[0xDD; 32]);
+	let ssid = compute_ssid(&public_key, 2, 3, &participant_list, message, context, &[0xDD; 32]);
 
 	let r1: Vec<_> = signers
 		.iter_mut()
