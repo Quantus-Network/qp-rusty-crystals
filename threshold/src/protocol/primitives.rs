@@ -3,6 +3,26 @@
 //! This module provides the basic types and functions needed by the threshold protocol,
 //! including hyperball sampling, matrix operations, and modular arithmetic helpers.
 //!
+//! # Security Notice: Side-Channel Considerations
+//!
+//! **The hyperball sampling and norm-checking code in this module is NOT hardened against
+//! timing or floating-point side-channel attacks.** The implementation uses:
+//!
+//! - `f64` floating-point arithmetic
+//! - Box-Muller transform with `libm` transcendental functions (`log`, `sqrt`, `sin`, `cos`)
+//! - Branching rejection loops based on norm comparisons
+//!
+//! This approach matches the academic reference implementation and is suitable for
+//! environments where local side-channel attacks are not a concern (e.g., trusted
+//! execution environments, server-side signing with physical security).
+//!
+//! **If local timing or power side-channel resistance is required**, the sampling and
+//! norm-checking routines would need to be replaced with constant-time integer-based
+//! implementations using techniques such as:
+//! - Fixed-point arithmetic instead of floating-point
+//! - Constant-time rejection sampling (e.g., with dummy operations)
+//! - Side-channel-resistant transcendental function approximations
+//!
 //! # ML-DSA-87 Parameters
 //!
 //! This module uses ML-DSA-87 parameters directly from `dilithium_params`:
@@ -267,6 +287,12 @@ pub(crate) fn compute_ntt_dot_product(
 /// Used for rejection sampling in the threshold signing protocol. Samples are
 /// drawn from a hyperball of specified radius and scaled by nu for the s1
 /// components.
+///
+/// # Security Notice
+///
+/// **This implementation is NOT constant-time.** It uses floating-point arithmetic,
+/// `libm` transcendental functions, and data-dependent branching. See the module-level
+/// documentation for details on side-channel considerations.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct HyperballSampleVector {
 	data: Box<[f64]>,
@@ -279,8 +305,15 @@ impl HyperballSampleVector {
 	}
 
 	/// Sample from hyperball with given radius and nu parameter.
+	///
 	/// This uses SHAKE256 for cryptographic randomness and Box-Muller
 	/// transform for normally distributed samples.
+	///
+	/// # Security Notice
+	///
+	/// This function is NOT constant-time. It uses floating-point operations
+	/// and `libm` functions (`log`, `sqrt`, `sin`, `cos`) which may leak
+	/// timing information about the sampled values.
 	pub fn sample_hyperball(&mut self, radius: f64, nu: f64, rhop: &[u8; 64], nonce: u16) {
 		let size = self.data.len();
 		let mut samples = vec![0.0f64; size + 2];
@@ -396,6 +429,15 @@ impl HyperballSampleVector {
 	}
 
 	/// Check if norm exceeds rejection bounds for rejection sampling.
+	///
+	/// Returns `true` if the weighted norm of the vector exceeds the bound `r`,
+	/// indicating the sample should be rejected.
+	///
+	/// # Security Notice
+	///
+	/// This function is NOT constant-time. The comparison result depends on
+	/// the sampled values, and the early-return pattern in rejection sampling
+	/// loops can leak timing information.
 	pub fn excess(&self, r: f64, nu: f64) -> bool {
 		let mut sq = 0.0;
 
