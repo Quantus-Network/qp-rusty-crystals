@@ -12,10 +12,10 @@ hex = { version = "=0.4.3", default-features = false, features = ["alloc"] }
 hex-literal = { version = "=0.4.1", default-features = false }
 libm = { version = "=0.2.11" }
 log = { version = "=0.4.29", default-features = false }
-qp-poseidon-core = { version = "1.4.0", default-features = false }
-qp-rusty-crystals-dilithium = { path = "./dilithium", version = "2.4.0", default-features = false }
-qp-rusty-crystals-hdwallet = { path = "./hdwallet", version = "2.3.1", default-features = false }
-qp-rusty-crystals-threshold = { path = "./threshold", version = "1.0.0", default-features = false }
+qp-poseidon-core = { version = "=2.1.0", default-features = false }
+qp-rusty-crystals-dilithium = { path = "./dilithium", version = "=2.5.0", default-features = false }
+qp-rusty-crystals-hdwallet = { path = "./hdwallet", version = "=2.4.0", default-features = false }
+qp-rusty-crystals-threshold = { path = "./threshold", version = "=1.0.0", default-features = false }
 rand = { version = "=0.10.1", default-features = false, features = ["std_rng", "thread_rng"] }
 rand_core = { version = "=0.10.0", default-features = false }
 rusty-crystals-integration-tests = { path = "./tests" }
