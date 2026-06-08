@@ -39,6 +39,7 @@ use qp_rusty_crystals_dilithium::{
 	fips202,
 	params::{ETA, K, L, N, Q},
 };
+use zeroize::Zeroize;
 
 use crate::{
 	keys::{PrivateKeyShare, SecretShareData},
@@ -196,7 +197,7 @@ impl fmt::Display for ResharingProtocolError {
 /// - **Round 2**: Entropy reveal (old committee reveals entropy, session seed computed)
 /// - **Round 3**: Sub-share commitments (designated dealers broadcast `H(r_{I→J})`)
 /// - **Round 4**: Private delivery (dealers send `r_{I→J}` to new committee)
-/// - **Round 5**: Verification (share commitments, partial PKs, accusations)
+/// - **Round 5**: Verification (share commitments, partial PKs)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResharingState {
 	/// Generating Round 1 message (entropy commitment).
@@ -215,7 +216,7 @@ pub enum ResharingState {
 	Round4Generate,
 	/// Waiting for Round 4 messages (receiving sub-shares).
 	Round4Waiting,
-	/// Generating Round 5 message (verification commitments + accusations).
+	/// Generating Round 5 message (verification commitments).
 	Round5Generate,
 	/// Waiting for Round 5 messages.
 	Round5Waiting,
@@ -292,6 +293,23 @@ pub struct ResharingProtocol {
 	new_shares: BTreeMap<SubsetMask, NewShareData>,
 	/// Final output (cached so `take_output` can return it after Combining).
 	completed_output: Option<ResharingOutput>,
+}
+
+impl Drop for ResharingProtocol {
+	fn drop(&mut self) {
+		// Zeroize all secret-bearing fields
+		self.seed.zeroize();
+		if let Some(ref mut entropy) = self.my_entropy {
+			entropy.zeroize();
+		}
+		if let Some(ref mut seed) = self.session_seed {
+			seed.zeroize();
+		}
+		// NewShareData implements ZeroizeOnDrop, but we explicitly clear the maps
+		// to ensure all values are dropped and zeroized
+		self.my_subshares.clear();
+		self.new_shares.clear();
+	}
 }
 
 impl ResharingProtocol {
@@ -777,8 +795,7 @@ impl ResharingProtocol {
 			return self.poke();
 		}
 
-		// Old-only parties advance to Round 5 generation (they will broadcast accusations
-		// only).
+		// Old-only parties advance to Round 5 generation (they broadcast success/failure status).
 		if !self.config.role().is_new_committee() &&
 			self.round4_sent_count >= self.pending_round4.len()
 		{
@@ -914,7 +931,7 @@ impl ResharingProtocol {
 
 	fn have_all_round5(&self) -> bool {
 		// Round 5 has contributions from BOTH old and new committee members
-		// (old members file accusations; new members commit to new shares),
+		// (old members broadcast status; new members commit to new shares),
 		// so we need broadcasts from every party that is in either committee.
 		let union = self.config.all_participants();
 		union.iter().all(|p| self.round5_broadcasts.contains_key(p))
@@ -990,8 +1007,8 @@ impl ResharingProtocol {
 			})?;
 			let subshares =
 				derive_subshares_with_session_seed(i_mask, s_i, &new_subsets, &session_seed);
-			for (j_idx, j_mask) in new_subsets.iter().enumerate() {
-				self.my_subshares.insert((i_mask, *j_mask), subshares[j_idx].clone());
+			for (j_mask, subshare) in new_subsets.iter().zip(subshares.into_iter()) {
+				self.my_subshares.insert((i_mask, *j_mask), subshare);
 			}
 		}
 		Ok(())

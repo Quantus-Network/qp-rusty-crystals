@@ -18,6 +18,7 @@ use qp_rusty_crystals_dilithium::{
 	params::{K, L},
 	polyvec,
 };
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	error::{ThresholdError, ThresholdResult},
@@ -26,7 +27,7 @@ use crate::{
 };
 
 /// Secret share for a single party.
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SecretShare {
 	/// Share of the s1 polynomial vector.
 	pub s1_share: polyvec::Polyvecl,

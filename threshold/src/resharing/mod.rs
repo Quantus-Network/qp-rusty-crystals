@@ -29,7 +29,7 @@
 //!   computed
 //! - **Round 3**: Sub-share commitments - designated dealers broadcast `H(r_{I→J})`
 //! - **Round 4**: Private delivery - dealers send `r_{I→J}` to new committee (**secure channel**)
-//! - **Round 5**: Verification - share commitments, partial PKs, accusations
+//! - **Round 5**: Verification - share commitments, partial PKs
 //!
 //! For each old RSS subset `I` (a `k_old`-subset of the old committee whose members all hold the
 //! η-bounded share `s_I^old`), the lowest-ID member of `I` (the "designated dealer" `D_I`)
@@ -59,8 +59,8 @@
 //!   compromise of old subset shares lets an attacker recompute the deterministic sub-shares.
 //! - **Confidentiality of share contributions**: Rounds 1-3 only broadcast hash commitments; Round
 //!   4 sub-shares travel privately (**caller must provide secure channel**).
-//! - **Cheating-dealer detection**: Old subset members cross-verify dealers' commitments; new
-//!   subset members cross-verify computed `s_J^new` values.
+//! - **Cheating-dealer detection**: New subset members cross-verify computed `s_J^new` values;
+//!   public-key invariant verification catches inconsistent dealing.
 //! - **Public key preservation**: `t = A·s1 + s2` is unchanged.
 //!
 //! # Why Custom Protocol?

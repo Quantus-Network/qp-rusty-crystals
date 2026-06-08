@@ -8,6 +8,7 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::fmt;
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use qp_rusty_crystals_dilithium::params::{K, L, N};
 
@@ -404,7 +405,7 @@ impl fmt::Display for ResharingConfigError {
 /// - **Round 2**: Entropy reveal (old committee reveals entropy, session seed computed)
 /// - **Round 3**: Sub-share commitments (designated dealers broadcast `H(r_{I→J})`)
 /// - **Round 4**: Private delivery (dealers send `r_{I→J}` to new committee)
-/// - **Round 5**: Verification (share commitments, partial PKs, accusations)
+/// - **Round 5**: Verification (share commitments, partial PKs)
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum ResharingMessage {
 	/// Round 1: Entropy commitment from old committee members.
@@ -581,7 +582,7 @@ pub type SubsetPair = (SubsetMask, SubsetMask);
 ///
 /// Transmitting this message over an unencrypted channel exposes sub-shares to
 /// eavesdroppers and compromises the threshold scheme's security.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound4Message {
 	/// Session identifier binding this message to the resharing session.
 	pub ssid: [u8; RESHARING_SSID_SIZE],
@@ -593,8 +594,20 @@ pub struct ResharingRound4Message {
 	pub contributions: BTreeMap<SubsetPair, NewShareData>,
 }
 
+impl fmt::Debug for ResharingRound4Message {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("ResharingRound4Message")
+			.field("ssid", &format_args!("[{:02x}{:02x}{:02x}{:02x}...]", 
+				self.ssid[0], self.ssid[1], self.ssid[2], self.ssid[3]))
+			.field("from_party_id", &self.from_party_id)
+			.field("to_party_id", &self.to_party_id)
+			.field("contributions", &format_args!("<{} entries, REDACTED>", self.contributions.len()))
+			.finish()
+	}
+}
+
 /// New share data for a specific subset.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
 pub struct NewShareData {
 	/// Share of s1 polynomial vector (exactly L polynomials).
 	pub s1: [[i32; N as usize]; L],
@@ -628,17 +641,11 @@ impl Default for NewShareData {
 ///    should produce identical commitments; any mismatch indicates inconsistent dealing (e.g., a
 ///    malicious dealer who sent different `r_{I→J}` to different recipients).
 ///
-/// 2. **Old committee cross-verification.** Old committee members that share an old subset `I` with
-///    the dealer `D_I` independently recompute the deterministic `r_{I→J}` values from their own
-///    copy of `s_I^old` and compare them against `D_I`'s broadcast commitments. Any mismatch is
-///    reported as a `DealerAccusation`. If the accusation is correct (the accuser's recomputation
-///    matches their own private knowledge of `s_I`), the resharing fails.
-///
-/// 3. **Public-key invariant verification.** Each new committee member additionally publishes
+/// 2. **Public-key invariant verification.** Each new committee member additionally publishes
 ///    `t_J^new = A·s1_J^new + s2_J^new mod Q` for every new subset `J` it belongs to. Anyone can
 ///    sum these `t_J` and check that the result reconstructs the original public key. This catches
 ///    a malicious dealer that lies about the residual `r_{I→J}` in a *size-1* old subset (`t = n`
-///    configurations), where there is no other old-subset member to cross-verify in purpose 2.
+///    configurations), where there is no other old-subset member to cross-verify.
 ///    Publishing `t_J^new` is safe: recovering `s_J^new` from `t_J^new` is the LWE problem.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ResharingRound5Broadcast {
