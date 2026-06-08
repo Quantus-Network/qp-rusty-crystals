@@ -244,10 +244,6 @@ pub struct ResharingProtocol {
 	/// Seed for entropy generation (provided by caller).
 	seed: [u8; 32],
 
-	/// This party's existing private key share (if in old committee).
-	/// None if this party is NewOnly (joining the new committee).
-	existing_share: Option<PrivateKeyShare>,
-
 	/// Old subset masks (from the existing share's stored shares), in canonical
 	/// (BTreeMap) order. Indexed by `old_subset_index`.
 	old_subset_order: Vec<SubsetMask>,
@@ -301,16 +297,16 @@ pub struct ResharingProtocol {
 impl ResharingProtocol {
 	/// Create a new resharing protocol instance.
 	///
-	/// * `existing_share` - Required for old committee members (`OldOnly`/`Both`), `None` for
-	///   `NewOnly`.
-	/// * `seed` - 32 bytes of cryptographic randomness for this party's entropy contribution.
-	/// * `session_nonce` - Unique nonce for SSID computation (prevents cross-session replay).
-	pub fn new(
-		config: ResharingConfig,
-		existing_share: Option<PrivateKeyShare>,
-		seed: [u8; 32],
-		session_nonce: &[u8; 32],
-	) -> Self {
+	/// The config must be created using `ResharingConfig::new_for_old_member` (for old committee
+	/// members with an existing share) or `ResharingConfig::new_for_new_member` (for new-only
+	/// members without a share). The config contains the existing share if applicable.
+	///
+	/// # Arguments
+	///
+	/// * `config` - The resharing configuration (includes existing_share for old members)
+	/// * `seed` - 32 bytes of cryptographic randomness for this party's entropy contribution
+	/// * `session_nonce` - Unique nonce for SSID computation (prevents cross-session replay)
+	pub fn new(config: ResharingConfig, seed: [u8; 32], session_nonce: &[u8; 32]) -> Self {
 		let old_participants: Vec<_> = config.old_participants().iter().collect();
 		let new_participants: Vec<_> = config.new_participants().iter().collect();
 		let ssid = compute_resharing_ssid(
@@ -330,7 +326,6 @@ impl ResharingProtocol {
 			state: ResharingState::Round1Generate,
 			ssid,
 			seed,
-			existing_share,
 			old_subset_order,
 			new_subset_order,
 			my_entropy: None,
@@ -965,7 +960,7 @@ impl ResharingProtocol {
 	/// Pre-compute every sub-share `r_{I→J}` we are responsible for dealing.
 	/// Uses the public session seed for per-session randomization.
 	fn compute_my_subshares(&mut self) -> Result<(), ResharingProtocolError> {
-		let existing = self.existing_share.as_ref().ok_or_else(|| {
+		let existing = self.config.existing_share().ok_or_else(|| {
 			ResharingProtocolError::InternalError("Missing existing share".to_string())
 		})?;
 		let shares = existing.shares();
@@ -1186,7 +1181,7 @@ impl ResharingProtocol {
 	/// Extract `rho` (matrix-A seed). Old/Both parties take it from their existing
 	/// share; NewOnly parties extract it from the public key prefix.
 	fn derive_rho(&self) -> [u8; 32] {
-		if let Some(existing) = self.existing_share.as_ref() {
+		if let Some(existing) = self.config.existing_share() {
 			*existing.rho()
 		} else {
 			let mut rho = [0u8; 32];
@@ -1292,7 +1287,7 @@ impl ResharingProtocol {
 		}
 
 		let rho = self.derive_rho();
-		let tr = if let Some(existing) = self.existing_share.as_ref() {
+		let tr = if let Some(existing) = self.config.existing_share() {
 			*existing.tr()
 		} else {
 			*self.config.public_key().tr()

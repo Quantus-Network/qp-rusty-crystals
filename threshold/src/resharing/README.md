@@ -167,7 +167,7 @@ let config = ResharingConfig::new(
 )?;
 
 // Old committee members pass Some(existing_share); new-only parties pass None.
-let mut protocol = ResharingProtocol::new(config, my_existing_share, seed, &session_nonce);
+let mut protocol = ResharingProtocol::new(config, my_existing_share, seed, &session_nonce)?;
 
 // Run protocol loop
 loop {

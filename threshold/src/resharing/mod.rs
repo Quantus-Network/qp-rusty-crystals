@@ -96,7 +96,7 @@
 //! )?;
 //!
 //! // Old committee members pass Some(existing_share); new-only parties pass None.
-//! let mut protocol = ResharingProtocol::new(config, existing_share, seed, &session_nonce);
+//! let mut protocol = ResharingProtocol::new(config, existing_share, seed, &session_nonce)?;
 //!
 //! loop {
 //!     match protocol.poke()? {
