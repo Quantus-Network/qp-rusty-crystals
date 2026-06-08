@@ -140,6 +140,7 @@ use core::{fmt, mem};
 use borsh::{BorshDeserialize, BorshSerialize};
 use log::warn;
 use qp_rusty_crystals_dilithium::{fips202, ml_dsa_87::MAX_MESSAGE_SIZE};
+use zeroize::Zeroize;
 
 use crate::{
 	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature, SSID_SIZE},
@@ -514,6 +515,13 @@ pub struct DilithiumSignProtocol {
 
 	/// Signature received from leader (for followers).
 	received_signature: Option<Signature>,
+}
+
+impl Drop for DilithiumSignProtocol {
+	fn drop(&mut self) {
+		// Zeroize the round1_seed which is the key-leaking secret if exposed
+		self.round1_seed.zeroize();
+	}
 }
 
 impl DilithiumSignProtocol {

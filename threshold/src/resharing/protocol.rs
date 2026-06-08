@@ -309,6 +309,11 @@ impl Drop for ResharingProtocol {
 		// to ensure all values are dropped and zeroized
 		self.my_subshares.clear();
 		self.new_shares.clear();
+		// Also clear Round 4 messages which contain NewShareData contributions
+		self.pending_round4.clear();
+		self.round4_messages.clear();
+		// Note: ResharingConfig contains existing_share which has ZeroizeOnDrop,
+		// so it will be zeroized when config is dropped
 	}
 }
 
