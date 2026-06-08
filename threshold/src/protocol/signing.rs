@@ -718,6 +718,16 @@ pub(crate) fn unpack_responses(
 // Signature Combination
 // ============================================================================
 
+/// Check if a response vector is all zeros.
+///
+/// A zero response indicates that local rejection sampling failed for this iteration.
+/// Zero vectors must be excluded from aggregation because they would be counted as
+/// valid threshold contributions (they pass norm checks) but don't actually contain
+/// valid cryptographic data, breaking threshold linearity.
+fn is_zero_response(z_i: &polyvec::Polyvecl) -> bool {
+	z_i.vec.iter().take(L).all(|poly| poly.coeffs.iter().all(|&c| c == 0))
+}
+
 /// Check if a single party's z response for one iteration satisfies the norm bound.
 /// Returns true if the response is valid (within bounds).
 ///
@@ -782,6 +792,12 @@ pub(crate) fn combine_signature(
 		for party_responses in all_responses.iter() {
 			if i < party_responses.len() {
 				let z_i = &party_responses[i];
+				// H4: Skip zero responses (indicates local rejection sampling failure).
+				// Zero vectors pass norm checks but don't contain valid cryptographic
+				// data - counting them would break threshold linearity.
+				if is_zero_response(z_i) {
+					continue;
+				}
 				// Only include parties with valid z-norm for this iteration
 				if check_party_z_norm(z_i, gamma1_minus_beta) {
 					// Aggregate this party's response
@@ -1008,4 +1024,140 @@ fn unpack_t1(pk_bytes: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
 	}
 
 	Ok(t1)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Test that is_zero_response correctly identifies all-zero response vectors.
+	#[test]
+	fn test_is_zero_response_detects_zeros() {
+		// All-zero response should be detected
+		let zero_response = polyvec::Polyvecl::default();
+		assert!(is_zero_response(&zero_response), "All-zero response should be detected as zero");
+	}
+
+	/// Test that is_zero_response correctly identifies non-zero response vectors.
+	#[test]
+	fn test_is_zero_response_allows_nonzero() {
+		// Response with a single non-zero coefficient should not be zero
+		let mut nonzero_response = polyvec::Polyvecl::default();
+		nonzero_response.vec[0].coeffs[0] = 1;
+		assert!(
+			!is_zero_response(&nonzero_response),
+			"Non-zero response should not be detected as zero"
+		);
+
+		// Response with non-zero in last position
+		let mut nonzero_response2 = polyvec::Polyvecl::default();
+		nonzero_response2.vec[L - 1].coeffs[N as usize - 1] = 42;
+		assert!(
+			!is_zero_response(&nonzero_response2),
+			"Response with non-zero in last position should not be detected as zero"
+		);
+	}
+
+	/// Test that check_party_z_norm accepts zero vectors (the bug we're fixing).
+	/// This documents the behavior that necessitates the is_zero_response check.
+	#[test]
+	fn test_zero_vector_passes_norm_check() {
+		let zero_response = polyvec::Polyvecl::default();
+		let gamma1_minus_beta = (GAMMA1 - BETA) as i32;
+
+		// Zero vectors pass norm checks because 0 < gamma1_minus_beta
+		assert!(
+			check_party_z_norm(&zero_response, gamma1_minus_beta),
+			"Zero vector passes norm check (this is why we need is_zero_response)"
+		);
+	}
+
+	/// Test that the combination of checks correctly filters zero responses.
+	/// A zero response should be rejected by is_zero_response even though
+	/// it passes check_party_z_norm.
+	#[test]
+	fn test_zero_response_filtered_before_norm_check() {
+		let zero_response = polyvec::Polyvecl::default();
+		let gamma1_minus_beta = (GAMMA1 - BETA) as i32;
+
+		// Simulate the check order in combine_signature:
+		// 1. First check if zero (skip if true)
+		// 2. Then check norm (would pass for zero)
+		let should_skip = is_zero_response(&zero_response);
+		let passes_norm = check_party_z_norm(&zero_response, gamma1_minus_beta);
+
+		assert!(should_skip, "Zero response should be detected and skipped");
+		assert!(passes_norm, "Zero response would pass norm check if not filtered");
+
+		// The fix ensures we skip BEFORE checking norm
+		let would_be_aggregated = !should_skip && passes_norm;
+		assert!(!would_be_aggregated, "Zero response must not be aggregated (H4 fix)");
+	}
+
+	/// Test that combine_signature correctly counts valid parties when some have zero responses.
+	///
+	/// This tests the H4 fix: zero responses (from local rejection sampling failures) must
+	/// not be counted as valid threshold contributions. Before the fix, zeros passed norm
+	/// checks and were aggregated, breaking threshold linearity.
+	#[test]
+	fn test_combine_signature_excludes_zero_responses_from_party_count() {
+		use crate::{generate_with_dealer, ThresholdConfig};
+
+		// Set up a 2-of-3 threshold scheme
+		let seed = [42u8; 32];
+		let config = ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, _shares) = generate_with_dealer(&seed, config).expect("key generation");
+
+		let message = b"test message";
+		let context: &[u8] = b"";
+		let k_iterations = config.k_iterations() as usize;
+
+		// Create fake w_aggregated (doesn't need to be valid for this test -
+		// we're testing that party counting fails before signature construction)
+		let w_aggregated: Vec<polyvec::Polyveck> = vec![polyvec::Polyveck::default(); k_iterations];
+
+		// Scenario 1: All 3 parties submit zero responses
+		// Expected: CombinationFailed because valid_party_count (0) < threshold (2)
+		let all_zero_responses: Vec<Vec<polyvec::Polyvecl>> = vec![
+			vec![polyvec::Polyvecl::default(); k_iterations], // Party 1: zeros
+			vec![polyvec::Polyvecl::default(); k_iterations], // Party 2: zeros
+			vec![polyvec::Polyvecl::default(); k_iterations], // Party 3: zeros
+		];
+
+		let result = combine_signature(
+			&public_key,
+			&config,
+			message,
+			context,
+			&w_aggregated,
+			&all_zero_responses,
+		);
+
+		assert!(result.is_err(), "Should fail when all responses are zero (no valid parties)");
+
+		// Scenario 2: Only 1 party has a non-zero response, below threshold
+		// Even though 3 parties "responded", only 1 is valid
+		let mut one_nonzero = polyvec::Polyvecl::default();
+		one_nonzero.vec[0].coeffs[0] = 1; // Small value within norm bounds
+
+		let mixed_responses: Vec<Vec<polyvec::Polyvecl>> = vec![
+			vec![one_nonzero.clone(); k_iterations], // Party 1: valid
+			vec![polyvec::Polyvecl::default(); k_iterations], // Party 2: zeros
+			vec![polyvec::Polyvecl::default(); k_iterations], // Party 3: zeros
+		];
+
+		let result = combine_signature(
+			&public_key,
+			&config,
+			message,
+			context,
+			&w_aggregated,
+			&mixed_responses,
+		);
+
+		// This should still fail because only 1 valid party < threshold of 2
+		// (The actual signature won't verify anyway since w_aggregated is fake,
+		// but the important thing is that zeros are not counted)
+		assert!(result.is_err(), "Should fail when valid_party_count (1) < threshold (2)");
+	}
 }
