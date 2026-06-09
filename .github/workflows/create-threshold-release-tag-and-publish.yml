@@ -188,6 +188,7 @@ jobs:
             $DRAFT_FLAG
 
       - name: Publish threshold to crates.io
+        if: needs.create-tag.outputs.is_draft != 'true'
         run: |
           cd threshold
           cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty

@@ -62,9 +62,18 @@ jobs:
           # Get all threshold version tags and sort them by version
           latest_semver_tag=$(git tag -l "threshold-v[0-9]*.[0-9]*.[0-9]*" | sort -V | tail -n 1)
           
-          # If no tags found, use default
+          # If no tags found, read current version from threshold/Cargo.toml
           if [ -z "$latest_semver_tag" ]; then
-            latest_semver_tag="threshold-v0.0.0"
+            cargo_version=$(grep -m1 '^version' threshold/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+            if [ -z "$cargo_version" ]; then
+              echo "Error: No threshold tags found and could not read version from threshold/Cargo.toml"
+              exit 1
+            fi
+            # Use the Cargo.toml version as the base (subtract one patch for the first bump to match)
+            # This ensures a patch bump from Cargo.toml 1.0.0 yields 1.0.1, not 0.0.1
+            latest_semver_tag="threshold-v$cargo_version"
+            echo "No existing threshold tags found. Using version from threshold/Cargo.toml: $latest_semver_tag"
+            echo "Note: The first release will increment from this version."
           fi
           
           echo "latest_tag_found=$latest_semver_tag" >> $GITHUB_OUTPUT
@@ -171,7 +180,7 @@ jobs:
 
           gh pr create \
             --title "$PR_TITLE" \
-            --body "$(printf "Automated threshold version bump for release %s.\\n\\n%s\\n\\nTriggered by workflow run: %s\\n\\nType: %s" "$NEW_VERSION" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" "${{ github.event.inputs.version_type }}")" \
+            --body "$(printf "Automated threshold version bump for release %s.\\n\\nTriggered by workflow run: %s\\n\\nType: %s" "$NEW_VERSION" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" "${{ github.event.inputs.version_type }}")" \
             --base "$TARGET_BRANCH" \
             --head "$branch_name" \
             --label "$PR_LABELS"
