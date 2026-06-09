@@ -8,7 +8,7 @@ description = "Threshold ML-DSA-87 signature scheme implementation for post-quan
 readme = "README.md"
 homepage = "https://www.quantus.com"
 repository = "https://github.com/Quantus-Network/qp-rusty-crystals"
-keywords = ["cryptography", "ml-dsa", "post-quantum", "threshold", "dilithium"]
+keywords = ["cryptography", "dilithium", "ml-dsa", "post-quantum", "threshold"]
 categories = ["cryptography"]
 
 [dependencies]
