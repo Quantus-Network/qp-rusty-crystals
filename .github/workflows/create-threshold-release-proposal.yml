@@ -69,8 +69,8 @@ jobs:
               echo "Error: No threshold tags found and could not read version from threshold/Cargo.toml"
               exit 1
             fi
-            # Use the Cargo.toml version as the base (subtract one patch for the first bump to match)
-            # This ensures a patch bump from Cargo.toml 1.0.0 yields 1.0.1, not 0.0.1
+            # Use the Cargo.toml version as the base for incrementing.
+            # With Cargo.toml at 1.0.0, the first patch release will be 1.0.1 (version 1.0.0 is never tagged/published)
             latest_semver_tag="threshold-v$cargo_version"
             echo "No existing threshold tags found. Using version from threshold/Cargo.toml: $latest_semver_tag"
             echo "Note: The first release will increment from this version."
