@@ -5,8 +5,7 @@ env:
   CARGO_TERM_COLOR: always
 
 on:
-  pull_request:
-    types: [closed]
+  push:
     branches:
       - master
 
@@ -18,7 +17,7 @@ permissions:
 jobs:
   create-tag:
     name: Create Threshold Tag
-    if: github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'threshold-release-proposal')
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -35,7 +34,7 @@ jobs:
         id: extract_version
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-          IS_DRAFT_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'draft-release') }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
           # Extract version from PR title (format: "ci: Automate threshold version bump to threshold-vX.Y.Z")
           # Using env var to prevent command injection from malicious PR titles
@@ -47,7 +46,7 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
           # Check if this is a draft release
-          if [[ "$IS_DRAFT_LABEL" == "true" ]]; then
+          if [[ ",$PR_LABELS," == *",draft-release,"* ]]; then
             echo "is_draft=true" >> $GITHUB_OUTPUT
           else
             echo "is_draft=false" >> $GITHUB_OUTPUT
