@@ -2,11 +2,13 @@
 name = "qp-rusty-crystals-threshold"
 version = "1.0.0"
 edition = "2021"
-authors = ["Quantum Resistant Ledger"]
+authors = ["Quantus Network"]
 license = "GPL-3.0"
-description = "Threshold ML-DSA signature scheme implementation"
-repository = "https://github.com/quantum-resistant-ledger/qp-rusty-crystals"
-keywords = ["cryptography", "ml-dsa", "post-quantum", "signatures", "threshold"]
+description = "Threshold ML-DSA-87 signature scheme implementation for post-quantum threshold signing"
+readme = "README.md"
+homepage = "https://www.quantus.com"
+repository = "https://github.com/Quantus-Network/qp-rusty-crystals"
+keywords = ["cryptography", "ml-dsa", "post-quantum", "threshold", "dilithium"]
 categories = ["cryptography"]
 
 [dependencies]
