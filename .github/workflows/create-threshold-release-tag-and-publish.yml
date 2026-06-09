@@ -33,17 +33,21 @@ jobs:
 
       - name: Extract version from PR title
         id: extract_version
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          IS_DRAFT_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'draft-release') }}
         run: |
           # Extract version from PR title (format: "ci: Automate threshold version bump to threshold-vX.Y.Z")
-          VERSION=$(echo "${{ github.event.pull_request.title }}" | grep -o 'threshold-v[0-9]\+\.[0-9]\+\.[0-9]\+')
+          # Using env var to prevent command injection from malicious PR titles
+          VERSION=$(echo "$PR_TITLE" | grep -o 'threshold-v[0-9]\+\.[0-9]\+\.[0-9]\+')
           if [ -z "$VERSION" ]; then
-            echo "Error: Could not extract threshold version from PR title: ${{ github.event.pull_request.title }}"
+            echo "Error: Could not extract threshold version from PR title: $PR_TITLE"
             exit 1
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
           # Check if this is a draft release
-          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'draft-release') }}" == "true" ]]; then
+          if [[ "$IS_DRAFT_LABEL" == "true" ]]; then
             echo "is_draft=true" >> $GITHUB_OUTPUT
           else
             echo "is_draft=false" >> $GITHUB_OUTPUT
@@ -51,11 +55,15 @@ jobs:
           echo "Extracted threshold version: $VERSION"
 
       - name: Create and push tag
+        env:
+          GIT_USER_NAME: ${{ github.actor }}
+          GIT_USER_EMAIL: ${{ github.actor }}@users.noreply.github.com
+          TAG_VERSION: ${{ steps.extract_version.outputs.version }}
         run: |
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
-          git tag -a "${{ steps.extract_version.outputs.version }}" -m "Threshold Release ${{ steps.extract_version.outputs.version }}"
-          git push origin "${{ steps.extract_version.outputs.version }}"
+          git config user.name "$GIT_USER_NAME"
+          git config user.email "$GIT_USER_EMAIL"
+          git tag -a "$TAG_VERSION" -m "Threshold Release $TAG_VERSION"
+          git push origin "$TAG_VERSION"
 
   format-checks:
     name: Format Checks

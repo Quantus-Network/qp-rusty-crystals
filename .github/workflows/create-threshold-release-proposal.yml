@@ -141,6 +141,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.ADMIN_PAT }}
           SOURCE_BRANCH: ${{ needs.calculate-next-version.outputs.source_branch }}
           TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
+          GIT_USER_NAME: ${{ github.actor }}
+          GIT_USER_EMAIL: ${{ github.actor }}@users.noreply.github.com
+          IS_DRAFT: ${{ github.event.inputs.is_draft }}
+          VERSION_TYPE: ${{ github.event.inputs.version_type }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -ex
           # Extract version without threshold- prefix
@@ -163,8 +168,8 @@ jobs:
           cargo update --package qp-rusty-crystals-threshold
 
           # Commit changes
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git config user.name "$GIT_USER_NAME"
+          git config user.email "$GIT_USER_EMAIL"
           
           git add Cargo.toml threshold/Cargo.toml Cargo.lock
           git commit -m "ci: Automate threshold version bump to $NEW_VERSION"
@@ -174,13 +179,13 @@ jobs:
 
           # Prepare labels
           PR_LABELS="automated,threshold-release-proposal"
-          if [[ "${{ github.event.inputs.is_draft }}" == "true" ]]; then
+          if [[ "$IS_DRAFT" == "true" ]]; then
             PR_LABELS="$PR_LABELS,draft-release"
           fi
 
           gh pr create \
             --title "$PR_TITLE" \
-            --body "$(printf "Automated threshold version bump for release %s.\\n\\nTriggered by workflow run: %s\\n\\nType: %s" "$NEW_VERSION" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" "${{ github.event.inputs.version_type }}")" \
+            --body "$(printf "Automated threshold version bump for release %s.\\n\\nTriggered by workflow run: %s\\n\\nType: %s" "$NEW_VERSION" "$WORKFLOW_URL" "$VERSION_TYPE")" \
             --base "$TARGET_BRANCH" \
             --head "$branch_name" \
             --label "$PR_LABELS"
