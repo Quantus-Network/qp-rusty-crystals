@@ -95,7 +95,7 @@ Before Round 2 reveals are known, an attacker cannot predict the session seed un
 | **Replay protection** | Every message carries an SSID derived from the old/new committees, public key, and session nonce. Messages with a mismatched SSID are ignored. |
 | **Session randomization** | Session seed incorporates the SSID and fresh entropy from all old committee members via commit-reveal, so different sessions produce different deterministic sub-share splits even if entropy is accidentally reused. This does not provide post-compromise forward secrecy once the transcript is recorded. |
 | **Confidentiality of contributions** | Rounds 1-3, 5 broadcast only hash commitments; Round 4 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
-| **Cheating-dealer detection** | New-subset members cross-verify computed `s_J^new` against broadcast commitments, and a final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching a malicious dealer even when their old subset has size 1. If any verification fails, the protocol aborts. |
+| **Cheating-dealer detection** | New-subset members verify delivered sub-shares against Round 3 commitments, reject over-large sub-share coefficients, and reject recovered signing partials that exceed the existing hyperball safety envelope. A final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching aggregate-secret corruption even when an old subset has size 1. If any verification fails, the protocol aborts. |
 | **PK Preservation** | Public key `t = A·s1 + s2` unchanged, verified at the end of Round 5 via a deterministic byte-equality check against the original PK. |
 
 ## Why Custom Protocol?
@@ -136,7 +136,15 @@ and therefore also the required modular equation. No single sub-share absorbs a 
 ceil(|centered(s_I^old)| / m) + (m - 1)η.
 ```
 
-This is a practical bounded conditional sampler over the sum constraint. It is not an `η`-bounded sharing and it is not claimed to be a discrete Gaussian sampler. The security proof obligation is instead the same one used by the hyperball rejection analysis: every recovered signing partial must remain within the norm bound used to choose the hyperball parameters.
+This is a practical bounded conditional sampler over the sum constraint. It is not an `η`-bounded sharing and it is not claimed to be a discrete Gaussian sampler. The security proof obligation is instead the same one used by the hyperball rejection analysis: every recovered signing partial must remain within the norm envelope assumed by the existing hyperball parameters.
+
+Round 5 now enforces that condition directly. After a new party aggregates its `s_J^new` values, it enumerates every threshold signing set containing itself, recovers the same partial secret that signing would use, and aborts unless
+
+```text
+τ · sqrt(||p_{i,1}||² / ν² + ||p_{i,2}||²) ≤ r'
+```
+
+for the existing `(t_new, n_new)` hyperball parameters. This catches bounded, public-key-preserving zero-sum reshaping attacks that would pass the per-subshare coefficient bound but push later signing outside the intended proof regime.
 
 ## Usage
 
@@ -276,7 +284,7 @@ The bounded conditional splitter is designed to prevent the random-walk growth c
 
 ### Post-Resharing Coefficient Distribution
 
-After resharing, coefficients follow an **approximately Gaussian distribution** that is stable across further resharings. This is a consequence of the Central Limit Theorem: each new subset share is a sum of contributions from multiple old subsets, and the sum of many bounded random variables converges to a Gaussian.
+For honest executions of the bounded splitter, coefficients follow an **approximately Gaussian distribution** that is stable across further resharings. This is a consequence of the Central Limit Theorem: each new subset share is a sum of contributions from multiple old subsets, and the sum of many bounded random variables converges to a Gaussian. This distributional analysis is useful for parameter sanity checks; the runtime security guard is the recovered-partial norm check above.
 
 #### Variance Formula
 
@@ -323,7 +331,7 @@ The variance stabilizes after the first resharing and remains constant (within <
 
 #### Security Implications
 
-For security proofs, the post-resharing distribution can be characterized as **sub-Gaussian with parameter σ** where σ is given by the formula above. This provides:
+For honest-resharing analysis, the post-resharing distribution can be characterized as **sub-Gaussian with parameter σ** where σ is given by the formula above. This provides:
 
 - **Tail bounds**: P(|X| > t) ≤ 2·exp(-t²/2σ²)
 - **Composability**: Sub-Gaussian distributions compose well under addition
@@ -331,7 +339,7 @@ For security proofs, the post-resharing distribution can be characterized as **s
 
 ### Hyperball Parameter Verification
 
-The hyperball rejection sampling proof requires that recovered partials satisfy a weighted norm bound. Specifically, for each signing party `i`, the check is:
+The hyperball rejection sampling proof requires recovered partials to be small after challenge multiplication. The implementation enforces the following deterministic sufficient check for each new party and each threshold signing set containing that party:
 
 ```
 τ · sqrt(||p_{i,1}||² / ν² + ||p_{i,2}||²) ≤ r'
@@ -341,36 +349,39 @@ Where:
 - `p_{i,1}`, `p_{i,2}` are the s1/s2 components of the recovered partial
 - `τ = 60` is the challenge weight (number of ±1 in the challenge polynomial)
 - `ν = 7` is the s1 scaling factor for ML-DSA-87
-- `r'` is the hyperball sampling radius
+- `r'` is the existing hyperball sampling radius for `(t_new, n_new)`
+
+This does **not** change hyperball parameters. It rejects resharing outputs that would require larger parameters.
 
 #### Empirical Verification
 
-Testing shows that **post-resharing recovered partials have massive margin** relative to the hyperball bounds:
+Testing shows that honest post-resharing recovered partials have comfortable margin relative to this enforced bound:
 
-| Config | Max Combined Norm | r' | Margin | Coeff σ Ratio |
-|--------|------------------|-----|--------|---------------|
-| 2-of-3 | 179              | 631,703 | 99.97% | 2.7x |
-| 2-of-4 | 251              | 633,006 | 99.96% | 3.7x |
-| 3-of-5 | 1,037            | 577,546 | 99.82% | 13.5x |
-| 4-of-6 | 2,894            | 517,853 | 99.44% | 36x |
+| Config | Max Combined Norm | τ·Max Norm | r' | Guard Margin | Coeff σ Ratio |
+|--------|------------------|------------|-----|--------------|---------------|
+| 2-of-3 | 179              | 10,740     | 631,703 | 98.3% | 2.7x |
+| 2-of-4 | 251              | 15,060     | 633,006 | 97.6% | 3.7x |
+| 3-of-5 | 1,037            | 62,220     | 577,546 | 89.2% | 13.5x |
+| 4-of-6 | 2,894            | 173,640    | 517,853 | 66.5% | 36x |
 
 Where:
 - **Combined Norm** = `sqrt(||s1||² / ν² + ||s2||²)` for the recovered partial
-- **Margin** = `(r' - max_norm) / r'`
+- **τ·Max Norm** is the conservative challenge-amplified bound checked by Round 5
+- **Guard Margin** = `(r' - τ·max_norm) / r'`
 - **Coeff σ Ratio** = post-resharing coefficient std dev / original η-bounded std dev
 
-Even in the worst case (4-of-6 after resharing), the combined norm is only ~2,900 vs an r' limit of ~518,000 — a margin of **99.4%**.
+Even in the worst observed honest case (4-of-6 after resharing), the challenge-amplified bound is ~174,000 vs an r' limit of ~518,000, leaving about **66%** margin.
 
 #### Long-Term Stability (100+ Resharings)
 
 Extended testing over 100 resharings confirms the distribution is a **stable fixed point**:
 
-| Config | Resharings | Max Norm | Margin |
-|--------|------------|----------|--------|
-| 2-of-3 | 100        | 179      | 99.97% |
-| 2-of-4 | 100        | 251      | 99.96% |
+| Config | Resharings | Max Norm | τ·Max Norm | Guard Margin |
+|--------|------------|----------|------------|--------------|
+| 2-of-3 | 100        | 179      | 10,740     | 98.3% |
+| 2-of-4 | 100        | 251      | 15,060     | 97.6% |
 
-The recovered partial norm remains **completely stable** across resharings. The margin depends only on the configuration (t, n), not on the number of resharings performed. This confirms the idempotence property: the post-resharing distribution is a fixed point of the resharing operator.
+The recovered partial norm remains stable across honest resharings. The margin depends only on the configuration `(t, n)`, not on the number of resharings performed. This confirms the idempotence property observed for honest executions: the post-resharing distribution is a fixed point of the resharing operator.
 
 #### Why Such Large Margins?
 
@@ -394,19 +405,17 @@ E[||p||] ≈ σ · sqrt(dimension) = σ · sqrt(3840) ≈ 62·σ
 
 For 4-of-6 with σ ≈ 51:
 - Expected L2 norm ≈ 62 × 51 ≈ 3,100
-- Observed max combined norm ≈ 2,894 ✓
+- Observed max combined norm ≈ 2,894
+- Conservative challenge-amplified bound ≈ 60 × 2,894 ≈ 174,000, still below r' = 517,853
 
-The hyperball r' of 517,853 provides a factor of ~180x headroom over the expected recovered partial norm. This margin easily absorbs:
-- The `τ = 60` challenge multiplication
-- Statistical fluctuations (4σ tail bounds)
-- Any residual variance growth
+The Round 5 guard rejects any resharing output whose challenge-amplified recovered partial exceeds the existing `r'` radius. This ensures malicious bounded zero-sum reshaping cannot silently move the key outside the checked signing regime.
 
 #### Conclusion
 
-**Resharing does not threaten hyperball security bounds.** The coefficient variance growth after resharing is offset by:
-1. The massive built-in margins in hyperball parameters (99%+)
-2. The L2 norm averaging effect across thousands of coefficients
-3. The bounded conditional splitter preventing unbounded residual growth
-4. The idempotent distribution that stabilizes after the first resharing
+**Accepted resharings remain inside the existing signing regime.** The coefficient variance growth after honest resharing is controlled by:
+1. The L2 norm averaging effect across thousands of coefficients
+2. The bounded conditional splitter preventing unbounded residual growth
+3. The idempotent distribution that stabilizes after the first resharing
+4. The Round 5 recovered-partial guard, which rejects adversarial outputs that exceed the current hyperball envelope
 
-The protocol is safe for unlimited resharings in all supported (t, n) configurations.
+Within the supported `(t, n)` configurations, honest repeated resharing remains stable in testing, and adversarial resharing outputs are accepted only if every recovered signing partial passes the same norm guard used to justify signing with the existing parameters.

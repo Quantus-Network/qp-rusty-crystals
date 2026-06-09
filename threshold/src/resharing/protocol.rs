@@ -37,7 +37,7 @@ use core::fmt;
 
 use qp_rusty_crystals_dilithium::{
 	fips202,
-	params::{ETA, K, L, N, Q},
+	params::{ETA, K, L, N, Q, TAU},
 };
 use zeroize::Zeroize;
 
@@ -878,7 +878,13 @@ impl ResharingProtocol {
 		// broadcast commitments, sum them into new subset shares, and commit.
 		if self.config.role().is_new_committee() {
 			match self.verify_and_aggregate_new_shares() {
-				Ok(commits) => share_commitments = commits,
+				Ok(commits) => match self.verify_recovered_partial_norms() {
+					Ok(()) => share_commitments = commits,
+					Err(e) => {
+						success = false;
+						error_message = Some(e.to_string());
+					},
+				},
 				Err(e) => {
 					success = false;
 					error_message = Some(e.to_string());
@@ -1175,6 +1181,133 @@ impl ResharingProtocol {
 			self.new_shares.insert(j_mask, share);
 		}
 		Ok(commitments)
+	}
+
+	/// Check that every signing partial this new party may later recover stays
+	/// inside the existing hyperball safety envelope for the new configuration.
+	///
+	/// The signing proof relies on the norm of the challenge-shifted partial
+	/// secret being small. A malicious dealer can preserve the aggregate public key
+	/// while adding bounded zero-sum noise across new RSS subsets, so Round 5 also
+	/// validates the recovered partials that would be used by signing.
+	fn verify_recovered_partial_norms(&self) -> Result<(), ResharingProtocolError> {
+		let my_idx =
+			self.config.new_participants().index_of(self.config.my_party_id()).ok_or_else(
+				|| ResharingProtocolError::InternalError("not in new committee".into()),
+			)?;
+
+		let threshold = self.config.new_threshold();
+		let parties = self.config.new_participants().len() as u32;
+		let (_, r_prime, nu) = crate::protocol::signing::get_hyperball_params(threshold, parties)
+			.ok_or_else(|| {
+			ResharingProtocolError::ShareVerificationFailed(format!(
+				"no hyperball parameters for new configuration ({}, {})",
+				threshold, parties
+			))
+		})?;
+
+		for signing_mask in generate_subset_masks(parties as usize, threshold as usize) {
+			if (signing_mask & (1 << my_idx)) == 0 {
+				continue;
+			}
+
+			let weighted_norm = self.recovered_partial_weighted_norm(signing_mask, my_idx, nu)?;
+			let challenge_bound = weighted_norm * TAU as f64;
+			if challenge_bound > r_prime {
+				let signing_set = self.config.new_participants().ids_from_mask(signing_mask);
+				return Err(ResharingProtocolError::ShareVerificationFailed(format!(
+					"recovered partial for signing set {:?} exceeds hyperball bound: \
+					 tau * weighted_norm = {:.0}, r' = {:.0}",
+					signing_set, challenge_bound, r_prime
+				)));
+			}
+		}
+
+		Ok(())
+	}
+
+	fn recovered_partial_weighted_norm(
+		&self,
+		signing_mask: SubsetMask,
+		my_idx: usize,
+		nu: f64,
+	) -> Result<f64, ResharingProtocolError> {
+		let threshold = self.config.new_threshold();
+		let parties = self.config.new_participants().len();
+		let patterns =
+			crate::protocol::secret_sharing::compute_sharing_patterns(threshold, parties as u32)
+				.map_err(|e| ResharingProtocolError::ShareVerificationFailed(e.to_string()))?;
+
+		let active_indices: Vec<usize> =
+			(0..parties).filter(|idx| (signing_mask & (1 << idx)) != 0).collect();
+		let current_i = active_indices.iter().position(|&idx| idx == my_idx).ok_or_else(|| {
+			ResharingProtocolError::ShareVerificationFailed(format!(
+				"party index {} is not in signing set {:b}",
+				my_idx, signing_mask
+			))
+		})?;
+
+		let mut perm = vec![0usize; parties];
+		let mut active_pos = 0usize;
+		let mut inactive_pos = threshold as usize;
+		for idx in 0..parties {
+			if active_indices.contains(&idx) {
+				perm[active_pos] = idx;
+				active_pos += 1;
+			} else {
+				perm[inactive_pos] = idx;
+				inactive_pos += 1;
+			}
+		}
+
+		let mut s1_acc = [[0i64; N as usize]; L];
+		let mut s2_acc = [[0i64; N as usize]; K];
+
+		for &pattern_u in &patterns[current_i] {
+			let mut translated = 0u16;
+			for (pos, &mapped_idx) in perm.iter().enumerate().take(parties) {
+				if (pattern_u & (1 << pos)) != 0 {
+					translated |= 1 << mapped_idx;
+				}
+			}
+
+			let share = self.new_shares.get(&translated).ok_or_else(|| {
+				ResharingProtocolError::ShareVerificationFailed(format!(
+					"missing new subset share {:b} while checking signing set {:b}",
+					translated, signing_mask
+				))
+			})?;
+
+			for (acc_poly, share_poly) in s1_acc.iter_mut().zip(share.s1.iter()) {
+				for (acc, &coeff) in acc_poly.iter_mut().zip(share_poly.iter()) {
+					*acc += center_mod_q(coeff) as i64;
+				}
+			}
+			for (acc_poly, share_poly) in s2_acc.iter_mut().zip(share.s2.iter()) {
+				for (acc, &coeff) in acc_poly.iter_mut().zip(share_poly.iter()) {
+					*acc += center_mod_q(coeff) as i64;
+				}
+			}
+		}
+
+		let s1_sq: f64 = s1_acc
+			.iter()
+			.flat_map(|poly| poly.iter())
+			.map(|&c| {
+				let x = c as f64;
+				x * x
+			})
+			.sum();
+		let s2_sq: f64 = s2_acc
+			.iter()
+			.flat_map(|poly| poly.iter())
+			.map(|&c| {
+				let x = c as f64;
+				x * x
+			})
+			.sum();
+
+		Ok((s1_sq / (nu * nu) + s2_sq).sqrt())
 	}
 
 	/// All members of new subset J must produce identical `s_J^new` (and thus identical
@@ -1959,6 +2092,52 @@ mod tests {
 		// updated alongside the security review.
 		assert_eq!(r3.party_id, 7);
 		assert_eq!(r3.commitments.len(), 1);
+	}
+
+	#[test]
+	fn test_recovered_partial_norm_guard_rejects_pk_preserving_zero_sum_noise() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[7u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(resharing_config, [1u8; 32], &[2u8; 32]);
+
+		// This models a bounded zero-sum reshaping attack: +delta on one new RSS
+		// subset and -delta on another preserves the aggregate public key, and each
+		// individual subset is still within SUBSHARE_COEFF_BOUND. It nevertheless
+		// makes some recovered signing partials too large for the existing hyperball
+		// proof envelope.
+		let mut plus = NewShareData::new();
+		let mut minus = NewShareData::new();
+		for poly in plus.s2.iter_mut() {
+			for coeff in poly.iter_mut() {
+				*coeff = 450;
+			}
+		}
+		for poly in minus.s2.iter_mut() {
+			for coeff in poly.iter_mut() {
+				*coeff = -450;
+			}
+		}
+		assert!(plus.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+		assert!(minus.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+
+		protocol.new_shares.insert(0b011, plus);
+		protocol.new_shares.insert(0b110, minus);
+
+		let err = protocol
+			.verify_recovered_partial_norms()
+			.expect_err("oversized recovered partial must be rejected");
+		assert!(err.to_string().contains("exceeds hyperball bound"), "unexpected error: {}", err);
 	}
 
 	#[test]
