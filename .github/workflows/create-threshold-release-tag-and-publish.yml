@@ -26,9 +26,13 @@ jobs:
       version: ${{ steps.extract_version.outputs.version }}
       is_draft: ${{ steps.extract_version.outputs.is_draft }}
     steps:
+      # Checkout the merge commit on master, not the PR head branch.
+      # This is safe because merged == true means a maintainer approved the PR,
+      # and we're checking out the result that's already on the target branch.
       - name: Checkout code
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
 
       - name: Extract version from PR title
