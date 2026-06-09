@@ -1,0 +1,208 @@
+name: Create Threshold Release Tag & Publish
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - master
+
+# Default to read-only; jobs that need to push tags or create releases
+# override this with explicit `contents: write` (see create-tag, create-github-release).
+permissions:
+  contents: read
+
+jobs:
+  create-tag:
+    name: Create Threshold Tag
+    if: github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'threshold-release-proposal')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.extract_version.outputs.version }}
+      is_draft: ${{ steps.extract_version.outputs.is_draft }}
+    steps:
+      # Checkout the merge commit on master, not the PR head branch.
+      # This is safe because merged == true means a maintainer approved the PR,
+      # and we're checking out the result that's already on the target branch.
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Extract version from PR title
+        id: extract_version
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          # Extract version from PR title (format: "ci: Automate threshold version bump to threshold-vX.Y.Z")
+          # Using env var to prevent command injection from malicious PR titles
+          VERSION=$(echo "$PR_TITLE" | grep -o 'threshold-v[0-9]\+\.[0-9]\+\.[0-9]\+')
+          if [ -z "$VERSION" ]; then
+            echo "Error: Could not extract threshold version from PR title: $PR_TITLE"
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          # Check if this is a draft release
+          if [[ ",$PR_LABELS," == *",draft-release,"* ]]; then
+            echo "is_draft=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_draft=false" >> $GITHUB_OUTPUT
+          fi
+          echo "Extracted threshold version: $VERSION"
+
+      - name: Create and push tag
+        env:
+          GIT_USER_NAME: ${{ github.actor }}
+          GIT_USER_EMAIL: ${{ github.actor }}@users.noreply.github.com
+          TAG_VERSION: ${{ steps.extract_version.outputs.version }}
+        run: |
+          git config user.name "$GIT_USER_NAME"
+          git config user.email "$GIT_USER_EMAIL"
+          git tag -a "$TAG_VERSION" -m "Threshold Release $TAG_VERSION"
+          git push origin "$TAG_VERSION"
+
+  format-checks:
+    name: Format Checks
+    needs: create-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code at tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.create-tag.outputs.version }}
+
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: |
+          rustup toolchain install
+          rustup component add rustfmt --toolchain nightly
+
+      - name: Install taplo
+        run: cargo install taplo-cli --locked
+
+      - name: Run format checks
+        run: |
+          taplo format --check --config taplo.toml
+          cargo +nightly fmt --all -- --check
+
+  build-and-test:
+    name: Build & Test Threshold
+    needs: [create-tag, format-checks]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code at tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.create-tag.outputs.version }}
+
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: |
+          rustup toolchain install
+          rustup component add clippy rust-src
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build workspace (for threshold dependencies)
+        run: cargo build --workspace --locked
+
+      - name: Test threshold
+        run: |
+          cd threshold
+          cargo test --locked
+
+      - name: Run clippy on threshold
+        run: |
+          cd threshold
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Generate threshold documentation
+        run: |
+          cd threshold
+          cargo doc --locked --no-deps --all-features
+
+      - name: Check threshold documentation
+        run: |
+          cd threshold
+          cargo doc --locked --no-deps --all-features --document-private-items
+
+  security-audit:
+    name: Security Audit
+    needs: [create-tag, format-checks]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code at tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.create-tag.outputs.version }}
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run security audit
+        run: cargo audit
+
+  create-github-release:
+    name: Create Threshold GitHub Release
+    needs: [create-tag, build-and-test, security-audit]
+    if: always() && needs.build-and-test.result == 'success' && needs.security-audit.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.create-tag.outputs.version }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Required before `cargo publish` below: rustup does not auto-install the
+      # active toolchain anymore, so we must install the version pinned in
+      # `rust-toolchain` explicitly. Idempotent if already present.
+      - name: Install Rust toolchain (from rust-toolchain file)
+        run: rustup toolchain install
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.ADMIN_PAT }}
+          NEW_VERSION: ${{ needs.create-tag.outputs.version }}
+        run: |
+          release_notes="Automated threshold release for version $NEW_VERSION."
+          printf "%s" "$release_notes" > release_notes.txt
+
+          # Add draft flag if this is a draft release
+          if [[ "${{ needs.create-tag.outputs.is_draft }}" == "true" ]]; then
+            DRAFT_FLAG="--draft"
+          else
+            DRAFT_FLAG=""
+          fi
+
+          echo "Creating threshold release with DRAFT_FLAG: $DRAFT_FLAG"
+
+          gh release create "$NEW_VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Quantus qp-rusty-crystals-threshold - $NEW_VERSION" \
+            --notes-file release_notes.txt \
+            --target master \
+            $DRAFT_FLAG
+
+      - name: Publish threshold to crates.io
+        if: needs.create-tag.outputs.is_draft != 'true'
+        run: |
+          cd threshold
+          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
