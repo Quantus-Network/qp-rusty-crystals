@@ -10,7 +10,8 @@
 //! - **Round 2 (Entropy reveal)**: Old committee members reveal entropy. All parties compute the
 //!   public session seed from these reveals after checking the commitments.
 //! - **Round 3 (Sub-share commitments)**: Each designated dealer broadcasts hash commitments to
-//!   deterministic sub-shares `r_{I→J}` derived from `s_I^old` and the public session seed.
+//!   deterministic sub-shares `r_{I→J}` derived from `s_I^old` and the public session seed. Other
+//!   old members of the same subset recompute and verify those commitments before Round 4.
 //! - **Round 4 (Private delivery)**: Dealers privately deliver `r_{I→J}` to new committee members.
 //! - **Round 5 (Verification)**: New committee members verify received sub-shares, sum them into
 //!   new shares `s_J^new`, and broadcast commitments so each new subset can cross-verify.
@@ -733,6 +734,7 @@ impl ResharingProtocol {
 
 	fn handle_round3_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
 		if self.have_enough_round3() {
+			self.verify_peer_dealer_commitments()?;
 			self.state = ResharingState::Round4Generate;
 			self.poke()
 		} else {
@@ -765,6 +767,74 @@ impl ResharingProtocol {
 		// We need a Round 3 broadcast from every party that is a designated dealer for at
 		// least one old subset. Conservative requirement: all old participants.
 		self.round3_broadcasts.len() >= self.config.old_participants().len()
+	}
+
+	/// Old-subset peer verification for Round 3 dealer commitments.
+	///
+	/// Every member of an old RSS subset knows the same `s_I^old`. If the
+	/// designated dealer for `I` is another party, this party can recompute the
+	/// deterministic sub-shares and verify the dealer committed to exactly those
+	/// values before any Round 4 private delivery occurs.
+	fn verify_peer_dealer_commitments(&self) -> Result<(), ResharingProtocolError> {
+		if !self.config.role().is_old_committee() {
+			return Ok(());
+		}
+
+		let existing = self.config.existing_share().ok_or_else(|| {
+			ResharingProtocolError::InternalError("Missing existing share".to_string())
+		})?;
+		let session_seed = self.session_seed.ok_or_else(|| {
+			ResharingProtocolError::InternalError("Missing session seed".to_string())
+		})?;
+
+		for (&i_mask, s_i) in existing.shares() {
+			let dealer = self.designated_dealer_for(i_mask).ok_or_else(|| {
+				ResharingProtocolError::ShareVerificationFailed(format!(
+					"no designated dealer found for old subset {:b}",
+					i_mask
+				))
+			})?;
+
+			if dealer == self.config.my_party_id() {
+				continue;
+			}
+
+			let dealer_r3 = self.round3_broadcasts.get(&dealer).ok_or_else(|| {
+				ResharingProtocolError::DealerDeliveryFailed {
+					dealer,
+					reason: format!("missing Round 3 commitment for subset {:b}", i_mask),
+				}
+			})?;
+
+			let expected_subshares = derive_subshares_with_session_seed(
+				i_mask,
+				s_i,
+				&self.new_subset_order,
+				&session_seed,
+			);
+
+			for (j_mask, expected_share) in
+				self.new_subset_order.iter().zip(expected_subshares.iter())
+			{
+				let expected_commit = commit_subshare(i_mask, *j_mask, expected_share);
+				let actual_commit =
+					dealer_r3.commitments.get(&(i_mask, *j_mask)).ok_or_else(|| {
+						ResharingProtocolError::DealerDeliveryFailed {
+							dealer,
+							reason: format!("did not commit to r_{{{:b}->{:b}}}", i_mask, j_mask),
+						}
+					})?;
+
+				if *actual_commit != expected_commit {
+					return Err(ResharingProtocolError::ShareVerificationFailed(format!(
+						"dealer {} commitment mismatch for r_{{{:b}->{:b}}}",
+						dealer, i_mask, j_mask
+					)));
+				}
+			}
+		}
+
+		Ok(())
 	}
 
 	// ========================================================================
@@ -2092,6 +2162,62 @@ mod tests {
 		// updated alongside the security review.
 		assert_eq!(r3.party_id, 7);
 		assert_eq!(r3.commitments.len(), 1);
+	}
+
+	#[test]
+	fn test_old_subset_peer_verifies_dealer_round3_commitments() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[8u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(resharing_config, [1u8; 32], &[2u8; 32]);
+		let session_seed = [9u8; 32];
+		protocol.session_seed = Some(session_seed);
+
+		let i_mask = 0b011u16;
+		let s_i = shares[0].shares().get(&i_mask).expect("old subset share");
+		let subshares = derive_subshares_with_session_seed(
+			i_mask,
+			s_i,
+			&protocol.new_subset_order,
+			&session_seed,
+		);
+		let mut commitments = BTreeMap::new();
+		for (j_mask, subshare) in protocol.new_subset_order.iter().zip(subshares.iter()) {
+			commitments.insert((i_mask, *j_mask), commit_subshare(i_mask, *j_mask, subshare));
+		}
+
+		protocol.round3_broadcasts.insert(
+			0,
+			ResharingRound3Broadcast {
+				ssid: protocol.ssid,
+				party_id: 0,
+				commitments: commitments.clone(),
+			},
+		);
+		assert!(protocol.verify_peer_dealer_commitments().is_ok());
+
+		let target_j = protocol.new_subset_order[0];
+		let mut tampered = subshares[0].clone();
+		tampered.s2[0][0] += 1;
+		commitments.insert((i_mask, target_j), commit_subshare(i_mask, target_j, &tampered));
+		protocol
+			.round3_broadcasts
+			.insert(0, ResharingRound3Broadcast { ssid: protocol.ssid, party_id: 0, commitments });
+
+		let err = protocol
+			.verify_peer_dealer_commitments()
+			.expect_err("old subset peer must reject tampered commitment");
+		assert!(err.to_string().contains("commitment mismatch"), "unexpected error: {}", err);
 	}
 
 	#[test]

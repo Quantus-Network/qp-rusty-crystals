@@ -40,7 +40,9 @@ Round 3: Per-Subset Commitments
 │   deterministically derives bounded sub-shares r_{I→J} for every new subset J such that
 │   Σ_J r_{I→J} = s_I^old. The derivation incorporates the public session seed for
 │   per-session randomization.
-└── D_I broadcasts H(r_{I→J}) for each (I, J).
+├── D_I broadcasts H(r_{I→J}) for each (I, J).
+└── Every other old member of I recomputes the same r_{I→J} values and verifies
+    D_I's commitments before any Round 4 private delivery occurs.
 
 Round 4: Private Sub-Share Reveal (⚠️ REQUIRES SECURE CHANNEL)
 ├── D_I privately delivers r_{I→J} to each member of new subset J.
@@ -95,7 +97,7 @@ Before Round 2 reveals are known, an attacker cannot predict the session seed un
 | **Replay protection** | Every message carries an SSID derived from the old/new committees, public key, and session nonce. Messages with a mismatched SSID are ignored. |
 | **Session randomization** | Session seed incorporates the SSID and fresh entropy from all old committee members via commit-reveal, so different sessions produce different deterministic sub-share splits even if entropy is accidentally reused. This does not provide post-compromise forward secrecy once the transcript is recorded. |
 | **Confidentiality of contributions** | Rounds 1-3, 5 broadcast only hash commitments; Round 4 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
-| **Cheating-dealer detection** | New-subset members verify delivered sub-shares against Round 3 commitments, reject over-large sub-share coefficients, and reject recovered signing partials that exceed the existing hyperball safety envelope. A final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching aggregate-secret corruption even when an old subset has size 1. If any verification fails, the protocol aborts. |
+| **Cheating-dealer detection** | Old-subset peers recompute and verify Round 3 commitments before Round 4 whenever the old subset has another member. New-subset members verify delivered sub-shares against Round 3 commitments, reject over-large sub-share coefficients, and reject recovered signing partials that exceed the existing hyperball safety envelope. A final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching aggregate-secret corruption even when an old subset has size 1. If any verification fails, the protocol aborts. |
 | **PK Preservation** | Public key `t = A·s1 + s2` unchanged, verified at the end of Round 5 via a deterministic byte-equality check against the original PK. |
 
 ## Why Custom Protocol?
