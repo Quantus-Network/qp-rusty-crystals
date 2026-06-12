@@ -58,7 +58,8 @@ use super::types::{
 const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
 
 /// Domain separator for bounded conditional splitting noise.
-const BOUNDED_SPLIT_DOMAIN: &[u8] = b"resharing-bounded-split-v1";
+/// v2: O(m) telescoping cycle noise (replaces the O(m^2) all-pairs pattern).
+const BOUNDED_SPLIT_DOMAIN: &[u8] = b"resharing-bounded-split-v2";
 
 const COMMIT_DOMAIN: &[u8] = b"resharing-commit-v3";
 
@@ -1254,12 +1255,38 @@ impl ResharingProtocol {
 	}
 
 	/// Check that every signing partial this new party may later recover stays
-	/// inside the existing hyperball safety envelope for the new configuration.
+	/// inside the partial-secret norm envelope assumed by the Threshold ML-DSA
+	/// signing proof for the new configuration.
 	///
 	/// The signing proof relies on the norm of the challenge-shifted partial
 	/// secret being small. A malicious dealer can preserve the aggregate public key
 	/// while adding bounded zero-sum noise across new RSS subsets, so Round 5 also
 	/// validates the recovered partials that would be used by signing.
+	///
+	/// # Which bound
+	///
+	/// The Threshold ML-DSA proof (Mithril, "Efficient Threshold ML-DSA", §3.2-3.4)
+	/// requires the challenge-shifted recovered partial `(c·u1/ν, c·u2)` to satisfy
+	/// `‖(c·u1/ν, c·u2)‖₂ ≤ B` with overwhelming probability over the challenge `c`,
+	/// where `B` is the partial-secret norm bound from §3.4:
+	///
+	/// ```text
+	/// B = 1.3 · √τ · √(n·(k + ℓ/ν²)) · √Var(U(−η,η)) · √⌈C(N, T−1)/T⌉
+	/// ```
+	///
+	/// This is the bound the hyperball radii `(r, r')` are derived from via
+	/// `r'² ≥ r² + B² + 2rB/φ` (Lemma 2.4 / §3.4); it is *not* `r'` itself. The
+	/// randomness radius `r' ≈ 6·10⁵` is roughly two to three orders of magnitude
+	/// larger than `B`, so comparing against `r'` does not enforce the proof's
+	/// condition. We therefore compare against `B` directly.
+	///
+	/// # Challenge factor
+	///
+	/// The shift to bound is `c·u`. For a `SampleInBall` challenge with `τ` nonzero
+	/// `±1` coefficients, `E_c[‖c·u‖₂²] = τ·‖u‖₂²`, so `‖c·u‖₂ ≈ √τ·‖u‖₂` (the
+	/// Gaussian heuristic used to define `B`; see Mithril footnote 3). We use the
+	/// `√τ` factor here rather than the worst-case `‖c‖₁ = τ` factor so that the
+	/// quantity compared and the bound `B` use the same convention.
 	fn verify_recovered_partial_norms(&self) -> Result<(), ResharingProtocolError> {
 		let my_idx =
 			self.config.new_participants().index_of(self.config.my_party_id()).ok_or_else(
@@ -1268,7 +1295,9 @@ impl ResharingProtocol {
 
 		let threshold = self.config.new_threshold();
 		let parties = self.config.new_participants().len() as u32;
-		let (_, r_prime, nu) = crate::protocol::signing::get_hyperball_params(threshold, parties)
+		// `get_hyperball_params` also validates that the new configuration is
+		// supported; we use its `nu` for the weighted norm and ignore `(r, r')`.
+		let (_, _, nu) = crate::protocol::signing::get_hyperball_params(threshold, parties)
 			.ok_or_else(|| {
 			ResharingProtocolError::ShareVerificationFailed(format!(
 				"no hyperball parameters for new configuration ({}, {})",
@@ -1276,19 +1305,21 @@ impl ResharingProtocol {
 			))
 		})?;
 
+		let bound = partial_secret_norm_bound(threshold, parties, nu);
+
 		for signing_mask in generate_subset_masks(parties as usize, threshold as usize) {
 			if (signing_mask & (1 << my_idx)) == 0 {
 				continue;
 			}
 
 			let weighted_norm = self.recovered_partial_weighted_norm(signing_mask, my_idx, nu)?;
-			let challenge_bound = weighted_norm * TAU as f64;
-			if challenge_bound > r_prime {
+			let challenge_bound = weighted_norm * (TAU as f64).sqrt();
+			if challenge_bound > bound {
 				let signing_set = self.config.new_participants().ids_from_mask(signing_mask);
 				return Err(ResharingProtocolError::ShareVerificationFailed(format!(
-					"recovered partial for signing set {:?} exceeds hyperball bound: \
-					 tau * weighted_norm = {:.0}, r' = {:.0}",
-					signing_set, challenge_bound, r_prime
+					"recovered partial for signing set {:?} exceeds partial-secret norm \
+					 bound: sqrt(tau) * weighted_norm = {:.0}, B = {:.0}",
+					signing_set, challenge_bound, bound
 				)));
 			}
 		}
@@ -1596,6 +1627,48 @@ fn compute_new_subset_order(config: &ResharingConfig) -> Vec<SubsetMask> {
 	generate_subset_masks(n, k)
 }
 
+/// Binomial coefficient `C(n, k)`. Inputs are tiny here (`n ≤ MAX_PARTIES`), so
+/// the naive multiplicative form cannot overflow `u64`.
+fn binomial(n: u32, k: u32) -> u64 {
+	if k > n {
+		return 0;
+	}
+	let k = core::cmp::min(k, n - k) as u64;
+	let mut result: u64 = 1;
+	for i in 0..k {
+		result = result * (n as u64 - i) / (i + 1);
+	}
+	result
+}
+
+/// Partial-secret norm bound `B` from the Threshold ML-DSA proof (Mithril §3.4).
+///
+/// ```text
+/// B = 1.3 · √τ · √(n·(k + ℓ/ν²)) · √Var(U(−η,η)) · √⌈C(N, T−1)/T⌉
+/// ```
+///
+/// `B` bounds the challenge-shifted recovered partial `‖(c·u1/ν, c·u2)‖₂` that
+/// the hyperball rejection-sampling analysis requires (and that the radii
+/// `(r, r')` are derived from). It is calibrated to a *fresh keygen* partial:
+/// a sum of `⌈C(N, T−1)/T⌉` base subset shares whose coefficients are
+/// `η`-bounded with per-coefficient variance `Var(U(−η,η)) = η(η+1)/3`.
+///
+/// `1.3` is the `≈13·σ` Gaussian tail factor on `‖c·u‖`, and `√τ` is the
+/// challenge amplification (`E_c[‖c·u‖₂²] = τ·‖u‖₂²`); both follow Mithril §3.4
+/// and footnote 3.
+fn partial_secret_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
+	let n = N as f64;
+	let dim = n * (K as f64 + L as f64 / (nu * nu));
+	let var_eta = ETA as f64 * (ETA as f64 + 1.0) / 3.0;
+	// Max number of base secrets a party aggregates in one signing session
+	// (RSSRecover balanced partition, Mithril §B): ⌈C(N, T−1)/T⌉.
+	let num_secrets = {
+		let c = binomial(parties, threshold - 1) as f64;
+		(c / threshold as f64).ceil()
+	};
+	1.3 * (TAU as f64).sqrt() * (dim * var_eta * num_secrets).sqrt()
+}
+
 /// Enumerate subset masks of size `k` over `n` bits in canonical (numerically
 /// ascending) order using Gosper's hack.
 fn generate_subset_masks(n: usize, k: usize) -> Vec<SubsetMask> {
@@ -1623,9 +1696,12 @@ fn generate_subset_masks(n: usize, k: usize) -> Vec<SubsetMask> {
 /// to leave the hyperball proof regime after repeated resharings.
 ///
 /// This splitter first distributes the centered coefficient of `s_I` as evenly
-/// as possible across all new subsets, then adds deterministic pairwise
-/// zero-sum η-bounded noise. The integer sum of the outputs is exactly the
-/// centered representative of `s_I`, hence the modular sum is `s_I`.
+/// as possible across all new subsets, then adds deterministic zero-sum
+/// η-bounded noise using an `O(m)` telescoping "cycle" pattern (each subset gets
+/// `delta_i - delta_{i-1}`). The integer sum of the outputs is exactly the
+/// centered representative of `s_I`, hence the modular sum is `s_I`. The cycle
+/// keeps per-coefficient noise variance `O(1)` in the number of new subsets `m`,
+/// avoiding the `O(m)` variance growth of an all-pairs noise pattern.
 fn derive_subshares_with_session_seed(
 	i_mask: SubsetMask,
 	s_i: &SecretShareData,
@@ -1674,23 +1750,39 @@ fn derive_subshares_with_session_seed(
 		}
 	}
 
-	// Add pairwise zero-sum noise. Every unordered pair contributes +δ to one
-	// subset and -δ to the other, so the sum over all new subsets stays exact.
-	for a in 0..m {
-		for b in (a + 1)..m {
-			for poly_idx in 0..L {
-				for coeff_idx in 0..N as usize {
-					let delta = sample_eta_coeff(&mut state);
-					out[a].s1[poly_idx][coeff_idx] += delta;
-					out[b].s1[poly_idx][coeff_idx] -= delta;
-				}
+	// Add zero-sum noise using an O(m) "cycle" pattern. For each coefficient we
+	// sample one bounded delta per new subset and assign the telescoping
+	// difference `noise_i = delta_i - delta_{(i-1) mod m}` to subset `i`. The
+	// assignment is zero-sum over all subsets (`Σ_i (delta_i - delta_{i-1}) = 0`),
+	// so the exact integer secret identity is preserved.
+	//
+	// Compared to the previous all-pairs pattern (which gave each subset `(m-1)`
+	// independent noise terms, i.e. per-coefficient noise variance growing as
+	// `O(m)`), the cycle gives each subset exactly two noise terms regardless of
+	// `m`, so per-coefficient noise variance is `O(1)` in `m`. This keeps the
+	// recovered-partial norm much closer to the keygen envelope as the committee
+	// grows. Hiding still holds because the noise remains PRF-derived and keyed to
+	// `(session_seed, i_mask, s_i)`.
+	let mut deltas = vec![0i32; m];
+	for poly_idx in 0..L {
+		for coeff_idx in 0..N as usize {
+			for d in deltas.iter_mut() {
+				*d = sample_eta_coeff(&mut state);
 			}
-			for poly_idx in 0..K {
-				for coeff_idx in 0..N as usize {
-					let delta = sample_eta_coeff(&mut state);
-					out[a].s2[poly_idx][coeff_idx] += delta;
-					out[b].s2[poly_idx][coeff_idx] -= delta;
-				}
+			for i in 0..m {
+				let prev = deltas[(i + m - 1) % m];
+				out[i].s1[poly_idx][coeff_idx] += deltas[i] - prev;
+			}
+		}
+	}
+	for poly_idx in 0..K {
+		for coeff_idx in 0..N as usize {
+			for d in deltas.iter_mut() {
+				*d = sample_eta_coeff(&mut state);
+			}
+			for i in 0..m {
+				let prev = deltas[(i + m - 1) % m];
+				out[i].s2[poly_idx][coeff_idx] += deltas[i] - prev;
 			}
 		}
 	}
@@ -2263,7 +2355,11 @@ mod tests {
 		let err = protocol
 			.verify_recovered_partial_norms()
 			.expect_err("oversized recovered partial must be rejected");
-		assert!(err.to_string().contains("exceeds hyperball bound"), "unexpected error: {}", err);
+		assert!(
+			err.to_string().contains("exceeds partial-secret norm bound"),
+			"unexpected error: {}",
+			err
+		);
 	}
 
 	#[test]
