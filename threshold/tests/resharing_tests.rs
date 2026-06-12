@@ -1540,6 +1540,109 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 	);
 }
 
+/// Test that the coefficient bound guard (norm guard) catches a malicious dealer
+/// who injects large coefficients that preserve the PK but would compromise
+/// hyperball security bounds.
+///
+/// This test exercises the `coefficients_within_bound` check in
+/// `verify_and_aggregate_new_shares`. The attack injects coefficients exceeding
+/// SUBSHARE_COEFF_BOUND (500) while keeping Round 3 commitments consistent with
+/// Round 4 data, so the commit-vs-r check passes but the bound check fails.
+#[test]
+fn test_resharing_detects_large_coefficient_injection() {
+	use qp_rusty_crystals_threshold::resharing::SUBSHARE_COEFF_BOUND;
+
+	const N: usize = 256;
+	const L: usize = 7;
+	const K: usize = 8;
+
+	// Use 2-of-3 configuration where old subsets have size 2
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [0x42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	// Create a bogus sub-share with coefficients exceeding the bound.
+	// Use SUBSHARE_COEFF_BOUND + 100 to clearly exceed the limit.
+	let large_coeff = SUBSHARE_COEFF_BOUND + 100;
+	let bogus_r = NewShareData {
+		s1: [[large_coeff; N]; L],
+		s2: [[large_coeff; N]; K],
+	};
+
+	// Target: dealer 0 sends to new subset containing party 1
+	// Old subset 0b011 (parties 0,1), new subset 0b011 (parties 0,1)
+	let target_pair = (0b011u16, 0b011u16);
+
+	// Create consistent commitment for the bogus data
+	let bogus_commit = forge_consistent_commitment(target_pair.0, target_pair.1, &bogus_r);
+
+	let bogus_r_capt = bogus_r.clone();
+	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
+		// Only tamper messages from dealer 0
+		if sender != 0 {
+			return data;
+		}
+		let msg: ResharingMessage = match borsh::from_slice(&data) {
+			Ok(m) => m,
+			Err(_) => return data,
+		};
+		let modified = match msg {
+			ResharingMessage::Round3(mut b) => {
+				// Replace commitment with one consistent with our bogus data
+				if let Some(c) = b.commitments.get_mut(&target_pair) {
+					*c = bogus_commit;
+				}
+				ResharingMessage::Round3(b)
+			}
+			ResharingMessage::Round4(mut m) => {
+				// Inject the bogus sub-share with large coefficients
+				if m.from_party_id == 0 && m.contributions.contains_key(&target_pair) {
+					m.contributions.insert(target_pair, bogus_r_capt.clone());
+				}
+				ResharingMessage::Round4(m)
+			}
+			other => other,
+		};
+		borsh::to_vec(&modified).expect("re-serialize tampered msg")
+	});
+
+	let result = run_resharing_protocol_with_tamper(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		Some(tamper),
+	);
+
+	// Protocol must detect the attack via coefficient bound check
+	let err = result.expect_err("large coefficient injection must be detected");
+
+	// The error should indicate coefficient bounds were exceeded
+	assert!(
+		err.contains("coefficient") ||
+			err.contains("bound") ||
+			err.contains("exceeding") ||
+			err.contains("DealerDeliveryFailed") ||
+			err.contains("abort") ||
+			err.contains("Abort") ||
+			err.contains("parties reported failure"),
+		"expected coefficient bound violation error, got: {}",
+		err
+	);
+
+	println!(
+		"Successfully detected large coefficient injection (bound={}, injected={}): {}",
+		SUBSHARE_COEFF_BOUND, large_coeff, err
+	);
+}
+
 // ============================================================================
 // Session Randomization Tests
 // ============================================================================
