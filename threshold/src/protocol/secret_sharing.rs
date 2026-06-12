@@ -242,11 +242,8 @@ pub fn recover_share(
 			})?;
 
 	// Create permutation using shared helper
-	let perm = create_signing_permutation(
-		&sorted_active_indices,
-		threshold as usize,
-		parties as usize,
-	);
+	let perm =
+		create_signing_permutation(&sorted_active_indices, threshold as usize, parties as usize);
 
 	if current_i >= sharing_patterns.len() {
 		return Err(ThresholdError::InvalidConfiguration(
