@@ -35,6 +35,63 @@ pub struct SecretShare {
 	pub s2_share: polyvec::Polyveck,
 }
 
+/// Creates a permutation that maps canonical positions to DKG indices for a signing set.
+///
+/// The permutation places active (signing) parties in the first `t` positions,
+/// and inactive parties in the remaining positions. This is used to translate
+/// between canonical sharing patterns and actual subset masks.
+///
+/// # Arguments
+/// * `sorted_active_indices` - Sorted DKG indices of the active signing parties
+/// * `threshold` - The threshold value t
+/// * `parties` - The total number of parties n
+///
+/// # Returns
+/// A permutation vector where `perm[canonical_position] = dkg_index`
+pub fn create_signing_permutation(
+	sorted_active_indices: &[usize],
+	threshold: usize,
+	parties: usize,
+) -> Vec<usize> {
+	let mut perm = vec![0usize; parties];
+	let mut i1 = 0;
+	let mut i2 = threshold;
+
+	for j in 0..parties {
+		if sorted_active_indices.contains(&j) {
+			perm[i1] = j;
+			i1 += 1;
+		} else {
+			perm[i2] = j;
+			i2 += 1;
+		}
+	}
+
+	perm
+}
+
+/// Translates a canonical pattern mask to the actual subset mask using a permutation.
+///
+/// The canonical pattern uses positions 0, 1, 2, ... to represent parties.
+/// This function applies the permutation to convert to actual DKG indices.
+///
+/// # Arguments
+/// * `pattern` - The canonical pattern mask (bits represent positions)
+/// * `perm` - Permutation where `perm[position] = dkg_index`
+/// * `parties` - Total number of parties (for bounds checking)
+///
+/// # Returns
+/// The translated subset mask (bits represent DKG indices)
+pub fn translate_pattern_to_subset(pattern: u16, perm: &[usize], parties: usize) -> u16 {
+	let mut translated = 0u16;
+	for (i, &perm_val) in perm.iter().enumerate().take(parties) {
+		if pattern & (1 << i) != 0 {
+			translated |= 1 << (perm_val as u16);
+		}
+	}
+	translated
+}
+
 /// Compute sharing patterns for a (threshold, parties) configuration.
 ///
 /// These patterns determine which subset shares each party position uses during
@@ -170,12 +227,7 @@ pub fn recover_share(
 		})
 		.collect::<ThresholdResult<Vec<usize>>>()?;
 
-	// Create permutation to cover the signing set (using DKG indices)
-	let mut perm = vec![0usize; parties as usize];
-	let mut i1 = 0;
-	let mut i2 = threshold as usize;
-
-	// Find the position of my_dkg_index within active_indices (sorted)
+	// Sort active indices and find my position within the signing set
 	let mut sorted_active_indices = active_indices.clone();
 	sorted_active_indices.sort();
 	let current_i =
@@ -189,15 +241,12 @@ pub fn recover_share(
 				))
 			})?;
 
-	for j in 0..parties as usize {
-		if sorted_active_indices.contains(&j) {
-			perm[i1] = j;
-			i1 += 1;
-		} else {
-			perm[i2] = j;
-			i2 += 1;
-		}
-	}
+	// Create permutation using shared helper
+	let perm = create_signing_permutation(
+		&sorted_active_indices,
+		threshold as usize,
+		parties as usize,
+	);
 
 	if current_i >= sharing_patterns.len() {
 		return Err(ThresholdError::InvalidConfiguration(
@@ -212,14 +261,8 @@ pub fn recover_share(
 	let mut s2_acc = NttAccumulatorK::new();
 
 	for &pattern_u in &sharing_patterns[current_i] {
-		// Translate the share index u to the share index u_ by applying the permutation
-		// The permutation maps positions to DKG indices
-		let mut u_translated = 0u16;
-		for (i, &perm_val) in perm.iter().enumerate().take(parties as usize) {
-			if pattern_u & (1 << i) != 0 {
-				u_translated |= 1 << (perm_val as u16);
-			}
-		}
+		// Translate pattern to actual subset mask using shared helper
+		let u_translated = translate_pattern_to_subset(pattern_u, &perm, parties as usize);
 
 		// Find the corresponding share - MUST exist for correct recovery
 		let share = shares.get(&u_translated).ok_or_else(|| {

@@ -6,9 +6,10 @@
 use std::collections::HashMap;
 
 use qp_rusty_crystals_threshold::{
-	compute_ssid, convert_shares, generate_subsets_of_size, generate_with_dealer,
-	get_hyperball_params, verify_signature, ParticipantList, PrivateKeyShare, PublicKey,
-	Round1Broadcast, Round2Broadcast, Round3Broadcast, ThresholdConfig, ThresholdSigner,
+	compute_ssid, convert_shares, create_signing_permutation, generate_subsets_of_size,
+	generate_with_dealer, get_hyperball_params, translate_pattern_to_subset, verify_signature,
+	ParticipantList, PrivateKeyShare, PublicKey, Round1Broadcast, Round2Broadcast, Round3Broadcast,
+	ThresholdConfig, ThresholdSigner,
 };
 
 use qp_rusty_crystals_threshold::resharing::{
@@ -3139,6 +3140,9 @@ fn compute_partial_stats(s1_coeffs: &[i64], s2_coeffs: &[i64], nu: f64) -> Recov
 
 /// Extract centered coefficients from recovered partial for analysis.
 /// Sums share coefficients directly (no NTT) for statistical analysis.
+///
+/// Uses the same permutation and translation logic as `recover_share` via shared
+/// helpers to ensure the test stays in sync with production code.
 fn extract_recovered_coefficients(
 	share: &PrivateKeyShare,
 	signing_set: &[u32],
@@ -3182,31 +3186,16 @@ fn extract_recovered_coefficients(
 		.collect();
 	let current_i = sorted_indices.iter().position(|&idx| idx == my_dkg_index)?;
 
-	// Create permutation
-	let mut perm = vec![0usize; n];
-	let mut i1 = 0;
-	let mut i2 = t;
-	for j in 0..n {
-		if sorted_indices.contains(&j) {
-			perm[i1] = j;
-			i1 += 1;
-		} else {
-			perm[i2] = j;
-			i2 += 1;
-		}
-	}
+	// Create permutation using shared helper (same logic as recover_share)
+	let perm = create_signing_permutation(&sorted_indices, t, n);
 
 	// Accumulate coefficients directly (no NTT)
 	let mut s1_acc = vec![0i64; 7 * 256];
 	let mut s2_acc = vec![0i64; 8 * 256];
 
 	for &pattern_u in &patterns[current_i] {
-		let mut u_translated = 0u16;
-		for (i, &perm_val) in perm.iter().enumerate().take(n) {
-			if pattern_u & (1 << i) != 0 {
-				u_translated |= 1 << (perm_val as u16);
-			}
-		}
+		// Translate pattern using shared helper (same logic as recover_share)
+		let u_translated = translate_pattern_to_subset(pattern_u, &perm, n);
 
 		if let Some(secret_share) = shares.get(&u_translated) {
 			for (poly_idx, poly) in secret_share.s1_share.vec.iter().enumerate().take(7) {

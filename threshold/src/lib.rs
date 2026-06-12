@@ -184,7 +184,9 @@ pub use protocol::signing::{compute_ssid, convert_shares};
 pub use protocol::signing::get_hyperball_params;
 
 // Secret sharing utilities (for analysis and testing)
-pub use protocol::secret_sharing::generate_subsets_of_size;
+pub use protocol::secret_sharing::{
+	create_signing_permutation, generate_subsets_of_size, translate_pattern_to_subset,
+};
 
 /// Signature verification.
 mod verification {
