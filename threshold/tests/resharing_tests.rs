@@ -1569,10 +1569,7 @@ fn test_resharing_detects_large_coefficient_injection() {
 	// Create a bogus sub-share with coefficients exceeding the bound.
 	// Use SUBSHARE_COEFF_BOUND + 100 to clearly exceed the limit.
 	let large_coeff = SUBSHARE_COEFF_BOUND + 100;
-	let bogus_r = NewShareData {
-		s1: [[large_coeff; N]; L],
-		s2: [[large_coeff; N]; K],
-	};
+	let bogus_r = NewShareData { s1: [[large_coeff; N]; L], s2: [[large_coeff; N]; K] };
 
 	// Target: dealer 0 sends to new subset containing party 1
 	// Old subset 0b011 (parties 0,1), new subset 0b011 (parties 0,1)
@@ -1598,14 +1595,14 @@ fn test_resharing_detects_large_coefficient_injection() {
 					*c = bogus_commit;
 				}
 				ResharingMessage::Round3(b)
-			}
+			},
 			ResharingMessage::Round4(mut m) => {
 				// Inject the bogus sub-share with large coefficients
 				if m.from_party_id == 0 && m.contributions.contains_key(&target_pair) {
 					m.contributions.insert(target_pair, bogus_r_capt.clone());
 				}
 				ResharingMessage::Round4(m)
-			}
+			},
 			other => other,
 		};
 		borsh::to_vec(&modified).expect("re-serialize tampered msg")
