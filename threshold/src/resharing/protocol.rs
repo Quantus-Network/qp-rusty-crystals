@@ -58,8 +58,20 @@ use super::types::{
 const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
 
 /// Domain separator for bounded conditional splitting noise.
-/// v2: O(m) telescoping cycle noise (replaces the O(m^2) all-pairs pattern).
-const BOUNDED_SPLIT_DOMAIN: &[u8] = b"resharing-bounded-split-v2";
+/// v3: O(m) telescoping cycle noise with centered-binomial (discrete-Gaussian-like)
+/// deltas (v2 used uniform deltas over [-ETA, ETA]).
+const BOUNDED_SPLIT_DOMAIN: &[u8] = b"resharing-bounded-split-v3";
+
+/// Parameter for the centered-binomial distribution (CBD) used to generate the
+/// zero-sum splitting noise. CBD_eta is the standard bounded approximation to a
+/// discrete Gaussian (as used by ML-KEM): it is symmetric, sub-Gaussian, has
+/// support `[-eta, eta]`, and per-coefficient variance `eta / 2`. Shaping the
+/// noise this way (rather than uniform over `[-eta, eta]`) makes the joint
+/// distribution of the new subset shares approximately multivariate Gaussian,
+/// which is what the key-hiding analysis in SECURITY_PROOF.md relies on. eta=2
+/// keeps the same support as the previous uniform noise while halving its
+/// variance (2 -> 1), which also tightens the recovered-partial norm margin.
+const RESHARING_NOISE_ETA: u32 = 2;
 
 const COMMIT_DOMAIN: &[u8] = b"resharing-commit-v3";
 
@@ -1763,11 +1775,17 @@ fn derive_subshares_with_session_seed(
 	// recovered-partial norm much closer to the keygen envelope as the committee
 	// grows. Hiding still holds because the noise remains PRF-derived and keyed to
 	// `(session_seed, i_mask, s_i)`.
+	//
+	// The per-subset deltas are drawn from a centered binomial distribution
+	// (CBD_eta), the standard bounded approximation to a discrete Gaussian. With
+	// (approximately) Gaussian noise the joint law of the new subset shares is
+	// approximately a (degenerate, sum-preserving) multivariate Gaussian, which is
+	// the structure the key-hiding analysis in SECURITY_PROOF.md relies on.
 	let mut deltas = vec![0i32; m];
 	for poly_idx in 0..L {
 		for coeff_idx in 0..N as usize {
 			for d in deltas.iter_mut() {
-				*d = sample_eta_coeff(&mut state);
+				*d = sample_cbd_coeff(&mut state);
 			}
 			for i in 0..m {
 				let prev = deltas[(i + m - 1) % m];
@@ -1778,7 +1796,7 @@ fn derive_subshares_with_session_seed(
 	for poly_idx in 0..K {
 		for coeff_idx in 0..N as usize {
 			for d in deltas.iter_mut() {
-				*d = sample_eta_coeff(&mut state);
+				*d = sample_cbd_coeff(&mut state);
 			}
 			for i in 0..m {
 				let prev = deltas[(i + m - 1) % m];
@@ -1825,18 +1843,27 @@ fn center_mod_q(coeff: i32) -> i32 {
 	}
 }
 
-fn sample_eta_coeff(state: &mut fips202::KeccakState) -> i32 {
-	let eta_i32 = ETA as i32;
-	let bound = 2 * eta_i32 + 1;
-	let cutoff = (256 / bound) * bound;
+/// Sample a centered-binomial-distribution (CBD) coefficient in
+/// `[-RESHARING_NOISE_ETA, RESHARING_NOISE_ETA]`. CBD is the standard bounded
+/// approximation to a discrete Gaussian used in ML-KEM: draw `2*eta` PRF bits,
+/// set `a = popcount(first eta bits)`, `b = popcount(last eta bits)`, and return
+/// `a - b`. The result is symmetric about 0, sub-Gaussian, and has variance
+/// `eta / 2`. Sampling consumes exactly one PRF byte per coefficient (valid for
+/// `eta <= 4`, since `2*eta <= 8`) and needs no rejection, so it is deterministic
+/// and stream-aligned across all parties.
+fn sample_cbd_coeff(state: &mut fips202::KeccakState) -> i32 {
+	let eta = RESHARING_NOISE_ETA as usize;
+	debug_assert!(eta <= 4, "CBD needs 2*eta <= 8 bits to fit in one byte");
 	let mut buf = [0u8; 1];
-	loop {
-		fips202::shake256_squeeze(&mut buf, state);
-		let b = buf[0] as i32;
-		if b < cutoff {
-			return (b % bound) - eta_i32;
-		}
+	fips202::shake256_squeeze(&mut buf, state);
+	let bits = buf[0];
+	let mut a = 0i32;
+	let mut b = 0i32;
+	for i in 0..eta {
+		a += ((bits >> i) & 1) as i32;
+		b += ((bits >> (eta + i)) & 1) as i32;
 	}
+	a - b
 }
 
 fn sample_uniform_usize(state: &mut fips202::KeccakState, upper: usize) -> usize {

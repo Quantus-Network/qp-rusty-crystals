@@ -49,10 +49,16 @@ The new subset share is:
 s_J^new = sum_I r_{I->J}
 ```
 
-The implementation uses a bounded conditional splitter, not a discrete Gaussian
-sampler. Each coefficient is split evenly across new subsets and then masked by
-deterministic pairwise zero-sum `[-eta, eta]` noise derived from the public
-session seed and the old subset share.
+The implementation uses a bounded conditional splitter, not an exact discrete
+Gaussian sampler. Each coefficient is split evenly across new subsets and then
+masked by deterministic zero-sum noise derived from the public session seed and
+the old subset share. The noise uses an `O(m)` telescoping cycle: for each
+coefficient one centered-binomial delta `delta_i` is drawn per new subset and the
+difference `delta_i - delta_{(i-1) mod m}` is assigned to subset `i`. The
+centered binomial distribution (CBD, as used by ML-KEM) is the standard bounded
+approximation to a discrete Gaussian; it makes the joint law of the new subset
+shares approximately a (degenerate, sum-preserving) multivariate Gaussian, which
+is what the key-hiding argument below relies on.
 
 ## Threat Model
 
@@ -298,6 +304,125 @@ Thus resharing leaks no additional secret information beyond:
 
 This is the same leakage structure as the underlying RSS threshold scheme, plus
 the public verification data needed to make the handoff verifiable.
+
+## Key Hiding Under Resharing (Heuristic Parity)
+
+This section addresses the gap between what the Threshold ML-DSA (Mithril) proof
+formally requires of a share distribution and what the bounded conditional
+splitter actually produces. The claim here is heuristic parity with Mithril's own
+a-posteriori sharing, not a fresh MLWE reduction.
+
+### Leakage structure
+
+Fix a single resharing epoch. An adversary corrupting at most `t_new - 1` new
+parties learns at most `t_new - 1` of the new subset shares `{s_J^new}` (the new
+RSS subset shares it is entitled to), the public transcript, and every per-subset
+partial key `t_J^new`. Key hiding requires that the secret `s` (equivalently the
+unseen subset shares) stays pseudorandom given this view, with the public key
+`t = A*s_1 + s_2` fixed.
+
+This is exactly the leakage structure that Mithril analyzes for key generation
+and a-posteriori resharing (Mithril Sec. 3.3): the adversary's view is a
+hint-MLWE instance, where the "hints" are the leaked subset shares (which are
+correlated with the unseen shares through the `sum_J s_J^new = s` constraint and
+the zero-sum splitting noise).
+
+### Why this is heuristic, not a fresh reduction
+
+Mithril's formal hint-MLWE -> MLWE reduction (Mithril Thm. for a-posteriori
+sharing, App. E.3) requires each share coordinate to be discrete Gaussian with
+standard deviation above the lattice smoothing parameter (sigma on the order of a
+few thousand for these dimensions). That regime is incompatible with the small
+secret-dependent shifts that signing's hyperball rejection sampling needs, so
+Mithril does not instantiate the reduction at those parameters either. Instead it
+falls back to a heuristic estimate (conditional entropy of the hidden share fed
+to the lattice estimator, with a reported ~7-12 bit security loss versus plain
+ML-DSA). Resharing inherits the same wall, so the realistic target is parity with
+Mithril's heuristic, not a stronger statement.
+
+### Distribution produced by the splitter
+
+After the CBD noise change (see `protocol.rs`), each new subset-share coordinate
+is
+
+```text
+s_J^new[x] = sum_I ( balanced_split(s_I^old)[x] + (delta_{I,J} - delta_{I,J-1}) )
+```
+
+where the `delta` are independent CBD_eta draws (symmetric, sub-Gaussian,
+variance `eta/2`). Two facts make the joint distribution tractable:
+
+1. Each coordinate is a sum over the `C(n_old, k_old)` old subsets of bounded,
+   symmetric, independent terms, so by the central limit theorem each marginal is
+   approximately a discrete Gaussian centered at the balanced-split mean. This
+   matches the empirically observed shape in `README.md`.
+2. With (approximately) Gaussian noise the joint law of `(s_J^new)_J` is
+   approximately a degenerate multivariate Gaussian, degenerate because the
+   shares are constrained to sum to `s`. This is the same object Mithril's
+   heuristic reasons about, which is why the CBD shaping (rather than uniform
+   noise) matters: it lets the conditional distribution of an unseen share given
+   the leaked shares be described by a Gaussian conditional covariance instead of
+   an ad hoc bounded distribution.
+
+### Parity argument
+
+Let `chi_s = U([-eta, eta])` be the base ML-DSA secret coordinate distribution,
+with variance `Var(chi_s) = eta*(eta+1)/3` (sigma ~ 1.41 for eta=2). The base
+scheme's hidden keygen subset share has coordinate variance `Var(chi_s)`.
+
+1. Marginal width. The honest post-reshare hidden subset share has per-coordinate
+   standard deviation at least that of the base keygen share, and empirically
+   strictly larger (sigma >= ~3.6 even for the smallest 2-of-3 configuration; see
+   `README.md`). A wider symmetric marginal has at least as much per-coordinate
+   conditional entropy, so on the marginal axis resharing is no worse than base
+   keygen.
+2. Correlation with leaked shares. Unlike independent keygen shares, the leaked
+   `t_new - 1` shares are correlated with the hidden share via the sum constraint
+   and the telescoping noise. Because the joint law is approximately multivariate
+   Gaussian, the residual uncertainty in the hidden share given the leaked shares
+   is governed by the Schur-complement conditional covariance. The telescoping
+   cycle gives each subset exactly two noise terms (variance `O(1)` in `m`) and
+   spreads them around a cycle, so no leaked share fixes the hidden share; the
+   conditional covariance retains the structural balanced-split spread plus a
+   non-degenerate noise contribution. We therefore claim the conditional entropy
+   of the hidden share is at least that of the base scheme's hidden keygen share.
+   This is the step that should be confirmed numerically by feeding the actual
+   conditional covariance into the lattice estimator (see Open Items).
+3. Published partial keys. Resharing additionally publishes `{t_J^new}`, which the
+   base keygen does not. Each `t_J^new = A*s_{J,1}^new + s_{J,2}^new` is an MLWE
+   sample for the post-reshare short-share distribution, and they sum to the fixed
+   public key. Treating each as an MLWE sample, publishing them leaks nothing
+   beyond MLWE hardness for that distribution. This is an extra assumption beyond
+   base keygen, flagged in Limitations.
+
+Combining the three points, the hint-MLWE instance an adversary faces after an
+honest resharing is heuristically no easier than the one Mithril already accepts
+for a-posteriori sharing: the hidden share is at least as wide marginally, the
+Gaussian-shaped noise keeps the conditional covariance non-degenerate, and the
+only genuinely new public data is a set of MLWE samples. Hence the lattice
+estimator security level (and Mithril's reported heuristic loss) is expected to
+carry over.
+
+### Repeated resharing
+
+Each epoch republishes `{t_J^new}` and introduces a fresh hint. Under the
+single-epoch bounded-corruption and erasure assumptions in the Threat Model, the
+adversary's view in any one epoch is one hint-MLWE instance as above; it does not
+accumulate hidden-share information across epochs because honest parties erase old
+shares and the per-epoch noise is independently keyed to a fresh session seed.
+There is no post-compromise forward secrecy: an adversary that records all
+transcripts and later compromises old shares can recompute the deterministic
+splits, exactly as stated in Limitations.
+
+### Open items
+
+This argument is heuristic parity, not a proof. The supporting work needed to make
+it quantitative is: (i) compute the exact conditional covariance of one hidden
+subset share given any `t_new - 1` leaked shares for each supported `(t,n)`, and
+(ii) run the lattice estimator on the induced hint-MLWE instance to confirm the
+security level matches Mithril's a-posteriori heuristic within its stated loss.
+Items (i)-(ii) are configuration-specific and are tracked separately from this
+note.
 
 ## Proactive Security
 

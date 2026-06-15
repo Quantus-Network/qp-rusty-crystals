@@ -124,7 +124,7 @@ The current protocol instead uses a bounded conditional splitter. For each coeff
 
 1. Converts the coefficient to its centered representative in `(-Q/2, Q/2]`.
 2. Splits it as evenly as possible across all `m` new subsets, so the deterministic base values sum exactly to the centered coefficient.
-3. Adds deterministic PRF-derived pairwise zero-sum noise: for every pair `(J_a, J_b)`, sample a small `δ ∈ [-η, η]`, add `δ` to `J_a`, and subtract `δ` from `J_b`.
+3. Adds deterministic PRF-derived zero-sum noise using an `O(m)` telescoping cycle: for each coefficient, sample one centered-binomial delta `δ_i` per new subset and assign the difference `δ_i − δ_{(i−1) mod m}` to subset `i`. The assignment is zero-sum (`Σ_i (δ_i − δ_{i−1}) = 0`), so each subset receives exactly two noise terms regardless of `m` (per-coefficient noise variance is `O(1)` in `m`, versus `O(m)` for the earlier all-pairs pattern). The deltas are drawn from the centered binomial distribution (CBD_η, as used by ML-KEM), the standard bounded approximation to a discrete Gaussian; this makes the joint share distribution approximately multivariate Gaussian, which the key-hiding analysis in `SECURITY_PROOF.md` relies on.
 
 The output satisfies the exact integer equation
 
@@ -288,48 +288,58 @@ The bounded conditional splitter is designed to prevent the random-walk growth c
 
 For honest executions of the bounded splitter, coefficients follow an **approximately Gaussian distribution** that is stable across further resharings. This is a consequence of the Central Limit Theorem: each new subset share is a sum of contributions from multiple old subsets, and the sum of many bounded random variables converges to a Gaussian. This distributional analysis is useful for parameter sanity checks; the runtime security guard is the recovered-partial norm check above.
 
-#### Variance Formula
+#### Variance Scaling
 
-For a (t, n) threshold scheme with **m = C(n, t-1)** subsets:
+For a (t, n) threshold scheme with **m = C(n, t-1)** subsets, each new subset
+share sums one fragment from each of the `m` old subsets, where each fragment is
+a balanced-split piece plus two CBD noise terms (from the `O(m)` telescoping
+cycle). Variance therefore adds across the `m` old-subset contributions, giving a
+roughly linear-in-`m` variance and `√m` standard deviation:
 
 ```
-σ² = Var_η · (m² - m + 1/m) ≈ 2(m² - m)   for η = 2
-
-σ ≈ √(2m(m-1)) ≈ 1.41 · m · √(1 - 1/m)
+σ² ≈ 2.1 · m        (empirical fit, η = 2, CBD noise)
+σ  ≈ √(2.1 · m)
 ```
 
-Where `Var_η = 2` is the variance of uniform distribution over {-η, ..., η} with η = 2.
+This is a dramatic improvement over the original `O(m²)` all-pairs uniform noise,
+whose variance grew as `≈ 2(m² − m)` (e.g. σ ≈ 27.6 for 4-of-6 versus ≈ 6.6
+now). The `√m` scaling keeps recovered partials far closer to the keygen
+envelope as the committee grows.
 
-#### Predicted Bounds
+#### Empirical Measurements
 
-| Config | Subsets (m) | Std Dev (σ) | ≈4σ Bound |
-|--------|-------------|-------------|-----------|
-| 2-of-3 | 3           | 3.6         | ±14       |
-| 2-of-4 | 4           | 5.0         | ±20       |
-| 3-of-5 | 10          | 13.4        | ±54       |
-| 4-of-6 | 20          | 27.6        | ±110      |
+Measured with the current `O(m)` telescoping CBD splitter (per-coefficient
+statistics over all shares; values are the stabilized post-resharing fixed
+point). For comparison, the final column shows the original all-pairs uniform σ.
 
-The 4σ bound captures >99.99% of coefficients (Gaussian tail bound).
+| Config | Subsets (m) | Empirical σ | Observed range | √(2.1m) | Old all-pairs σ |
+|--------|-------------|-------------|----------------|---------|-----------------|
+| 2-of-3 | 3           | 2.65        | [-10, 10]      | 2.51    | 3.6             |
+| 2-of-4 | 4           | 3.02        | [-13, 14]      | 2.90    | 5.0             |
+| 3-of-5 | 10          | 4.67        | [-22, 21]      | 4.58    | 13.4            |
+| 4-of-6 | 20          | 6.57        | [-31, 29]      | 6.48    | 27.6            |
+
+Numbers are reproduced by `test_coefficient_distribution_*` in
+`tests/resharing_tests.rs`. The DKG baseline is uniform over `[-2, 2]`
+(σ ≈ 1.41, excess kurtosis ≈ −1.3); after the first resharing the distribution
+becomes approximately Gaussian (excess kurtosis ≈ 0, see Key Properties).
 
 #### Key Properties
 
-1. **Symmetric**: Skewness ≈ 0
-2. **Approximately Gaussian**: Excess kurtosis ≈ 0
-3. **Idempotent**: The distribution is a fixed point of the resharing operation — further resharings produce the same distribution (within statistical noise)
-4. **Bounded**: Coefficients stay within ≈4σ with >99.99% probability
+1. **Symmetric**: Skewness ≈ 0 (measured `|skew| < 0.04` across all configs).
+2. **Approximately Gaussian**: Excess kurtosis ≈ 0 after the first resharing
+   (measured within `±0.08`), versus ≈ −1.3 for the uniform DKG baseline. The CBD
+   noise shaping is what pulls the post-resharing distribution toward a Gaussian.
+3. **Idempotent**: The distribution is a fixed point of resharing — variance
+   changes by < 5% from the first resharing through 10–100 subsequent resharings.
+4. **Bounded**: Coefficients stay within ≈ 4.5σ in the measured ranges.
 
 #### Empirical Verification
 
-Testing confirms the theoretical predictions:
-
-| Config | Resharings | Empirical σ | Theoretical σ | Empirical Range |
-|--------|------------|-------------|---------------|-----------------|
-| 2-of-3 | 1-100      | 3.6         | 3.56          | [-13, 13]       |
-| 2-of-4 | 1-20       | 5.0         | 4.95          | [-20, 20]       |
-| 3-of-5 | 1-20       | 13.5        | 13.42         | [-57, 57]       |
-| 4-of-6 | 1-10       | 27.6        | 27.57         | [-124, 124]     |
-
-The variance stabilizes after the first resharing and remains constant (within <1% variation) across subsequent resharings. This idempotence occurs because subset shares become correlated after resharing, preventing further variance growth.
+The variance stabilizes after the first resharing and remains constant (within
+< 5% variation) across subsequent resharings. This idempotence occurs because
+subset shares become correlated after resharing, preventing further variance
+growth.
 
 #### Security Implications
 
