@@ -422,19 +422,41 @@ pub fn get_hyperball_params(threshold: u32, parties: u32) -> Option<(f64, f64, f
 	// Threshold parameters (r, r', nu) from the reference implementation
 	// nu = 7 for ML-DSA-87
 	match (threshold, parties) {
+		// Resharing-supported committees have radii enlarged by kappa so honest
+		// post-resharing recovered partials fit under the enlarged bound B'. The
+		// enlargement scales (r, r') and B together, leaving the per-sample
+		// rejection leakage eps invariant (scale-invariant radius condition). It
+		// does NOT preserve the query budget Q_s = 1/(K*eps): K grows (the larger
+		// radius nears ML-DSA's fixed verification ceilings), and Q_s falls by that
+		// K factor (e.g. (3,5) K 35->60 at kappa=1.15 => ~0.8 bits of Q_s). See
+		// scripts/compute_hyperball_params.py and partial_secret_norm_bound().
+		// Radii = kappa x base, kappa re-derived for the v5 mean-subtracted coset
+		// splitter from the measured honest overshoot (Rust
+		// test_recovered_partial_variance_*, fixed point over all signing sets):
+		// (2,2) 0.780x -> kappa 1.00, (2,3) 0.810x -> 1.00 (both reshare at base B),
+		// (2,4) 0.961x -> 1.10, (3,5) 1.012x -> 1.15, (4,6) 1.163x -> 1.25
+		// (K 350->1600, ~15 MB/sig; enabled for the near-mpc 4-of-6 shape). See
+		// scripts/compute_hyperball_params.py (compute_resharing_params).
+		// (2,2)/(2,3) reshare at kappa=1, i.e. with the *exact* base keygen radii (a
+		// reshared committee signs identically to a fresh one). Use the reference base
+		// values directly, not the resharing script's expo-recovered approximation
+		// (whose 0.005 expo-grid drift shrinks r enough to tip the tight K=5/K=4
+		// single-shot acceptance below 1 for some seeds).
 		(2, 2) => Some((503119.0, 503192.0, 7.0)),
 		(2, 3) => Some((631601.0, 631703.0, 7.0)),
 		(3, 3) => Some((483107.0, 483180.0, 7.0)),
-		(2, 4) => Some((632903.0, 633006.0, 7.0)),
+		(2, 4) => Some((696194.0, 696307.0, 7.0)),
 		(3, 4) => Some((551752.0, 551854.0, 7.0)),
 		(4, 4) => Some((487958.0, 488031.0, 7.0)),
 		(2, 5) => Some((607694.0, 607820.0, 7.0)),
-		(3, 5) => Some((577400.0, 577546.0, 7.0)),
+		// (3,5): base (577400, 577546) x 1.15.
+		(3, 5) => Some((664010.0, 664178.0, 7.0)),
 		(4, 5) => Some((518384.0, 518510.0, 7.0)),
 		(5, 5) => Some((468214.0, 468287.0, 7.0)),
 		(2, 6) => Some((665106.0, 665232.0, 7.0)),
 		(3, 6) => Some((577541.0, 577704.0, 7.0)),
-		(4, 6) => Some((517689.0, 517853.0, 7.0)),
+		// (4,6): base (517689, 517853) x 1.25 (overshoot 1.163x, enabled for near-mpc).
+		(4, 6) => Some((647112.0, 647317.0, 7.0)),
 		(5, 6) => Some((479692.0, 479819.0, 7.0)),
 		(6, 6) => Some((424124.0, 424197.0, 7.0)),
 		_ => None,

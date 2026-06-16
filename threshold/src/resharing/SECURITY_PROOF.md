@@ -52,13 +52,42 @@ s_J^new = sum_I r_{I->J}
 The implementation uses a bounded conditional splitter, not an exact discrete
 Gaussian sampler. Each coefficient is split evenly across new subsets and then
 masked by deterministic zero-sum noise derived from the public session seed and
-the old subset share. The noise uses an `O(m)` telescoping cycle: for each
-coefficient one centered-binomial delta `delta_i` is drawn per new subset and the
-difference `delta_i - delta_{(i-1) mod m}` is assigned to subset `i`. The
-centered binomial distribution (CBD, as used by ML-KEM) is the standard bounded
-approximation to a discrete Gaussian; it makes the joint law of the new subset
-shares approximately a (degenerate, sum-preserving) multivariate Gaussian, which
-is what the key-hiding argument below relies on.
+the old subset share. The noise (splitter `v5`, `add_mean_subtracted_noise`) uses
+**balanced mean subtraction**: for each coefficient `m` i.i.d. deltas `δ_0..δ_{m−1}`
+are drawn and `N_j = δ_j − balanced(Σδ)_j` is assigned to subset `j`. This is
+integer zero-sum and reproduces the a-posteriori coset Gaussian's *uniform*
+negative correlation `Cov(N_j,N_k) = −σ²/m` (the earlier `v4` telescoping cycle
+`δ_i − δ_{i−1}` had only banded correlation, which overshot for non-contiguous
+recovery patterns).
+
+### Fresh re-sharing (noise intensity scaling)
+
+The deltas are **sparse-ternary** in `{-1, 0, +1}` with per-coefficient intensity
+`P(±1) ≈ 0.49 / S_old` each, where `S_old = C(n_old, n_old−T_old+1)` is the number
+of old RSS subsets (`split_noise_threshold` in `protocol.rs`). The scaling is the
+crux of the construction. Each new subset share is
+
+```text
+s_J^new = sum_I r_{I->J}
+```
+
+a sum over all `S_old` old subsets, so injecting only `≈ 1/S_old` of the keygen
+noise per dealer makes the **aggregated** new-share noise variance reach the
+keygen level `σ²_keygen`. The new shares are therefore distributed like a *fresh*
+keygen short secret sharing — a discrete Gaussian over the sum-`s` coset, i.e.
+Mithril's a-posteriori sharing (Sec. 3.3) reproduced in a distributed way. This
+keeps the recovered signing partials under the keygen norm envelope `B` instead
+of letting their variance grow linearly in the committee size.
+
+The `v3` splitter used a **fixed** centered-binomial delta (`CBD_η`, independent of
+`S_old`), which over-injected noise: the recovered-partial overshoot grew as
+`~√S_old` (2-of-3: 1.22×, 3-of-5: 2.61×, 4-of-6: 4.50×). With the `1/S_old` scaling
+*and* the v5 mean subtraction the steady-state overshoot is held at `~0.78–1.16×`
+across all committees `2 ≤ T ≤ N ≤ 6` (Rust fixed-point measurement over repeated
+reshares), while the aggregated hiding standard deviation stays `≈ σ_keygen = √2`.
+Sparse-ternary at this small intensity is an integer,
+PRF-deterministic stand-in for a coset discrete Gaussian (its `±2` Gaussian tail
+is negligible), so every old-subset peer derives identical sub-shares.
 
 ## Threat Model
 
@@ -256,25 +285,106 @@ the relevant weighted norm is:
 ||p_i(A)||_nu = sqrt(||p_{i,1}(A)||_2^2 / nu^2 + ||p_{i,2}(A)||_2^2)
 ```
 
-The implementation checks the conservative challenge-amplified sufficient bound:
+The implementation checks the challenge-amplified sufficient bound:
 
 ```text
-TAU * ||p_i(A)||_nu <= R_guard
+sqrt(TAU) * ||p_i(A)||_nu <= B'
 ```
 
-where `R_guard` is the configured guard radius derived from the current
-Threshold ML-DSA-87 hyperball parameters for `(t_new, n_new)`.
+using the `sqrt(TAU)` amplification (matching the Gaussian-heuristic convention
+that defines `B` in Mithril §3.4 / footnote 3), where `B'` is the configured
+partial-secret norm bound for `(t_new, n_new)`.
 
 The check is deterministic and local to each new party. Each new party enumerates
 all threshold signing sets containing itself and uses the same RSS recovery logic
 as signing. Therefore, every later signing partial that this party can produce
 has already passed the guard during resharing.
 
-For a paper-style instantiation against the exact Mithril theorem, instantiate
-`R_guard` with a bound `B` satisfying the hyperball parameter-selection condition
-from the Threshold ML-DSA proof. Operationally, the implementation rejects any
-resharing output that exceeds its configured guard for the existing parameters;
-it does not enlarge or retune hyperball parameters during resharing.
+### Bound `B`, the enlargement `B' = κ·B`, and `Q_s`
+
+The base bound `B` is the keygen-calibrated Mithril §3.4 quantity
+
+```text
+B = 1.3 · sqrt(TAU) · sqrt(n·(k + ℓ/ν²)) · sqrt(Var(U(−η,η))) · sqrt(⌈C(N, T−1)/T⌉),
+```
+
+the value the reference hyperball radii `(r, r')` are derived from
+(`r = slack·B`, `r' = slackradius2·r`; see `scripts/compute_hyperball_params.py`,
+where `B` is the script's `beta`).
+
+Honest resharing inflates the recovered-partial norm relative to the keygen `B`
+by a factor that depends on the splitter. With the **v5 mean-subtracted coset**
+splitter (the `1/S_old` noise scaling above plus balanced mean subtraction) the
+steady-state overshoot is `~0.78–1.16×` for every committee `2 ≤ T ≤ N ≤ 6`,
+instead of the `~√S_old` growth (2-of-3: 1.22×, 3-of-5: 2.61×, 4-of-6: 4.50×) of
+the old fixed-noise splitter.
+
+To accept honest reshares the implementation enlarges the bound to `B' = κ·B`
+*and* enlarges the hyperball radii to `(κ·r, κ·r')` for the same configuration
+(`get_hyperball_params`).
+
+**What the enlargement preserves, and what it costs.** The per-sample rejection
+distribution is governed by `φ` through the radius condition
+`r'² = r² + B² + 2rB/φ`, which is *scale-invariant*: scaling `(B, r, r')` by a
+common `κ` leaves `φ` — and hence the per-sample leakage `ε` — exactly unchanged
+(verified numerically: `(3,5)` `φ = 8.9931` before and after; `(4,6)`
+`φ = 8.9762` before and after). So the simulated and real transcript
+distributions stand in exactly the same relation *per sample* as in the unscaled
+scheme.
+
+The signing-query budget, however, is **not** preserved. By Theorem 3.2 the
+budget is
+
+```text
+Q_s = 1 / (K · ε),
+```
+
+so it is inversely proportional to the parallel-attempt count `K`. Enlarging the
+ball lowers per-iteration acceptance — because `κ·r` moves toward ML-DSA-87's
+*fixed* verification ceilings (`‖z₁‖∞ < γ1 − β`, `‖v‖∞ ≤ γ2`, hint weight `≤ ω`),
+and clearing all ~4000 nonce coordinates simultaneously is a high-dimensional
+joint event that collapses super-linearly in the radius — so `K` grows. Because
+`ε` is unchanged, that same `K` growth reduces `Q_s` by exactly the factor `K`
+grows, i.e. the `Q_s` cost is `log₂(K_enlarged / K_base)` bits.
+
+The `κ` were re-derived for the **v5 mean-subtracted coset splitter**
+(`add_mean_subtracted_noise`) from the **measured** honest overshoot
+(`sqrt(τ)·‖p‖_ν / B_base`; Rust `test_recovered_partial_variance_*`, fixed point
+over all signing sets). v5's uniform negative correlation lowered every overshoot
+vs the v4 telescoping cycle:
+
+| Config | overshoot (v4 → v5) | κ | K (base → enlarged) | `Q_s` cost |
+|--------|---------------------|---|---------------------|-----------|
+| 2-of-2 | 0.975 → 0.780 | 1.00 | 4 → 4   | 0 (base params) |
+| 2-of-3 | 0.897 → 0.810 | 1.00 | 5 → 5   | 0 (base params) |
+| 2-of-4 | 1.018 → 0.961 | 1.10 | 7 → 10  | 0.51 bits |
+| 3-of-5 | 1.107 → 1.012 | 1.15 | 35 → 60 | 0.78 bits |
+| 4-of-6 | 1.286 → 1.163 | 1.25 | 350 → 1600 | ~2.2 bits (→ ~2^28.2) |
+
+v5 pushes `(2,2)` and `(2,3)` far enough below the base bound that they reshare at
+**κ = 1**: a reshared committee signs with the exact base params of a fresh keygen
+committee, at *zero* `Q_s` cost. `(3,5)` drops `K` from 227 (v4) to 60. The cost
+where κ > 1 is real and is *not* merely a completeness/`K` overhead — the `K`
+overhead and the `Q_s` reduction are the **same** effect (each signing query
+reveals all `K` aggregated responses, so the security game accumulates
+`Q_s · K · ε` leakage, bounding `Q_s ≤ 1/(K·ε)`).
+
+Note `B_base` itself (the keygen §3.4 quantity above) is **sampler-independent** —
+it is the keygen reference, not re-derived from the resharing distribution. Only
+`κ` (hence `B' = κ·B`, the radii, and `K`) depends on the splitter.
+
+This enlargement is only possible while `κ·r` stays under ML-DSA-87's fixed
+verification ceiling on `‖z₁‖∞ < γ1 − β`, which caps `κ` at ≈1.5×:
+
+- `(2,2)`, `(2,3)`, `(2,4)`, `(3,5)`, `(4,6)` are **supported** (κ = 1.00 / 1.00 /
+  1.10 / 1.15 / 1.25; `(2,2)`/`(2,3)` need no enlargement at all).
+- `(4,6)` is **enabled** by enlargement (κ = 1.25, K = 1600) because the `near-mpc`
+  integration requires the 4-of-6 committee shape. v5's honest overshoot is
+  `~1.163×` and extremely stable (1.153–1.163 across 8 seeds, the recovered-partial
+  norm concentrates), so κ = 1.25 carries a ~7.5% margin. The cost is a
+  per-signature tax: every `(4,6)` signature uses `K = 1600` (~15 MB/session,
+  `Q_s ≈ 2^28.2 ≈ 300M` queries). Reaching `κ = 1 / K = 350` for `(4,6)` needs the
+  Option B/C work in `COSET_RESHARING_SPEC.md`, which would remove this tax.
 
 ## Confidentiality
 
@@ -342,27 +452,29 @@ Mithril's heuristic, not a stronger statement.
 
 ### Distribution produced by the splitter
 
-After the CBD noise change (see `protocol.rs`), each new subset-share coordinate
-is
+After the fresh re-sharing noise change (see `protocol.rs`), each new subset-share
+coordinate is
 
 ```text
 s_J^new[x] = sum_I ( balanced_split(s_I^old)[x] + (delta_{I,J} - delta_{I,J-1}) )
 ```
 
-where the `delta` are independent CBD_eta draws (symmetric, sub-Gaussian,
-variance `eta/2`). Two facts make the joint distribution tractable:
+where the `delta` are independent sparse-ternary draws in `{-1, 0, +1}` with
+intensity `P(±1) ≈ 0.49 / S_old`. Two facts make the joint distribution tractable:
 
-1. Each coordinate is a sum over the `C(n_old, k_old)` old subsets of bounded,
-   symmetric, independent terms, so by the central limit theorem each marginal is
-   approximately a discrete Gaussian centered at the balanced-split mean. This
-   matches the empirically observed shape in `README.md`.
+1. Each coordinate is a sum over the `S_old = C(n_old, k_old)` old subsets of
+   bounded, symmetric, independent terms, so by the central limit theorem each
+   marginal is approximately a discrete Gaussian centered at the balanced-split
+   mean. The `1/S_old` intensity scaling is chosen so that this aggregated marginal
+   has standard deviation `≈ σ_keygen = √2` — i.e. the post-reshare share matches
+   the *fresh keygen* share width rather than exceeding it (the small-σ sparse
+   ternary is an integer stand-in for the coset discrete Gaussian of Mithril §3.3).
 2. With (approximately) Gaussian noise the joint law of `(s_J^new)_J` is
    approximately a degenerate multivariate Gaussian, degenerate because the
    shares are constrained to sum to `s`. This is the same object Mithril's
-   heuristic reasons about, which is why the CBD shaping (rather than uniform
-   noise) matters: it lets the conditional distribution of an unseen share given
-   the leaked shares be described by a Gaussian conditional covariance instead of
-   an ad hoc bounded distribution.
+   heuristic reasons about, which lets the conditional distribution of an unseen
+   share given the leaked shares be described by a Gaussian conditional covariance
+   rather than an ad hoc bounded distribution.
 
 ### Parity argument
 
@@ -370,24 +482,26 @@ Let `chi_s = U([-eta, eta])` be the base ML-DSA secret coordinate distribution,
 with variance `Var(chi_s) = eta*(eta+1)/3` (sigma ~ 1.41 for eta=2). The base
 scheme's hidden keygen subset share has coordinate variance `Var(chi_s)`.
 
-1. Marginal width. The honest post-reshare hidden subset share has per-coordinate
-   standard deviation at least that of the base keygen share, and empirically
-   strictly larger (sigma >= ~3.6 even for the smallest 2-of-3 configuration; see
-   `README.md`). A wider symmetric marginal has at least as much per-coordinate
-   conditional entropy, so on the marginal axis resharing is no worse than base
-   keygen.
+1. Marginal width. The v5 coset splitter is tuned so the honest post-reshare
+   hidden subset share has per-coordinate standard deviation `≈ σ_keygen` (measured
+   aggregated hiding σ ≈ 1.37–1.43 across supported committees), matching the base
+   keygen share rather than the old splitter's inflated `σ ≈ 3.6`. This is exactly
+   the a-posteriori target of Mithril §3.3: the hidden share is distributed like a
+   fresh keygen share, so its per-coordinate conditional entropy is on par with
+   base keygen.
 2. Correlation with leaked shares. Unlike independent keygen shares, the leaked
    `t_new - 1` shares are correlated with the hidden share via the sum constraint
-   and the telescoping noise. Because the joint law is approximately multivariate
-   Gaussian, the residual uncertainty in the hidden share given the leaked shares
-   is governed by the Schur-complement conditional covariance. The telescoping
-   cycle gives each subset exactly two noise terms (variance `O(1)` in `m`) and
-   spreads them around a cycle, so no leaked share fixes the hidden share; the
-   conditional covariance retains the structural balanced-split spread plus a
-   non-degenerate noise contribution. We therefore claim the conditional entropy
-   of the hidden share is at least that of the base scheme's hidden keygen share.
-   This is the step that should be confirmed numerically by feeding the actual
-   conditional covariance into the lattice estimator (see Open Items).
+   and the mean-subtracted noise. Because the joint law is approximately
+   multivariate Gaussian, the residual uncertainty in the hidden share given the
+   leaked shares is governed by the Schur-complement conditional covariance. The
+   mean-subtracted noise gives the uniform negative correlation `−σ²/m` of the coset
+   Gaussian, so no leaked share fixes the hidden share; the conditional covariance
+   retains the structural balanced-split spread plus a non-degenerate noise
+   contribution.
+   We therefore claim the conditional entropy of the hidden share is at least that
+   of the base scheme's hidden keygen share. This is the step that should be
+   confirmed numerically by feeding the actual conditional covariance into the
+   lattice estimator (see Open Items).
 3. Published partial keys. Resharing additionally publishes `{t_J^new}`, which the
    base keygen does not. Each `t_J^new = A*s_{J,1}^new + s_{J,2}^new` is an MLWE
    sample for the post-reshare short-share distribution, and they sum to the fixed

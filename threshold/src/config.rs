@@ -60,19 +60,30 @@ impl ThresholdConfig {
 		// achieve low retry rates (~0.3-0.5 average retries per signing).
 		// Values are from the reference Threshold-ML-DSA implementation.
 		let k_iterations = match (t, n) {
+			// K re-derived for the v5 mean-subtracted coset splitter (see
+			// get_hyperball_params and scripts/compute_hyperball_params.py). v5's lower
+			// overshoot lets (2,2)/(2,3) reshare at kappa=1 (base signing K), and cut
+			// (3,5) from K=227 (v4) to 60. (2,4) kappa=1.10, (3,5) kappa=1.15,
+			// (4,6) kappa=1.25 (K 350->1600, enabled for the near-mpc 4-of-6 shape).
 			(2, 2) => 4,
 			(2, 3) => 5,
 			(3, 3) => 12,
-			(2, 4) => 7,
+			(2, 4) => 10,
 			(3, 4) => 24,
 			(4, 4) => 25,
 			(2, 5) => 6,
-			(3, 5) => 42,
+			// (3,5): resharing-supported via the v5 coset splitter; radii enlarged by
+			// kappa=1.15 (get_hyperball_params), so K is 60 (was 227 under v4 kappa=1.30).
+			(3, 5) => 60,
 			(4, 5) => 110,
 			(5, 5) => 60,
 			(2, 6) => 8,
 			(3, 6) => 65,
-			(4, 6) => 350,
+			// (4,6): resharing-supported via the v5 coset splitter; radii enlarged by
+			// kappa=1.25 (get_hyperball_params), so K is 1600 (was 350 base). This taxes
+			// every (4,6) signature (~15 MB/sig, Q_s ~2^28.2); see COSET_RESHARING_SPEC.md
+			// Option B/C for the path back to K=350.
+			(4, 6) => 1600,
 			(5, 6) => 380,
 			(6, 6) => 180,
 			_ =>
@@ -136,7 +147,7 @@ mod tests {
 		let config = ThresholdConfig::new(2, 3).unwrap();
 		assert_eq!(config.threshold(), 2);
 		assert_eq!(config.total_parties(), 3);
-		assert_eq!(config.k_iterations(), 5); // Updated based on retry tuning
+		assert_eq!(config.k_iterations(), 5); // (2,3) reshares at kappa=1 (base signing K)
 	}
 
 	#[test]

@@ -124,7 +124,7 @@ The current protocol instead uses a bounded conditional splitter. For each coeff
 
 1. Converts the coefficient to its centered representative in `(-Q/2, Q/2]`.
 2. Splits it as evenly as possible across all `m` new subsets, so the deterministic base values sum exactly to the centered coefficient.
-3. Adds deterministic PRF-derived zero-sum noise using an `O(m)` telescoping cycle: for each coefficient, sample one centered-binomial delta `δ_i` per new subset and assign the difference `δ_i − δ_{(i−1) mod m}` to subset `i`. The assignment is zero-sum (`Σ_i (δ_i − δ_{i−1}) = 0`), so each subset receives exactly two noise terms regardless of `m` (per-coefficient noise variance is `O(1)` in `m`, versus `O(m)` for the earlier all-pairs pattern). The deltas are drawn from the centered binomial distribution (CBD_η, as used by ML-KEM), the standard bounded approximation to a discrete Gaussian; this makes the joint share distribution approximately multivariate Gaussian, which the key-hiding analysis in `SECURITY_PROOF.md` relies on.
+3. Adds deterministic PRF-derived zero-sum noise via **balanced mean subtraction** (`add_mean_subtracted_noise`): for each coefficient, sample `m` i.i.d. deltas `δ_0..δ_{m−1}` and assign `N_j = δ_j − balanced(Σδ)_j` to subset `j`. The assignment is integer zero-sum (`Σ_j N_j = 0`), and reproduces the a-posteriori coset Gaussian's **uniform** negative correlation `Cov(N_j,N_k) = −σ²/m`, so `Var(Σ_{J∈pattern} N) = σ²·|pattern|·(1 − |pattern|/m)` matches the keygen conditional partial variance for *every* recovery pattern. The deltas are **sparse-ternary** in `{−1, 0, +1}` with intensity `P(±1) ≈ 0.49 / S_old`, where `S_old = C(n_old, n_old−t_old+1)` is the number of old subsets. This `1/S_old` scaling is the key: because each new share `s_J^new = Σ_I r_{I→J}` aggregates contributions from all `S_old` old subsets, injecting only `≈ 1/S_old` of the keygen noise per dealer makes the aggregated new-share noise land at the keygen level — the new shares are distributed like a *fresh* keygen sharing (a discrete Gaussian over the sum-`s` coset, i.e. Mithril §3.3 a-posteriori sharing), so the recovered-partial norm no longer grows with the committee size. (The `v4` splitter used an `O(m)` telescoping cycle `δ_i − δ_{i−1}`, whose *banded* correlation overshot for non-contiguous patterns; the earlier `v3` used a fixed `CBD_η` delta independent of `S_old`, over-injecting noise.) See `COSET_RESHARING_SPEC.md` and `SECURITY_PROOF.md`.
 
 The output satisfies the exact integer equation
 
@@ -138,12 +138,12 @@ and therefore also the required modular equation. No single sub-share absorbs a 
 ceil(|centered(s_I^old)| / m) + (m - 1)η.
 ```
 
-This is a practical bounded conditional sampler over the sum constraint. It is not an `η`-bounded sharing and it is not claimed to be a discrete Gaussian sampler. The security proof obligation is instead the same one used by the hyperball rejection analysis: every recovered signing partial must remain within the norm envelope assumed by the existing hyperball parameters.
+This is a practical bounded conditional sampler over the sum constraint. It is not an `η`-bounded sharing and it is not claimed to be a discrete Gaussian sampler. The security proof obligation is instead the same one used by the hyperball rejection analysis: every recovered signing partial must remain within the partial-secret norm bound `B'` that the configuration's hyperball parameters are derived from.
 
 Round 5 now enforces that condition directly. After a new party aggregates its `s_J^new` values, it enumerates every threshold signing set containing itself, recovers the same partial secret that signing would use, and aborts unless
 
 ```text
-τ · sqrt(||p_{i,1}||² / ν² + ||p_{i,2}||²) ≤ r'
+sqrt(τ) · sqrt(||p_{i,1}||² / ν² + ||p_{i,2}||²) ≤ B'
 ```
 
 for the existing `(t_new, n_new)` hyperball parameters. This catches bounded, public-key-preserving zero-sum reshaping attacks that would pass the per-subshare coefficient bound but push later signing outside the intended proof regime.
@@ -279,7 +279,7 @@ v_i(c) = ((c · p_{i,1}) / ν, c · p_{i,2})
 is within the configured norm bound for all challenges `c` sampled by `SampleInBall`. A conservative deterministic sufficient condition is
 
 ```text
-τ · sqrt(||p_{i,1}||² / ν² + ||p_{i,2}||²) ≤ B.
+sqrt(τ) · sqrt(||p_{i,1}||² / ν² + ||p_{i,2}||²) ≤ B'
 ```
 
 The bounded conditional splitter is designed to prevent the random-walk growth caused by residual sub-shares, so this recovered-partial norm remains stable across repeated committee handoffs.
@@ -291,48 +291,50 @@ For honest executions of the bounded splitter, coefficients follow an **approxim
 #### Variance Scaling
 
 For a (t, n) threshold scheme with **m = C(n, t-1)** subsets, each new subset
-share sums one fragment from each of the `m` old subsets, where each fragment is
-a balanced-split piece plus two CBD noise terms (from the `O(m)` telescoping
-cycle). Variance therefore adds across the `m` old-subset contributions, giving a
-roughly linear-in-`m` variance and `√m` standard deviation:
+share sums one fragment from each of the `S_old` old subsets, where each fragment
+is a balanced-split piece plus a mean-subtracted noise term. The coset splitter
+scales each dealer's noise intensity as `1/S_old`, so the aggregated noise variance
+is **independent of the committee size** and matches the keygen level:
 
 ```
-σ² ≈ 2.1 · m        (empirical fit, η = 2, CBD noise)
-σ  ≈ √(2.1 · m)
+σ_aggregated_noise ≈ σ_keygen = √2     (by design; intensity ∝ 1/S_old)
+σ_stored_share     ≈ 1.7–1.85          (balanced-split spread + keygen-level noise)
 ```
 
-This is a dramatic improvement over the original `O(m²)` all-pairs uniform noise,
-whose variance grew as `≈ 2(m² − m)` (e.g. σ ≈ 27.6 for 4-of-6 versus ≈ 6.6
-now). The `√m` scaling keeps recovered partials far closer to the keygen
-envelope as the committee grows.
+This is the key difference from the earlier fixed-`CBD_η` splitter, whose
+stored-share σ grew as `√(2.1·m)` (e.g. σ ≈ 6.6 for 4-of-6). Holding σ ≈
+keygen-level keeps recovered partials inside the keygen envelope `B` regardless of
+how large the committee is.
 
 #### Empirical Measurements
 
-Measured with the current `O(m)` telescoping CBD splitter (per-coefficient
-statistics over all shares; values are the stabilized post-resharing fixed
-point). For comparison, the final column shows the original all-pairs uniform σ.
+Measured with the fresh re-sharing splitter (per-coefficient statistics over all
+stored shares; values are the stabilized post-resharing fixed point). For
+comparison, the final column shows the earlier fixed-`CBD_η` splitter's σ.
 
-| Config | Subsets (m) | Empirical σ | Observed range | √(2.1m) | Old all-pairs σ |
-|--------|-------------|-------------|----------------|---------|-----------------|
-| 2-of-3 | 3           | 2.65        | [-10, 10]      | 2.51    | 3.6             |
-| 2-of-4 | 4           | 3.02        | [-13, 14]      | 2.90    | 5.0             |
-| 3-of-5 | 10          | 4.67        | [-22, 21]      | 4.58    | 13.4            |
-| 4-of-6 | 20          | 6.57        | [-31, 29]      | 6.48    | 27.6            |
+| Config | Subsets (m) | Empirical σ | Observed range | DKG σ | Old `√(2.1m)` σ |
+|--------|-------------|-------------|----------------|-------|-----------------|
+| 2-of-3 | 3           | 1.76        | [-6, 8]        | 1.41  | 2.65            |
+| 2-of-4 | 4           | 1.74        | [-8, 7]        | 1.41  | 3.02            |
+| 3-of-5 | 10          | 1.81        | [-8, 8]        | 1.41  | 4.67            |
+| 4-of-6 | 20          | ~1.85       | —              | 1.41  | 6.57            |
 
 Numbers are reproduced by `test_coefficient_distribution_*` in
-`tests/resharing_tests.rs`. The DKG baseline is uniform over `[-2, 2]`
+`tests/resharing_tests.rs` (4-of-6 is the projected value). The DKG baseline is uniform over `[-2, 2]`
 (σ ≈ 1.41, excess kurtosis ≈ −1.3); after the first resharing the distribution
-becomes approximately Gaussian (excess kurtosis ≈ 0, see Key Properties).
+becomes approximately Gaussian (excess kurtosis ≈ 0, see Key Properties). Note the
+σ is now roughly **constant in `m`** rather than growing.
 
 #### Key Properties
 
 1. **Symmetric**: Skewness ≈ 0 (measured `|skew| < 0.04` across all configs).
 2. **Approximately Gaussian**: Excess kurtosis ≈ 0 after the first resharing
-   (measured within `±0.08`), versus ≈ −1.3 for the uniform DKG baseline. The CBD
-   noise shaping is what pulls the post-resharing distribution toward a Gaussian.
+   (measured within `±0.1`), versus ≈ −1.3 for the uniform DKG baseline. The
+   aggregated (CLT) sum over old subsets pulls the distribution toward a Gaussian.
 3. **Idempotent**: The distribution is a fixed point of resharing — variance
    changes by < 5% from the first resharing through 10–100 subsequent resharings.
-4. **Bounded**: Coefficients stay within ≈ 4.5σ in the measured ranges.
+4. **Keygen-matched width**: σ ≈ 1.25× the keygen σ and constant in committee
+   size, the a-posteriori target that keeps recovered partials under `B`.
 
 #### Empirical Verification
 
@@ -354,80 +356,61 @@ For honest-resharing analysis, the post-resharing distribution can be characteri
 The hyperball rejection sampling proof requires recovered partials to be small after challenge multiplication. The implementation enforces the following deterministic sufficient check for each new party and each threshold signing set containing that party:
 
 ```
-τ · sqrt(||p_{i,1}||² / ν² + ||p_{i,2}||²) ≤ r'
+sqrt(τ) · sqrt(||p_{i,1}||² / ν² + ||p_{i,2}||²) ≤ B'
 ```
 
 Where:
 - `p_{i,1}`, `p_{i,2}` are the s1/s2 components of the recovered partial
-- `τ = 60` is the challenge weight (number of ±1 in the challenge polynomial)
+- `τ = 60` is the challenge weight; the `sqrt(τ)` amplification matches the Gaussian-heuristic convention used to define `B` in Mithril §3.4 / footnote 3
 - `ν = 7` is the s1 scaling factor for ML-DSA-87
-- `r'` is the existing hyperball sampling radius for `(t_new, n_new)`
+- `B'` is the configured partial-secret norm bound for `(t_new, n_new)` — see below
 
-This does **not** change hyperball parameters. It rejects resharing outputs that would require larger parameters.
+> **Note.** Earlier revisions of this document compared `τ · ||p||_ν` against the
+> sampling radius `r'`. That was incorrect: `r'` (~500k–665k) is the radius the
+> signing nonce is sampled from, **not** the bound on the secret-dependent shift.
+> The correct quantity is Mithril's partial-secret bound `B` (~650–1450), and the
+> amplification factor is `sqrt(τ)`, not `τ`.
+
+#### Bound `B` and the enlargement `B' = κ·B`
+
+`B` is the keygen-calibrated Mithril §3.4 bound that the hyperball radii are derived from (`r = slack·B`, `r' = slackradius2·r`; in `scripts/compute_hyperball_params.py`, `B` is the script's `beta`).
+
+Honest resharing inflates the recovered-partial norm relative to the keygen `B`. With the v5 mean-subtracted coset splitter (noise intensity `∝ 1/S_old`) the steady-state overshoot is ~0.78–1.16× across committees `2 ≤ T ≤ N ≤ 6`, instead of the `~√S_old` growth of the earlier fixed-noise splitter. Where the overshoot exceeds 1, the config enlarges the bound to `B' = κ·B` **and** the hyperball radii to `(κ·r, κ·r')` by the same factor. Scaling `(B, r, r')` by a common `κ` is *scale-invariant* in the radius condition `r'² = r² + B² + 2rB/φ`, so the **per-sample** rejection distribution `ε` is unchanged. The **signing-query budget `Q_s = 1/(K·ε)` is not** preserved when `κ > 1`: enlarging the ball lowers per-iteration acceptance (the enlarged radius nears ML-DSA-87's fixed verification ceilings), so `K` grows — and since `ε` is fixed, `Q_s` falls by exactly that `K` factor (`(3,5)`: −0.78 bits, K 35→60; `(2,2)`/`(2,3)` stay at κ=1 so pay nothing). See `SECURITY_PROOF.md` for the table.
+
+This enlargement only works while `κ·r` stays under ML-DSA-87's fixed `‖z₁‖∞ < γ1 − β` verification ceiling, which caps `κ` at ≈1.5×. With the small v5 overshoot this is no longer the binding constraint for the supported committees (see table).
 
 #### Empirical Verification
 
-Testing shows that honest post-resharing recovered partials have comfortable margin relative to this enforced bound:
+Measured honest post-resharing overshoot (`sqrt(τ)·‖p‖_ν / B`) with the **v5 mean-subtracted coset splitter** (`add_mean_subtracted_noise`; Rust `test_recovered_partial_variance_*`, fixed point over all signing sets: 100 reshares for `(2,*)`, 20 for `(3,5)`, 10 for `(4,6)`), the re-derived enlargement `κ`, and the resulting `K`:
 
-| Config | Max Combined Norm | τ·Max Norm | r' | Guard Margin | Coeff σ Ratio |
-|--------|------------------|------------|-----|--------------|---------------|
-| 2-of-3 | 179              | 10,740     | 631,703 | 98.3% | 2.7x |
-| 2-of-4 | 251              | 15,060     | 633,006 | 97.6% | 3.7x |
-| 3-of-5 | 1,037            | 62,220     | 577,546 | 89.2% | 13.5x |
-| 4-of-6 | 2,894            | 173,640    | 517,853 | 66.5% | 36x |
+| Config | Base `B` | Overshoot (v4 → v5) | `κ` | `B' = κ·B` | `K` (prev) | Supported? |
+|--------|---------|---------------------|------|-----------|-----------|------------|
+| 2-of-2 | 650  | 0.975 → **0.780** | 1.00 | 650   | 4 (was 6/14) | ✅ (base params) |
+| 2-of-3 | 920  | 0.897 → **0.810** | 1.00 | 920   | 5 (was 6/23) | ✅ (base params) |
+| 2-of-4 | 920  | 1.018 → **0.961** | 1.10 | 1,011 | 10 | ✅ |
+| 3-of-5 | 1,300 | 1.107 → **1.012** | 1.15 | 1,495 | 60 (was 227) | ✅ |
+| 4-of-6 | 1,454 | 1.286 → **1.163** | 1.25 | 1,818 | 1,600 (was 350 base) | ✅ (per-sig tax) |
 
-Where:
-- **Combined Norm** = `sqrt(||s1||² / ν² + ||s2||²)` for the recovered partial
-- **τ·Max Norm** is the conservative challenge-amplified bound checked by Round 5
-- **Guard Margin** = `(r' - τ·max_norm) / r'`
-- **Coeff σ Ratio** = post-resharing coefficient std dev / original η-bounded std dev
+The **v5 mean-subtracted noise** (`δ_j − balanced(Σδ)_j`) reproduces the a-posteriori coset Gaussian's uniform negative correlation, dropping every overshoot vs the v4 telescoping cycle. `(2,2)`/`(2,3)` now sit far enough below the base bound to reshare at **κ=1** — a reshared committee signs with exactly the same params as a fresh keygen one, at no `Q_s` cost. `(3,5)` dropped `K` 227→60 (~1.9 bits of `Q_s` recovered). The base `B` itself is sampler-independent (keygen §3.4) and unchanged; only `κ` depends on the splitter.
 
-Even in the worst observed honest case (4-of-6 after resharing), the challenge-amplified bound is ~174,000 vs an r' limit of ~518,000, leaving about **66%** margin.
+`(4,6)` is **enabled** by enlargement (`κ = 1.25`, `K = 1600`) because the `near-mpc` integration requires the 4-of-6 committee shape. Its honest overshoot ~1.163× is extremely stable (1.153–1.163 across 8 seeds, the recovered-partial norm concentrates), so κ=1.25 carries a ~7.5% margin. The cost is a per-signature tax: every `(4,6)` signature uses `K = 1600` (~15 MB/session, `Q_s ≈ 2^28.2 ≈ 300M` queries). The path to `κ=1 / K=350` (removing the tax) is the `COSET_RESHARING_SPEC.md` Option B/C work.
+
+These numbers are reproduced by `scripts/compute_hyperball_params.py` (`compute_resharing_params`) and the `test_recovered_partial_variance_*` tests.
 
 #### Long-Term Stability (100+ Resharings)
 
-Extended testing over 100 resharings confirms the distribution is a **stable fixed point**:
-
-| Config | Resharings | Max Norm | τ·Max Norm | Guard Margin |
-|--------|------------|----------|------------|--------------|
-| 2-of-3 | 100        | 179      | 10,740     | 98.3% |
-| 2-of-4 | 100        | 251      | 15,060     | 97.6% |
-
-The recovered partial norm remains stable across honest resharings. The margin depends only on the configuration `(t, n)`, not on the number of resharings performed. This confirms the idempotence property observed for honest executions: the post-resharing distribution is a fixed point of the resharing operator.
-
-#### Why Such Large Margins?
-
-The hyperball parameters are computed to handle:
-1. Sum of `t` parties' random hyperball contributions
-2. Challenge multiplication `c · s` which amplifies by factor `τ`
-3. Rejection sampling overhead
-
-The key insight is that the coefficient variance (which grows ~36x for 4-of-6) affects individual coefficients, but the **L2 norm** of the full polynomial vector grows much more slowly because:
-- Most coefficients remain small (Gaussian distribution is concentrated near 0)
-- The L2 norm averages over all ~3,840 coefficients (L×N + K×N = 7×256 + 8×256)
-- The hyperball parameters already include 1.3x safety factors
+For the supported configs, the recovered-partial norm is a **stable fixed point** — it stabilizes after the first resharing and stays within <5% across 100 consecutive resharings, so the guard margin depends only on `(t, n)`, not on the number of resharings. This is verified by `test_recovered_partial_variance_2_of_3`, `test_recovered_partial_variance_2_of_4`, and `test_recovered_partial_variance_3_of_5`.
 
 #### Safety Analysis
 
-For a recovered partial with coefficient std dev `σ`, the expected L2 norm is:
-
-```
-E[||p||] ≈ σ · sqrt(dimension) = σ · sqrt(3840) ≈ 62·σ
-```
-
-For 4-of-6 with σ ≈ 51:
-- Expected L2 norm ≈ 62 × 51 ≈ 3,100
-- Observed max combined norm ≈ 2,894
-- Conservative challenge-amplified bound ≈ 60 × 2,894 ≈ 174,000, still below r' = 517,853
-
-The Round 5 guard rejects any resharing output whose challenge-amplified recovered partial exceeds the existing `r'` radius. This ensures malicious bounded zero-sum reshaping cannot silently move the key outside the checked signing regime.
+The guard rejects any resharing output (honest or adversarial) whose challenge-amplified recovered partial `sqrt(τ)·‖p‖_ν` exceeds the configured bound `B'`. Because the enlarged radii `(κ·r, κ·r')` were derived from the same `B'`, every accepted partial provably sits inside the hyperball regime that the signing security proof requires for that configuration — at the cost of a larger `K` and the corresponding `Q_s = 1/(K·ε)` reduction (see above). This ensures malicious bounded zero-sum reshaping cannot silently move the key outside the checked signing regime.
 
 #### Conclusion
 
-**Accepted resharings remain inside the existing signing regime.** The coefficient variance growth after honest resharing is controlled by:
-1. The L2 norm averaging effect across thousands of coefficients
-2. The bounded conditional splitter preventing unbounded residual growth
-3. The idempotent distribution that stabilizes after the first resharing
-4. The Round 5 recovered-partial guard, which rejects adversarial outputs that exceed the current hyperball envelope
+**Accepted resharings remain inside the signing regime that `(r, r', K, B')` were jointly derived for.** For the supported committees (`(2,2)`, `(2,3)`, `(2,4)`, `(3,5)`):
+1. honest repeated resharing is a stable fixed point (verified over 100 resharings);
+2. the v5 mean-subtracted coset splitter holds the recovered-partial overshoot at ~0.78–1.01× (independent of committee size);
+3. where overshoot > 1, the enlarged bound `B' = κ·B` covers it and the matching enlarged radii keep the per-sample `ε` invariant (scale-invariant radius condition) at the cost of a larger `K` — which reduces `Q_s = 1/(K·ε)` by that `K` factor (`(3,5)`: ~0.78 bits; `(2,2)`/`(2,3)` use κ=1 and pay nothing);
+4. the recovered-partial guard rejects adversarial outputs exceeding `B'`.
 
-Within the supported `(t, n)` configurations, honest repeated resharing remains stable in testing, and adversarial resharing outputs are accepted only if every recovered signing partial passes the same norm guard used to justify signing with the existing parameters.
+`(4,6)` is **enabled** by enlargement under the v5 coset splitter (overshoot ~1.163× at keygen-level hiding, κ = 1.25, `K = 1600`) for the `near-mpc` 4-of-6 committee shape — at the cost of a per-signature tax (~15 MB/session, `Q_s ≈ 2^28.2`). The path to `κ=1 / K=350` (removing the tax) is the `COSET_RESHARING_SPEC.md` Option B/C work. A separate one-time hiding (hint-MLWE) loss applies to a-posteriori-style sharing in general, per Mithril §3.3 (≤12 bits heuristic); see `SECURITY_PROOF.md`.
