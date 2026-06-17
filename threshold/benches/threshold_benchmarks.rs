@@ -10,8 +10,8 @@ use std::time::Duration;
 use qp_rusty_crystals_threshold::{
 	generate_with_dealer,
 	keygen::dkg::{run_local_dkg, TranscriptSigner},
-	signing_protocol::run_local_signing,
-	verify_signature, ThresholdConfig, ThresholdSigner,
+	signing_protocol::{run_local_signing, SignProtocolError},
+	verify_signature, Signature, ThresholdConfig, ThresholdSigner,
 };
 
 /// Simple test signer for DKG benchmarks.
@@ -78,6 +78,24 @@ const ALL_CONFIGS: [(u32, u32); 15] = [
 const QUICK_CONFIGS: [(u32, u32); 8] =
 	[(2, 2), (2, 3), (3, 3), (3, 4), (4, 4), (3, 5), (5, 5), (6, 6)];
 
+/// Configurations for the signing benchmarks: `QUICK_CONFIGS` plus the full n=6
+/// family so the resharing-hardened configs are measured. Note 4-of-6 uses
+/// k_iterations=1600, so a single signing sample is multi-second.
+const SIGNING_CONFIGS: [(u32, u32); 12] = [
+	(2, 2),
+	(2, 3),
+	(3, 3),
+	(3, 4),
+	(4, 4),
+	(3, 5),
+	(5, 5),
+	(2, 6),
+	(3, 6),
+	(4, 6),
+	(5, 6),
+	(6, 6),
+];
+
 /// Helper to create signers from shares for a given configuration.
 fn create_signers(
 	seed: &[u8; 32],
@@ -91,6 +109,41 @@ fn create_signers(
 	let config = ThresholdConfig::new(t, n).unwrap();
 	let (public_key, shares) = generate_with_dealer(seed, config).unwrap();
 	(public_key, shares, config)
+}
+
+/// Maximum number of fresh signing attempts (mirrors the production retry loop).
+const MAX_SIGN_ATTEMPTS: u32 = 100;
+
+/// Whether a signing error is transient (a fresh attempt seed may succeed).
+fn is_retryable(err: &SignProtocolError) -> bool {
+	matches!(err, SignProtocolError::SigningError(_) | SignProtocolError::ProtocolFailed(_))
+}
+
+/// Run `run_local_signing` with fresh per-attempt seeds until it succeeds.
+///
+/// Threshold signing can abort probabilistically (rejection sampling / norm
+/// bounds), so a single attempt is not guaranteed to succeed — high-k configs
+/// such as 4-of-6 (k=1600) often need several attempts. This measures
+/// end-to-end signing latency. Permanent (non-retryable) errors fail fast.
+fn sign_until_success(
+	make_signers: impl Fn() -> Vec<ThresholdSigner>,
+	message: &[u8],
+	context: &[u8],
+	base_seed: &[u8; 32],
+) -> Signature {
+	let mut last_err = None;
+	for attempt in 0..MAX_SIGN_ATTEMPTS {
+		let mut attempt_seed = *base_seed;
+		for (i, b) in attempt.to_le_bytes().iter().enumerate() {
+			attempt_seed[i] ^= *b;
+		}
+		match run_local_signing(make_signers(), message, context, &attempt_seed) {
+			Ok(sig) => return sig,
+			Err(e) if is_retryable(&e) => last_err = Some(e),
+			Err(e) => panic!("signing failed (permanent error): {e:?}"),
+		}
+	}
+	panic!("signing failed after {MAX_SIGN_ATTEMPTS} attempts: {last_err:?}");
 }
 
 /// Benchmark dealer-based key generation for all configurations.
@@ -150,7 +203,7 @@ fn bench_signing_4round(c: &mut Criterion) {
 	let message = b"benchmark message for threshold signing";
 	let context: &[u8] = b"";
 
-	for (t, n) in QUICK_CONFIGS {
+	for (t, n) in SIGNING_CONFIGS {
 		let (public_key, shares, config) = create_signers(&seed, t, n);
 
 		group.bench_with_input(
@@ -158,15 +211,18 @@ fn bench_signing_4round(c: &mut Criterion) {
 			&(public_key, shares, config),
 			|b, (public_key, shares, config)| {
 				b.iter(|| {
-					// Create fresh signers for each iteration (signers have state)
-					let signers: Vec<ThresholdSigner> = shares
-						.iter()
-						.take(t as usize)
-						.map(|s| {
-							ThresholdSigner::new(s.clone(), public_key.clone(), *config).unwrap()
-						})
-						.collect();
-					run_local_signing(signers, message, context, &seed).unwrap()
+					// Create fresh signers for each attempt (signers have state).
+					let make_signers = || {
+						shares
+							.iter()
+							.take(t as usize)
+							.map(|s| {
+								ThresholdSigner::new(s.clone(), public_key.clone(), *config)
+									.unwrap()
+							})
+							.collect::<Vec<_>>()
+					};
+					sign_until_success(make_signers, message, context, &seed)
 				});
 			},
 		);
@@ -210,7 +266,7 @@ fn bench_round1(c: &mut Criterion) {
 
 	let seed = [42u8; 32];
 
-	for (t, n) in QUICK_CONFIGS {
+	for (t, n) in SIGNING_CONFIGS {
 		let (public_key, shares, config) = create_signers(&seed, t, n);
 
 		group.bench_with_input(
