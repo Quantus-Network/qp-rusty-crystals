@@ -167,10 +167,14 @@ pub enum Action<T> {
 	Return(T),
 }
 
-/// Maximum signing message size in bytes (4 MB).
-/// This limits the size of serialized signing protocol messages.
-/// With high k_iterations (e.g., k=380 for 5-of-6), messages can exceed 2MB.
-pub const MAX_SIGNING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+/// Maximum signing message size in bytes (12 MiB).
+/// This limits the size of serialized signing protocol messages. It must exceed the largest
+/// per-round payload, which is the Round 2 commitment broadcast: k_iterations × (k × POLY_Q_SIZE).
+/// The 4-of-6 resharing-hardened config uses k=1600, giving a ~9.42 MB commitment broadcast, so the
+/// 4 MiB limit no longer fits; 12 MiB leaves headroom above `MAX_COMMITMENT_DATA_SIZE`.
+/// near-mpc's transport frames up to 100 MiB (`MAX_MESSAGE_SIZE_BYTES`), so this is well within the
+/// network layer's budget.
+pub const MAX_SIGNING_MESSAGE_SIZE: usize = 12 * 1024 * 1024;
 
 // ============================================================================
 // Error Types
