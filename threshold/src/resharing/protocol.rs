@@ -1746,7 +1746,11 @@ fn partial_secret_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
 /// The `(4,6)` overshoot 1.163× is extremely stable (1.153–1.163 across 8 seeds, the
 /// recovered-partial norm concentrates), so κ=1.25 carries a ~7.5% margin against a
 /// worst-case that barely moves.
-fn resharing_norm_enlargement(threshold: u32, parties: u32) -> f64 {
+///
+/// Exposed (re-exported at `resharing::resharing_norm_enlargement`) for analysis and
+/// testing: the recovered-partial regression tests assert that the measured honest
+/// overshoot stays `≤ κ`, the exact margin this guard enlargement provides.
+pub fn resharing_norm_enlargement(threshold: u32, parties: u32) -> f64 {
 	match (threshold, parties) {
 		// Re-derived for the v5 mean-subtracted coset splitter: kappa = measured honest
 		// overshoot (+ ~7-15% margin where >1). Scaling (r,r') by the same kappa keeps

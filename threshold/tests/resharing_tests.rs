@@ -12,7 +12,8 @@ use qp_rusty_crystals_threshold::{
 };
 
 use qp_rusty_crystals_threshold::resharing::{
-	Action, NewShareData, ResharingConfig, ResharingMessage, ResharingProtocol, ResharingState,
+	resharing_norm_enlargement, Action, NewShareData, ResharingConfig, ResharingMessage,
+	ResharingProtocol, ResharingState,
 };
 
 /// Helper to run the resharing protocol locally with simulated message passing.
@@ -3487,6 +3488,24 @@ fn analyze_recovered_partials(threshold: u32, parties: u32, num_resharings: usiz
 	println!("  sqrt(tau)*max_combined_norm:  {:.0}", 60.0f64.sqrt() * max_combined_norm);
 	println!("  >>> overshoot = {:.3}x  (need kappa >= this)", guard_overshoot);
 	println!();
+
+	// Regression guard for the acceptance/κ path. The Round-5 recovered-partial
+	// guard enforces sqrt(tau)*||p||_nu <= kappa*B_base, i.e. the honest overshoot
+	// (= sqrt(tau)*max_combined_norm / B_base, computed above) must stay <= kappa.
+	// This is the quantity κ is selected against, so assert it for every config that
+	// runs: a splitter regression (overshoot grows) or a κ lowered below the real
+	// overshoot now fails CI instead of silently shipping reshares the guard rejects.
+	// `kappa` is read from the same source the guard uses, so the test cannot drift.
+	let kappa = resharing_norm_enlargement(threshold, parties);
+	assert!(
+		guard_overshoot <= kappa,
+		"{}-of-{}: honest recovered-partial overshoot {:.3}x exceeds the configured \
+		 enlargement kappa = {:.2}; the kappa*B guard would reject honest reshares",
+		threshold,
+		parties,
+		guard_overshoot,
+		kappa
+	);
 
 	// Compare to expected values based on coefficient variance
 	// The hyperball formula uses: beta = 1.3 * sqrt((k + l/nu²) * n * num_subsets) * sigt *
