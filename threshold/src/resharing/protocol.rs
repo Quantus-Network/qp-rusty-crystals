@@ -1370,44 +1370,22 @@ impl ResharingProtocol {
 		nu: f64,
 	) -> Result<f64, ResharingProtocolError> {
 		let threshold = self.config.new_threshold();
-		let parties = self.config.new_participants().len();
-		let patterns =
-			crate::protocol::secret_sharing::compute_sharing_patterns(threshold, parties as u32)
-				.map_err(|e| ResharingProtocolError::ShareVerificationFailed(e.to_string()))?;
+		let parties = self.config.new_participants().len() as u32;
 
-		let active_indices: Vec<usize> =
-			(0..parties).filter(|idx| (signing_mask & (1 << idx)) != 0).collect();
-		let current_i = active_indices.iter().position(|&idx| idx == my_idx).ok_or_else(|| {
-			ResharingProtocolError::ShareVerificationFailed(format!(
-				"party index {} is not in signing set {:b}",
-				my_idx, signing_mask
-			))
-		})?;
-
-		let mut perm = vec![0usize; parties];
-		let mut active_pos = 0usize;
-		let mut inactive_pos = threshold as usize;
-		for idx in 0..parties {
-			if active_indices.contains(&idx) {
-				perm[active_pos] = idx;
-				active_pos += 1;
-			} else {
-				perm[inactive_pos] = idx;
-				inactive_pos += 1;
-			}
-		}
+		// Same perm build + pattern translation that signing-time recovery uses, so
+		// the guard provably checks the exact share combination RSSRecover will sum.
+		let translated_masks = crate::protocol::secret_sharing::translated_subset_masks(
+			signing_mask,
+			my_idx,
+			threshold,
+			parties,
+		)
+		.map_err(ResharingProtocolError::ShareVerificationFailed)?;
 
 		let mut s1_acc = [[0i64; N as usize]; L];
 		let mut s2_acc = [[0i64; N as usize]; K];
 
-		for &pattern_u in &patterns[current_i] {
-			let mut translated = 0u16;
-			for (pos, &mapped_idx) in perm.iter().enumerate().take(parties) {
-				if (pattern_u & (1 << pos)) != 0 {
-					translated |= 1 << mapped_idx;
-				}
-			}
-
+		for translated in translated_masks {
 			let share = self.new_shares.get(&translated).ok_or_else(|| {
 				ResharingProtocolError::ShareVerificationFailed(format!(
 					"missing new subset share {:b} while checking signing set {:b}",

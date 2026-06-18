@@ -9,7 +9,7 @@
 use alloc::{
 	collections::{BTreeMap, BTreeSet},
 	format,
-	string::ToString,
+	string::String,
 	vec,
 	vec::Vec,
 };
@@ -120,6 +120,78 @@ pub fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
 	subsets
 }
 
+/// Build the share-recovery permutation for a signing set and translate the
+/// recovering party's share patterns into subset masks over real participant
+/// indices.
+///
+/// `signing_mask` is the signing set as a bitmask over participant indices
+/// `0..parties` (exactly `threshold` bits set), and `my_index` is the recovering
+/// party's own index. The returned masks are the subset shares that party sums to
+/// reconstruct its recovered partial for this signing set.
+///
+/// This is the single source of truth for the permutation build + pattern
+/// translation shared by [`recover_share`] (signing-time recovery) and the
+/// resharing recovered-partial norm guard. Keeping one implementation guarantees
+/// the guard checks the exact same share combination signing will use; two copies
+/// could drift and silently defeat the guard's purpose.
+pub(crate) fn translated_subset_masks(
+	signing_mask: u16,
+	my_index: usize,
+	threshold: u32,
+	parties: u32,
+) -> Result<Vec<u16>, String> {
+	let parties = parties as usize;
+	let sharing_patterns = compute_sharing_patterns(threshold, parties as u32)?;
+
+	// Active (signing-set) indices in ascending order.
+	let active_indices: Vec<usize> =
+		(0..parties).filter(|idx| (signing_mask & (1 << idx)) != 0).collect();
+
+	let current_i = active_indices.iter().position(|&idx| idx == my_index).ok_or_else(|| {
+		format!("party index {} is not in signing set {:b}", my_index, signing_mask)
+	})?;
+
+	if current_i >= sharing_patterns.len() {
+		return Err(format!(
+			"party slot {} exceeds sharing pattern count {}",
+			current_i,
+			sharing_patterns.len()
+		));
+	}
+
+	// Permutation: active (signing-set) indices fill the first `threshold` slots in
+	// ascending order, remaining indices fill the rest. Patterns are defined over
+	// these permuted slots, so mapping a pattern bit `pos` to `perm[pos]` recovers
+	// the real subset mask.
+	let mut perm = vec![0usize; parties];
+	let mut active_pos = 0usize;
+	let mut inactive_pos = threshold as usize;
+	for idx in 0..parties {
+		if active_indices.contains(&idx) {
+			perm[active_pos] = idx;
+			active_pos += 1;
+		} else {
+			perm[inactive_pos] = idx;
+			inactive_pos += 1;
+		}
+	}
+
+	let translated = sharing_patterns[current_i]
+		.iter()
+		.map(|&pattern_u| {
+			let mut mask = 0u16;
+			for (pos, &mapped_idx) in perm.iter().enumerate().take(parties) {
+				if (pattern_u & (1 << pos)) != 0 {
+					mask |= 1 << mapped_idx;
+				}
+			}
+			mask
+		})
+		.collect();
+
+	Ok(translated)
+}
+
 /// Recover share using computed sharing patterns instead of Lagrange interpolation.
 ///
 /// This avoids the coefficient explosion problem with general Lagrange interpolation
@@ -145,10 +217,6 @@ pub fn recover_share(
 	parties: u32,
 	dkg_participants: &ParticipantList,
 ) -> ThresholdResult<(polyvec::Polyvecl, polyvec::Polyveck)> {
-	// Compute the sharing patterns dynamically
-	let sharing_patterns = compute_sharing_patterns(threshold, parties)
-		.map_err(|e| ThresholdError::InvalidConfiguration(e.to_string()))?;
-
 	// Get the DKG index for my party_id
 	let my_dkg_index = dkg_participants.index_of(party_id).ok_or_else(|| {
 		ThresholdError::InvalidConfiguration(format!(
@@ -170,40 +238,11 @@ pub fn recover_share(
 		})
 		.collect::<ThresholdResult<Vec<usize>>>()?;
 
-	// Create permutation to cover the signing set (using DKG indices)
-	let mut perm = vec![0usize; parties as usize];
-	let mut i1 = 0;
-	let mut i2 = threshold as usize;
-
-	// Find the position of my_dkg_index within active_indices (sorted)
-	let mut sorted_active_indices = active_indices.clone();
-	sorted_active_indices.sort();
-	let current_i =
-		sorted_active_indices
-			.iter()
-			.position(|&idx| idx == my_dkg_index)
-			.ok_or_else(|| {
-				ThresholdError::InvalidConfiguration(format!(
-					"Party {} (index {}) is not in active parties list",
-					party_id, my_dkg_index
-				))
-			})?;
-
-	for j in 0..parties as usize {
-		if sorted_active_indices.contains(&j) {
-			perm[i1] = j;
-			i1 += 1;
-		} else {
-			perm[i2] = j;
-			i2 += 1;
-		}
-	}
-
-	if current_i >= sharing_patterns.len() {
-		return Err(ThresholdError::InvalidConfiguration(
-			"Party index exceeds sharing pattern length".to_string(),
-		));
-	}
+	// Translate this party's share patterns into subset masks over DKG indices.
+	// Shared with the resharing norm guard so both recover the identical shares.
+	let signing_mask: u16 = active_indices.iter().fold(0u16, |mask, &idx| mask | (1 << idx));
+	let translated_masks = translated_subset_masks(signing_mask, my_dkg_index, threshold, parties)
+		.map_err(ThresholdError::InvalidConfiguration)?;
 
 	// Use NTT accumulators to avoid i32 overflow for large configurations.
 	// After NTT, coefficients are bounded by 18*Q. For large subset counts,
@@ -211,21 +250,12 @@ pub fn recover_share(
 	let mut s1_acc = NttAccumulatorL::new();
 	let mut s2_acc = NttAccumulatorK::new();
 
-	for &pattern_u in &sharing_patterns[current_i] {
-		// Translate the share index u to the share index u_ by applying the permutation
-		// The permutation maps positions to DKG indices
-		let mut u_translated = 0u16;
-		for (i, &perm_val) in perm.iter().enumerate().take(parties as usize) {
-			if pattern_u & (1 << i) != 0 {
-				u_translated |= 1 << (perm_val as u16);
-			}
-		}
-
+	for &u_translated in &translated_masks {
 		// Find the corresponding share - MUST exist for correct recovery
 		let share = shares.get(&u_translated).ok_or_else(|| {
 			ThresholdError::InvalidConfiguration(format!(
-				"Missing required share for subset mask 0x{:04x} (pattern 0x{:04x})",
-				u_translated, pattern_u
+				"Missing required share for subset mask 0x{:04x}",
+				u_translated
 			))
 		})?;
 
@@ -254,6 +284,8 @@ pub fn recover_share(
 
 #[cfg(test)]
 mod tests {
+	use alloc::string::ToString;
+
 	use super::*;
 
 	#[test]
