@@ -2508,7 +2508,6 @@ fn test_measure_retry_rate_dkg_vs_reshared_shares() {
 /// enlarged hyperball radii (v5 coset splitter, kappa=1.15, K=60): the guard
 /// accepts the honest reshares and the resulting shares sign and verify.
 #[test]
-#[ignore] // Long-running (K=60); run with `cargo test -- --ignored test_reshares_and_sign_3_of_5`
 fn test_reshares_and_sign_3_of_5() {
 	println!("\n=== Consecutive Resharings + Sign (3-of-5) ===\n");
 
@@ -2551,11 +2550,12 @@ fn test_reshares_and_sign_3_of_5() {
 /// 4-of-6 honest overshoot is ~1.163x (1.153-1.163 across seeds, the recovered
 /// partial norm concentrates), so the radii are enlarged by kappa=1.25 with a
 /// ~7.5% margin (get_hyperball_params), and K is 1600 (config.rs). This taxes
-/// every (4,6) signature (~15 MB/sig, Q_s ~2^28.2); COSET_RESHARING_SPEC.md
-/// Option B/C targets kappa=1/K=350. Enabled because near-mpc requires the
-/// 4-of-6 committee shape.
+/// every (4,6) signature (~15 MB/sig, Q_s ~2^28.2); the path back to kappa=1/K=350
+/// (budgeted per-reshare noise intensity, or a collaborative coset-Gaussian sample)
+/// is future work. Enabled because near-mpc requires the 4-of-6 committee shape.
+// K=1600 makes this the heaviest hot-path test (5 reshares + 2 signings); kept in
+// the default suite so the (4,6) end-to-end reshare→sign path is regression-covered.
 #[test]
-#[ignore] // Long-running (K=1600); run with `cargo test -- --ignored test_reshares_and_sign_4_of_6`
 fn test_reshares_and_sign_4_of_6() {
 	println!("\n=== Consecutive Resharings + Sign (4-of-6) ===\n");
 
@@ -3195,10 +3195,10 @@ fn test_coefficient_distribution_2_of_4() {
 
 // (4,6): with the v5 coset splitter the overshoot is ~1.163x at keygen-level
 // hiding; resharing is enabled by enlarging the radii to kappa=1.25 (K=1600,
-// ~15 MB/sig) for the near-mpc 4-of-6 shape. COSET_RESHARING_SPEC.md Option B/C
-// targets kappa=1/K=350; see resharing_norm_enlargement() and README.
+// ~15 MB/sig) for the near-mpc 4-of-6 shape. The path back to kappa=1/K=350
+// (budgeted per-reshare noise intensity, or a collaborative coset-Gaussian sample)
+// is future work; see resharing_norm_enlargement() and README.
 #[test]
-#[ignore = "Long-running distribution analysis; run with `cargo test -- --ignored`"]
 fn test_coefficient_distribution_4_of_6() {
 	run_distribution_analysis(4, 6, 10);
 }
@@ -3622,7 +3622,8 @@ fn test_recovered_partial_variance_3_of_5() {
 }
 
 #[test]
-#[ignore = "Long-running recovered-partial analysis; run with `cargo test -- --ignored`"]
+// (4,6) carries the thinnest κ margin (~7.5%: measured 1.163× vs κ=1.25); its
+// overshoot ≤ κ assertion runs in the default suite alongside the cheaper configs.
 fn test_recovered_partial_variance_4_of_6() {
 	analyze_recovered_partials(4, 6, 10);
 }

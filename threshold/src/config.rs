@@ -81,8 +81,9 @@ impl ThresholdConfig {
 			(3, 6) => 65,
 			// (4,6): resharing-supported via the v5 coset splitter; radii enlarged by
 			// kappa=1.25 (get_hyperball_params), so K is 1600 (was 350 base). This taxes
-			// every (4,6) signature (~15 MB/sig, Q_s ~2^28.2); see COSET_RESHARING_SPEC.md
-			// Option B/C for the path back to K=350.
+			// every (4,6) signature (~15 MB/sig, Q_s ~2^28.2). The path back to K=350
+			// (budgeted per-reshare noise intensity, or a collaborative coset-Gaussian
+			// sample) is future work.
 			(4, 6) => 1600,
 			(5, 6) => 380,
 			(6, 6) => 180,

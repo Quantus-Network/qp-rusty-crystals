@@ -333,8 +333,8 @@ def compute_resharing_params(nbsamples: int = 8000):
     (2,2)/(2,3) overshoot below 1 so they reshare at kappa=1 (base signing params,
     no Q_s cost); (2,4)/(3,5) take kappa=1.10/1.15. (4,6) (overshoot ~1.16x, stable
     across seeds) is enabled by enlargement at kappa=1.25 => K=1600 for the near-mpc
-    4-of-6 shape; COSET_RESHARING_SPEC.md Option B/C targets kappa=1/K=350 to drop
-    that per-signature tax.
+    4-of-6 shape. The path back to kappa=1/K=350 (budgeted per-reshare noise
+    intensity, or a collaborative coset-Gaussian sample) is future work.
     """
     params, eta, fact = PARAMS_87, ETA_87, 7.0
     # Reference (r, r') used to recover each config's expo.

@@ -63,7 +63,7 @@ const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
 /// split of their sum* (`add_mean_subtracted_noise`). This integer zero-sum noise
 /// has the uniform negative correlation `Cov(N_j,N_k) = −σ²/m` of the a-posteriori
 /// coset Gaussian, so recovered-partial variance tracks keygen for *every* recovery
-/// pattern (COSET_RESHARING_SPEC.md, Option A).
+/// pattern.
 /// v4 used an O(m) telescoping cycle (`δ_i − δ_{i−1}`): only *banded* correlation,
 /// so non-contiguous recovery patterns failed to cancel and the partial norm
 /// overshot (4-of-6 ~1.29× vs ~1.16× here).
@@ -1718,8 +1718,9 @@ fn partial_secret_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
 ///   bits of `Q_s`.)
 /// - `(4,6)`: overshoot 1.163× → κ = 1.25, K = 1600.  (Enabled by enlargement: this `K` taxes
 ///   *every* `(4,6)` signature, ~15 MB/signature, Q_s ≈ 2^28.2 ≈ 300M queries. Required for the
-///   `near-mpc` 4-of-6 committee shape; the COSET_RESHARING_SPEC.md Option B/C work targets κ=1 /
-///   K=350 to remove this tax.)
+///   `near-mpc` 4-of-6 committee shape. Removing this tax (back to κ=1 / K=350) is future work:
+///   budget the per-reshare noise intensity down for a bounded reshare count, or draw a single
+///   collaborative coset-Gaussian sample (one extra MPC round) for keygen-level hiding at κ=1.)
 ///
 /// The `(4,6)` overshoot 1.163× is extremely stable (1.153–1.163 across 8 seeds, the
 /// recovered-partial norm concentrates), so κ=1.25 carries a ~7.5% margin against a
@@ -1849,7 +1850,7 @@ fn derive_subshares_with_session_seed(
 	// The per-subset deltas are sparse-ternary with intensity `≈ 0.49/S_old`
 	// (`split_noise_threshold`): each dealer injects only `1/S_old` of the keygen
 	// noise, so the aggregated noise across the `S_old` dealers in
-	// `s_J^new = Σ_I r_{I→J}` reaches the keygen level (COSET_RESHARING_SPEC.md).
+	// `s_J^new = Σ_I r_{I→J}` reaches the keygen level.
 	let noise_t = split_noise_threshold(num_old_subsets);
 	let mut deltas = vec![0i32; m];
 	for poly_idx in 0..L {

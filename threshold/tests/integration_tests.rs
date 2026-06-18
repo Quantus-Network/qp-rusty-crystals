@@ -427,8 +427,8 @@ fn test_signature_verification_with_wrong_context() {
 // One #[test] per (threshold, total_parties) config so a failure pinpoints the
 // exact config and the suite parallelizes across configs. The 4-of-6 case uses
 // k_iterations=1600 (resharing-hardened) — a single signing is multi-second in
-// release and minutes in a debug build — so it is #[ignore]d; run it explicitly
-// with `cargo test ... -- --ignored`.
+// release and slower in a debug build — but it runs in the default suite so the
+// near-mpc 4-of-6 committee shape stays regression-covered.
 // ============================================================================
 
 /// Run dealer-based keygen + signing for a single config and assert success.
@@ -533,8 +533,6 @@ fn test_dealer_sign_3_of_6() {
 }
 
 #[test]
-#[ignore = "4-of-6 uses k_iterations=1600 (resharing-hardened): ~7s/sign in release, minutes in \
-            debug. Run with `-- --ignored`."]
 fn test_dealer_sign_4_of_6() {
 	run_dealer_signing_test(4, 6);
 }
