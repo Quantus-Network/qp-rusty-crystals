@@ -778,7 +778,9 @@ version = "2.5.0"
 dependencies = [
  "criterion",
  "dudect-bencher",
+ "hex",
  "rand",
+ "serde_json",
  "zeroize",
 ]
 
