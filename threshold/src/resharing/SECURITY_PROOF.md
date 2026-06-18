@@ -295,6 +295,21 @@ using the `sqrt(TAU)` amplification (matching the Gaussian-heuristic convention
 that defines `B` in Mithril §3.4 / footnote 3), where `B'` is the configured
 partial-secret norm bound for `(t_new, n_new)`.
 
+**Assumption (√τ convention — explicit auditor sign-off).** The guard amplifies by
+the *expected* challenge factor `√τ` (`E_c‖c·u‖₂ ≈ √τ·‖u‖₂` for a `SampleInBall`
+challenge with `τ` nonzero `±1` coefficients), not the worst-case `‖c‖₁ = τ`. This
+is deliberate: it is the same expected-norm convention used to *define* the keygen
+bound `B` (Mithril §3.4 / footnote 3) and the one signing's own hyperball
+rejection sampling is calibrated against, so the quantity the guard bounds and the
+bound `B` it is compared to are expressed in identical units. Its soundness
+therefore inherits from — and is **conditional on** — the Threshold ML-DSA proof
+using this `√τ` expected-norm convention throughout its rejection-sampling
+analysis (rather than a worst-case `τ` bound). We flag this as an explicit
+dependency for the cryptographic auditor. It does not change the guard's
+structure: a worst-case `τ` convention would simply re-scale `B`, `(r, r')` and the
+per-config `κ` by the `√τ ≈ 7.75×` substitution (a larger bound that shrinks `Q_s`
+accordingly), with the same acceptance test.
+
 The check is deterministic and local to each new party. Each new party enumerates
 all threshold signing sets containing itself and uses the same RSS recovery logic
 as signing. Therefore, every later signing partial that this party can produce
@@ -523,11 +538,12 @@ scheme's hidden keygen subset share has coordinate variance `Var(chi_s)`.
 
 Combining the three points, the hint-MLWE instance an adversary faces after an
 honest resharing is heuristically no easier than the one Mithril already accepts
-for a-posteriori sharing: the hidden share is at least as wide marginally, the
-Gaussian-shaped noise keeps the conditional covariance non-degenerate, and the
-only genuinely new public data is a set of MLWE samples. Hence the lattice
-estimator security level (and Mithril's reported heuristic loss) is expected to
-carry over.
+for a-posteriori sharing: the hidden share is at least as wide (strictly wider for
+`m_new ≥ 3`; within `0.4 %` of keygen width for `(2,2)` — both marginal and
+conditional variance `≈ 1.992`, see *Quantitative confirmation*), the
+Gaussian-shaped noise keeps the conditional covariance non-degenerate, and the only
+genuinely new public data is a set of MLWE samples. Hence the lattice estimator
+security level (and Mithril's reported heuristic loss) is expected to carry over.
 
 ### Repeated resharing
 
@@ -567,21 +583,31 @@ least as hard an MLWE secret as base ML-DSA-87's `U(−2,2)`?
 coordinate and measuring the Schur-complement conditional variance of the hidden
 share at the repeated-reshare fixed point (`keyhiding_conditional.py`, 4×10⁵
 samples). Keygen samples subset shares i.i.d. `U(−2,2)`, so its hidden share is
-independent with conditional variance `= Var(χ_s) = 2`; resharing must match or
-exceed it:
+independent with conditional variance `= Var(χ_s) = 2`; the variance-parity
+criterion is that resharing match or exceed it (the security-relevant criterion —
+core-SVP hardness — is analysed in (ii)):
 
 | Config | keygen cond. var. | reshared cond. var. (fixed pt) | σ_cond |
 |--------|-------------------|--------------------------------|--------|
-| 2-of-2 | 2.00 | 1.99 | 1.411 |
-| 2-of-3 | 2.00 | 2.14 | 1.464 |
-| 2-of-4 | 2.00 | 2.24 | 1.496 |
-| 3-of-5 | 2.00 | 2.50 | 1.582 |
-| 4-of-6 | 2.00 | 2.48 | 1.575 |
+| 2-of-2 | 2.00 | 1.992 | 1.411 |
+| 2-of-3 | 2.00 | 2.14  | 1.464 |
+| 2-of-4 | 2.00 | 2.24  | 1.496 |
+| 3-of-5 | 2.00 | 2.50  | 1.582 |
+| 4-of-6 | 2.00 | 2.48  | 1.575 |
 
-The conditional variance is stable across `R = 1..20` reshares (no drift) and is
-`≥ 2` for every config — `(2,2)` is at statistical parity (1.99, within Monte-Carlo
-error and a 0.2% effect on σ), the rest are strictly wider. So the hidden share is
-at least as wide as a fresh keygen share.
+The conditional variance is stable across `R = 1..20` reshares (no drift). Four of
+the five configs are strictly wider than the keygen baseline (`> 2`); `(2,2)` is
+the sole exception, sitting reproducibly just below it at `1.992`. This is **not**
+Monte-Carlo noise: over 64 independent seeds (`N = 4·10⁵` each) the `(2,2)` fixed
+point is `1.992 ± 0.004` (per-run std), with the keygen value `2.000` lying `+2.1`
+per-run σ above the mean (`≈16` standard errors above the mean-of-means). It is a
+genuine `~0.4 %` variance deficit — `σ_cond = √1.992 = 1.4114` vs the keygen
+`√2 = 1.4142`, a `0.2 %` reduction in secret width. Crucially this sits **below the
+resolution of the core-SVP estimator**: at `σ_cond = 1.411` the induced instance
+still yields `β = 863` / classical `252`-bit / quantum `229`-bit, **identical** to
+base ML-DSA-87 (see (ii)). So `(2,2)` misses *exact variance* parity by a
+cryptographically negligible margin while retaining full *key-recovery-hardness*
+parity, and the other four configs are strictly harder.
 
 **(ii) Lattice estimate.** The induced key-recovery instance has the *identical*
 module shape, modulus and sample count as base ML-DSA-87; only the secret/error
@@ -599,16 +625,23 @@ gives:
 | 3-of-5 | 1.582 | 878 | 256 bits | +4.4 |
 | 4-of-6 | 1.575 | 878 | 256 bits | +4.4 |
 
-Core-SVP β is monotone non-decreasing in the secret/error width, so `σ_cond ≥ √2`
-gives key-recovery hardness `≥` base ML-DSA-87 (NIST Category 5) for every
-supported config — the larger committees are a few bits *harder*, not easier. The
-heuristic-parity claim is therefore confirmed quantitatively: an honest resharing
-leaves the hidden share at least as hard to recover as in base ML-DSA-87.
+Core-SVP β is monotone non-decreasing in the secret/error width. The four configs
+with `σ_cond > √2` are therefore key-recovery hardness strictly `≥` base ML-DSA-87
+(a few bits *harder*). For `(2,2)`, `σ_cond = 1.411` is a hair *below* `√2 = 1.414`,
+but the gap is below the estimator's integer-β resolution: it yields the same
+`β = 863` and the same classical `252`-bit / quantum `229`-bit hardness as base. So
+key-recovery hardness is `≥` base ML-DSA-87 (NIST Category 5) for every supported
+config. The heuristic-parity claim is therefore confirmed quantitatively at the
+security-relevant level: an honest resharing leaves the hidden share at least as
+hard to recover as in base ML-DSA-87 — for `(2,2)` at parity, for the rest strictly
+harder — even though `(2,2)` falls `0.4 %` short of exact *variance* parity.
 
 **Residual caveats.** (a) The covariance is the exact second moment, but the
 variance→core-SVP step uses the same Gaussian core-SVP model as ML-DSA's own
 security claim; the hidden share is Gaussian by CLT over `m_new` subset
-contributions, weakest at `m_new = 2` (`(2,2)`), where `σ_cond ≈ √2` regardless.
+contributions, weakest at `m_new = 2` (`(2,2)`), where `σ_cond ≈ 1.411` — `0.2 %`
+below `√2`, which the core-SVP estimate resolves as identical β / bit-security to
+base (above).
 (b) The analysis is per-coordinate i.i.d. (the splitter treats coordinates
 independently), so the scalar result lifts to the full `256·(k+ℓ)` dimension.
 (c) Smaller coalitions leak fewer shares (strictly easier to hide), so the
