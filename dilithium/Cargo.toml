@@ -20,6 +20,10 @@ categories = ["cryptography"]
 name = "stack_usage_demo"
 path = "examples/stack_usage_demo.rs"
 
+[[example]]
+name = "stack_probe"
+path = "examples/stack_probe.rs"
+
 [dependencies]
 zeroize = { workspace = true }
 
@@ -27,6 +31,7 @@ zeroize = { workspace = true }
 criterion = { version = "=0.5.1", features = ["html_reports"] }
 rand = { version = "=0.10.1", features = ["thread_rng"] }
 dudect-bencher = { version = "=0.7" }
+psm = "=0.1.31"
 
 [[bench]]
 name = "dilithium_benchmarks"
