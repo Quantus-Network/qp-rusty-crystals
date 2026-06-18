@@ -134,14 +134,18 @@ pub fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
 /// resharing recovered-partial norm guard. Keeping one implementation guarantees
 /// the guard checks the exact same share combination signing will use; two copies
 /// could drift and silently defeat the guard's purpose.
+///
+/// `sharing_patterns` is the output of [`compute_sharing_patterns`] for this
+/// `(threshold, parties)` config; callers pass it in so it can be computed once
+/// and reused across many signing sets (the norm guard sweeps every signing set).
 pub(crate) fn translated_subset_masks(
+	sharing_patterns: &[Vec<u16>],
 	signing_mask: u16,
 	my_index: usize,
 	threshold: u32,
 	parties: u32,
 ) -> Result<Vec<u16>, String> {
 	let parties = parties as usize;
-	let sharing_patterns = compute_sharing_patterns(threshold, parties as u32)?;
 
 	// Active (signing-set) indices in ascending order.
 	let active_indices: Vec<usize> =
@@ -240,9 +244,12 @@ pub fn recover_share(
 
 	// Translate this party's share patterns into subset masks over DKG indices.
 	// Shared with the resharing norm guard so both recover the identical shares.
+	let sharing_patterns = compute_sharing_patterns(threshold, parties)
+		.map_err(|e| ThresholdError::InvalidConfiguration(String::from(e)))?;
 	let signing_mask: u16 = active_indices.iter().fold(0u16, |mask, &idx| mask | (1 << idx));
-	let translated_masks = translated_subset_masks(signing_mask, my_dkg_index, threshold, parties)
-		.map_err(ThresholdError::InvalidConfiguration)?;
+	let translated_masks =
+		translated_subset_masks(&sharing_patterns, signing_mask, my_dkg_index, threshold, parties)
+			.map_err(ThresholdError::InvalidConfiguration)?;
 
 	// Use NTT accumulators to avoid i32 overflow for large configurations.
 	// After NTT, coefficients are bounded by 18*Q. For large subset counts,

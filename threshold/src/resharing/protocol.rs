@@ -765,7 +765,25 @@ impl ResharingProtocol {
 
 	fn handle_round3_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
 		if self.have_enough_round3() {
-			self.verify_peer_dealer_commitments()?;
+			// Security halt: if a peer dealer's Round-3 commitment does not match the
+			// deterministic sub-shares we can recompute, abort *before* dealing our own
+			// Round-4 private shares — delivering them into a committee that contains a
+			// cheating dealer would leak share material.
+			//
+			// Unlike the Round-5 abort (which is broadcast to peers via `success =
+			// false`), this is a deliberate *silent* local halt: the safe response is
+			// simply to withhold our Round-4 messages, so we do not warn peers. We set
+			// `Failed` so the state is terminal and observable via `is_failed()`
+			// (matching the Round-5 abort), and rely on the transport/runner to surface
+			// the returned `Err` as a global abort. New-only members, now receiving no
+			// Round-4 shares, detect the stall via their own transport timeout.
+			// (Confirmed in near-mpc: the aborting node's `poke()` Err propagates out of
+			// `run_protocol`, while waiting nodes hit the 120s
+			// `perform_leader_centric_computation` timeout.)
+			if let Err(e) = self.verify_peer_dealer_commitments() {
+				self.state = ResharingState::Failed(e.to_string());
+				return Err(e);
+			}
 			self.state = ResharingState::Round4Generate;
 			self.poke()
 		} else {
@@ -806,6 +824,30 @@ impl ResharingProtocol {
 	/// designated dealer for `I` is another party, this party can recompute the
 	/// deterministic sub-shares and verify the dealer committed to exactly those
 	/// values before any Round 4 private delivery occurs.
+	/// Resolve the designated dealer for old subset `i_mask` and borrow its Round-3
+	/// commitment broadcast. Shared by `verify_peer_dealer_commitments` (Round-3 peer
+	/// check) and `verify_and_aggregate_new_shares` (Round-5 aggregation) so the
+	/// dealer lookup, the Round-3 broadcast lookup, and their error messages live in
+	/// one place.
+	fn dealer_round3_for(
+		&self,
+		i_mask: SubsetMask,
+	) -> Result<(ParticipantId, &ResharingRound3Broadcast), ResharingProtocolError> {
+		let dealer = self.designated_dealer_for(i_mask).ok_or_else(|| {
+			ResharingProtocolError::ShareVerificationFailed(format!(
+				"no designated dealer found for old subset {:b}",
+				i_mask
+			))
+		})?;
+		let dealer_r3 = self.round3_broadcasts.get(&dealer).ok_or_else(|| {
+			ResharingProtocolError::DealerDeliveryFailed {
+				dealer,
+				reason: format!("missing Round 3 commitment for subset {:b}", i_mask),
+			}
+		})?;
+		Ok((dealer, dealer_r3))
+	}
+
 	fn verify_peer_dealer_commitments(&self) -> Result<(), ResharingProtocolError> {
 		if !self.config.role().is_old_committee() {
 			return Ok(());
@@ -819,23 +861,14 @@ impl ResharingProtocol {
 		})?;
 
 		for (&i_mask, s_i) in existing.shares() {
-			let dealer = self.designated_dealer_for(i_mask).ok_or_else(|| {
-				ResharingProtocolError::ShareVerificationFailed(format!(
-					"no designated dealer found for old subset {:b}",
-					i_mask
-				))
-			})?;
-
-			if dealer == self.config.my_party_id() {
+			// We never verify our own commitments, so skip before fetching the Round 3
+			// broadcast — a designated dealer that is us need not have recorded its own
+			// broadcast for this peer check (and a missing peer broadcast is a real
+			// error, handled by `dealer_round3_for`).
+			if self.designated_dealer_for(i_mask) == Some(self.config.my_party_id()) {
 				continue;
 			}
-
-			let dealer_r3 = self.round3_broadcasts.get(&dealer).ok_or_else(|| {
-				ResharingProtocolError::DealerDeliveryFailed {
-					dealer,
-					reason: format!("missing Round 3 commitment for subset {:b}", i_mask),
-				}
-			})?;
+			let (dealer, dealer_r3) = self.dealer_round3_for(i_mask)?;
 
 			let expected_subshares = derive_subshares_with_session_seed(
 				i_mask,
@@ -1212,20 +1245,7 @@ impl ResharingProtocol {
 		}
 
 		for &i_mask in &self.old_subset_order {
-			let dealer = match self.designated_dealer_for(i_mask) {
-				Some(d) => d,
-				None =>
-					return Err(ResharingProtocolError::ShareVerificationFailed(format!(
-						"no designated dealer found for old subset {:b}",
-						i_mask
-					))),
-			};
-			let dealer_r3 = self.round3_broadcasts.get(&dealer).ok_or_else(|| {
-				ResharingProtocolError::DealerDeliveryFailed {
-					dealer,
-					reason: format!("missing Round 3 commitment for subset {:b}", i_mask),
-				}
-			})?;
+			let (dealer, dealer_r3) = self.dealer_round3_for(i_mask)?;
 			let dealer_r4 = self.round4_messages.get(&dealer).ok_or_else(|| {
 				ResharingProtocolError::DealerDeliveryFailed {
 					dealer,
@@ -1343,12 +1363,19 @@ impl ResharingProtocol {
 
 		let bound = partial_secret_norm_bound(threshold, parties, nu);
 
+		// Sharing patterns depend only on `(threshold, parties)`, so compute them once
+		// and reuse across every signing set rather than re-deriving them per mask.
+		let sharing_patterns =
+			crate::protocol::secret_sharing::compute_sharing_patterns(threshold, parties)
+				.map_err(|e| ResharingProtocolError::ShareVerificationFailed(e.into()))?;
+
 		for signing_mask in generate_subset_masks(parties as usize, threshold as usize) {
 			if (signing_mask & (1 << my_idx)) == 0 {
 				continue;
 			}
 
-			let weighted_norm = self.recovered_partial_weighted_norm(signing_mask, my_idx, nu)?;
+			let weighted_norm =
+				self.recovered_partial_weighted_norm(&sharing_patterns, signing_mask, my_idx, nu)?;
 			let challenge_bound = weighted_norm * (TAU as f64).sqrt();
 			if challenge_bound > bound {
 				let signing_set = self.config.new_participants().ids_from_mask(signing_mask);
@@ -1365,6 +1392,7 @@ impl ResharingProtocol {
 
 	fn recovered_partial_weighted_norm(
 		&self,
+		sharing_patterns: &[Vec<u16>],
 		signing_mask: SubsetMask,
 		my_idx: usize,
 		nu: f64,
@@ -1375,6 +1403,7 @@ impl ResharingProtocol {
 		// Same perm build + pattern translation that signing-time recovery uses, so
 		// the guard provably checks the exact share combination RSSRecover will sum.
 		let translated_masks = crate::protocol::secret_sharing::translated_subset_masks(
+			sharing_patterns,
 			signing_mask,
 			my_idx,
 			threshold,
