@@ -90,7 +90,12 @@ impl WormholePair {
 		let mut secret_bytes = secret.into_bytes();
 		let mut preimage_felts = Vec::new();
 		let salt_felt = string_to_felts(ADDRESS_SALT);
-		// Use bytes_to_digest for safe 4-bytes/felt encoding (8 felts total)
+		// Encode the 32-byte secret as 4 felts via the 8-bytes/felt `bytes_to_digest`.
+		// This encoding is non-injective (limbs ≥ the Goldilocks prime are reduced),
+		// which is harmless here: a secret deterministically maps to one canonical
+		// felt-tuple, and a collision would only alias the holder's own secret —
+		// it cannot forge another user's address without their secret. The same
+		// encoding is used when proving, so derivation stays consistent.
 		let mut secret_felt = bytes_to_digest(&secret_bytes);
 		preimage_felts.extend_from_slice(&salt_felt);
 		preimage_felts.extend_from_slice(&secret_felt);

@@ -135,6 +135,12 @@ make nistkat
 cp ./nistkat/PQCsignKAT_Dilithium5.rsp ???
 ```
 
+## Deep Wiki
+
+Use AI to explore this repository interactively!
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Quantus-Network/qp-rusty-crystals)
+
 ## Code Coverage
 This repository has 100% code coverage for all critical logic and functionality. 
 ```./coverage.sh```

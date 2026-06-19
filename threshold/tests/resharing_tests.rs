@@ -12,7 +12,8 @@ use qp_rusty_crystals_threshold::{
 };
 
 use qp_rusty_crystals_threshold::resharing::{
-	Action, NewShareData, ResharingConfig, ResharingMessage, ResharingProtocol, ResharingState,
+	resharing_norm_enlargement, Action, NewShareData, ResharingConfig, ResharingMessage,
+	ResharingProtocol, ResharingState,
 };
 
 /// Helper to run the resharing protocol locally with simulated message passing.
@@ -2083,6 +2084,46 @@ fn run_signing_with_stats(
 	(true, stats)
 }
 
+/// Run `num_reshares` consecutive same-committee resharings, then measure signing.
+fn run_consecutive_reshares_and_sign(
+	threshold: u32,
+	participants: Vec<u32>,
+	initial_shares: HashMap<u32, PrivateKeyShare>,
+	public_key: &PublicKey,
+	config: ThresholdConfig,
+	num_reshares: u32,
+	signing_party_ids: &[u32],
+	num_signings: u32,
+	max_retries_per_signing: u32,
+) -> (bool, SigningStats) {
+	let mut current_shares = initial_shares;
+
+	for _ in 0..num_reshares {
+		current_shares = run_resharing_protocol(
+			threshold,
+			participants.clone(),
+			threshold,
+			participants.clone(),
+			&current_shares,
+			public_key,
+		)
+		.expect("resharing should succeed");
+	}
+
+	let signing_shares: Vec<_> = signing_party_ids
+		.iter()
+		.map(|party_id| current_shares.get(party_id).unwrap().clone())
+		.collect();
+
+	run_signing_with_stats(
+		&signing_shares,
+		public_key,
+		config,
+		num_signings,
+		max_retries_per_signing,
+	)
+}
+
 #[test]
 #[ignore] // Long-running benchmark test - run with `cargo test -- --ignored`
 fn test_measure_retry_rate_dkg_vs_reshared_shares() {
@@ -2396,31 +2437,14 @@ fn test_measure_retry_rate_dkg_vs_reshared_shares() {
 	// -------------------------------------------------------------------------
 	// Test 10: 1000 consecutive resharings (extreme stress test)
 	// -------------------------------------------------------------------------
-	let mut current_shares_1000x = old_shares.clone();
-
-	for _reshare_round in 0..1000 {
-		let new_shares = run_resharing_protocol(
-			2,
-			vec![0, 1, 2],
-			2,
-			vec![0, 1, 2],
-			&current_shares_1000x,
-			&public_key,
-		)
-		.expect("resharing should succeed");
-
-		current_shares_1000x = new_shares;
-	}
-
-	let signing_shares_1000x: Vec<_> = vec![
-		current_shares_1000x.get(&0).unwrap().clone(),
-		current_shares_1000x.get(&1).unwrap().clone(),
-	];
-
-	let (success_1000x, stats_1000x) = run_signing_with_stats(
-		&signing_shares_1000x,
+	let (success_1000x, stats_1000x) = run_consecutive_reshares_and_sign(
+		2,
+		vec![0, 1, 2],
+		old_shares.clone(),
 		&public_key,
 		config,
+		1000,
+		&[0, 1],
 		num_signings,
 		max_retries,
 	);
@@ -2477,6 +2501,96 @@ fn test_measure_retry_rate_dkg_vs_reshared_shares() {
 	if !success_1000x {
 		println!("Note: 1000x resharing shows degradation (expected at extreme scales)");
 	}
+}
+
+/// Validate that 3-of-5 shares still produce valid ML-DSA signatures after
+/// consecutive fresh re-sharings. This exercises the full pipeline with the
+/// enlarged hyperball radii (v5 coset splitter, kappa=1.15, K=60): the guard
+/// accepts the honest reshares and the resulting shares sign and verify.
+#[test]
+fn test_reshares_and_sign_3_of_5() {
+	println!("\n=== Consecutive Resharings + Sign (3-of-5) ===\n");
+
+	let config = ThresholdConfig::new(3, 5).expect("valid config");
+	let participants = vec![0, 1, 2, 3, 4];
+	let signing_parties = [0, 1, 2];
+	let num_signings = 3;
+	let max_retries = 5;
+	let num_reshares = 10;
+
+	let seed = [0x35; 32];
+	let (public_key, dkg_shares) = generate_with_dealer(&seed, config).expect("keygen");
+	let mut initial_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &dkg_shares {
+		initial_shares.insert(share.party_id(), share.clone());
+	}
+
+	let (reshare_success, reshare_stats) = run_consecutive_reshares_and_sign(
+		3,
+		participants,
+		initial_shares,
+		&public_key,
+		config,
+		num_reshares,
+		&signing_parties,
+		num_signings,
+		max_retries,
+	);
+
+	println!("After {} consecutive 3-of-5 resharings:", num_reshares);
+	println!("  Success: {}", reshare_success);
+	println!("  Successful signings: {}/{}", reshare_stats.successful_attempts, num_signings);
+	println!("  Avg retries per signing: {:.2}", reshare_stats.avg_retries_per_success());
+
+	assert!(reshare_success, "3-of-5 signing after fresh re-sharing should succeed");
+}
+
+/// Validate that 4-of-6 shares still produce valid ML-DSA signatures after
+/// consecutive fresh re-sharings. With the v5 mean-subtracted coset splitter the
+/// 4-of-6 honest overshoot is ~1.163x (1.153-1.163 across seeds, the recovered
+/// partial norm concentrates), so the radii are enlarged by kappa=1.25 with a
+/// ~7.5% margin (get_hyperball_params), and K is 1600 (config.rs). This taxes
+/// every (4,6) signature (~15 MB/sig, Q_s ~2^28.2); the path back to kappa=1/K=350
+/// (budgeted per-reshare noise intensity, or a collaborative coset-Gaussian sample)
+/// is future work. Enabled because near-mpc requires the 4-of-6 committee shape.
+// K=1600 makes this the heaviest hot-path test (5 reshares + 2 signings); kept in
+// the default suite so the (4,6) end-to-end reshare→sign path is regression-covered.
+#[test]
+fn test_reshares_and_sign_4_of_6() {
+	println!("\n=== Consecutive Resharings + Sign (4-of-6) ===\n");
+
+	let config = ThresholdConfig::new(4, 6).expect("valid config");
+	let participants = vec![0, 1, 2, 3, 4, 5];
+	let signing_parties = [0, 1, 2, 3];
+	let num_signings = 2;
+	let max_retries = 5;
+	let num_reshares = 5;
+
+	let seed = [0xCC; 32];
+	let (public_key, dkg_shares) = generate_with_dealer(&seed, config).expect("keygen");
+	let mut initial_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &dkg_shares {
+		initial_shares.insert(share.party_id(), share.clone());
+	}
+
+	let (reshare_success, reshare_stats) = run_consecutive_reshares_and_sign(
+		4,
+		participants,
+		initial_shares,
+		&public_key,
+		config,
+		num_reshares,
+		&signing_parties,
+		num_signings,
+		max_retries,
+	);
+
+	println!("After {} consecutive 4-of-6 resharings:", num_reshares);
+	println!("  Success: {}", reshare_success);
+	println!("  Successful signings: {}/{}", reshare_stats.successful_attempts, num_signings);
+	println!("  Avg retries per signing: {:.2}", reshare_stats.avg_retries_per_success());
+
+	assert!(reshare_success, "4-of-6 signing after fresh re-sharing should succeed");
 }
 
 #[test]
@@ -3063,6 +3177,12 @@ fn run_distribution_analysis(threshold: u32, parties: u32, max_resharings: usize
 	}
 }
 
+// (3,5) is supported via the v5 mean-subtracted coset splitter: the uniform
+// negative correlation holds the steady-state recovered-partial overshoot at
+// ~1.012x, so kappa=1.15 (with (r,r') scaled to match, keeping the per-sample
+// leakage eps fixed) accepts honest reshares. The larger K this forces reduces the
+// query budget Q_s = 1/(K*eps) by ~0.8 bits (K 35->60, was 227 under v4). See
+// resharing_norm_enlargement() in protocol.rs.
 #[test]
 fn test_coefficient_distribution_3_of_5() {
 	run_distribution_analysis(3, 5, 20);
@@ -3073,6 +3193,11 @@ fn test_coefficient_distribution_2_of_4() {
 	run_distribution_analysis(2, 4, 20);
 }
 
+// (4,6): with the v5 coset splitter the overshoot is ~1.163x at keygen-level
+// hiding; resharing is enabled by enlarging the radii to kappa=1.25 (K=1600,
+// ~15 MB/sig) for the near-mpc 4-of-6 shape. The path back to kappa=1/K=350
+// (budgeted per-reshare noise intensity, or a collaborative coset-Gaussian sample)
+// is future work; see resharing_norm_enlargement() and README.
 #[test]
 fn test_coefficient_distribution_4_of_6() {
 	run_distribution_analysis(4, 6, 10);
@@ -3346,6 +3471,42 @@ fn analyze_recovered_partials(threshold: u32, parties: u32, num_resharings: usiz
 	println!("  Margin:   {:.1}% of r'", (1.0 - max_combined_norm / r_prime) * 100.0);
 	println!();
 
+	// Guard overshoot relative to the *base* keygen bound B (kappa = 1), computed
+	// exactly as partial_secret_norm_bound()/the Round-5 guard does: B_base =
+	// 1.3*sqrt(tau)*sqrt(dim*var_eta*num_secrets), num_secrets = ceil(C(n,t-1)/t),
+	// dim = n*(k + l/nu^2), var_eta = eta(eta+1)/3 = 2. Overshoot = sqrt(tau)*max /
+	// B_base. A config needs kappa >= this overshoot for honest reshares to pass.
+	let num_secrets_ceil = {
+		let c = binomial(parties as usize, threshold as usize - 1) as f64;
+		(c / threshold as f64).ceil()
+	};
+	let dim_b = 256.0 * (8.0 + 7.0 / (nu * nu));
+	let base_b = 1.3 * 60.0f64.sqrt() * (dim_b * 2.0 * num_secrets_ceil).sqrt();
+	let guard_overshoot = 60.0f64.sqrt() * max_combined_norm / base_b;
+	println!("Guard overshoot vs base keygen B (kappa=1):");
+	println!("  base B (num_secrets=ceil={}): {:.0}", num_secrets_ceil, base_b);
+	println!("  sqrt(tau)*max_combined_norm:  {:.0}", 60.0f64.sqrt() * max_combined_norm);
+	println!("  >>> overshoot = {:.3}x  (need kappa >= this)", guard_overshoot);
+	println!();
+
+	// Regression guard for the acceptance/κ path. The Round-5 recovered-partial
+	// guard enforces sqrt(tau)*||p||_nu <= kappa*B_base, i.e. the honest overshoot
+	// (= sqrt(tau)*max_combined_norm / B_base, computed above) must stay <= kappa.
+	// This is the quantity κ is selected against, so assert it for every config that
+	// runs: a splitter regression (overshoot grows) or a κ lowered below the real
+	// overshoot now fails CI instead of silently shipping reshares the guard rejects.
+	// `kappa` is read from the same source the guard uses, so the test cannot drift.
+	let kappa = resharing_norm_enlargement(threshold, parties);
+	assert!(
+		guard_overshoot <= kappa,
+		"{}-of-{}: honest recovered-partial overshoot {:.3}x exceeds the configured \
+		 enlargement kappa = {:.2}; the kappa*B guard would reject honest reshares",
+		threshold,
+		parties,
+		guard_overshoot,
+		kappa
+	);
+
 	// Compare to expected values based on coefficient variance
 	// The hyperball formula uses: beta = 1.3 * sqrt((k + l/nu²) * n * num_subsets) * sigt *
 	// sqrt(tau) where sigt is the coefficient std dev (sqrt(2) for eta=2)
@@ -3441,6 +3602,11 @@ fn binomial(n: usize, k: usize) -> usize {
 }
 
 #[test]
+fn test_recovered_partial_variance_2_of_2() {
+	analyze_recovered_partials(2, 2, 100);
+}
+
+#[test]
 fn test_recovered_partial_variance_2_of_3() {
 	analyze_recovered_partials(2, 3, 100);
 }
@@ -3456,6 +3622,8 @@ fn test_recovered_partial_variance_3_of_5() {
 }
 
 #[test]
+// (4,6) carries the thinnest κ margin (~7.5%: measured 1.163× vs κ=1.25); its
+// overshoot ≤ κ assertion runs in the default suite alongside the cheaper configs.
 fn test_recovered_partial_variance_4_of_6() {
 	analyze_recovered_partials(4, 6, 10);
 }

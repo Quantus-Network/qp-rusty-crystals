@@ -540,7 +540,7 @@ pub struct ResharingRound2EntropyReveal {
 /// only commits to subsets where they are the *designated dealer* (the
 /// lowest-ID old participant in the subset). Other members of the same old
 /// subset independently recompute the same contributions and verify the
-/// commitment in Round 5.
+/// commitments before Round 4 private delivery begins.
 ///
 /// # Security
 ///
