@@ -7,6 +7,12 @@
 
 extern crate alloc;
 
+// `std` is pulled in only for the test build so the ACVP known-answer harness
+// (`acvp`) can read the vendored NIST vector files from disk. Production builds
+// remain `#![no_std]`.
+#[cfg(test)]
+extern crate std;
+
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Wrapper for sensitive 32-byte data that enforces move semantics and automatic zeroization
@@ -98,6 +104,9 @@ pub mod polyvec;
 pub(crate) mod reduce;
 pub(crate) mod rounding;
 pub(crate) mod sign;
+
+#[cfg(test)]
+mod acvp;
 
 #[cfg(test)]
 mod tests {
