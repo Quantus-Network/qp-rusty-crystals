@@ -28,13 +28,11 @@ fn peak_stack<F: FnOnce()>(f: F) -> usize {
 		let region = std::slice::from_raw_parts(base, STACK_BYTES);
 		let used = match psm::StackDirection::new() {
 			// Grows toward lower addresses: untouched sentinel bytes remain at the low end.
-			psm::StackDirection::Descending => {
-				STACK_BYTES - region.iter().take_while(|&&b| b == PAINT).count()
-			},
+			psm::StackDirection::Descending =>
+				STACK_BYTES - region.iter().take_while(|&&b| b == PAINT).count(),
 			// Grows toward higher addresses: untouched sentinel bytes remain at the high end.
-			psm::StackDirection::Ascending => {
-				STACK_BYTES - region.iter().rev().take_while(|&&b| b == PAINT).count()
-			},
+			psm::StackDirection::Ascending =>
+				STACK_BYTES - region.iter().rev().take_while(|&&b| b == PAINT).count(),
 		};
 		dealloc(base, layout);
 		used
@@ -66,7 +64,10 @@ fn main() {
 		let _ = kp.verify(msg, &sig, None);
 	});
 
-	println!("=== ML-DSA-87 peak stack (painted-stack probe, host arch: {}) ===", std::env::consts::ARCH);
+	println!(
+		"=== ML-DSA-87 peak stack (painted-stack probe, host arch: {}) ===",
+		std::env::consts::ARCH
+	);
 	println!("  keygen: {}", kb(keygen));
 	println!("  sign  : {}", kb(sign));
 	println!("  verify: {}", kb(verify));
