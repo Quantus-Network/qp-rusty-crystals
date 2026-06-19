@@ -19,11 +19,10 @@
 //! Mapping to FIPS 204 / this crate:
 //!
 //! - keyGen: `seed` (xi) -> `crate::sign::keypair`, then checks `pk`, `sk`.
-//! - sigGen: `crate::sign::signature` runs `Sign_internal(sk, message, rnd)`
-//!   (`rnd = 0^32` when the group is `deterministic`, else the vector's `rnd`),
-//!   then checks `signature`.
-//! - sigVer: `crate::sign::verify` runs `Verify_internal(pk, message, sig)`
-//!   (includes intentionally-corrupted cases), then checks `testPassed`.
+//! - sigGen: `crate::sign::signature` runs `Sign_internal(sk, message, rnd)` (`rnd = 0^32` when the
+//!   group is `deterministic`, else the vector's `rnd`), then checks `signature`.
+//! - sigVer: `crate::sign::verify` runs `Verify_internal(pk, message, sig)` (includes
+//!   intentionally-corrupted cases), then checks `testPassed`.
 
 use alloc::vec::Vec;
 use serde_json::Value;
