@@ -10,7 +10,8 @@
 //! - **Round 2 (Entropy reveal)**: Old committee members reveal entropy. All parties compute the
 //!   public session seed from these reveals after checking the commitments.
 //! - **Round 3 (Sub-share commitments)**: Each designated dealer broadcasts hash commitments to
-//!   deterministic sub-shares `r_{I→J}` derived from `s_I^old` and the public session seed.
+//!   deterministic sub-shares `r_{I→J}` derived from `s_I^old` and the public session seed. Other
+//!   old members of the same subset recompute and verify those commitments before Round 4.
 //! - **Round 4 (Private delivery)**: Dealers privately deliver `r_{I→J}` to new committee members.
 //! - **Round 5 (Verification)**: New committee members verify received sub-shares, sum them into
 //!   new shares `s_J^new`, and broadcast commitments so each new subset can cross-verify.
@@ -37,7 +38,7 @@ use core::fmt;
 
 use qp_rusty_crystals_dilithium::{
 	fips202,
-	params::{ETA, K, L, N, Q},
+	params::{ETA, K, L, N, Q, TAU},
 };
 use zeroize::Zeroize;
 
@@ -57,7 +58,38 @@ use super::types::{
 const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
 
 /// Domain separator for bounded conditional splitting noise.
-const BOUNDED_SPLIT_DOMAIN: &[u8] = b"resharing-bounded-split-v1";
+/// v5: "coset" hiding noise — per dealer, per coefficient, sample `m` i.i.d.
+/// sparse-ternary deltas (intensity `≈ 0.49 / S_old`) and subtract the *balanced
+/// split of their sum* (`add_mean_subtracted_noise`). This integer zero-sum noise
+/// has the uniform negative correlation `Cov(N_j,N_k) = −σ²/m` of the a-posteriori
+/// coset Gaussian, so recovered-partial variance tracks keygen for *every* recovery
+/// pattern.
+/// v4 used an O(m) telescoping cycle (`δ_i − δ_{i−1}`): only *banded* correlation,
+/// so non-contiguous recovery patterns failed to cancel and the partial norm
+/// overshot (4-of-6 ~1.29× vs ~1.16× here).
+/// v3 used fixed centered-binomial deltas (over-injected noise, growing the
+/// recovered-partial norm linearly in the old-committee size).
+const BOUNDED_SPLIT_DOMAIN: &[u8] = b"resharing-bounded-split-v5";
+
+/// Per-coefficient probability scale for the sparse-ternary split noise, as a
+/// 256-denominator numerator: a single dealer draws `±1` with probability
+/// `≈ 0.49 / S_old` each (and `0` otherwise) for each of the `m` deltas, before
+/// the balanced mean subtraction in `add_mean_subtracted_noise`.
+///
+/// # Why `1/S_old`
+///
+/// Each new subset share is `s_J^new = Σ_{I} r_{I→J}`, a sum over all `S_old`
+/// old RSS subsets. With per-dealer noise variance `≈ σ²_keygen / S_old`, the
+/// aggregated noise variance over the `S_old` dealers is `≈ σ²_keygen`: the new
+/// shares are distributed like a *fresh* keygen short secret sharing (Mithril
+/// "Efficient Threshold ML-DSA", §3.3 *a posteriori* sharing — a discrete
+/// Gaussian over the sum-`s` coset). This keeps the recovered-partial norm under
+/// the keygen envelope `B` while preserving keygen-level key hiding.
+///
+/// The `0.49` constant (= `(0.7)²`, i.e. `σ_split = 0.7·σ_keygen/√S_old`) is
+/// tuned by Monte-Carlo (`scripts/compute_hyperball_params.py`) so the
+/// aggregated hiding σ stays ≈ `σ_keygen = √2` across supported committees.
+const SPLIT_NOISE_NUM_X256: u32 = 125; // round(0.49 * 256)
 
 const COMMIT_DOMAIN: &[u8] = b"resharing-commit-v3";
 
@@ -733,6 +765,25 @@ impl ResharingProtocol {
 
 	fn handle_round3_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
 		if self.have_enough_round3() {
+			// Security halt: if a peer dealer's Round-3 commitment does not match the
+			// deterministic sub-shares we can recompute, abort *before* dealing our own
+			// Round-4 private shares — delivering them into a committee that contains a
+			// cheating dealer would leak share material.
+			//
+			// Unlike the Round-5 abort (which is broadcast to peers via `success =
+			// false`), this is a deliberate *silent* local halt: the safe response is
+			// simply to withhold our Round-4 messages, so we do not warn peers. We set
+			// `Failed` so the state is terminal and observable via `is_failed()`
+			// (matching the Round-5 abort), and rely on the transport/runner to surface
+			// the returned `Err` as a global abort. New-only members, now receiving no
+			// Round-4 shares, detect the stall via their own transport timeout.
+			// (Confirmed in near-mpc: the aborting node's `poke()` Err propagates out of
+			// `run_protocol`, while waiting nodes hit the 120s
+			// `perform_leader_centric_computation` timeout.)
+			if let Err(e) = self.verify_peer_dealer_commitments() {
+				self.state = ResharingState::Failed(e.to_string());
+				return Err(e);
+			}
 			self.state = ResharingState::Round4Generate;
 			self.poke()
 		} else {
@@ -765,6 +816,90 @@ impl ResharingProtocol {
 		// We need a Round 3 broadcast from every party that is a designated dealer for at
 		// least one old subset. Conservative requirement: all old participants.
 		self.round3_broadcasts.len() >= self.config.old_participants().len()
+	}
+
+	/// Old-subset peer verification for Round 3 dealer commitments.
+	///
+	/// Every member of an old RSS subset knows the same `s_I^old`. If the
+	/// designated dealer for `I` is another party, this party can recompute the
+	/// deterministic sub-shares and verify the dealer committed to exactly those
+	/// values before any Round 4 private delivery occurs.
+	/// Resolve the designated dealer for old subset `i_mask` and borrow its Round-3
+	/// commitment broadcast. Shared by `verify_peer_dealer_commitments` (Round-3 peer
+	/// check) and `verify_and_aggregate_new_shares` (Round-5 aggregation) so the
+	/// dealer lookup, the Round-3 broadcast lookup, and their error messages live in
+	/// one place.
+	fn dealer_round3_for(
+		&self,
+		i_mask: SubsetMask,
+	) -> Result<(ParticipantId, &ResharingRound3Broadcast), ResharingProtocolError> {
+		let dealer = self.designated_dealer_for(i_mask).ok_or_else(|| {
+			ResharingProtocolError::ShareVerificationFailed(format!(
+				"no designated dealer found for old subset {:b}",
+				i_mask
+			))
+		})?;
+		let dealer_r3 = self.round3_broadcasts.get(&dealer).ok_or_else(|| {
+			ResharingProtocolError::DealerDeliveryFailed {
+				dealer,
+				reason: format!("missing Round 3 commitment for subset {:b}", i_mask),
+			}
+		})?;
+		Ok((dealer, dealer_r3))
+	}
+
+	fn verify_peer_dealer_commitments(&self) -> Result<(), ResharingProtocolError> {
+		if !self.config.role().is_old_committee() {
+			return Ok(());
+		}
+
+		let existing = self.config.existing_share().ok_or_else(|| {
+			ResharingProtocolError::InternalError("Missing existing share".to_string())
+		})?;
+		let session_seed = self.session_seed.ok_or_else(|| {
+			ResharingProtocolError::InternalError("Missing session seed".to_string())
+		})?;
+
+		for (&i_mask, s_i) in existing.shares() {
+			// We never verify our own commitments, so skip before fetching the Round 3
+			// broadcast — a designated dealer that is us need not have recorded its own
+			// broadcast for this peer check (and a missing peer broadcast is a real
+			// error, handled by `dealer_round3_for`).
+			if self.designated_dealer_for(i_mask) == Some(self.config.my_party_id()) {
+				continue;
+			}
+			let (dealer, dealer_r3) = self.dealer_round3_for(i_mask)?;
+
+			let expected_subshares = derive_subshares_with_session_seed(
+				i_mask,
+				s_i,
+				&self.new_subset_order,
+				&session_seed,
+				self.old_subset_order.len(),
+			);
+
+			for (j_mask, expected_share) in
+				self.new_subset_order.iter().zip(expected_subshares.iter())
+			{
+				let expected_commit = commit_subshare(i_mask, *j_mask, expected_share);
+				let actual_commit =
+					dealer_r3.commitments.get(&(i_mask, *j_mask)).ok_or_else(|| {
+						ResharingProtocolError::DealerDeliveryFailed {
+							dealer,
+							reason: format!("did not commit to r_{{{:b}->{:b}}}", i_mask, j_mask),
+						}
+					})?;
+
+				if *actual_commit != expected_commit {
+					return Err(ResharingProtocolError::ShareVerificationFailed(format!(
+						"dealer {} commitment mismatch for r_{{{:b}->{:b}}}",
+						dealer, i_mask, j_mask
+					)));
+				}
+			}
+		}
+
+		Ok(())
 	}
 
 	// ========================================================================
@@ -878,7 +1013,13 @@ impl ResharingProtocol {
 		// broadcast commitments, sum them into new subset shares, and commit.
 		if self.config.role().is_new_committee() {
 			match self.verify_and_aggregate_new_shares() {
-				Ok(commits) => share_commitments = commits,
+				Ok(commits) => match self.verify_recovered_partial_norms() {
+					Ok(()) => share_commitments = commits,
+					Err(e) => {
+						success = false;
+						error_message = Some(e.to_string());
+					},
+				},
 				Err(e) => {
 					success = false;
 					error_message = Some(e.to_string());
@@ -1010,8 +1151,13 @@ impl ResharingProtocol {
 					i_mask
 				))
 			})?;
-			let subshares =
-				derive_subshares_with_session_seed(i_mask, s_i, &new_subsets, &session_seed);
+			let subshares = derive_subshares_with_session_seed(
+				i_mask,
+				s_i,
+				&new_subsets,
+				&session_seed,
+				self.old_subset_order.len(),
+			);
 			for (j_mask, subshare) in new_subsets.iter().zip(subshares.into_iter()) {
 				self.my_subshares.insert((i_mask, *j_mask), subshare);
 			}
@@ -1099,20 +1245,7 @@ impl ResharingProtocol {
 		}
 
 		for &i_mask in &self.old_subset_order {
-			let dealer = match self.designated_dealer_for(i_mask) {
-				Some(d) => d,
-				None =>
-					return Err(ResharingProtocolError::ShareVerificationFailed(format!(
-						"no designated dealer found for old subset {:b}",
-						i_mask
-					))),
-			};
-			let dealer_r3 = self.round3_broadcasts.get(&dealer).ok_or_else(|| {
-				ResharingProtocolError::DealerDeliveryFailed {
-					dealer,
-					reason: format!("missing Round 3 commitment for subset {:b}", i_mask),
-				}
-			})?;
+			let (dealer, dealer_r3) = self.dealer_round3_for(i_mask)?;
 			let dealer_r4 = self.round4_messages.get(&dealer).ok_or_else(|| {
 				ResharingProtocolError::DealerDeliveryFailed {
 					dealer,
@@ -1175,6 +1308,150 @@ impl ResharingProtocol {
 			self.new_shares.insert(j_mask, share);
 		}
 		Ok(commitments)
+	}
+
+	/// Check that every signing partial this new party may later recover stays
+	/// inside the partial-secret norm envelope assumed by the Threshold ML-DSA
+	/// signing proof for the new configuration.
+	///
+	/// The signing proof relies on the norm of the challenge-shifted partial
+	/// secret being small. A malicious dealer can preserve the aggregate public key
+	/// while adding bounded zero-sum noise across new RSS subsets, so Round 5 also
+	/// validates the recovered partials that would be used by signing.
+	///
+	/// # Which bound
+	///
+	/// The Threshold ML-DSA proof (Mithril, "Efficient Threshold ML-DSA", §3.2-3.4)
+	/// requires the challenge-shifted recovered partial `(c·u1/ν, c·u2)` to satisfy
+	/// `‖(c·u1/ν, c·u2)‖₂ ≤ B` with overwhelming probability over the challenge `c`,
+	/// where `B` is the partial-secret norm bound from §3.4:
+	///
+	/// ```text
+	/// B = 1.3 · √τ · √(n·(k + ℓ/ν²)) · √Var(U(−η,η)) · √⌈C(N, T−1)/T⌉
+	/// ```
+	///
+	/// This is the bound the hyperball radii `(r, r')` are derived from via
+	/// `r'² ≥ r² + B² + 2rB/φ` (Lemma 2.4 / §3.4); it is *not* `r'` itself. The
+	/// randomness radius `r' ≈ 6·10⁵` is roughly two to three orders of magnitude
+	/// larger than `B`, so comparing against `r'` does not enforce the proof's
+	/// condition. We therefore compare against `B` directly.
+	///
+	/// # Challenge factor
+	///
+	/// The shift to bound is `c·u`. For a `SampleInBall` challenge with `τ` nonzero
+	/// `±1` coefficients, `E_c[‖c·u‖₂²] = τ·‖u‖₂²`, so `‖c·u‖₂ ≈ √τ·‖u‖₂` (the
+	/// Gaussian heuristic used to define `B`; see Mithril footnote 3). We use the
+	/// `√τ` factor here rather than the worst-case `‖c‖₁ = τ` factor so that the
+	/// quantity compared and the bound `B` use the same convention.
+	fn verify_recovered_partial_norms(&self) -> Result<(), ResharingProtocolError> {
+		let my_idx =
+			self.config.new_participants().index_of(self.config.my_party_id()).ok_or_else(
+				|| ResharingProtocolError::InternalError("not in new committee".into()),
+			)?;
+
+		let threshold = self.config.new_threshold();
+		let parties = self.config.new_participants().len() as u32;
+		// `get_hyperball_params` also validates that the new configuration is
+		// supported; we use its `nu` for the weighted norm and ignore `(r, r')`.
+		let (_, _, nu) = crate::protocol::signing::get_hyperball_params(threshold, parties)
+			.ok_or_else(|| {
+				ResharingProtocolError::ShareVerificationFailed(format!(
+					"no hyperball parameters for new configuration ({}, {})",
+					threshold, parties
+				))
+			})?;
+
+		let bound = partial_secret_norm_bound(threshold, parties, nu);
+
+		// Sharing patterns depend only on `(threshold, parties)`, so compute them once
+		// and reuse across every signing set rather than re-deriving them per mask.
+		let sharing_patterns =
+			crate::protocol::secret_sharing::compute_sharing_patterns(threshold, parties)
+				.map_err(|e| ResharingProtocolError::ShareVerificationFailed(e.into()))?;
+
+		for signing_mask in generate_subset_masks(parties as usize, threshold as usize) {
+			if (signing_mask & (1 << my_idx)) == 0 {
+				continue;
+			}
+
+			let weighted_norm =
+				self.recovered_partial_weighted_norm(&sharing_patterns, signing_mask, my_idx, nu)?;
+			let challenge_bound = weighted_norm * (TAU as f64).sqrt();
+			if challenge_bound > bound {
+				let signing_set = self.config.new_participants().ids_from_mask(signing_mask);
+				return Err(ResharingProtocolError::ShareVerificationFailed(format!(
+					"recovered partial for signing set {:?} exceeds partial-secret norm \
+					 bound: sqrt(tau) * weighted_norm = {:.0}, B = {:.0}",
+					signing_set, challenge_bound, bound
+				)));
+			}
+		}
+
+		Ok(())
+	}
+
+	fn recovered_partial_weighted_norm(
+		&self,
+		sharing_patterns: &[Vec<u16>],
+		signing_mask: SubsetMask,
+		my_idx: usize,
+		nu: f64,
+	) -> Result<f64, ResharingProtocolError> {
+		let threshold = self.config.new_threshold();
+		let parties = self.config.new_participants().len() as u32;
+
+		// Same perm build + pattern translation that signing-time recovery uses, so
+		// the guard provably checks the exact share combination RSSRecover will sum.
+		let translated_masks = crate::protocol::secret_sharing::translated_subset_masks(
+			sharing_patterns,
+			signing_mask,
+			my_idx,
+			threshold,
+			parties,
+		)
+		.map_err(ResharingProtocolError::ShareVerificationFailed)?;
+
+		let mut s1_acc = [[0i64; N as usize]; L];
+		let mut s2_acc = [[0i64; N as usize]; K];
+
+		for translated in translated_masks {
+			let share = self.new_shares.get(&translated).ok_or_else(|| {
+				ResharingProtocolError::ShareVerificationFailed(format!(
+					"missing new subset share {:b} while checking signing set {:b}",
+					translated, signing_mask
+				))
+			})?;
+
+			for (acc_poly, share_poly) in s1_acc.iter_mut().zip(share.s1.iter()) {
+				for (acc, &coeff) in acc_poly.iter_mut().zip(share_poly.iter()) {
+					*acc += center_mod_q(coeff) as i64;
+				}
+			}
+			for (acc_poly, share_poly) in s2_acc.iter_mut().zip(share.s2.iter()) {
+				for (acc, &coeff) in acc_poly.iter_mut().zip(share_poly.iter()) {
+					*acc += center_mod_q(coeff) as i64;
+				}
+			}
+		}
+
+		let s1_sq: f64 = s1_acc
+			.iter()
+			.flat_map(|poly| poly.iter())
+			.map(|&c| {
+				let x = c as f64;
+				x * x
+			})
+			.sum();
+		let s2_sq: f64 = s2_acc
+			.iter()
+			.flat_map(|poly| poly.iter())
+			.map(|&c| {
+				let x = c as f64;
+				x * x
+			})
+			.sum();
+
+		Ok((s1_sq / (nu * nu) + s2_sq).sqrt())
 	}
 
 	/// All members of new subset J must produce identical `s_J^new` (and thus identical
@@ -1393,6 +1670,107 @@ fn compute_new_subset_order(config: &ResharingConfig) -> Vec<SubsetMask> {
 	generate_subset_masks(n, k)
 }
 
+/// Binomial coefficient `C(n, k)`. Inputs are tiny here (`n ≤ MAX_PARTIES`), so
+/// the naive multiplicative form cannot overflow `u64`.
+fn binomial(n: u32, k: u32) -> u64 {
+	if k > n {
+		return 0;
+	}
+	let k = core::cmp::min(k, n - k) as u64;
+	let mut result: u64 = 1;
+	for i in 0..k {
+		result = result * (n as u64 - i) / (i + 1);
+	}
+	result
+}
+
+/// Partial-secret norm bound `B` from the Threshold ML-DSA proof (Mithril §3.4).
+///
+/// ```text
+/// B = 1.3 · √τ · √(n·(k + ℓ/ν²)) · √Var(U(−η,η)) · √⌈C(N, T−1)/T⌉
+/// ```
+///
+/// `B` bounds the challenge-shifted recovered partial `‖(c·u1/ν, c·u2)‖₂` that
+/// the hyperball rejection-sampling analysis requires (and that the radii
+/// `(r, r')` are derived from). It is calibrated to a *fresh keygen* partial:
+/// a sum of `⌈C(N, T−1)/T⌉` base subset shares whose coefficients are
+/// `η`-bounded with per-coefficient variance `Var(U(−η,η)) = η(η+1)/3`.
+///
+/// `1.3` is the `≈13·σ` Gaussian tail factor on `‖c·u‖`, and `√τ` is the
+/// challenge amplification (`E_c[‖c·u‖₂²] = τ·‖u‖₂²`); both follow Mithril §3.4
+/// and footnote 3.
+fn partial_secret_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
+	let n = N as f64;
+	let dim = n * (K as f64 + L as f64 / (nu * nu));
+	let var_eta = ETA as f64 * (ETA as f64 + 1.0) / 3.0;
+	// Max number of base secrets a party aggregates in one signing session
+	// (RSSRecover balanced partition, Mithril §B): ⌈C(N, T−1)/T⌉.
+	let num_secrets = {
+		let c = binomial(parties, threshold - 1) as f64;
+		(c / threshold as f64).ceil()
+	};
+	let base = 1.3 * (TAU as f64).sqrt() * (dim * var_eta * num_secrets).sqrt();
+	base * resharing_norm_enlargement(threshold, parties)
+}
+
+/// Per-config enlargement factor `κ` applied to the keygen-calibrated bound `B`.
+///
+/// Honest resharing inflates the recovered-partial norm past the keygen `B`. With
+/// the v5 mean-subtracted coset splitter (sparse-ternary deltas scaled `∝ 1/S_old`
+/// minus their balanced mean, see `derive_subshares_with_session_seed` /
+/// `add_mean_subtracted_noise`) the steady-state overshoot is ~0.78–1.16× across
+/// committees `2 ≤ T ≤ N ≤ 6`, instead of the `~√S_old` growth of the old fixed-CBD
+/// splitter (2-of-3: 1.22×, 3-of-5: 2.61×, 4-of-6: 4.50×).
+///
+/// To accept honest reshares we enlarge `B → κ·B` *and* the hyperball radii
+/// `(r, r') → (κ·r, κ·r')` together (see `get_hyperball_params`). Scaling all of
+/// `(B, r, r')` by a common `κ` is scale-invariant in the radius condition
+/// `r'² = r² + B² + 2rB/φ`, so the per-sample rejection leakage `ε` is unchanged.
+/// The signing-query budget `Q_s = 1/(K·ε)` is *not* preserved, though: the larger
+/// ball lowers per-iteration acceptance (the radius nears ML-DSA-87's fixed
+/// verification ceilings), so `K` grows — and with `ε` fixed, `Q_s` falls by that
+/// same `K` factor (e.g. `(3,5)` K 35→60 at κ=1.15). Configs whose overshoot is
+/// below 1 keep κ = 1 and pay nothing. See `config.rs` for `K` and SECURITY_PROOF.md
+/// ("Bound `B` … and `Q_s`") for the bit-loss table.
+///
+/// This is only possible while the enlarged radius stays under ML-DSA-87's fixed
+/// verification ceiling (`‖z₁‖∞ < γ1 − β`), which caps κ at ≈1.5×. The κ below were
+/// re-derived for the **v5 mean-subtracted ("coset") splitter** from the *measured*
+/// honest overshoot (Rust `test_recovered_partial_variance_*`, fixed point over all
+/// signing sets). v5's uniform negative correlation lowered every overshoot vs v4:
+///
+/// - `(2,2)`: overshoot 0.780× → κ = 1.00, K = 4.   (reshare within base `B`: a
+/// - `(2,3)`: overshoot 0.810× → κ = 1.00, K = 5.    reshared committee signs with exactly the same
+///   params as a fresh keygen committee — no enlargement, no `Q_s` cost.)
+/// - `(2,4)`: overshoot 0.961× → κ = 1.10, K = 10.
+/// - `(3,5)`: overshoot 1.012× → κ = 1.15, K = 60.  (was κ=1.30/K=227 under v4 — v5 recovers ~1.9
+///   bits of `Q_s`.)
+/// - `(4,6)`: overshoot 1.163× → κ = 1.25, K = 1600.  (Enabled by enlargement: this `K` taxes
+///   *every* `(4,6)` signature, ~15 MB/signature, Q_s ≈ 2^28.2 ≈ 300M queries. Required for the
+///   `near-mpc` 4-of-6 committee shape. Removing this tax (back to κ=1 / K=350) is future work:
+///   budget the per-reshare noise intensity down for a bounded reshare count, or draw a single
+///   collaborative coset-Gaussian sample (one extra MPC round) for keygen-level hiding at κ=1.)
+///
+/// The `(4,6)` overshoot 1.163× is extremely stable (1.153–1.163 across 8 seeds, the
+/// recovered-partial norm concentrates), so κ=1.25 carries a ~7.5% margin against a
+/// worst-case that barely moves.
+///
+/// Exposed (re-exported at `resharing::resharing_norm_enlargement`) for analysis and
+/// testing: the recovered-partial regression tests assert that the measured honest
+/// overshoot stays `≤ κ`, the exact margin this guard enlargement provides.
+pub fn resharing_norm_enlargement(threshold: u32, parties: u32) -> f64 {
+	match (threshold, parties) {
+		// Re-derived for the v5 mean-subtracted coset splitter: kappa = measured honest
+		// overshoot (+ ~7-15% margin where >1). Scaling (r,r') by the same kappa keeps
+		// per-sample leakage eps fixed (get_hyperball_params); K sets Q_s = 1/(K*eps).
+		(2, 4) => 1.10, // overshoot 0.961x
+		(3, 5) => 1.15, // overshoot 1.012x
+		(4, 6) => 1.25, // overshoot 1.163x (enabled for near-mpc; K = 1600)
+		// (2,2) 0.780x, (2,3) 0.810x: comfortably below base B, reshare at kappa = 1.
+		_ => 1.0,
+	}
+}
+
 /// Enumerate subset masks of size `k` over `n` bits in canonical (numerically
 /// ascending) order using Gosper's hack.
 fn generate_subset_masks(n: usize, k: usize) -> Vec<SubsetMask> {
@@ -1420,14 +1798,28 @@ fn generate_subset_masks(n: usize, k: usize) -> Vec<SubsetMask> {
 /// to leave the hyperball proof regime after repeated resharings.
 ///
 /// This splitter first distributes the centered coefficient of `s_I` as evenly
-/// as possible across all new subsets, then adds deterministic pairwise
-/// zero-sum η-bounded noise. The integer sum of the outputs is exactly the
-/// centered representative of `s_I`, hence the modular sum is `s_I`.
+/// as possible across all new subsets, then adds deterministic zero-sum noise via
+/// *balanced mean subtraction* (`add_mean_subtracted_noise`: sample `m` i.i.d.
+/// deltas, subtract the balanced split of their sum). The integer sum of the
+/// outputs is exactly the centered representative of `s_I`, hence the modular sum
+/// is `s_I`. (Older `v4` used an `O(m)` telescoping cycle `delta_i − delta_{i−1}`;
+/// its banded correlation overshot for non-contiguous recovery patterns.)
+///
+/// # Fresh re-sharing (noise intensity)
+///
+/// The deltas are sparse-ternary with intensity `≈ 0.49 / S_old` (see
+/// `split_noise_threshold`). Because each new share `s_J^new = Σ_I r_{I→J}` sums
+/// contributions from all `S_old = num_old_subsets` old subsets, scaling each
+/// dealer's noise as `1/S_old` makes the *aggregated* new-share noise land at the
+/// keygen level. The new shares are then distributed like a fresh keygen secret
+/// sharing (Mithril §3.3 *a posteriori* sharing), so recovered signing partials
+/// stay under the keygen norm envelope `B` instead of growing with the committee.
 fn derive_subshares_with_session_seed(
 	i_mask: SubsetMask,
 	s_i: &SecretShareData,
 	new_subsets: &[SubsetMask],
 	session_seed: &[u8; 32],
+	num_old_subsets: usize,
 ) -> Vec<NewShareData> {
 	debug_assert!(!new_subsets.is_empty());
 	let mut out: Vec<NewShareData> = (0..new_subsets.len()).map(|_| NewShareData::new()).collect();
@@ -1471,27 +1863,76 @@ fn derive_subshares_with_session_seed(
 		}
 	}
 
-	// Add pairwise zero-sum noise. Every unordered pair contributes +δ to one
-	// subset and -δ to the other, so the sum over all new subsets stays exact.
-	for a in 0..m {
-		for b in (a + 1)..m {
-			for poly_idx in 0..L {
-				for coeff_idx in 0..N as usize {
-					let delta = sample_eta_coeff(&mut state);
-					out[a].s1[poly_idx][coeff_idx] += delta;
-					out[b].s1[poly_idx][coeff_idx] -= delta;
-				}
+	// Add integer zero-sum hiding noise via *balanced mean subtraction*. For each
+	// coefficient we sample `m` i.i.d. sparse-ternary deltas and subtract the
+	// balanced split of their sum (`add_mean_subtracted_noise`), giving
+	// `N_j = δ_j − balanced(Σδ)_j` with `Σ_j N_j = 0`, so the exact integer secret
+	// identity is preserved.
+	//
+	// Unlike the v4 telescoping cycle, this yields the *uniform* negative
+	// correlation `Cov(N_j,N_k) = −σ²/m` of the a-posteriori coset Gaussian, so
+	// `Var(Σ_{J∈pattern} N_J) = σ²·|pattern|·(1 − |pattern|/m)` matches the keygen
+	// conditional partial variance for *every* recovery pattern — the overshoot no
+	// longer depends on the (arbitrary) subset ordering. Hiding holds because the
+	// noise is PRF-derived and keyed to `(session_seed, i_mask, s_i)`.
+	//
+	// The per-subset deltas are sparse-ternary with intensity `≈ 0.49/S_old`
+	// (`split_noise_threshold`): each dealer injects only `1/S_old` of the keygen
+	// noise, so the aggregated noise across the `S_old` dealers in
+	// `s_J^new = Σ_I r_{I→J}` reaches the keygen level.
+	let noise_t = split_noise_threshold(num_old_subsets);
+	let mut deltas = vec![0i32; m];
+	for poly_idx in 0..L {
+		for coeff_idx in 0..N as usize {
+			for d in deltas.iter_mut() {
+				*d = sample_split_noise_coeff(&mut state, noise_t);
 			}
-			for poly_idx in 0..K {
-				for coeff_idx in 0..N as usize {
-					let delta = sample_eta_coeff(&mut state);
-					out[a].s2[poly_idx][coeff_idx] += delta;
-					out[b].s2[poly_idx][coeff_idx] -= delta;
-				}
+			add_mean_subtracted_noise(&deltas, &mut out, true, poly_idx, coeff_idx, &mut state);
+		}
+	}
+	for poly_idx in 0..K {
+		for coeff_idx in 0..N as usize {
+			for d in deltas.iter_mut() {
+				*d = sample_split_noise_coeff(&mut state, noise_t);
 			}
+			add_mean_subtracted_noise(&deltas, &mut out, false, poly_idx, coeff_idx, &mut state);
 		}
 	}
 	out
+}
+
+/// Add integer zero-sum hiding noise to one coefficient across all `m` new subset
+/// shares, using *balanced mean subtraction*. Given i.i.d. deltas `δ_0..δ_{m-1}`,
+/// subtract the balanced split of their sum so `N_j = δ_j − balanced(Σδ)_j` sums to
+/// exactly zero. This reproduces the a-posteriori coset Gaussian's uniform negative
+/// correlation (`Cov(N_j,N_k) = −σ²/m`), unlike the old telescoping cycle's banded
+/// correlation. Consumes one PRF draw for the remainder offset, so it stays
+/// deterministic and identical across all members of the old subset.
+fn add_mean_subtracted_noise(
+	deltas: &[i32],
+	out: &mut [NewShareData],
+	is_s1: bool,
+	poly_idx: usize,
+	coeff_idx: usize,
+	state: &mut fips202::KeccakState,
+) {
+	let m = out.len();
+	let m_i32 = m as i32;
+	let total: i32 = deltas.iter().sum();
+	let base = total.div_euclid(m_i32);
+	let remainder = total.rem_euclid(m_i32) as usize;
+	let offset = sample_uniform_usize(state, m);
+
+	for (j_idx, share) in out.iter_mut().enumerate() {
+		let gets_remainder = ((j_idx + m - offset) % m) < remainder;
+		let sub = base + if gets_remainder { 1 } else { 0 };
+		let noise = deltas[j_idx] - sub;
+		if is_s1 {
+			share.s1[poly_idx][coeff_idx] += noise;
+		} else {
+			share.s2[poly_idx][coeff_idx] += noise;
+		}
+	}
 }
 
 fn balanced_split_coeff(
@@ -1530,17 +1971,34 @@ fn center_mod_q(coeff: i32) -> i32 {
 	}
 }
 
-fn sample_eta_coeff(state: &mut fips202::KeccakState) -> i32 {
-	let eta_i32 = ETA as i32;
-	let bound = 2 * eta_i32 + 1;
-	let cutoff = (256 / bound) * bound;
+/// Byte threshold `T` for the sparse-ternary split-noise sampler, given the
+/// number of old RSS subsets `S_old`. Each delta is `+1` for PRF byte `< T`,
+/// `-1` for `< 2T`, else `0`, so `P(±1) = T/256 ≈ 0.49 / S_old` each.
+///
+/// Computed with integer arithmetic (no float, `no_std`-friendly) as
+/// `round(SPLIT_NOISE_NUM_X256 / S_old)`, clamped to `[1, 127]` so the three
+/// bands always fit in a byte and noise never fully vanishes.
+fn split_noise_threshold(num_old_subsets: usize) -> u32 {
+	let s = num_old_subsets.max(1) as u32;
+	// round(125 / s) = (125 + s/2) / s
+	let t = (SPLIT_NOISE_NUM_X256 + s / 2) / s;
+	t.clamp(1, 127)
+}
+
+/// Sample one sparse-ternary split-noise delta in `{-1, 0, +1}` from the PRF
+/// stream, with `P(+1) = P(-1) = threshold / 256`. Consumes exactly one PRF byte
+/// per coefficient, so it is deterministic and stream-aligned across all parties
+/// (every member of an old subset derives identical sub-shares).
+fn sample_split_noise_coeff(state: &mut fips202::KeccakState, threshold: u32) -> i32 {
 	let mut buf = [0u8; 1];
-	loop {
-		fips202::shake256_squeeze(&mut buf, state);
-		let b = buf[0] as i32;
-		if b < cutoff {
-			return (b % bound) - eta_i32;
-		}
+	fips202::shake256_squeeze(&mut buf, state);
+	let b = buf[0] as u32;
+	if b < threshold {
+		1
+	} else if b < 2 * threshold {
+		-1
+	} else {
+		0
 	}
 }
 
@@ -1747,7 +2205,13 @@ mod tests {
 		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let subshares = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let subshares = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 		let mut sum_s1: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; L];
 		let mut sum_s2: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; K];
 		for sub in &subshares {
@@ -1783,7 +2247,13 @@ mod tests {
 		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let subshares = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let subshares = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 		let max_expected = 1 + (new_subsets.len() as i32 - 1) * ETA as i32;
 
 		for sub in &subshares {
@@ -1815,7 +2285,13 @@ mod tests {
 		let s = SecretShareData { s1: [[Q - 1; N as usize]; L], s2: [[Q - 2; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let subshares = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let subshares = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 
 		let mut sum_s1: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; L];
 		let mut sum_s2: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; K];
@@ -1850,8 +2326,20 @@ mod tests {
 		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let a = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
-		let b = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let a = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
+		let b = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 		for (x, y) in a.iter().zip(b.iter()) {
 			assert_eq!(x.s1, y.s1);
 			assert_eq!(x.s2, y.s2);
@@ -1926,8 +2414,20 @@ mod tests {
 		let s_b = SecretShareData { s1: [[3i32; N as usize]; L], s2: [[5i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let a = derive_subshares_with_session_seed(0b011, &s_a, &new_subsets, &session_seed);
-		let b = derive_subshares_with_session_seed(0b011, &s_b, &new_subsets, &session_seed);
+		let a = derive_subshares_with_session_seed(
+			0b011,
+			&s_a,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
+		let b = derive_subshares_with_session_seed(
+			0b011,
+			&s_b,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 		// The bounded split includes PRF-derived zero-sum noise keyed by `s_i`,
 		// so shares for different old secrets must differ.
 		assert_ne!(a[1].s1, b[1].s1);
@@ -1940,8 +2440,20 @@ mod tests {
 		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let a = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
-		let b = derive_subshares_with_session_seed(0b101, &s, &new_subsets, &session_seed);
+		let a = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
+		let b = derive_subshares_with_session_seed(
+			0b101,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 		// The bounded split includes PRF-derived zero-sum noise keyed on `i_mask`,
 		// so shares for different old subsets must differ.
 		assert_ne!(a[1].s1, b[1].s1);
@@ -1959,6 +2471,113 @@ mod tests {
 		// updated alongside the security review.
 		assert_eq!(r3.party_id, 7);
 		assert_eq!(r3.commitments.len(), 1);
+	}
+
+	#[test]
+	fn test_old_subset_peer_verifies_dealer_round3_commitments() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[8u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(resharing_config, [1u8; 32], &[2u8; 32]);
+		let session_seed = [9u8; 32];
+		protocol.session_seed = Some(session_seed);
+
+		let i_mask = 0b011u16;
+		let s_i = shares[0].shares().get(&i_mask).expect("old subset share");
+		let subshares = derive_subshares_with_session_seed(
+			i_mask,
+			s_i,
+			&protocol.new_subset_order,
+			&session_seed,
+			protocol.old_subset_order.len(),
+		);
+		let mut commitments = BTreeMap::new();
+		for (j_mask, subshare) in protocol.new_subset_order.iter().zip(subshares.iter()) {
+			commitments.insert((i_mask, *j_mask), commit_subshare(i_mask, *j_mask, subshare));
+		}
+
+		protocol.round3_broadcasts.insert(
+			0,
+			ResharingRound3Broadcast {
+				ssid: protocol.ssid,
+				party_id: 0,
+				commitments: commitments.clone(),
+			},
+		);
+		assert!(protocol.verify_peer_dealer_commitments().is_ok());
+
+		let target_j = protocol.new_subset_order[0];
+		let mut tampered = subshares[0].clone();
+		tampered.s2[0][0] += 1;
+		commitments.insert((i_mask, target_j), commit_subshare(i_mask, target_j, &tampered));
+		protocol
+			.round3_broadcasts
+			.insert(0, ResharingRound3Broadcast { ssid: protocol.ssid, party_id: 0, commitments });
+
+		let err = protocol
+			.verify_peer_dealer_commitments()
+			.expect_err("old subset peer must reject tampered commitment");
+		assert!(err.to_string().contains("commitment mismatch"), "unexpected error: {}", err);
+	}
+
+	#[test]
+	fn test_recovered_partial_norm_guard_rejects_pk_preserving_zero_sum_noise() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[7u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(resharing_config, [1u8; 32], &[2u8; 32]);
+
+		// This models a bounded zero-sum reshaping attack: +delta on one new RSS
+		// subset and -delta on another preserves the aggregate public key, and each
+		// individual subset is still within SUBSHARE_COEFF_BOUND. It nevertheless
+		// makes some recovered signing partials too large for the existing hyperball
+		// proof envelope.
+		let mut plus = NewShareData::new();
+		let mut minus = NewShareData::new();
+		for poly in plus.s2.iter_mut() {
+			for coeff in poly.iter_mut() {
+				*coeff = 450;
+			}
+		}
+		for poly in minus.s2.iter_mut() {
+			for coeff in poly.iter_mut() {
+				*coeff = -450;
+			}
+		}
+		assert!(plus.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+		assert!(minus.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+
+		protocol.new_shares.insert(0b011, plus);
+		protocol.new_shares.insert(0b110, minus);
+
+		let err = protocol
+			.verify_recovered_partial_norms()
+			.expect_err("oversized recovered partial must be rejected");
+		assert!(
+			err.to_string().contains("exceeds partial-secret norm bound"),
+			"unexpected error: {}",
+			err
+		);
 	}
 
 	#[test]
@@ -2018,7 +2637,13 @@ mod tests {
 		let s = SecretShareData { s1: [[100i32; N as usize]; L], s2: [[50i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let subshares = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let subshares = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 
 		for (i, share) in subshares.iter().enumerate() {
 			let max_coeff = share.max_abs_coefficient();

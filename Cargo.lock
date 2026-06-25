@@ -823,7 +823,9 @@ dependencies = [
  "criterion",
  "dudect-bencher",
  "psm",
+ "hex",
  "rand",
+ "serde_json",
  "zeroize",
 ]
 

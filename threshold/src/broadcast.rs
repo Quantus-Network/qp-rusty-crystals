@@ -41,15 +41,16 @@ pub const SIGNATURE_SIZE: usize = 4627;
 
 /// Maximum size of commitment data in Round2Broadcast.
 ///
-/// This is derived from: max_k_iterations (380) × single_commitment_size (K × POLY_Q_SIZE = 8 ×
-/// 736). We add a small margin (rounding up to 2.5 MB) to allow for future parameter changes.
-pub const MAX_COMMITMENT_DATA_SIZE: usize = 2_500_000;
+/// This is derived from: max_k_iterations (1600, for 4-of-6) × single_commitment_size (k ×
+/// POLY_Q_SIZE = 8 × 736 = 5888) = 9_420_800 bytes. We round up to 10.5 MB for margin. The 4-of-6
+/// resharing-hardened config raised the worst-case k from 380 to 1600; see `config::k_iterations`.
+pub const MAX_COMMITMENT_DATA_SIZE: usize = 10_500_000;
 
 /// Maximum size of response data in Round3Broadcast.
 ///
-/// This is derived from: max_k_iterations (380) × single_response_size (L × 640 = 7 × 640).
-/// We add a small margin (rounding up to 2 MB) to allow for future parameter changes.
-pub const MAX_RESPONSE_SIZE: usize = 2_000_000;
+/// This is derived from: max_k_iterations (1600, for 4-of-6) × single_response_size (L × 640 = 7 ×
+/// 640 = 4480) = 7_168_000 bytes. We round up to 8 MB for margin.
+pub const MAX_RESPONSE_SIZE: usize = 8_000_000;
 
 /// Round 1 broadcast message: commitment hash.
 ///

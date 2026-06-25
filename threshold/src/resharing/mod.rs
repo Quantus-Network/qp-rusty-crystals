@@ -143,4 +143,6 @@ pub use types::{
 	SubsetPair, ENTROPY_SIZE, RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
 };
 
-pub use protocol::{Action, ResharingProtocol, ResharingProtocolError, ResharingState};
+pub use protocol::{
+	resharing_norm_enlargement, Action, ResharingProtocol, ResharingProtocolError, ResharingState,
+};

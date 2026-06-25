@@ -32,6 +32,9 @@ criterion = { version = "=0.5.1", features = ["html_reports"] }
 rand = { version = "=0.10.1", features = ["thread_rng"] }
 dudect-bencher = { version = "=0.7" }
 psm = "=0.1.31"
+# NIST ACVP known-answer-test harness (tests only; does not affect the no_std lib).
+serde_json = "1"
+hex = "0.4"
 
 [[bench]]
 name = "dilithium_benchmarks"
