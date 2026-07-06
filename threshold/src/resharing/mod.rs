@@ -22,18 +22,25 @@
 //! Resharing uses **distributed per-subset re-sharing** with replay protection and public session
 //! randomization:
 //!
-//! ## Protocol Rounds (5-round session-randomized protocol)
+//! ## Protocol Rounds (session-randomized protocol with active-set liveness)
 //!
-//! - **Round 1**: Entropy commitment - old committee broadcasts `H(entropy)`
-//! - **Round 2**: Entropy reveal - old committee reveals entropy and a public session seed is
+//! - **Round 1**: Entropy commitment / Ready - old committee broadcasts `H(entropy)`
+//! - **Act proposal**: The session leader (lowest-ID new committee member) proposes the active
+//!   set `Act` of ready old members. All old members once everyone commits (fast path), or the
+//!   committed subset after [`ResharingProtocol::close_ready_window`] — requires `|Act| >=
+//!   t_old`, so resharing succeeds even when up to `n_old - t_old` old members are offline
+//! - **Round 2**: Entropy reveal - active members reveal entropy and a public session seed is
 //!   computed
 //! - **Round 3**: Sub-share commitments - designated dealers broadcast `H(r_{I→J})`
 //! - **Round 4**: Private delivery - dealers send `r_{I→J}` to new committee (**secure channel**)
 //! - **Round 5**: Verification - share commitments, partial PKs
 //!
 //! For each old RSS subset `I` (a `k_old`-subset of the old committee whose members all hold the
-//! η-bounded share `s_I^old`), the lowest-ID member of `I` (the "designated dealer" `D_I`)
-//! re-shares `s_I^old` to the new committee:
+//! η-bounded share `s_I^old`), the lowest-ID *active* member of `I` (the "designated dealer"
+//! `D_I = min(I ∩ Act)`) re-shares `s_I^old` to the new committee. Because `|Act| >= t_old` and
+//! `|I| = n_old - t_old + 1`, every old subset has a live dealer; all members of `I` hold the
+//! same `s_I^old` and derivation is deterministic, so dealer identity does not affect the
+//! derived values:
 //!
 //! 1. `D_I` deterministically derives sub-shares `r_{I→J}` for every new RSS subset `J`, such that
 //!    `Σ_J r_{I→J} = s_I^old`. The derivation incorporates the public session seed from Rounds 1-2
@@ -137,8 +144,8 @@ mod types;
 
 // Re-export public types
 pub use types::{
-	compute_resharing_ssid, NewShareData, ResharingConfig, ResharingMessage, ResharingOutput,
-	ResharingRole, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
+	compute_resharing_ssid, NewShareData, ResharingActProposal, ResharingConfig, ResharingMessage,
+	ResharingOutput, ResharingRole, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
 	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast, SubsetMask,
 	SubsetPair, ENTROPY_SIZE, RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
 };

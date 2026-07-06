@@ -46,13 +46,61 @@ fn run_resharing_protocol_with_tamper(
 	new_participants: Vec<u32>,
 	old_shares: &HashMap<u32, PrivateKeyShare>,
 	public_key: &PublicKey,
-	mut tamper: Option<TamperFn>,
+	tamper: Option<TamperFn>,
 ) -> Result<HashMap<u32, PrivateKeyShare>, String> {
-	// Determine all parties involved (union of old and new)
+	run_resharing_protocol_full(
+		old_threshold,
+		old_participants,
+		new_threshold,
+		new_participants,
+		old_shares,
+		public_key,
+		tamper,
+		&[],
+		&[],
+	)
+}
+
+/// Full-options harness: like `run_resharing_protocol_with_tamper`, but parties
+/// listed in `offline` are never instantiated and receive no messages —
+/// simulating dead nodes — and parties listed in `slow` are frozen (not poked,
+/// no message delivery) until the ready window closes — simulating live nodes
+/// that lag past the leader's ready timeout and are therefore excluded from the
+/// active set. When the protocol goes quiescent (no progress because the leader
+/// is waiting for Ready signals that will never arrive), the harness calls
+/// `close_ready_window()` on the leader once, mimicking a production transport
+/// timeout, and unfreezes slow parties so they catch up as non-active observers.
+#[allow(clippy::too_many_arguments)]
+fn run_resharing_protocol_full(
+	old_threshold: u32,
+	old_participants: Vec<u32>,
+	new_threshold: u32,
+	new_participants: Vec<u32>,
+	old_shares: &HashMap<u32, PrivateKeyShare>,
+	public_key: &PublicKey,
+	mut tamper: Option<TamperFn>,
+	offline: &[u32],
+	slow: &[u32],
+) -> Result<HashMap<u32, PrivateKeyShare>, String> {
+	assert!(
+		new_participants.iter().all(|p| !offline.contains(p)),
+		"new committee members must be online (they receive the new shares)"
+	);
+	assert!(
+		slow.iter().all(|p| !offline.contains(p)),
+		"a party cannot be both slow and offline"
+	);
+
+	// Determine all parties involved (union of old and new), minus offline ones.
 	let mut all_parties: Vec<u32> =
 		old_participants.iter().chain(new_participants.iter()).cloned().collect();
 	all_parties.sort();
 	all_parties.dedup();
+	all_parties.retain(|p| !offline.contains(p));
+
+	// The session leader: lowest-ID new committee member.
+	let leader = *new_participants.iter().min().expect("non-empty new committee");
+	assert!(!slow.contains(&leader), "the leader cannot be slow (it closes the ready window)");
 
 	// Session nonce for SSID computation (shared by all parties in this resharing)
 	let session_nonce = [0x99u8; 32];
@@ -96,6 +144,8 @@ fn run_resharing_protocol_with_tamper(
 	// Run the protocol until all parties are done
 	let max_iterations = 1000;
 	let mut iteration = 0;
+	let mut ready_window_closed = false;
+	let mut quiescent_iterations = 0;
 
 	loop {
 		iteration += 1;
@@ -110,8 +160,19 @@ fn run_resharing_protocol_with_tamper(
 			break;
 		}
 
+		// Whether any message was delivered or any non-Wait action was produced
+		// this iteration. If not, the protocol is quiescent (stalled waiting for
+		// offline parties).
+		let mut any_activity = false;
+
 		// Process each party
 		for &party_id in &all_parties {
+			// Slow parties are frozen (no delivery, no poke) until the ready
+			// window closes; their inbound messages accumulate in the queue.
+			if !ready_window_closed && slow.contains(&party_id) {
+				continue;
+			}
+
 			let protocol = protocols.get_mut(&party_id).unwrap();
 
 			// Skip if already done or failed
@@ -124,6 +185,7 @@ fn run_resharing_protocol_with_tamper(
 			let messages_to_deliver: Vec<_> = std::mem::take(messages);
 
 			for (from, data) in messages_to_deliver {
+				any_activity = true;
 				protocol.message(from, data).unwrap();
 			}
 
@@ -133,6 +195,7 @@ fn run_resharing_protocol_with_tamper(
 					// Nothing to do
 				},
 				Ok(Action::SendMany(data)) => {
+					any_activity = true;
 					let payload = match tamper.as_mut() {
 						Some(f) => f(party_id, None, data),
 						None => data,
@@ -147,6 +210,7 @@ fn run_resharing_protocol_with_tamper(
 					}
 				},
 				Ok(Action::SendPrivate(to, data)) => {
+					any_activity = true;
 					// Send to specific party. We deliberately do NOT loop self-private
 					// messages back: the protocol must handle self-deals locally and
 					// never emit SendPrivate(self, _).
@@ -160,7 +224,10 @@ fn run_resharing_protocol_with_tamper(
 						Some(f) => f(party_id, Some(to), data),
 						None => data,
 					};
-					message_queues.get_mut(&to).unwrap().push((party_id, payload));
+					// Messages to offline parties are dropped (dead node).
+					if let Some(queue) = message_queues.get_mut(&to) {
+						queue.push((party_id, payload));
+					}
 				},
 				Ok(Action::Return(_)) => {
 					// Protocol complete for this party
@@ -168,6 +235,32 @@ fn run_resharing_protocol_with_tamper(
 				Err(e) => {
 					return Err(format!("Protocol error for party {}: {}", party_id, e));
 				},
+			}
+		}
+
+		// Quiescence handling: with offline old members, the leader waits for
+		// Ready signals that never arrive. Mimic a production transport timeout
+		// by closing the ready window on the leader once.
+		if !any_activity {
+			if !ready_window_closed {
+				ready_window_closed = true;
+				protocols
+					.get_mut(&leader)
+					.expect("leader is online")
+					.close_ready_window()
+					.map_err(|e| format!("close_ready_window failed: {}", e))?;
+			} else {
+				quiescent_iterations += 1;
+				if quiescent_iterations > 5 {
+					let states: Vec<String> = all_parties
+						.iter()
+						.map(|p| format!("{}: {:?}", p, protocols[p].state()))
+						.collect();
+					return Err(format!(
+						"Protocol deadlocked after ready window closed; states: [{}]",
+						states.join(", ")
+					));
+				}
 			}
 		}
 	}
@@ -3626,4 +3719,244 @@ fn test_recovered_partial_variance_3_of_5() {
 // overshoot ≤ κ assertion runs in the default suite alongside the cheaper configs.
 fn test_recovered_partial_variance_4_of_6() {
 	analyze_recovered_partials(4, 6, 10);
+}
+
+// ============================================================================
+// Active-Set Liveness Tests (Ready round + dealer failover)
+// ============================================================================
+
+/// Resharing away from a dead node: the main operational reason to reshare.
+/// Old committee {0,1,2} (t=2) with party 2 offline; new committee {0,1,3}.
+/// The leader (party 0) closes the ready window, Act = {0,1} >= t_old, and
+/// dealers for subsets containing party 2 fail over to the other member.
+#[test]
+fn test_resharing_succeeds_with_offline_old_party() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 3],
+		&old_shares,
+		&public_key,
+		None,
+		&[2], // party 2 is offline
+		&[],
+	);
+
+	assert!(result.is_ok(), "Resharing with offline old party failed: {:?}", result.err());
+	let new_shares = result.unwrap();
+	assert_eq!(new_shares.len(), 3);
+	assert!(new_shares.contains_key(&0));
+	assert!(new_shares.contains_key(&1));
+	assert!(new_shares.contains_key(&3));
+
+	// The new committee can sign under the unchanged public key, including a
+	// signer pair containing the joining party.
+	let new_config = ThresholdConfig::new(2, 3).expect("valid config");
+	let signing_shares =
+		vec![new_shares.get(&0).unwrap().clone(), new_shares.get(&3).unwrap().clone()];
+	let is_valid =
+		run_signing_and_verify(&signing_shares, &public_key, new_config, b"offline reshare", b"");
+	assert!(is_valid, "Signature with reshared shares should verify");
+}
+
+/// Dealer failover for the lowest-ID old participant: party 0 previously dealt
+/// every subset containing it; with party 0 offline, dealers must fail over to
+/// `min(I ∩ Act)`. Also exercises a leader (party 1) that differs from the
+/// lowest old ID.
+#[test]
+fn test_resharing_offline_lowest_id_dealer_fails_over() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![1, 2, 3],
+		&old_shares,
+		&public_key,
+		None,
+		&[0], // the would-be default dealer for every subset containing it
+		&[],
+	);
+
+	assert!(result.is_ok(), "Resharing with offline dealer failed: {:?}", result.err());
+	let new_shares = result.unwrap();
+	assert_eq!(new_shares.len(), 3);
+
+	let new_config = ThresholdConfig::new(2, 3).expect("valid config");
+	let signing_shares =
+		vec![new_shares.get(&2).unwrap().clone(), new_shares.get(&3).unwrap().clone()];
+	let is_valid =
+		run_signing_and_verify(&signing_shares, &public_key, new_config, b"dealer failover", b"");
+	assert!(is_valid, "Signature with reshared shares should verify");
+}
+
+/// Below-threshold participation must abort: with only 1 of 3 old members
+/// online and t_old = 2, closing the ready window aborts with
+/// InsufficientParties instead of producing shares.
+#[test]
+fn test_resharing_aborts_below_old_threshold() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 3],
+		&old_shares,
+		&public_key,
+		None,
+		&[1, 2], // only old party 0 remains: |Act| = 1 < t_old = 2
+		&[],
+	);
+
+	let err = result.expect_err("resharing below the old threshold must abort");
+	assert!(
+		err.contains("Insufficient parties"),
+		"expected InsufficientParties abort, got: {}",
+		err
+	);
+}
+
+/// Only the session leader (lowest-ID new committee member) may close the
+/// ready window.
+#[test]
+fn test_close_ready_window_requires_leader() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let session_nonce = [0x77u8; 32];
+	let make_protocol = |party_id: u32| {
+		let share = shares.iter().find(|s| s.party_id() == party_id).cloned();
+		let config = ResharingConfig::new(
+			share,
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 3],
+			party_id,
+			public_key.clone(),
+		)
+		.expect("valid config");
+		ResharingProtocol::new(config, [9u8; 32], &session_nonce)
+	};
+
+	// Party 1 is not the leader (leader = min{0,1,3} = 0).
+	let mut non_leader = make_protocol(1);
+	assert_eq!(non_leader.leader(), 0);
+	assert!(non_leader.close_ready_window().is_err(), "non-leader must be rejected");
+
+	// Party 0 is the leader; closing is accepted (and idempotent).
+	let mut leader = make_protocol(0);
+	assert!(leader.close_ready_window().is_ok());
+	assert!(leader.close_ready_window().is_ok());
+}
+
+/// A slow-but-online old member that misses the ready window is excluded from
+/// `Act` but, as a new committee member, must still catch up as an observer and
+/// receive its new shares. Old committee {0,1,2} (t=2), new committee {1,2,3};
+/// party 2 (in both committees) is frozen until the leader closes the ready
+/// window, so Act = {0,1}. Party 2 contributes no entropy and deals nothing,
+/// yet must end up with a working share of the unchanged key.
+#[test]
+fn test_slow_old_member_excluded_from_act_still_gets_new_shares() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![1, 2, 3],
+		&old_shares,
+		&public_key,
+		None,
+		&[],
+		&[2], // party 2 lags past the ready window
+	);
+
+	assert!(result.is_ok(), "Resharing with slow old member failed: {:?}", result.err());
+	let new_shares = result.unwrap();
+	assert_eq!(new_shares.len(), 3);
+
+	// The slow party's share must be genuine: sign with a pair that includes it.
+	let new_config = ThresholdConfig::new(2, 3).expect("valid config");
+	let signing_shares =
+		vec![new_shares.get(&2).unwrap().clone(), new_shares.get(&3).unwrap().clone()];
+	let is_valid =
+		run_signing_and_verify(&signing_shares, &public_key, new_config, b"slow observer", b"");
+	assert!(is_valid, "Signature with the slow party's reshared share should verify");
+}
+
+/// A slow-but-online OldOnly member (leaving the committee) that misses the
+/// ready window is excluded from `Act` and participates purely as an observer:
+/// it contributes no entropy, deals nothing, receives no shares — but must
+/// still complete the session cleanly. The harness requires every online party
+/// (including the observer) to reach Done without a protocol error before it
+/// returns, so a successful run is the assertion.
+#[test]
+fn test_slow_old_only_member_observes_and_completes() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 3],
+		&old_shares,
+		&public_key,
+		None,
+		&[],
+		&[2], // party 2 is OldOnly and lags past the ready window
+	);
+
+	assert!(result.is_ok(), "Resharing with slow OldOnly observer failed: {:?}", result.err());
+	let new_shares = result.unwrap();
+	assert_eq!(new_shares.len(), 3);
+	assert!(!new_shares.contains_key(&2), "OldOnly observer must not receive a share");
+
+	let new_config = ThresholdConfig::new(2, 3).expect("valid config");
+	let signing_shares =
+		vec![new_shares.get(&1).unwrap().clone(), new_shares.get(&3).unwrap().clone()];
+	let is_valid =
+		run_signing_and_verify(&signing_shares, &public_key, new_config, b"oldonly observer", b"");
+	assert!(is_valid, "Signature with reshared shares should verify");
 }

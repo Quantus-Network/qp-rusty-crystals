@@ -416,25 +416,31 @@ impl fmt::Display for ResharingConfigError {
 /// This allows messages to be serialized/deserialized without knowing
 /// the specific round at deserialization time.
 ///
-/// # Protocol Rounds (5-round session-randomized protocol)
+/// # Protocol Rounds (session-randomized protocol with active-set liveness)
 ///
-/// - **Round 1**: Entropy commitment (old committee broadcasts `H(entropy)`)
-/// - **Round 2**: Entropy reveal (old committee reveals entropy, session seed computed)
+/// - **Round 1**: Entropy commitment / Ready (old committee broadcasts `H(entropy)`)
+/// - **Act proposal**: Leader proposes the active set `Act` of ready old members
+/// - **Round 2**: Entropy reveal (active members reveal entropy, session seed computed)
 /// - **Round 3**: Sub-share commitments (designated dealers broadcast `H(r_{I→J})`)
 /// - **Round 4**: Private delivery (dealers send `r_{I→J}` to new committee)
 /// - **Round 5**: Verification (share commitments, partial PKs)
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum ResharingMessage {
-	/// Round 1: Entropy commitment from old committee members.
+	/// Round 1: Entropy commitment from old committee members (doubles as Ready).
 	Round1(ResharingRound1EntropyCommitment),
-	/// Round 2: Entropy reveal from old committee members.
+	/// Round 2: Entropy reveal from active old committee members.
 	Round2(ResharingRound2EntropyReveal),
-	/// Round 3: Hash commitments to per-subset sub-shares from old committee.
+	/// Round 3: Hash commitments to per-subset sub-shares from active old committee.
 	Round3(ResharingRound3Broadcast),
 	/// Round 4: New share distributions to new committee.
 	Round4(ResharingRound4Message),
 	/// Round 5: Verification commitments from new committee.
 	Round5(ResharingRound5Broadcast),
+	/// Active-set proposal from the session leader (between Rounds 1 and 2).
+	///
+	/// Appended after the round variants to preserve Borsh variant indices of
+	/// the pre-existing wire format.
+	ActProposal(ResharingActProposal),
 }
 
 impl ResharingMessage {
@@ -446,6 +452,7 @@ impl ResharingMessage {
 			ResharingMessage::Round3(msg) => &msg.ssid,
 			ResharingMessage::Round4(msg) => &msg.ssid,
 			ResharingMessage::Round5(msg) => &msg.ssid,
+			ResharingMessage::ActProposal(msg) => &msg.ssid,
 		}
 	}
 
@@ -457,13 +464,18 @@ impl ResharingMessage {
 			ResharingMessage::Round3(msg) => msg.party_id,
 			ResharingMessage::Round4(msg) => msg.from_party_id,
 			ResharingMessage::Round5(msg) => msg.party_id,
+			ResharingMessage::ActProposal(msg) => msg.party_id,
 		}
 	}
 
 	/// Get the round number of this message.
+	///
+	/// The Act proposal sits between Rounds 1 and 2; it reports round 1
+	/// (it concludes the Ready phase that Round 1 commitments open).
 	pub fn round(&self) -> u8 {
 		match self {
 			ResharingMessage::Round1(_) => 1,
+			ResharingMessage::ActProposal(_) => 1,
 			ResharingMessage::Round2(_) => 2,
 			ResharingMessage::Round3(_) => 3,
 			ResharingMessage::Round4(_) => 4,
@@ -497,6 +509,59 @@ pub struct ResharingRound1EntropyCommitment {
 	pub party_id: ParticipantId,
 	/// Hash commitment to the entropy: `SHAKE256("resharing-entropy-commit-v1" || entropy)`.
 	pub commitment: [u8; COMMITMENT_HASH_SIZE],
+}
+
+// ============================================================================
+// Active-Set Proposal (Ready-Round Liveness)
+// ============================================================================
+
+/// Active-set ("Act") proposal broadcast by the session leader.
+///
+/// Round 1 entropy commitments double as *Ready* signals: an old committee
+/// member that broadcasts its commitment is declaring itself online and
+/// willing to participate. The session leader (the lowest-ID new committee
+/// member) collects these and proposes the active set `Act` — the old
+/// committee members that will contribute entropy and deal sub-shares.
+///
+/// The leader proposes automatically once every old committee member has
+/// committed (fast path). If some old members are offline, the caller invokes
+/// [`ResharingProtocol::close_ready_window`](super::ResharingProtocol::close_ready_window)
+/// on the leader after a transport-level timeout, and the leader proposes
+/// `Act` = the members that committed so far.
+///
+/// # Validity
+///
+/// Every party independently verifies the proposal and aborts on violation:
+///
+/// - sender is the session leader,
+/// - `active_set` is strictly sorted, unique, and a subset of the old committee,
+/// - `|active_set| >= t_old`.
+///
+/// The threshold requirement guarantees every old RSS subset `I` (size
+/// `n_old - t_old + 1`) intersects `Act`, so a live dealer exists for every
+/// subset: dealers are reassigned to the lowest-ID member of `I ∩ Act`.
+///
+/// # Trust in the leader
+///
+/// The leader cannot break safety: it cannot forge Ready signals (parties
+/// only advance once they have seen the Round 1 commitment of every `Act`
+/// member), and the deterministic sub-share derivation means dealer *identity*
+/// does not affect the derived shares. A malicious leader can at most deny
+/// service (abort/stall) or select *which* committed members participate —
+/// the session seed remains unbiased because `|Act| >= t_old` guarantees at
+/// least one honest member whose entropy is unpredictable at proposal time
+/// (commitments hide entropy until Round 2). Equivocating proposals put the
+/// receiving parties in different sessions; their deterministic sub-share
+/// commitments then disagree and the protocol aborts.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct ResharingActProposal {
+	/// Session identifier binding this message to the resharing session.
+	pub ssid: [u8; RESHARING_SSID_SIZE],
+	/// Party ID of the sender (must be the session leader).
+	pub party_id: ParticipantId,
+	/// Proposed active set: old committee members that will contribute entropy
+	/// and deal sub-shares. Strictly sorted, unique, `|active_set| >= t_old`.
+	pub active_set: Vec<ParticipantId>,
 }
 
 // ============================================================================
@@ -535,12 +600,13 @@ pub struct ResharingRound2EntropyReveal {
 
 /// Round 3 broadcast from old committee members.
 ///
-/// Each old committee member broadcasts hash commitments to the per-subset
-/// "sub-share" contributions they will privately deliver in Round 4. A party
-/// only commits to subsets where they are the *designated dealer* (the
-/// lowest-ID old participant in the subset). Other members of the same old
-/// subset independently recompute the same contributions and verify the
-/// commitments before Round 4 private delivery begins.
+/// Each active old committee member broadcasts hash commitments to the
+/// per-subset "sub-share" contributions they will privately deliver in Round 4.
+/// A party only commits to subsets where they are the *designated dealer* (the
+/// lowest-ID *active* old participant in the subset, `min(I ∩ Act)`). Other
+/// active members of the same old subset independently recompute the same
+/// contributions and verify the commitments before Round 4 private delivery
+/// begins.
 ///
 /// # Security
 ///

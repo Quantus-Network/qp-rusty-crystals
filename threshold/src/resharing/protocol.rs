@@ -6,12 +6,20 @@
 //! See `resharing/mod.rs` for a full description of the cryptographic protocol.
 //! In short:
 //!
-//! - **Round 1 (Entropy commitment)**: Old committee members commit to fresh entropy.
-//! - **Round 2 (Entropy reveal)**: Old committee members reveal entropy. All parties compute the
-//!   public session seed from these reveals after checking the commitments.
-//! - **Round 3 (Sub-share commitments)**: Each designated dealer broadcasts hash commitments to
-//!   deterministic sub-shares `r_{I→J}` derived from `s_I^old` and the public session seed. Other
-//!   old members of the same subset recompute and verify those commitments before Round 4.
+//! - **Round 1 (Entropy commitment / Ready)**: Old committee members commit to fresh entropy.
+//!   The commitment doubles as a *Ready* signal for active-set selection.
+//! - **Act proposal**: The session leader (lowest-ID new committee member) proposes the active
+//!   set `Act` of old members that will participate: all old members once everyone has committed
+//!   (fast path), or the committed subset after the caller closes the ready window
+//!   ([`ResharingProtocol::close_ready_window`]). Every party checks `Act` is a subset of the
+//!   old committee with `|Act| >= t_old`, which guarantees every old RSS subset intersects `Act`.
+//! - **Round 2 (Entropy reveal)**: Active old committee members reveal entropy. All parties
+//!   compute the public session seed from the active members' reveals after checking the
+//!   commitments.
+//! - **Round 3 (Sub-share commitments)**: Each designated dealer (lowest-ID member of
+//!   `I ∩ Act`) broadcasts hash commitments to deterministic sub-shares `r_{I→J}` derived from
+//!   `s_I^old` and the public session seed. Other active members of the same subset recompute
+//!   and verify those commitments before Round 4.
 //! - **Round 4 (Private delivery)**: Dealers privately deliver `r_{I→J}` to new committee members.
 //! - **Round 5 (Verification)**: New committee members verify received sub-shares, sum them into
 //!   new shares `s_J^new`, and broadcast commitments so each new subset can cross-verify.
@@ -27,6 +35,9 @@
 //! Round1Generate -> Round1Waiting -> Round2Generate -> Round2Waiting
 //!     -> Round3Generate -> Round3Waiting -> Combining -> Done
 //! ```
+//!
+//! The Act proposal is emitted and consumed within `Round1Waiting` / `Round2Waiting`; parties
+//! do not advance past those states until they know `Act`.
 
 use alloc::{
 	collections::BTreeMap,
@@ -48,10 +59,10 @@ use crate::{
 };
 
 use super::types::{
-	compute_resharing_ssid, NewShareData, ResharingConfig, ResharingMessage, ResharingOutput,
-	ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal, ResharingRound3Broadcast,
-	ResharingRound4Message, ResharingRound5Broadcast, SubsetMask, SubsetPair, COMMITMENT_HASH_SIZE,
-	ENTROPY_SIZE, RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
+	compute_resharing_ssid, NewShareData, ResharingActProposal, ResharingConfig, ResharingMessage,
+	ResharingOutput, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
+	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast, SubsetMask,
+	SubsetPair, COMMITMENT_HASH_SIZE, ENTROPY_SIZE, RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
 };
 
 /// Domain separator for the per-subset PRF seed (includes public session seed for randomization).
@@ -223,22 +234,24 @@ impl fmt::Display for ResharingProtocolError {
 
 /// Current state of the resharing protocol.
 ///
-/// # Protocol Rounds (5-round session-randomized protocol)
+/// # Protocol Rounds (session-randomized protocol with active-set liveness)
 ///
-/// - **Round 1**: Entropy commitment (old committee broadcasts `H(entropy)`)
-/// - **Round 2**: Entropy reveal (old committee reveals entropy, session seed computed)
+/// - **Round 1**: Entropy commitment / Ready (old committee broadcasts `H(entropy)`)
+/// - **Act proposal**: Leader proposes the active set of ready old members (within the
+///   Round 1/2 waiting states)
+/// - **Round 2**: Entropy reveal (active members reveal entropy, session seed computed)
 /// - **Round 3**: Sub-share commitments (designated dealers broadcast `H(r_{I→J})`)
 /// - **Round 4**: Private delivery (dealers send `r_{I→J}` to new committee)
 /// - **Round 5**: Verification (share commitments, partial PKs)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResharingState {
-	/// Generating Round 1 message (entropy commitment).
+	/// Generating Round 1 message (entropy commitment / Ready).
 	Round1Generate,
-	/// Waiting for Round 1 messages from old committee members.
+	/// Waiting for the active-set proposal (and, as leader, for Ready signals).
 	Round1Waiting,
-	/// Generating Round 2 message (entropy reveal).
+	/// Generating Round 2 message (entropy reveal, active members only).
 	Round2Generate,
-	/// Waiting for Round 2 messages from old committee members.
+	/// Waiting for Round 2 messages from active old committee members.
 	Round2Waiting,
 	/// Generating Round 3 message (commitments to per-subset sub-shares).
 	Round3Generate,
@@ -290,11 +303,25 @@ pub struct ResharingProtocol {
 	/// This party's generated entropy (old committee members only).
 	my_entropy: Option<[u8; ENTROPY_SIZE]>,
 	/// Round 1 entropy commitments received from old committee members.
+	/// A commitment doubles as that member's *Ready* signal.
 	round1_entropy_commits: BTreeMap<ParticipantId, [u8; COMMITMENT_HASH_SIZE]>,
-	/// Round 2 entropy reveals received from old committee members.
+	/// Round 2 entropy reveals received from active old committee members.
 	round2_entropy_reveals: BTreeMap<ParticipantId, [u8; ENTROPY_SIZE]>,
-	/// Session seed computed from all entropy contributions (computed after Round 2).
+	/// Session seed computed from the active set's entropy contributions
+	/// (computed after Round 2).
 	session_seed: Option<[u8; 32]>,
+
+	// ========================================================================
+	// Active-set selection (Ready-round liveness)
+	// ========================================================================
+	/// The agreed active set `Act`: old committee members that contribute
+	/// entropy and deal sub-shares. Sorted. Set by the leader when proposing,
+	/// or by receiving a valid `ActProposal`.
+	active_set: Option<Vec<ParticipantId>>,
+	/// Set by [`Self::close_ready_window`] on the leader: propose `Act` from
+	/// the Ready signals received so far instead of waiting for the full old
+	/// committee.
+	ready_window_closed: bool,
 
 	// ========================================================================
 	// Round 3-4: Sub-share commitment and delivery
@@ -387,6 +414,8 @@ impl ResharingProtocol {
 			round1_entropy_commits: BTreeMap::new(),
 			round2_entropy_reveals: BTreeMap::new(),
 			session_seed: None,
+			active_set: None,
+			ready_window_closed: false,
 			my_subshares: BTreeMap::new(),
 			my_round3: None,
 			round3_broadcasts: BTreeMap::new(),
@@ -439,6 +468,103 @@ impl ResharingProtocol {
 	/// Check if the protocol has failed.
 	pub fn is_failed(&self) -> bool {
 		matches!(self.state, ResharingState::Failed(_))
+	}
+
+	/// The session leader: the lowest-ID new committee member.
+	///
+	/// The leader proposes the active set `Act`. New committee members must all
+	/// be online for resharing to succeed (they receive the new shares), so the
+	/// leader is always reachable in a viable session.
+	pub fn leader(&self) -> ParticipantId {
+		self.config.new_participants().get(0).expect("new committee is non-empty (validated)")
+	}
+
+	/// The agreed active set `Act`, once known.
+	///
+	/// `None` until the leader's proposal is made (leader) or received
+	/// (everyone else). Sorted.
+	pub fn active_set(&self) -> Option<&[ParticipantId]> {
+		self.active_set.as_deref()
+	}
+
+	/// Close the Ready window (leader only): propose the active set from the
+	/// Ready signals (Round 1 entropy commitments) received so far, instead of
+	/// waiting for the full old committee.
+	///
+	/// Call this on the leader after a transport-level timeout when some old
+	/// committee members appear offline. The next `poke()` broadcasts the
+	/// proposal if at least `t_old` old members are ready, and aborts with
+	/// [`ResharingProtocolError::InsufficientParties`] otherwise.
+	///
+	/// Idempotent; a no-op if the active set has already been proposed.
+	pub fn close_ready_window(&mut self) -> Result<(), ResharingProtocolError> {
+		if self.config.my_party_id() != self.leader() {
+			return Err(ResharingProtocolError::InvalidState(format!(
+				"only the session leader ({}) can close the ready window",
+				self.leader()
+			)));
+		}
+		if self.active_set.is_some() {
+			return Ok(());
+		}
+		if !matches!(
+			self.state,
+			ResharingState::Round1Generate |
+				ResharingState::Round1Waiting |
+				ResharingState::Round2Generate |
+				ResharingState::Round2Waiting
+		) {
+			return Err(ResharingProtocolError::InvalidState(format!(
+				"cannot close ready window in state {:?}",
+				self.state
+			)));
+		}
+		self.ready_window_closed = true;
+		Ok(())
+	}
+
+	/// Whether `party` is in the agreed active set. `false` until `Act` is known.
+	fn is_active(&self, party: ParticipantId) -> bool {
+		self.active_set.as_ref().is_some_and(|act| act.binary_search(&party).is_ok())
+	}
+
+	/// Leader-side active-set proposal.
+	///
+	/// Returns `Some(SendMany(..))` when this party is the leader and the
+	/// proposal is due: either every old committee member has sent its Round 1
+	/// commitment (fast path), or the caller closed the ready window. Aborts
+	/// with `InsufficientParties` if the window was closed with fewer than
+	/// `t_old` ready members.
+	fn maybe_propose_act(
+		&mut self,
+	) -> Result<Option<Action<ResharingOutput>>, ResharingProtocolError> {
+		if self.active_set.is_some() || self.config.my_party_id() != self.leader() {
+			return Ok(None);
+		}
+		let have_all =
+			self.round1_entropy_commits.len() >= self.config.old_participants().len();
+		if !have_all && !self.ready_window_closed {
+			return Ok(None);
+		}
+
+		// BTreeMap keys iterate in sorted order, so `act` is sorted.
+		let act: Vec<ParticipantId> = self.round1_entropy_commits.keys().copied().collect();
+		let required = self.config.old_threshold() as usize;
+		if act.len() < required {
+			let err =
+				ResharingProtocolError::InsufficientParties { required, received: act.len() };
+			self.state = ResharingState::Failed(err.to_string());
+			return Err(err);
+		}
+
+		let proposal = ResharingActProposal {
+			ssid: self.ssid,
+			party_id: self.config.my_party_id(),
+			active_set: act.clone(),
+		};
+		self.active_set = Some(act);
+		let data = Self::serialize_message(&ResharingMessage::ActProposal(proposal))?;
+		Ok(Some(Action::SendMany(data)))
 	}
 
 	fn serialize_message(msg: &ResharingMessage) -> Result<Vec<u8>, ResharingProtocolError> {
@@ -532,9 +658,62 @@ impl ResharingProtocol {
 			ResharingMessage::Round3(broadcast) => self.handle_round3_message(from, broadcast),
 			ResharingMessage::Round4(m) => self.handle_round4_message(from, m),
 			ResharingMessage::Round5(broadcast) => self.handle_round5_message(from, broadcast),
+			ResharingMessage::ActProposal(m) => self.handle_act_proposal(from, m),
 		}
 
 		Ok(())
+	}
+
+	// ========================================================================
+	// Active-set proposal handling
+	// ========================================================================
+
+	fn handle_act_proposal(&mut self, from: ParticipantId, msg: ResharingActProposal) {
+		// Parties beyond the Round 1-2 waiting states already know Act;
+		// anything arriving later is a stale duplicate.
+		if !matches!(
+			self.state,
+			ResharingState::Round1Generate |
+				ResharingState::Round1Waiting |
+				ResharingState::Round2Generate |
+				ResharingState::Round2Waiting
+		) {
+			return;
+		}
+		if from != self.leader() {
+			log::warn!("Resharing: ignoring Act proposal from non-leader {}", from);
+			return;
+		}
+
+		// Validate: strictly sorted (thus unique), subset of the old committee,
+		// at least t_old members. An invalid proposal from the genuine leader is
+		// unrecoverable (no valid session can proceed), so fail fast rather than
+		// stalling until a transport timeout.
+		let act = &msg.active_set;
+		let sorted_unique = act.windows(2).all(|w| w[0] < w[1]);
+		let all_old = act.iter().all(|p| self.config.old_participants().contains(*p));
+		let enough = act.len() >= self.config.old_threshold() as usize;
+		if act.is_empty() || !sorted_unique || !all_old || !enough {
+			self.state = ResharingState::Failed(format!(
+				"invalid Act proposal from leader {}: {:?} (t_old = {})",
+				from,
+				act,
+				self.config.old_threshold()
+			));
+			return;
+		}
+
+		match &self.active_set {
+			None => self.active_set = Some(msg.active_set),
+			Some(existing) if *existing == msg.active_set => {}, // duplicate, ignore
+			Some(_) => {
+				// Two different proposals from the leader: equivocation.
+				self.state = ResharingState::Failed(format!(
+					"leader {} equivocated on the Act proposal",
+					from
+				));
+			},
+		}
 	}
 
 	// ========================================================================
@@ -570,7 +749,14 @@ impl ResharingProtocol {
 	}
 
 	fn handle_round1_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		if self.have_all_round1_entropy_commits() {
+		// If we are the leader, propose the active set once it is due.
+		if let Some(action) = self.maybe_propose_act()? {
+			return Ok(action);
+		}
+		// Advance once the active set is agreed. Round 1 commitments from Act
+		// members are awaited in Round2Waiting before the session seed is
+		// computed, so there is no need to block on them here.
+		if self.active_set.is_some() {
 			self.state = ResharingState::Round2Generate;
 			self.poke()
 		} else {
@@ -604,9 +790,16 @@ impl ResharingProtocol {
 		self.round1_entropy_commits.insert(from, msg.commitment);
 	}
 
-	fn have_all_round1_entropy_commits(&self) -> bool {
-		// We need entropy commitments from all old committee members
-		self.round1_entropy_commits.len() >= self.config.old_participants().len()
+	/// Entropy data (Round 1 commitment + Round 2 reveal) present for every
+	/// active-set member. `false` until the active set is known.
+	fn have_act_entropy_data(&self) -> bool {
+		match &self.active_set {
+			Some(act) => act.iter().all(|p| {
+				self.round1_entropy_commits.contains_key(p) &&
+					self.round2_entropy_reveals.contains_key(p)
+			}),
+			None => false,
+		}
 	}
 
 	/// Generate this party's entropy contribution from the constructor seed.
@@ -628,9 +821,9 @@ impl ResharingProtocol {
 	fn handle_round2_generate(
 		&mut self,
 	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// Only old committee members participate in Round 2 (entropy reveal).
-		// New-only parties stay in Round 2 waiting.
-		if !self.config.role().is_old_committee() {
+		// Only *active* old committee members reveal entropy. New-only parties
+		// and old members outside the active set observe from Round 2 waiting.
+		if !self.is_active(self.config.my_party_id()) {
 			self.state = ResharingState::Round2Waiting;
 			return Ok(Action::Wait);
 		}
@@ -653,8 +846,14 @@ impl ResharingProtocol {
 	}
 
 	fn handle_round2_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		if self.have_all_round2_entropy_reveals() {
-			// Verify all reveals match their commitments and compute session seed
+		// A new-only leader collects Ready signals from this state; propose the
+		// active set once it is due.
+		if let Some(action) = self.maybe_propose_act()? {
+			return Ok(action);
+		}
+		if self.have_act_entropy_data() {
+			// Verify the active set's reveals match their commitments and
+			// compute the session seed.
 			self.verify_entropy_and_compute_session_seed()?;
 			self.state = ResharingState::Round3Generate;
 			self.poke()
@@ -664,10 +863,18 @@ impl ResharingProtocol {
 	}
 
 	fn handle_round2_message(&mut self, from: ParticipantId, msg: ResharingRound2EntropyReveal) {
-		// Accept Round 2 messages during Round 1-3 (for late arrivals)
+		// Accept Round 2 messages from protocol start through Round 3. The
+		// window includes `Round1Generate`: a party that lags past the ready
+		// window (and is excluded from Act) drains its inbound backlog before
+		// its first poke, while still in the initial state. Reveals are only
+		// *used* after `have_act_entropy_data` confirms the matching Round 1
+		// commitment, so early acceptance cannot bypass the commit-reveal
+		// binding; Act membership already fixes every contributor's commitment
+		// before any honest reveal is sent.
 		if !matches!(
 			self.state,
-			ResharingState::Round1Waiting |
+			ResharingState::Round1Generate |
+				ResharingState::Round1Waiting |
 				ResharingState::Round2Generate |
 				ResharingState::Round2Waiting |
 				ResharingState::Round3Generate |
@@ -686,19 +893,32 @@ impl ResharingProtocol {
 		self.round2_entropy_reveals.insert(from, msg.entropy);
 	}
 
-	fn have_all_round2_entropy_reveals(&self) -> bool {
-		// We need entropy reveals from all old committee members
-		self.round2_entropy_reveals.len() >= self.config.old_participants().len()
-	}
-
-	/// Verify all entropy reveals match their commitments and compute the session seed.
+	/// Verify the active set's entropy reveals match their commitments and
+	/// compute the session seed.
+	///
+	/// Only active-set members contribute: the set of contributors must be
+	/// agreed by every party (it determines the seed), and `Act` is exactly
+	/// the agreed set. Reveals from non-active members (e.g. a late Round 1
+	/// commitment excluded from `Act`) are ignored.
 	fn verify_entropy_and_compute_session_seed(&mut self) -> Result<(), ResharingProtocolError> {
-		// Verify each reveal matches its commitment
-		for (&party_id, &entropy) in &self.round2_entropy_reveals {
-			let expected_commit = commit_entropy(&entropy);
+		let act = self.active_set.clone().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"Computing session seed before active set is agreed".to_string(),
+			)
+		})?;
+
+		// Verify each active member's reveal matches its commitment.
+		for &party_id in &act {
+			let entropy = self.round2_entropy_reveals.get(&party_id).ok_or_else(|| {
+				ResharingProtocolError::InternalError(format!(
+					"Missing entropy reveal from active party {} during verification",
+					party_id
+				))
+			})?;
+			let expected_commit = commit_entropy(entropy);
 			let actual_commit = self.round1_entropy_commits.get(&party_id).ok_or_else(|| {
 				ResharingProtocolError::InternalError(format!(
-					"Missing entropy commitment from party {} during verification",
+					"Missing entropy commitment from active party {} during verification",
 					party_id
 				))
 			})?;
@@ -708,18 +928,16 @@ impl ResharingProtocol {
 		}
 
 		// Compute session seed: SHAKE256("resharing-session-seed-v1" || ssid || party_id_1 ||
-		// entropy_1 || ...). The SSID is included so that even if parties reuse entropy seeds
-		// across different resharing sessions, the session_seed (and thus the sub-share
-		// derivation) will differ. Process parties in sorted order for determinism.
-		let mut sorted_parties: Vec<_> = self.round2_entropy_reveals.iter().collect();
-		sorted_parties.sort_by_key(|(party_id, _)| *party_id);
-
+		// entropy_1 || ...) over active members in sorted order (Act is sorted). The SSID is
+		// included so that even if parties reuse entropy seeds across different resharing
+		// sessions, the session_seed (and thus the sub-share derivation) will differ.
 		let mut state = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut state, SESSION_SEED_DOMAIN);
 		fips202::shake256_absorb(&mut state, &self.ssid);
-		for (&party_id, entropy) in &sorted_parties {
+		for &party_id in &act {
+			let entropy = self.round2_entropy_reveals.get(&party_id).expect("checked above");
 			fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
-			fips202::shake256_absorb(&mut state, *entropy);
+			fips202::shake256_absorb(&mut state, entropy);
 		}
 		fips202::shake256_finalize(&mut state);
 		let mut session_seed = [0u8; 32];
@@ -736,8 +954,9 @@ impl ResharingProtocol {
 	fn handle_round3_generate(
 		&mut self,
 	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// Only old committee members participate in Round 3.
-		if !self.config.role().is_old_committee() {
+		// Only active old committee members deal in Round 3. New-only parties
+		// and old members outside the active set wait for Round 4 traffic.
+		if !self.is_active(self.config.my_party_id()) {
 			self.state = ResharingState::Round4Waiting;
 			return Ok(Action::Wait);
 		}
@@ -792,10 +1011,18 @@ impl ResharingProtocol {
 	}
 
 	fn handle_round3_message(&mut self, from: ParticipantId, broadcast: ResharingRound3Broadcast) {
-		// Accept Round 3 messages during Round 2-4 states (for late arrivals and NewOnly parties)
+		// Accept Round 3 messages from protocol start through Round 4: a slow
+		// party excluded from Act can receive dealers' broadcasts while still
+		// in the Round 1-2 states (see `handle_round2_message`). The broadcasts
+		// are hash commitments, verified later against deterministic
+		// recomputation (old-subset peers) or delivered sub-shares (recipients),
+		// so early acceptance is harmless.
 		if !matches!(
 			self.state,
-			ResharingState::Round2Waiting |
+			ResharingState::Round1Generate |
+				ResharingState::Round1Waiting |
+				ResharingState::Round2Generate |
+				ResharingState::Round2Waiting |
 				ResharingState::Round3Generate |
 				ResharingState::Round3Waiting |
 				ResharingState::Round4Generate |
@@ -813,9 +1040,14 @@ impl ResharingProtocol {
 	}
 
 	fn have_enough_round3(&self) -> bool {
-		// We need a Round 3 broadcast from every party that is a designated dealer for at
-		// least one old subset. Conservative requirement: all old participants.
-		self.round3_broadcasts.len() >= self.config.old_participants().len()
+		// We need a Round 3 broadcast from every active member. Every designated
+		// dealer is active by construction (dealers are chosen from `I ∩ Act`),
+		// and active non-dealers broadcast an empty commitment map, so this is
+		// both sufficient and satisfiable with offline non-active members.
+		match &self.active_set {
+			Some(act) => act.iter().all(|p| self.round3_broadcasts.contains_key(p)),
+			None => false,
+		}
 	}
 
 	/// Old-subset peer verification for Round 3 dealer commitments.
@@ -1076,11 +1308,14 @@ impl ResharingProtocol {
 	}
 
 	fn have_all_round5(&self) -> bool {
-		// Round 5 has contributions from BOTH old and new committee members
-		// (old members broadcast status; new members commit to new shares),
-		// so we need broadcasts from every party that is in either committee.
-		let union = self.config.all_participants();
-		union.iter().all(|p| self.round5_broadcasts.contains_key(p))
+		// Round 5 has contributions from active old members (status) and new
+		// committee members (new-share commitments + partial PKs). Old members
+		// outside the active set may be offline, so they are not required —
+		// though if an online one reports failure, Combining still honors it.
+		let Some(act) = &self.active_set else { return false };
+		let required: alloc::collections::BTreeSet<ParticipantId> =
+			act.iter().copied().chain(self.config.new_participants().iter()).collect();
+		required.iter().all(|p| self.round5_broadcasts.contains_key(p))
 	}
 
 	// ========================================================================
@@ -1207,16 +1442,26 @@ impl ResharingProtocol {
 		}
 	}
 
-	/// Find the designated dealer for an old subset: the lowest-ID old
-	/// participant that is a member of the subset.
+	/// Find the designated dealer for an old subset: the lowest-ID *active*
+	/// old participant that is a member of the subset (`min(I ∩ Act)`).
 	///
 	/// Bit positions in `i_mask` correspond to indices in the (sorted)
-	/// `old_participants` list, so the dealer is the party at the lowest
-	/// set bit. Works for every party — in particular NewOnly parties that
-	/// don't hold an `existing_share`.
+	/// `old_participants` list. Works for every party — in particular NewOnly
+	/// parties that don't hold an `existing_share`.
+	///
+	/// The active-set rule `|Act| >= t_old` guarantees `I ∩ Act` is non-empty
+	/// for every old subset `I` (which has `n_old - t_old + 1` members), so
+	/// once `Act` is agreed this returns `Some` for every valid subset. All
+	/// members of `I` hold the same `s_I^old` and the sub-share derivation is
+	/// deterministic, so any of them produces identical sub-shares — dealer
+	/// identity affects only message routing, not the derived values.
+	///
+	/// Returns `None` before the active set is agreed; all call sites run
+	/// after Round 2 completes, which requires `Act`.
 	fn designated_dealer_for(&self, i_mask: SubsetMask) -> Option<ParticipantId> {
+		self.active_set.as_ref()?;
 		for (bit, party) in self.config.old_participants().iter().enumerate() {
-			if (i_mask & (1 << bit)) != 0 {
+			if (i_mask & (1 << bit)) != 0 && self.is_active(party) {
 				return Some(party);
 			}
 		}
@@ -2491,6 +2736,8 @@ mod tests {
 		let mut protocol = ResharingProtocol::new(resharing_config, [1u8; 32], &[2u8; 32]);
 		let session_seed = [9u8; 32];
 		protocol.session_seed = Some(session_seed);
+		// Model the post-Act state: the full old committee is active.
+		protocol.active_set = Some(vec![0, 1, 2]);
 
 		let i_mask = 0b011u16;
 		let s_i = shares[0].shares().get(&i_mask).expect("old subset share");

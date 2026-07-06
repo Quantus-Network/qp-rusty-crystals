@@ -20,28 +20,41 @@ Without resharing, any change would require generating a new key and migrating a
 - **New Committee**: Parties that will hold new shares (threshold `t_new` of `n_new`)
 - **Overlap**: Parties may be in both committees
 
-### Protocol Rounds (5-round session-randomized protocol)
+### Protocol Rounds (session-randomized protocol with active-set liveness)
 
-This module uses **distributed per-subset re-sharing** with SSID-based replay protection and public session randomization. At no point does any party ever assemble the full secret `s`, and no individual share is exposed on public broadcast traffic. Round 4 private traffic does contain secret share material and requires an authenticated-encrypted channel.
+This module uses **distributed per-subset re-sharing** with SSID-based replay protection, public session randomization, and active-set liveness (resharing succeeds when up to `n_old − t_old` old members are offline). At no point does any party ever assemble the full secret `s`, and no individual share is exposed on public broadcast traffic. Round 4 private traffic does contain secret share material and requires an authenticated-encrypted channel.
 
 ```
-Round 1: Entropy Commitment (Session Randomization)
+Round 1: Entropy Commitment / Ready (Session Randomization)
 ├── Each old committee member generates fresh entropy and broadcasts H(entropy).
+├── The commitment doubles as that member's Ready signal.
 └── Commit-reveal prevents any party from biasing the session seed.
 
+Act Proposal (Active-Set Selection)
+├── The session leader (lowest-ID new committee member) proposes the active set Act:
+│   all old members once everyone has committed (fast path), or the committed subset
+│   after the caller closes the ready window (close_ready_window(), e.g. on a
+│   transport timeout).
+├── Every party verifies: sender is the leader, Act ⊆ old committee, |Act| ≥ t_old.
+│   |Act| ≥ t_old guarantees every old subset I (size n_old − t_old + 1) intersects
+│   Act, so a live dealer exists for every subset.
+└── If fewer than t_old old members are ready, the protocol aborts
+    (InsufficientParties).
+
 Round 2: Entropy Reveal (Public Session Seed)
-├── Old committee members reveal their entropy.
+├── Active old committee members reveal their entropy.
 ├── All parties verify reveals against Round 1 commitments.
-└── Session seed = SHAKE256("resharing-session-seed-v1" || party_1 || entropy_1 || ...)
-    computed deterministically from all contributions in sorted party ID order.
+└── Session seed = SHAKE256("resharing-session-seed-v1" || ssid || party_1 || entropy_1 || ...)
+    computed deterministically from the active set's contributions in sorted party ID order.
 
 Round 3: Per-Subset Commitments
-├── For each old subset I, the designated dealer D_I (lowest-ID old participant in I)
-│   deterministically derives bounded sub-shares r_{I→J} for every new subset J such that
-│   Σ_J r_{I→J} = s_I^old. The derivation incorporates the public session seed for
-│   per-session randomization.
+├── For each old subset I, the designated dealer D_I = min(I ∩ Act) (lowest-ID active
+│   old participant in I) deterministically derives bounded sub-shares r_{I→J} for every
+│   new subset J such that Σ_J r_{I→J} = s_I^old. The derivation incorporates the public
+│   session seed for per-session randomization. All members of I hold the same s_I^old
+│   and the derivation is deterministic, so dealer identity does not affect the values.
 ├── D_I broadcasts H(r_{I→J}) for each (I, J).
-└── Every other old member of I recomputes the same r_{I→J} values and verifies
+└── Every other active member of I recomputes the same r_{I→J} values and verifies
     D_I's commitments before any Round 4 private delivery occurs.
 
 Round 4: Private Sub-Share Reveal (⚠️ REQUIRES SECURE CHANNEL)
@@ -64,7 +77,7 @@ Because `Σ_J s_J^new = Σ_J Σ_I r_{I→J} = Σ_I s_I^old = s`, the secret — 
 
 ## Session Randomization and Threat Model
 
-The 5-round protocol provides public session randomization, replay protection, and anti-bias commit-reveal. It does **not** provide post-compromise forward secrecy.
+The protocol provides public session randomization, replay protection, and anti-bias commit-reveal. It does **not** provide post-compromise forward secrecy.
 
 Round 2 entropy reveals are part of the public transcript. After Round 2, the `session_seed` is public transcript material. Because sub-shares are derived deterministically from `session_seed`, `i_mask`, and `s_I^old`, an attacker who records the transcript and later compromises old subset shares can recompute the resharing randomness and derive the corresponding new shares.
 
@@ -95,7 +108,8 @@ Before Round 2 reveals are known, an attacker cannot predict the session seed un
 |----------|-----------|
 | **Secrecy of `s`** | No party — not even any dealer — ever holds `s` in clear. Each `D_I` only handles `s_I^old`, which they already had. |
 | **Replay protection** | Every message carries an SSID derived from the old/new committees, public key, and session nonce. Messages with a mismatched SSID are ignored. |
-| **Session randomization** | Session seed incorporates the SSID and fresh entropy from all old committee members via commit-reveal, so different sessions produce different deterministic sub-share splits even if entropy is accidentally reused. This does not provide post-compromise forward secrecy once the transcript is recorded. |
+| **Session randomization** | Session seed incorporates the SSID and fresh entropy from all active old committee members via commit-reveal, so different sessions produce different deterministic sub-share splits even if entropy is accidentally reused. This does not provide post-compromise forward secrecy once the transcript is recorded. |
+| **Liveness with offline old members** | Round 1 commitments double as Ready signals. The session leader (lowest-ID new committee member) proposes the active set `Act` of ready members (`|Act| ≥ t_old`); dealers are assigned as `min(I ∩ Act)`, so resharing completes with up to `n_old − t_old` old members offline. The leader cannot break safety: parties verify `Act` against the Ready signals they received themselves, sub-share derivation is deterministic (dealer identity doesn't change values), and the seed stays unbiased because `Act` is fixed before any entropy is revealed and contains at least one honest member. A malicious leader can at most deny service or select among ready members; equivocating proposals lead to mismatched deterministic commitments and an abort. |
 | **Confidentiality of contributions** | Rounds 1-3, 5 broadcast only hash commitments; Round 4 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
 | **Cheating-dealer detection** | Old-subset peers recompute and verify Round 3 commitments before Round 4 whenever the old subset has another member. New-subset members verify delivered sub-shares against Round 3 commitments, reject over-large sub-share coefficients, and reject recovered signing partials that exceed the existing hyperball safety envelope. A final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching aggregate-secret corruption even when an old subset has size 1. If any verification fails, the protocol aborts. |
 | **PK Preservation** | Public key `t = A·s1 + s2` unchanged, verified at the end of Round 5 via a deterministic byte-equality check against the original PK. |
@@ -243,7 +257,8 @@ Each party has a role determined by committee membership:
 
 ## Message Types
 
-- `Round1EntropyCommitment`: Hash commitment to entropy `H(entropy)` for session randomization
+- `Round1EntropyCommitment`: Hash commitment to entropy `H(entropy)` for session randomization; doubles as the sender's Ready signal
+- `ActProposal`: The leader's proposed active set `Act` (sorted, `⊆` old committee, `|Act| ≥ t_old`)
 - `Round2EntropyReveal`: Revealed entropy (32 bytes) — verified against Round 1 commitment
 - `Round3Broadcast`: Per-subset commitment hashes `H(r_{I→J})` (no plaintext shares)
 - `Round4Message`: Private sub-share reveal (**requires secure channel**) — one message per (dealer, recipient) carrying every `r_{I→J}` the dealer owes that recipient. Dealers handle self-deals locally and never emit `SendPrivate(self, _)`.
@@ -257,14 +272,14 @@ Round1Generate -> Round1Waiting -> Round2Generate -> Round2Waiting
     -> Round5Generate -> Round5Waiting -> Combining -> Done
 ```
 
-NewOnly parties skip Rounds 1-2 (entropy commit-reveal) and go directly to `Round2Waiting`.
+NewOnly parties skip Rounds 1-2 (entropy commit-reveal) and go directly to `Round2Waiting`. The Act proposal is emitted and consumed within the `Round1Waiting`/`Round2Waiting` states; parties do not advance past them until `Act` is agreed. Old members outside `Act` observe (they verify and, if in the new committee, receive shares) but do not contribute entropy or deal.
 
 ## Limitations
 
 - Maximum 16 parties (due to u16 subset masks)
-- Requires every designated dealer to be online; if a dealer is offline or cheats, the protocol aborts (no recovery / re-deal in this implementation)
+- Requires at least `t_old` old committee members (and every new committee member) to be online. Offline old members are excluded from the active set after the caller closes the ready window (`close_ready_window()` on the leader, e.g. after a transport timeout); dealers fail over to `min(I ∩ Act)`. If an *active* dealer goes offline mid-session or cheats, the protocol still aborts (no mid-session re-deal in this implementation) — restart the session and the dead dealer will be excluded from the next active set.
 - **Secure channels required for Round 4 private messages** (see Transport Security section above)
-- **Cryptographically random entropy required from each old committee member** (see Entropy Requirements section above)
+- **Cryptographically random entropy required from each active old committee member** (see Entropy Requirements section above)
 
 ## Coefficient Growth and Signing Security
 
