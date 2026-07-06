@@ -356,6 +356,8 @@ pub enum ResharingConfigError {
 	PublicKeyMismatch,
 	/// Share's threshold doesn't match the old_threshold parameter.
 	ThresholdMismatch { share_threshold: u32, config_threshold: u32 },
+	/// Signer configuration is missing the verifying key for a new committee member.
+	MissingVerifyingKey(ParticipantId),
 }
 
 impl fmt::Display for ResharingConfigError {
@@ -375,6 +377,9 @@ impl fmt::Display for ResharingConfigError {
 			},
 			ResharingConfigError::PartyNotInEitherCommittee { party_id } => {
 				write!(f, "Party {} is not in either old or new committee", party_id)
+			},
+			ResharingConfigError::MissingVerifyingKey(party_id) => {
+				write!(f, "Missing verifying key for new committee member {}", party_id)
 			},
 			ResharingConfigError::DuplicateParticipant => {
 				write!(f, "Duplicate participant ID in committee")
@@ -441,6 +446,9 @@ pub enum ResharingMessage {
 	/// Appended after the round variants to preserve Borsh variant indices of
 	/// the pre-existing wire format.
 	ActProposal(ResharingActProposal),
+	/// Round 6: Signed acceptance of the session transcript from new committee
+	/// members. Appended to preserve Borsh variant indices.
+	Accept(ResharingAccept),
 }
 
 impl ResharingMessage {
@@ -453,6 +461,7 @@ impl ResharingMessage {
 			ResharingMessage::Round4(msg) => &msg.ssid,
 			ResharingMessage::Round5(msg) => &msg.ssid,
 			ResharingMessage::ActProposal(msg) => &msg.ssid,
+			ResharingMessage::Accept(msg) => &msg.ssid,
 		}
 	}
 
@@ -465,6 +474,7 @@ impl ResharingMessage {
 			ResharingMessage::Round4(msg) => msg.from_party_id,
 			ResharingMessage::Round5(msg) => msg.party_id,
 			ResharingMessage::ActProposal(msg) => msg.party_id,
+			ResharingMessage::Accept(msg) => msg.party_id,
 		}
 	}
 
@@ -480,6 +490,7 @@ impl ResharingMessage {
 			ResharingMessage::Round3(_) => 3,
 			ResharingMessage::Round4(_) => 4,
 			ResharingMessage::Round5(_) => 5,
+			ResharingMessage::Accept(_) => 6,
 		}
 	}
 }
@@ -562,6 +573,169 @@ pub struct ResharingActProposal {
 	/// Proposed active set: old committee members that will contribute entropy
 	/// and deal sub-shares. Strictly sorted, unique, `|active_set| >= t_old`.
 	pub active_set: Vec<ParticipantId>,
+}
+
+// ============================================================================
+// Round 6: Signed Transcript Acceptance
+// ============================================================================
+
+/// Maximum accepted signature length in bytes (bounds deserialization).
+///
+/// Large enough for ML-DSA-87 signatures (4627 bytes) with headroom; small
+/// enough to bound memory on malformed input.
+pub const MAX_ACCEPT_SIGNATURE_LEN: usize = 8192;
+
+/// Round 6 broadcast: a new committee member's signed acceptance of the
+/// session transcript.
+///
+/// After completing all Round 5 verifications (sub-share commitment checks,
+/// new-share consistency, recovered-partial norm guard, and public-key
+/// preservation), each new committee member signs the session's transcript
+/// hash with its long-term key (see
+/// [`TranscriptSigner`](crate::keygen::dkg::TranscriptSigner)) and broadcasts
+/// the signature.
+///
+/// # What agreement on the transcript hash provides
+///
+/// The transcript hash covers the active set, the session seed, every active
+/// member's Round 3 dealer commitments, and every required Round 5 broadcast.
+/// Each party verifies every received acceptance against its *own* computed
+/// transcript hash, so a valid set of acceptances from the full new committee
+/// implies all of them observed identical protocol broadcasts. A dealer that
+/// equivocates (sends different Round 3/5 broadcasts to different parties)
+/// causes signature verification to fail on at least one honest party, which
+/// then aborts.
+///
+/// The signature is over `SHAKE256("resharing-accept-v1" || ssid ||
+/// transcript_hash)`, domain-separating acceptances from any other use of the
+/// same long-term key.
+#[derive(Debug, Clone, BorshSerialize)]
+pub struct ResharingAccept {
+	/// Session identifier binding this message to the resharing session.
+	pub ssid: [u8; RESHARING_SSID_SIZE],
+	/// Party ID of the sender (must be a new committee member).
+	pub party_id: ParticipantId,
+	/// Signature over the acceptance hash (raw bytes, scheme-dependent).
+	pub signature: Vec<u8>,
+}
+
+impl BorshDeserialize for ResharingAccept {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; RESHARING_SSID_SIZE]>::deserialize_reader(reader)?;
+		let party_id = ParticipantId::deserialize_reader(reader)?;
+		let sig_len = u32::deserialize_reader(reader)? as usize;
+		if sig_len > MAX_ACCEPT_SIGNATURE_LEN {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingAccept.signature exceeds MAX_ACCEPT_SIGNATURE_LEN",
+			));
+		}
+		let mut signature = alloc::vec![0u8; sig_len];
+		reader.read_exact(&mut signature)?;
+		Ok(Self { ssid, party_id, signature })
+	}
+}
+
+/// Long-term-key signing configuration for the resharing protocol.
+///
+/// Mirrors the DKG's signer configuration: this party's signer plus the
+/// verifying keys of (at least) every new committee member. Only new
+/// committee members produce acceptance signatures, but every participant
+/// verifies them, so every participant needs the new committee's keys.
+#[derive(Clone)]
+pub struct ResharingSignerConfig<S: crate::keygen::dkg::TranscriptSigner> {
+	/// This party's signer for transcript acceptance (used only if this party
+	/// is in the new committee).
+	pub my_signer: S,
+	/// Verifying keys, keyed by participant ID. Must cover every new
+	/// committee member; extra entries are ignored.
+	pub verifying_keys: BTreeMap<ParticipantId, S::PublicKey>,
+}
+
+impl<S: crate::keygen::dkg::TranscriptSigner> ResharingSignerConfig<S> {
+	/// Create a signer configuration, checking that `verifying_keys` covers
+	/// every new committee member.
+	pub fn new(
+		my_signer: S,
+		verifying_keys: BTreeMap<ParticipantId, S::PublicKey>,
+		new_participants: &[ParticipantId],
+	) -> Result<Self, ResharingConfigError> {
+		for p in new_participants {
+			if !verifying_keys.contains_key(p) {
+				return Err(ResharingConfigError::MissingVerifyingKey(*p));
+			}
+		}
+		Ok(Self { my_signer, verifying_keys })
+	}
+}
+
+/// Publicly verifiable certificate of a completed resharing session.
+///
+/// The no-ZK analog of a handoff certificate: it attests *process integrity*
+/// and *public-key preservation* — every new committee member verified its
+/// shares, observed the same transcript, and confirmed the reshared key still
+/// reconstructs the original public key. It does **not** prove statements
+/// about share distributions (that would require the deferred ZK machinery).
+///
+/// Verification requires only the new committee's verifying keys — no share
+/// material. A verifier that additionally holds the broadcast transcript can
+/// recompute `transcript_hash` and the `Σ_J t_J^new = T` public-key check
+/// independently.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct ResharingCertificate {
+	/// Session identifier of the completed session.
+	pub ssid: [u8; RESHARING_SSID_SIZE],
+	/// The active set of old committee members that dealt in this session.
+	pub active_set: Vec<ParticipantId>,
+	/// Hash of the session transcript (active set, session seed, Round 3
+	/// dealer commitments, Round 5 broadcasts).
+	pub transcript_hash: [u8; COMMITMENT_HASH_SIZE],
+	/// Acceptance signatures from every new committee member, keyed by
+	/// participant ID.
+	pub accepts: BTreeMap<ParticipantId, Vec<u8>>,
+}
+
+impl ResharingCertificate {
+	/// Verify the certificate: every new committee member has a valid
+	/// acceptance signature over this certificate's `ssid` and
+	/// `transcript_hash`.
+	///
+	/// `verifying_keys` must contain a key for every member of
+	/// `new_participants`; returns `false` if any key or signature is missing
+	/// or invalid.
+	pub fn verify<S: crate::keygen::dkg::TranscriptSigner>(
+		&self,
+		new_participants: &[ParticipantId],
+		verifying_keys: &BTreeMap<ParticipantId, S::PublicKey>,
+	) -> bool {
+		let accept_hash = compute_accept_hash(&self.ssid, &self.transcript_hash);
+		new_participants.iter().all(|p| {
+			match (verifying_keys.get(p), self.accepts.get(p)) {
+				(Some(pk), Some(sig)) => S::verify_bytes(pk, &accept_hash, sig),
+				_ => false,
+			}
+		})
+	}
+}
+
+/// Domain separator for the acceptance hash.
+const ACCEPT_DOMAIN: &[u8] = b"resharing-accept-v1";
+
+/// Compute the 32-byte hash that new committee members sign to accept the
+/// session transcript: `SHAKE256("resharing-accept-v1" || ssid || transcript_hash)`.
+pub fn compute_accept_hash(
+	ssid: &[u8; RESHARING_SSID_SIZE],
+	transcript_hash: &[u8; COMMITMENT_HASH_SIZE],
+) -> [u8; 32] {
+	use qp_rusty_crystals_dilithium::fips202;
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, ACCEPT_DOMAIN);
+	fips202::shake256_absorb(&mut state, ssid);
+	fips202::shake256_absorb(&mut state, transcript_hash);
+	fips202::shake256_finalize(&mut state);
+	let mut out = [0u8; 32];
+	fips202::shake256_squeeze(&mut out, &mut state);
+	out
 }
 
 // ============================================================================
@@ -903,6 +1077,10 @@ pub struct ResharingOutput {
 	pub public_key: PublicKey,
 	/// The new threshold configuration.
 	pub new_config: ThresholdConfig,
+	/// Certificate of the completed session: acceptance signatures from every
+	/// new committee member over the agreed transcript hash. Verifiable by any
+	/// third party holding the new committee's verifying keys.
+	pub certificate: ResharingCertificate,
 }
 
 // ============================================================================

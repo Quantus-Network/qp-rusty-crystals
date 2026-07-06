@@ -10,7 +10,7 @@
 //! in plaintext and **MUST** be transmitted over an authenticated-encrypted channel.
 //! This protocol does not provide its own encryption layer.
 //!
-//! - `Action::SendMany` (Rounds 1, 2, 3, 5): Requires authenticated broadcast (integrity)
+//! - `Action::SendMany` (Rounds 1, 2, 3, 5, 6): Requires authenticated broadcast (integrity)
 //! - `Action::SendPrivate` (Round 4): **Requires authenticated encryption** (confidentiality +
 //!   integrity)
 //!
@@ -34,6 +34,9 @@
 //! - **Round 3**: Sub-share commitments - designated dealers broadcast `H(r_{I→J})`
 //! - **Round 4**: Private delivery - dealers send `r_{I→J}` to new committee (**secure channel**)
 //! - **Round 5**: Verification - share commitments, partial PKs
+//! - **Round 6**: Signed transcript acceptance - new committee members sign the transcript hash
+//!   with their long-term keys ([`TranscriptSigner`]); the collected signatures form a publicly
+//!   verifiable [`ResharingCertificate`]
 //!
 //! For each old RSS subset `I` (a `k_old`-subset of the old committee whose members all hold the
 //! η-bounded share `s_I^old`), the lowest-ID *active* member of `I` (the "designated dealer"
@@ -69,6 +72,10 @@
 //! - **Cheating-dealer detection**: New subset members cross-verify computed `s_J^new` values;
 //!   public-key invariant verification catches inconsistent dealing.
 //! - **Public key preservation**: `t = A·s1 + s2` is unchanged.
+//! - **Transcript agreement + attestation**: Round 6 acceptance signatures are verified by every
+//!   party against its own transcript hash, so completion implies all parties observed identical
+//!   broadcasts (equivocation causes an abort). The resulting certificate is verifiable by third
+//!   parties holding the new committee's verifying keys.
 //!
 //! # Proactive Security Model
 //!
@@ -98,7 +105,7 @@
 //!
 //! ```ignore
 //! use qp_rusty_crystals_threshold::resharing::{
-//!     ResharingConfig, ResharingProtocol, Action,
+//!     ResharingConfig, ResharingProtocol, ResharingSignerConfig, Action,
 //! };
 //! use rand::RngCore;
 //!
@@ -120,8 +127,11 @@
 //!     public_key,
 //! )?;
 //!
+//! // Long-term-key signer (e.g. Ed25519) + new committee's verifying keys for Round 6.
+//! let signer_config = ResharingSignerConfig::new(my_signer, verifying_keys, &new_participants)?;
+//!
 //! // Old committee members pass Some(existing_share); new-only parties pass None.
-//! let mut protocol = ResharingProtocol::new(config, existing_share, seed, &session_nonce)?;
+//! let mut protocol = ResharingProtocol::new(config, signer_config, seed, &session_nonce)?;
 //!
 //! loop {
 //!     match protocol.poke()? {
@@ -132,6 +142,7 @@
 //!         Action::Return(output) => {
 //!             // Resharing complete!
 //!             let new_share = output.private_share;
+//!             let certificate = output.certificate; // publicly verifiable
 //!             break;
 //!         }
 //!     }
@@ -144,11 +155,17 @@ mod types;
 
 // Re-export public types
 pub use types::{
-	compute_resharing_ssid, NewShareData, ResharingActProposal, ResharingConfig, ResharingMessage,
+	compute_accept_hash, compute_resharing_ssid, NewShareData, ResharingAccept,
+	ResharingActProposal, ResharingCertificate, ResharingConfig, ResharingMessage,
 	ResharingOutput, ResharingRole, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
-	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast, SubsetMask,
-	SubsetPair, ENTROPY_SIZE, RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
+	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast,
+	ResharingSignerConfig, SubsetMask, SubsetPair, ENTROPY_SIZE, MAX_ACCEPT_SIGNATURE_LEN,
+	RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
 };
+
+// Re-export the long-term-key signing trait used for Round 6 acceptance, so
+// integrators don't need to reach into the DKG module.
+pub use crate::keygen::dkg::TranscriptSigner;
 
 pub use protocol::{
 	resharing_norm_enlargement, Action, ResharingProtocol, ResharingProtocolError, ResharingState,

@@ -16,6 +16,9 @@ use qp_rusty_crystals_threshold::resharing::{
 	ResharingProtocol, ResharingState,
 };
 
+mod common;
+use common::{new_test_protocol, TestSigner};
+
 /// Helper to run the resharing protocol locally with simulated message passing.
 fn run_resharing_protocol(
 	old_threshold: u32,
@@ -106,7 +109,7 @@ fn run_resharing_protocol_full(
 	let session_nonce = [0x99u8; 32];
 
 	// Create protocol instances for each party
-	let mut protocols: HashMap<u32, ResharingProtocol> = HashMap::new();
+	let mut protocols: HashMap<u32, ResharingProtocol<TestSigner>> = HashMap::new();
 
 	for &party_id in &all_parties {
 		let existing_share = old_shares.get(&party_id).cloned();
@@ -131,7 +134,7 @@ fn run_resharing_protocol_full(
 			*byte = ((party_id as u8).wrapping_mul(i as u8)).wrapping_add(0x42);
 		}
 
-		let protocol = ResharingProtocol::new(config, seed, &session_nonce);
+		let protocol = new_test_protocol(config, seed, &session_nonce);
 		protocols.insert(party_id, protocol);
 	}
 
@@ -265,10 +268,14 @@ fn run_resharing_protocol_full(
 		}
 	}
 
-	// Collect new shares from new committee members
+	// Collect outputs from every online party (new members carry shares;
+	// old-only observers carry just the certificate).
 	let mut new_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	let verifying_keys: std::collections::BTreeMap<u32, u32> =
+		all_parties.iter().map(|&p| (p, p)).collect();
+	let mut reference_transcript_hash: Option<[u8; 32]> = None;
 
-	for &party_id in &new_participants {
+	for &party_id in &all_parties {
 		let protocol = protocols.get_mut(&party_id).unwrap();
 
 		if protocol.is_failed() {
@@ -279,13 +286,30 @@ fn run_resharing_protocol_full(
 			return Err(format!("Party {} not done", party_id));
 		}
 
-		// Get the output using take_output
-		if let Some(output) = protocol.take_output() {
+		let Some(output) = protocol.take_output() else {
+			return Err(format!("Party {} has no output", party_id));
+		};
+
+		// Every party must emit a valid certificate over the same transcript.
+		let cert = &output.certificate;
+		if !cert.verify::<TestSigner>(&new_participants, &verifying_keys) {
+			return Err(format!("Party {}'s certificate does not verify", party_id));
+		}
+		match reference_transcript_hash {
+			None => reference_transcript_hash = Some(cert.transcript_hash),
+			Some(reference) =>
+				if cert.transcript_hash != reference {
+					return Err(format!(
+						"Party {} disagrees on the certificate transcript hash",
+						party_id
+					));
+				},
+		}
+
+		if new_participants.contains(&party_id) {
 			if let Some(share) = output.private_share {
 				new_shares.insert(party_id, share);
 			}
-		} else {
-			return Err(format!("Party {} has no output", party_id));
 		}
 	}
 
@@ -527,7 +551,7 @@ fn test_resharing_protocol_creation() {
 
 	let protocol_seed = [42u8; 32];
 	let session_nonce = [0x88u8; 32];
-	let protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
+	let protocol = new_test_protocol(resharing_config, protocol_seed, &session_nonce);
 	assert_eq!(*protocol.state(), ResharingState::Round1Generate);
 }
 
@@ -550,7 +574,7 @@ fn test_resharing_protocol_round1_generation() {
 
 	let protocol_seed = [42u8; 32];
 	let session_nonce = [0x55u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
+	let mut protocol = new_test_protocol(resharing_config, protocol_seed, &session_nonce);
 
 	// First poke should generate Round 1 message (entropy commitment)
 	let action = protocol.poke().expect("poke should succeed");
@@ -594,7 +618,7 @@ fn test_resharing_new_party_skips_round1() {
 
 	let protocol_seed = [42u8; 32];
 	let session_nonce = [0x66u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
+	let mut protocol = new_test_protocol(resharing_config, protocol_seed, &session_nonce);
 
 	// New party should skip Round 1-2 (entropy commit-reveal) and wait
 	let action = protocol.poke().expect("poke should succeed");
@@ -945,7 +969,7 @@ fn test_valid_resharing_configuration_succeeds() {
 	.expect("valid config");
 
 	let session_nonce = [0xFFu8; 32];
-	let _protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
+	let _protocol = new_test_protocol(resharing_config, [42u8; 32], &session_nonce);
 
 	// Valid: NewOnly with None
 	let resharing_config2 = ResharingConfig::new(
@@ -959,7 +983,7 @@ fn test_valid_resharing_configuration_succeeds() {
 	)
 	.expect("valid config for NewOnly");
 
-	let _protocol2 = ResharingProtocol::new(resharing_config2, [42u8; 32], &session_nonce);
+	let _protocol2 = new_test_protocol(resharing_config2, [42u8; 32], &session_nonce);
 }
 
 #[test]
@@ -1024,7 +1048,7 @@ fn test_resharing_round1_message_from_non_member_ignored() {
 	.expect("valid config");
 
 	let session_nonce = [0x44u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
+	let mut protocol = new_test_protocol(resharing_config, [42u8; 32], &session_nonce);
 
 	// Generate Round 1 message first
 	let _ = protocol.poke().expect("poke should succeed");
@@ -1072,8 +1096,8 @@ fn test_resharing_duplicate_message_ignored() {
 	.expect("valid config");
 
 	let session_nonce = [0x33u8; 32];
-	let mut protocol0 = ResharingProtocol::new(config0, [0u8; 32], &session_nonce);
-	let mut protocol1 = ResharingProtocol::new(config1, [1u8; 32], &session_nonce);
+	let mut protocol0 = new_test_protocol(config0, [0u8; 32], &session_nonce);
+	let mut protocol1 = new_test_protocol(config1, [1u8; 32], &session_nonce);
 
 	// Generate Round 0 messages
 	let msg0 = match protocol0.poke().expect("poke should succeed") {
@@ -1138,7 +1162,7 @@ fn test_old_only_party_behavior() {
 	.expect("valid config");
 
 	let session_nonce = [0x22u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
+	let mut protocol = new_test_protocol(resharing_config, [42u8; 32], &session_nonce);
 
 	// Party should participate in Round 0 (entropy commitment)
 	let action = protocol.poke().expect("poke should succeed");
@@ -1169,7 +1193,7 @@ fn test_new_only_party_behavior() {
 	.expect("valid config");
 
 	let session_nonce = [0x11u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
+	let mut protocol = new_test_protocol(resharing_config, [42u8; 32], &session_nonce);
 
 	// New party should skip Round 1-2 (entropy commit-reveal) and wait
 	let action = protocol.poke().expect("poke should succeed");
@@ -1658,7 +1682,7 @@ fn run_resharing_protocol_with_seeds(
 	let session_nonce = [0xCCu8; 32];
 
 	// Create protocol instances for each party with the provided seeds
-	let mut protocols: HashMap<u32, ResharingProtocol> = HashMap::new();
+	let mut protocols: HashMap<u32, ResharingProtocol<TestSigner>> = HashMap::new();
 
 	for &party_id in &all_parties {
 		let existing_share = old_shares.get(&party_id).cloned();
@@ -1676,7 +1700,7 @@ fn run_resharing_protocol_with_seeds(
 
 		// Use the provided seed for this party
 		let seed = party_seeds.get(&party_id).copied().unwrap_or([0u8; 32]);
-		let protocol = ResharingProtocol::new(config, seed, &session_nonce);
+		let protocol = new_test_protocol(config, seed, &session_nonce);
 		protocols.insert(party_id, protocol);
 	}
 
@@ -3863,7 +3887,7 @@ fn test_close_ready_window_requires_leader() {
 			public_key.clone(),
 		)
 		.expect("valid config");
-		ResharingProtocol::new(config, [9u8; 32], &session_nonce)
+		new_test_protocol(config, [9u8; 32], &session_nonce)
 	};
 
 	// Party 1 is not the leader (leader = min{0,1,3} = 0).
@@ -3959,4 +3983,106 @@ fn test_slow_old_only_member_observes_and_completes() {
 	let is_valid =
 		run_signing_and_verify(&signing_shares, &public_key, new_config, b"oldonly observer", b"");
 	assert!(is_valid, "Signature with reshared shares should verify");
+}
+
+// ============================================================================
+// Round 6: Signed Transcript Acceptance (Certificate)
+// ============================================================================
+//
+// Certificate coverage for the happy path is built into the harness: every
+// successful `run_resharing_protocol_full` call verifies each party's
+// certificate against the new committee's keys and checks that all parties
+// agree on the transcript hash.
+
+/// A corrupted acceptance signature must abort the protocol on every party
+/// that receives it: signature verification against the local transcript hash
+/// fails in the Accept round.
+#[test]
+fn test_tampered_accept_signature_aborts() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	// Corrupt party 1's broadcast Accept signature in flight.
+	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
+		if sender != 1 {
+			return data;
+		}
+		let msg: ResharingMessage = match borsh::from_slice(&data) {
+			Ok(m) => m,
+			Err(_) => return data,
+		};
+		if let ResharingMessage::Accept(mut accept) = msg {
+			accept.signature[4] ^= 0xFF;
+			return borsh::to_vec(&ResharingMessage::Accept(accept))
+				.expect("re-serialize tampered accept");
+		}
+		data
+	});
+
+	let result = run_resharing_protocol_with_tamper(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		Some(tamper),
+	);
+
+	let err = result.expect_err("tampered acceptance signature must be detected");
+	assert!(
+		err.contains("invalid transcript acceptance"),
+		"expected acceptance verification failure, got: {}",
+		err
+	);
+}
+
+/// Certificate verification must fail when an acceptance is missing or when
+/// the transcript hash it signs differs from the certificate's.
+#[test]
+fn test_certificate_verification_rejects_missing_or_wrong_accepts() {
+	use common::TestSigner as Signer;
+	use qp_rusty_crystals_threshold::resharing::{compute_accept_hash, ResharingCertificate};
+	use qp_rusty_crystals_threshold::resharing::TranscriptSigner as _;
+	use std::collections::BTreeMap;
+
+	let ssid = [7u8; 32];
+	let transcript_hash = [9u8; 32];
+	let accept_hash = compute_accept_hash(&ssid, &transcript_hash);
+	let new_participants = vec![0u32, 1u32];
+	let keys: BTreeMap<u32, u32> = new_participants.iter().map(|&p| (p, p)).collect();
+
+	let mut accepts: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+	accepts.insert(0, Signer { id: 0 }.sign(&accept_hash));
+	accepts.insert(1, Signer { id: 1 }.sign(&accept_hash));
+
+	let cert = ResharingCertificate {
+		ssid,
+		active_set: vec![0, 1],
+		transcript_hash,
+		accepts: accepts.clone(),
+	};
+	assert!(cert.verify::<Signer>(&new_participants, &keys), "valid certificate must verify");
+
+	// Missing an acceptance.
+	let mut missing = cert.clone();
+	missing.accepts.remove(&1);
+	assert!(!missing.verify::<Signer>(&new_participants, &keys));
+
+	// Acceptance over a different transcript hash.
+	let other_hash = compute_accept_hash(&ssid, &[10u8; 32]);
+	let mut wrong = cert.clone();
+	wrong.accepts.insert(1, Signer { id: 1 }.sign(&other_hash));
+	assert!(!wrong.verify::<Signer>(&new_participants, &keys));
+
+	// Signature by the wrong party.
+	let mut forged = cert;
+	forged.accepts.insert(1, Signer { id: 0 }.sign(&accept_hash));
+	assert!(!forged.verify::<Signer>(&new_participants, &keys));
 }

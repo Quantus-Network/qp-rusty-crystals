@@ -59,11 +59,14 @@ use crate::{
 };
 
 use super::types::{
-	compute_resharing_ssid, NewShareData, ResharingActProposal, ResharingConfig, ResharingMessage,
+	compute_accept_hash, compute_resharing_ssid, NewShareData, ResharingAccept,
+	ResharingActProposal, ResharingCertificate, ResharingConfig, ResharingMessage,
 	ResharingOutput, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
-	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast, SubsetMask,
-	SubsetPair, COMMITMENT_HASH_SIZE, ENTROPY_SIZE, RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
+	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast,
+	ResharingSignerConfig, SubsetMask, SubsetPair, COMMITMENT_HASH_SIZE, ENTROPY_SIZE,
+	RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
 };
+use crate::keygen::dkg::TranscriptSigner;
 
 /// Domain separator for the per-subset PRF seed (includes public session seed for randomization).
 const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
@@ -108,6 +111,9 @@ const NEW_SHARE_COMMIT_DOMAIN: &[u8] = b"resharing-new-share-commit-v3";
 
 /// Domain separator for entropy commitment.
 const ENTROPY_COMMIT_DOMAIN: &[u8] = b"resharing-entropy-commit-v1";
+
+/// Domain separator for the session transcript hash (Round 6 acceptance).
+const TRANSCRIPT_DOMAIN: &[u8] = b"resharing-transcript-v1";
 
 /// Domain separator for session seed derivation.
 const SESSION_SEED_DOMAIN: &[u8] = b"resharing-session-seed-v1";
@@ -267,6 +273,10 @@ pub enum ResharingState {
 	Round5Waiting,
 	/// Combining shares and finalizing.
 	Combining,
+	/// Generating the Round 6 acceptance signature (new committee members).
+	AcceptGenerate,
+	/// Waiting for Round 6 acceptance signatures from all new committee members.
+	AcceptWaiting,
 	/// Protocol completed successfully.
 	Done,
 	/// Protocol failed.
@@ -278,8 +288,12 @@ pub enum ResharingState {
 // ============================================================================
 
 /// The main resharing protocol state machine.
-pub struct ResharingProtocol {
+///
+/// Generic over `S`, the long-term-key signature scheme used for transcript
+/// acceptance (Round 6). See [`TranscriptSigner`] and [`ResharingSignerConfig`].
+pub struct ResharingProtocol<S: TranscriptSigner> {
 	config: ResharingConfig,
+	signer_config: ResharingSignerConfig<S>,
 	state: ResharingState,
 
 	/// Session identifier (SSID) for this resharing session.
@@ -352,9 +366,18 @@ pub struct ResharingProtocol {
 	new_shares: BTreeMap<SubsetMask, NewShareData>,
 	/// Final output (cached so `take_output` can return it after Combining).
 	completed_output: Option<ResharingOutput>,
+
+	// ========================================================================
+	// Round 6: Signed transcript acceptance
+	// ========================================================================
+	/// Transcript hash computed after all Combining checks pass.
+	transcript_hash: Option<[u8; COMMITMENT_HASH_SIZE]>,
+	/// Acceptance signatures received (and our own), keyed by sender. Raw
+	/// bytes; verified against our own transcript hash in `AcceptWaiting`.
+	accepts: BTreeMap<ParticipantId, Vec<u8>>,
 }
 
-impl Drop for ResharingProtocol {
+impl<S: TranscriptSigner> Drop for ResharingProtocol<S> {
 	fn drop(&mut self) {
 		// Zeroize all secret-bearing fields
 		self.seed.zeroize();
@@ -376,7 +399,7 @@ impl Drop for ResharingProtocol {
 	}
 }
 
-impl ResharingProtocol {
+impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// Create a new resharing protocol instance.
 	///
 	/// The config must be created using `ResharingConfig::new_for_old_member` (for old committee
@@ -386,9 +409,16 @@ impl ResharingProtocol {
 	/// # Arguments
 	///
 	/// * `config` - The resharing configuration (includes existing_share for old members)
+	/// * `signer_config` - This party's long-term-key signer plus the new committee's verifying
+	///   keys, used for Round 6 transcript acceptance
 	/// * `seed` - 32 bytes of cryptographic randomness for this party's entropy contribution
 	/// * `session_nonce` - Unique nonce for SSID computation (prevents cross-session replay)
-	pub fn new(config: ResharingConfig, seed: [u8; 32], session_nonce: &[u8; 32]) -> Self {
+	pub fn new(
+		config: ResharingConfig,
+		signer_config: ResharingSignerConfig<S>,
+		seed: [u8; 32],
+		session_nonce: &[u8; 32],
+	) -> Self {
 		let old_participants: Vec<_> = config.old_participants().iter().collect();
 		let new_participants: Vec<_> = config.new_participants().iter().collect();
 		let ssid = compute_resharing_ssid(
@@ -405,6 +435,7 @@ impl ResharingProtocol {
 		let new_subset_order = compute_new_subset_order(&config);
 		Self {
 			config,
+			signer_config,
 			state: ResharingState::Round1Generate,
 			ssid,
 			seed,
@@ -425,6 +456,8 @@ impl ResharingProtocol {
 			round5_broadcasts: BTreeMap::new(),
 			new_shares: BTreeMap::new(),
 			completed_output: None,
+			transcript_hash: None,
+			accepts: BTreeMap::new(),
 		}
 	}
 
@@ -600,6 +633,8 @@ impl ResharingProtocol {
 			ResharingState::Round5Generate => self.handle_round5_generate(),
 			ResharingState::Round5Waiting => self.handle_round5_waiting(),
 			ResharingState::Combining => self.handle_combining(),
+			ResharingState::AcceptGenerate => self.handle_accept_generate(),
+			ResharingState::AcceptWaiting => self.handle_accept_waiting(),
 			ResharingState::Done =>
 				Err(ResharingProtocolError::InvalidState("Protocol already completed".to_string())),
 			ResharingState::Failed(reason) =>
@@ -659,6 +694,7 @@ impl ResharingProtocol {
 			ResharingMessage::Round4(m) => self.handle_round4_message(from, m),
 			ResharingMessage::Round5(broadcast) => self.handle_round5_message(from, broadcast),
 			ResharingMessage::ActProposal(m) => self.handle_act_proposal(from, m),
+			ResharingMessage::Accept(m) => self.handle_accept_message(from, m),
 		}
 
 		Ok(())
@@ -1345,10 +1381,194 @@ impl ResharingProtocol {
 		// a malicious dealer that lies about a residual `r_{I→J}`.
 		self.verify_public_key_preservation()?;
 
-		let output = self.build_output()?;
+		// All checks passed: fix the transcript hash and move to the signed
+		// acceptance round.
+		self.transcript_hash = Some(self.compute_transcript_hash()?);
+		self.state = ResharingState::AcceptGenerate;
+		self.poke()
+	}
+
+	// ========================================================================
+	// Round 6: Signed Transcript Acceptance
+	// ========================================================================
+
+	/// Hash of everything that determines the session outcome: the active set,
+	/// the session seed, every active member's Round 3 dealer commitments, and
+	/// every *required* Round 5 broadcast (active old members + new committee).
+	///
+	/// Broadcasts from parties outside the required sets (e.g. a non-active
+	/// old observer's Round 5 status) are deliberately excluded: not every
+	/// party is guaranteed to have received them, and including them would
+	/// make honest parties disagree on the hash.
+	fn compute_transcript_hash(
+		&self,
+	) -> Result<[u8; COMMITMENT_HASH_SIZE], ResharingProtocolError> {
+		let act = self.active_set.as_ref().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"Computing transcript hash before active set is agreed".to_string(),
+			)
+		})?;
+		let session_seed = self.session_seed.as_ref().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"Computing transcript hash before session seed".to_string(),
+			)
+		})?;
+
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, TRANSCRIPT_DOMAIN);
+		fips202::shake256_absorb(&mut state, &self.ssid);
+		fips202::shake256_absorb(&mut state, &(act.len() as u32).to_le_bytes());
+		for &p in act {
+			fips202::shake256_absorb(&mut state, &p.to_le_bytes());
+		}
+		fips202::shake256_absorb(&mut state, session_seed);
+
+		// Round 3 dealer commitments from active members, in Act (sorted) order.
+		// (`round3_broadcasts` includes our own broadcast.)
+		for &p in act {
+			let broadcast = self.round3_broadcasts.get(&p);
+			let broadcast = broadcast.ok_or_else(|| {
+				ResharingProtocolError::InternalError(format!(
+					"Missing Round 3 broadcast from active party {} for transcript",
+					p
+				))
+			})?;
+			let bytes = borsh::to_vec(broadcast).map_err(|e| {
+				ResharingProtocolError::SerializationError(format!(
+					"Failed to serialize Round 3 broadcast for transcript: {}",
+					e
+				))
+			})?;
+			fips202::shake256_absorb(&mut state, &(bytes.len() as u32).to_le_bytes());
+			fips202::shake256_absorb(&mut state, &bytes);
+		}
+
+		// Required Round 5 broadcasts: active old members + new committee, in
+		// sorted order (matches `have_all_round5`).
+		let required: alloc::collections::BTreeSet<ParticipantId> =
+			act.iter().copied().chain(self.config.new_participants().iter()).collect();
+		for p in required {
+			let broadcast = self.round5_broadcasts.get(&p).ok_or_else(|| {
+				ResharingProtocolError::InternalError(format!(
+					"Missing Round 5 broadcast from required party {} for transcript",
+					p
+				))
+			})?;
+			let bytes = borsh::to_vec(broadcast).map_err(|e| {
+				ResharingProtocolError::SerializationError(format!(
+					"Failed to serialize Round 5 broadcast for transcript: {}",
+					e
+				))
+			})?;
+			fips202::shake256_absorb(&mut state, &(bytes.len() as u32).to_le_bytes());
+			fips202::shake256_absorb(&mut state, &bytes);
+		}
+
+		fips202::shake256_finalize(&mut state);
+		let mut out = [0u8; COMMITMENT_HASH_SIZE];
+		fips202::shake256_squeeze(&mut out, &mut state);
+		Ok(out)
+	}
+
+	fn handle_accept_generate(
+		&mut self,
+	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
+		let transcript_hash = self.transcript_hash.ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"AcceptGenerate reached without a transcript hash".to_string(),
+			)
+		})?;
+
+		// Only new committee members attest: they are the parties that verified
+		// and now hold the reshared key material. Old-only parties observe.
+		if !self.config.role().is_new_committee() {
+			self.state = ResharingState::AcceptWaiting;
+			return self.handle_accept_waiting();
+		}
+
+		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash);
+		let signature = self.signer_config.my_signer.sign(&accept_hash);
+		let my_id = self.config.my_party_id();
+		self.accepts.insert(my_id, signature.as_ref().to_vec());
+
+		let msg = ResharingAccept {
+			ssid: self.ssid,
+			party_id: my_id,
+			signature: signature.as_ref().to_vec(),
+		};
+		let data = Self::serialize_message(&ResharingMessage::Accept(msg))?;
+		self.state = ResharingState::AcceptWaiting;
+		Ok(Action::SendMany(data))
+	}
+
+	fn handle_accept_waiting(
+		&mut self,
+	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
+		let transcript_hash = self.transcript_hash.ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"AcceptWaiting reached without a transcript hash".to_string(),
+			)
+		})?;
+
+		// Need an acceptance from every new committee member.
+		let new_participants: Vec<ParticipantId> =
+			self.config.new_participants().iter().collect();
+		if !new_participants.iter().all(|p| self.accepts.contains_key(p)) {
+			return Ok(Action::Wait);
+		}
+
+		// Verify every signature against *our own* transcript hash. A signer
+		// that observed a different transcript (dealer equivocation, tampered
+		// broadcast) produces a signature that fails here, and we abort.
+		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash);
+		for p in &new_participants {
+			let pk = self.signer_config.verifying_keys.get(p).ok_or_else(|| {
+				ResharingProtocolError::InternalError(format!(
+					"Missing verifying key for new committee member {} (validated at config)",
+					p
+				))
+			})?;
+			let sig = self.accepts.get(p).expect("presence checked above");
+			if !S::verify_bytes(pk, &accept_hash, sig) {
+				let reason = format!(
+					"invalid transcript acceptance from party {} — transcript disagreement \
+					 or forged signature",
+					p
+				);
+				self.state = ResharingState::Failed(reason.clone());
+				return Err(ResharingProtocolError::ShareVerificationFailed(reason));
+			}
+		}
+
+		let certificate = ResharingCertificate {
+			ssid: self.ssid,
+			active_set: self.active_set.clone().expect("set before transcript hash"),
+			transcript_hash,
+			accepts: self.accepts.clone(),
+		};
+
+		let output = self.build_output(certificate)?;
 		self.completed_output = Some(output.clone());
 		self.state = ResharingState::Done;
 		Ok(Action::Return(output))
+	}
+
+	fn handle_accept_message(&mut self, from: ParticipantId, msg: ResharingAccept) {
+		if matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
+			return;
+		}
+		// Only new committee members attest.
+		if !self.config.new_participants().contains(from) {
+			return;
+		}
+		// First message wins; duplicates ignored (matches other rounds).
+		if self.accepts.contains_key(&from) {
+			return;
+		}
+		// Signature verification is deferred to `AcceptWaiting`, where our own
+		// transcript hash is known. Accepts can legitimately arrive earlier
+		// (e.g. while we are still draining Round 5 traffic).
+		self.accepts.insert(from, msg.signature);
 	}
 
 	// ========================================================================
@@ -1815,12 +2035,16 @@ impl ResharingProtocol {
 		Ok(())
 	}
 
-	fn build_output(&self) -> Result<ResharingOutput, ResharingProtocolError> {
+	fn build_output(
+		&self,
+		certificate: ResharingCertificate,
+	) -> Result<ResharingOutput, ResharingProtocolError> {
 		if !self.config.role().is_new_committee() {
 			return Ok(ResharingOutput {
 				private_share: None,
 				public_key: self.config.public_key().clone(),
 				new_config: self.config.new_config(),
+				certificate,
 			});
 		}
 		let new_share = self.build_private_key_share()?;
@@ -1828,6 +2052,7 @@ impl ResharingProtocol {
 			private_share: Some(new_share),
 			public_key: self.config.public_key().clone(),
 			new_config: self.config.new_config(),
+			certificate,
 		})
 	}
 
@@ -2408,6 +2633,50 @@ mod tests {
 	/// Test SSID for use in unit tests.
 	const TEST_SSID: [u8; RESHARING_SSID_SIZE] = [0xABu8; RESHARING_SSID_SIZE];
 
+	/// Minimal transcript signer for unit tests: "signature" = party_id || hash.
+	#[derive(Clone)]
+	pub(crate) struct TestSigner {
+		pub id: u32,
+	}
+
+	impl TranscriptSigner for TestSigner {
+		type Signature = Vec<u8>;
+		type PublicKey = u32;
+
+		fn sign(&self, hash: &[u8; 32]) -> Self::Signature {
+			let mut sig = vec![0u8; 36];
+			sig[..4].copy_from_slice(&self.id.to_le_bytes());
+			sig[4..36].copy_from_slice(hash);
+			sig
+		}
+
+		fn verify(pk: &Self::PublicKey, hash: &[u8; 32], sig: &Self::Signature) -> bool {
+			Self::verify_bytes(pk, hash, sig)
+		}
+
+		fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
+			if sig.len() < 36 {
+				return false;
+			}
+			let sig_id = u32::from_le_bytes(sig[..4].try_into().unwrap());
+			sig_id == *pk && &sig[4..36] == hash
+		}
+
+		fn public_key(&self) -> Self::PublicKey {
+			self.id
+		}
+	}
+
+	/// Build a `ResharingSignerConfig<TestSigner>` covering `participants`.
+	fn test_signer_config(
+		my_id: u32,
+		participants: &[u32],
+	) -> ResharingSignerConfig<TestSigner> {
+		let keys: BTreeMap<u32, u32> = participants.iter().map(|&p| (p, p)).collect();
+		ResharingSignerConfig::new(TestSigner { id: my_id }, keys, participants)
+			.expect("keys cover participants")
+	}
+
 	#[test]
 	fn test_generate_subset_masks() {
 		let s = generate_subset_masks(3, 2);
@@ -2733,7 +3002,12 @@ mod tests {
 			public_key,
 		)
 		.expect("valid resharing config");
-		let mut protocol = ResharingProtocol::new(resharing_config, [1u8; 32], &[2u8; 32]);
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(1, &[0, 1, 2]),
+			[1u8; 32],
+			&[2u8; 32],
+		);
 		let session_seed = [9u8; 32];
 		protocol.session_seed = Some(session_seed);
 		// Model the post-Act state: the full old committee is active.
@@ -2792,7 +3066,12 @@ mod tests {
 			public_key,
 		)
 		.expect("valid resharing config");
-		let mut protocol = ResharingProtocol::new(resharing_config, [1u8; 32], &[2u8; 32]);
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(1, &[0, 1, 2]),
+			[1u8; 32],
+			&[2u8; 32],
+		);
 
 		// This models a bounded zero-sum reshaping attack: +delta on one new RSS
 		// subset and -delta on another preserves the aggregate public key, and each

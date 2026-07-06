@@ -71,6 +71,20 @@ Round 5: Verification + Public-Key Invariant
 │   even when their old subset has size 1.
 └── If any verification fails, the protocol aborts. (No blame attribution is
     attempted since it's not always possible to identify the misbehaving party.)
+
+Round 6: Signed Transcript Acceptance (Certificate)
+├── After all Round 5 checks pass, each party computes the transcript hash:
+│   SHAKE256("resharing-transcript-v1" || ssid || Act || session_seed ||
+│   Round 3 broadcasts (Act, sorted) || Round 5 broadcasts (Act ∪ new, sorted)).
+├── Each new committee member signs
+│   SHAKE256("resharing-accept-v1" || ssid || transcript_hash) with its
+│   long-term key (TranscriptSigner) and broadcasts the signature.
+├── Every party verifies every acceptance against its *own* transcript hash.
+│   A dealer that equivocated (sent different broadcasts to different parties)
+│   causes verification to fail on at least one honest party, which aborts.
+└── The output includes a ResharingCertificate (ssid, Act, transcript hash,
+    acceptance signatures) verifiable by any third party holding the new
+    committee's verifying keys.
 ```
 
 Because `Σ_J s_J^new = Σ_J Σ_I r_{I→J} = Σ_I s_I^old = s`, the secret — and hence the public key `t = A·s1 + s2` — is preserved.
@@ -113,6 +127,7 @@ Before Round 2 reveals are known, an attacker cannot predict the session seed un
 | **Confidentiality of contributions** | Rounds 1-3, 5 broadcast only hash commitments; Round 4 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
 | **Cheating-dealer detection** | Old-subset peers recompute and verify Round 3 commitments before Round 4 whenever the old subset has another member. New-subset members verify delivered sub-shares against Round 3 commitments, reject over-large sub-share coefficients, and reject recovered signing partials that exceed the existing hyperball safety envelope. A final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching aggregate-secret corruption even when an old subset has size 1. If any verification fails, the protocol aborts. |
 | **PK Preservation** | Public key `t = A·s1 + s2` unchanged, verified at the end of Round 5 via a deterministic byte-equality check against the original PK. |
+| **Transcript agreement + attestation** | Round 6: every new committee member signs the transcript hash with its long-term key; every party verifies all acceptances against its own transcript hash, so completion implies all parties observed identical broadcasts (equivocation ⇒ abort). The resulting `ResharingCertificate` lets a third party holding the new committee's verifying keys confirm the whole new committee attested to the handoff. It attests process integrity and PK preservation, not share-distribution properties (that would require ZK proofs). |
 
 ## Why Custom Protocol?
 
@@ -166,7 +181,7 @@ for the existing `(t_new, n_new)` hyperball parameters. This catches bounded, pu
 
 ```rust
 use qp_rusty_crystals_threshold::resharing::{
-    ResharingConfig, ResharingProtocol, Action,
+    ResharingConfig, ResharingProtocol, ResharingSignerConfig, Action,
 };
 use rand::RngCore;
 
@@ -188,8 +203,16 @@ let config = ResharingConfig::new(
     public_key,
 )?;
 
+// Long-term-key signer for Round 6 transcript acceptance (e.g. Ed25519),
+// plus the verifying keys of every new committee member.
+let signer_config = ResharingSignerConfig::new(
+    my_signer,          // implements TranscriptSigner
+    verifying_keys,     // BTreeMap<ParticipantId, PublicKey>, covers new committee
+    &new_participants,
+)?;
+
 // Old committee members pass Some(existing_share); new-only parties pass None.
-let mut protocol = ResharingProtocol::new(config, my_existing_share, seed, &session_nonce)?;
+let mut protocol = ResharingProtocol::new(config, signer_config, seed, &session_nonce)?;
 
 // Run protocol loop
 loop {
@@ -201,6 +224,8 @@ loop {
         Action::Return(output) => {
             // Resharing complete
             let new_share = output.private_share;
+            // Publicly verifiable proof of the handoff:
+            let certificate = output.certificate;
             break;
         }
     }
@@ -220,7 +245,7 @@ provide its own encryption layer.
 
 | Message Type | Transport Requirement |
 |--------------|----------------------|
-| `Action::SendMany` (Rounds 1, 2, 3, 5) | Authenticated broadcast (integrity only) |
+| `Action::SendMany` (Rounds 1, 2, 3, 5, 6) | Authenticated broadcast (integrity only) |
 | `Action::SendPrivate` (Round 4) | **Authenticated encryption required** (confidentiality + integrity) |
 
 If `SendPrivate` messages are sent over an unencrypted channel, an eavesdropper can recover
@@ -263,13 +288,15 @@ Each party has a role determined by committee membership:
 - `Round3Broadcast`: Per-subset commitment hashes `H(r_{I→J})` (no plaintext shares)
 - `Round4Message`: Private sub-share reveal (**requires secure channel**) — one message per (dealer, recipient) carrying every `r_{I→J}` the dealer owes that recipient. Dealers handle self-deals locally and never emit `SendPrivate(self, _)`.
 - `Round5Broadcast`: Commitments to computed `s_J^new`, partial public-key contributions `t_J^new`
+- `Accept`: Signed acceptance of the transcript hash by a new committee member (Round 6); the collected signatures form the `ResharingCertificate`
 
 ## State Machine
 
 ```
 Round1Generate -> Round1Waiting -> Round2Generate -> Round2Waiting
     -> Round3Generate -> Round3Waiting -> Round4Generate -> Round4Waiting
-    -> Round5Generate -> Round5Waiting -> Combining -> Done
+    -> Round5Generate -> Round5Waiting -> Combining
+    -> AcceptGenerate -> AcceptWaiting -> Done
 ```
 
 NewOnly parties skip Rounds 1-2 (entropy commit-reveal) and go directly to `Round2Waiting`. The Act proposal is emitted and consumed within the `Round1Waiting`/`Round2Waiting` states; parties do not advance past them until `Act` is agreed. Old members outside `Act` observe (they verify and, if in the new committee, receive shares) but do not contribute entropy or deal.
