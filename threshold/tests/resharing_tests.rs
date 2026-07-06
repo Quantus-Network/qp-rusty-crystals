@@ -306,6 +306,14 @@ fn run_resharing_protocol_full(
 				},
 		}
 
+		// Old committee members must erase their pre-handoff share on success.
+		if old_participants.contains(&party_id) && !protocol.old_share_erased() {
+			return Err(format!(
+				"Party {} did not erase its old share after successful resharing",
+				party_id
+			));
+		}
+
 		if new_participants.contains(&party_id) {
 			if let Some(share) = output.private_share {
 				new_shares.insert(party_id, share);

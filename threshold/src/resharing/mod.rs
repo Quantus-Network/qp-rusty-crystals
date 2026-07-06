@@ -61,8 +61,9 @@
 //!
 //! - **Secrecy of `s`**: No party — not even the designated dealers — ever reconstructs the full
 //!   secret `s`. Each `D_I` only handles `s_I^old`, which they already had.
-//! - **Replay protection**: Each message includes an SSID derived from the old/new committees, the
-//!   public key, and a session nonce. Messages with a different SSID are ignored.
+//! - **Replay protection**: Each message includes an SSID derived from the protocol version,
+//!   suite ID, handoff epoch, old/new committees, the public key, and a session nonce. Messages
+//!   with a different SSID are ignored.
 //! - **Session randomization**: Rounds 1-2 commit to and reveal fresh entropy before deriving a
 //!   public session seed, making sub-share splits unpredictable before reveal and different across
 //!   fresh sessions. This is not post-compromise forward secrecy: a recorded transcript plus later
@@ -94,6 +95,11 @@
 //!
 //! This matches the standard proactive secret sharing model: security holds if fewer than `t`
 //! parties are compromised in any single epoch, with proper old-state erasure between epochs.
+//!
+//! The protocol erases its own session state at finalize: on successful completion it zeroizes
+//! the seed, entropy, session seed, derived and received sub-shares, and the old share held in
+//! its config (check via `ResharingProtocol::old_share_erased`). Callers remain responsible for
+//! erasing their own copies of the old share (key files, keystore entries).
 //!
 //! # Why Custom Protocol?
 //!
@@ -131,7 +137,8 @@
 //! let signer_config = ResharingSignerConfig::new(my_signer, verifying_keys, &new_participants)?;
 //!
 //! // Old committee members pass Some(existing_share); new-only parties pass None.
-//! let mut protocol = ResharingProtocol::new(config, signer_config, seed, &session_nonce)?;
+//! // `epoch` is a monotonic handoff counter for this key (0 = first resharing).
+//! let mut protocol = ResharingProtocol::new(config, signer_config, seed, &session_nonce, epoch)?;
 //!
 //! loop {
 //!     match protocol.poke()? {
@@ -160,7 +167,8 @@ pub use types::{
 	ResharingOutput, ResharingRole, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
 	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast,
 	ResharingSignerConfig, SubsetMask, SubsetPair, ENTROPY_SIZE, MAX_ACCEPT_SIGNATURE_LEN,
-	RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
+	RESHARING_SSID_SIZE, RESHARING_PROTOCOL_VERSION, RESHARING_SUITE_ML_DSA_87,
+	SUBSHARE_COEFF_BOUND,
 };
 
 // Re-export the long-term-key signing trait used for Round 6 acceptance, so

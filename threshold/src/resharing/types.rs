@@ -28,6 +28,14 @@ pub const ENTROPY_SIZE: usize = 32;
 /// Size of session identifier (SSID) in bytes.
 pub const RESHARING_SSID_SIZE: usize = 32;
 
+/// Current resharing protocol version baked into the SSID.
+///
+/// Bump when the round structure or wire format changes incompatibly.
+pub const RESHARING_PROTOCOL_VERSION: u32 = 2;
+
+/// Cryptographic suite identifier for threshold ML-DSA-87 RSS resharing.
+pub const RESHARING_SUITE_ML_DSA_87: u32 = 1;
+
 /// Maximum absolute value for sub-share coefficients in resharing.
 ///
 /// This bound defends against malicious dealers who might inject arbitrarily large
@@ -45,8 +53,8 @@ pub const RESHARING_SSID_SIZE: usize = 32;
 /// attacks that could compromise hyperball security (e.g., injecting Q/2 ≈ 4.2M).
 pub const SUBSHARE_COEFF_BOUND: i32 = 500;
 
-/// Domain separator for SSID computation.
-const DOMAIN_RESHARING_SSID: &[u8] = b"RESHARING_SSID_V1";
+/// Domain separator for SSID computation (V2 includes version, suite, epoch).
+const DOMAIN_RESHARING_SSID: &[u8] = b"RESHARING_SSID_V2";
 
 /// Subset mask - a bitmask indicating which parties are in a subset.
 /// Uses u16 to support up to 16 parties.
@@ -250,6 +258,17 @@ impl ResharingConfig {
 	/// Returns `Some` for OldOnly and Both roles, `None` for NewOnly.
 	pub fn existing_share(&self) -> Option<&PrivateKeyShare> {
 		self.existing_share.as_ref()
+	}
+
+	/// Securely erase the old committee share held in this config.
+	///
+	/// Called automatically when the protocol completes successfully. Integrators
+	/// should treat the returned new share as the only live key material after
+	/// a successful handoff.
+	pub fn zeroize_existing_share(&mut self) {
+		if let Some(mut share) = self.existing_share.take() {
+			share.zeroize();
+		}
 	}
 
 	/// Get old threshold config.
@@ -1096,7 +1115,10 @@ pub struct ResharingOutput {
 ///
 /// ```text
 /// SSID = SHAKE256(
-///     "RESHARING_SSID_V1" ||
+///     "RESHARING_SSID_V2" ||
+///     protocol_version (u32 LE) ||
+///     suite_id (u32 LE) ||
+///     epoch (u64 LE) ||
 ///     old_threshold (u32 LE) ||
 ///     old_n (u32 LE) ||
 ///     old_num_participants (u32 LE) ||
@@ -1112,6 +1134,10 @@ pub struct ResharingOutput {
 ///
 /// # Arguments
 ///
+/// * `protocol_version` - Wire/logic version ([`RESHARING_PROTOCOL_VERSION`])
+/// * `suite_id` - Cryptographic suite ([`RESHARING_SUITE_ML_DSA_87`])
+/// * `epoch` - Monotonic handoff counter for this public key (0 for the first
+///   resharing after keygen; increment for each subsequent handoff)
 /// * `old_threshold` - Threshold of the old committee
 /// * `old_n` - Total parties in the old committee
 /// * `old_participants` - Participant IDs in the old committee
@@ -1120,7 +1146,11 @@ pub struct ResharingOutput {
 /// * `new_participants` - Participant IDs in the new committee
 /// * `public_key` - The public key being reshared
 /// * `session_nonce` - Unique nonce for this session (e.g., from transport layer)
+#[allow(clippy::too_many_arguments)] // flat list of independent hash inputs
 pub fn compute_resharing_ssid(
+	protocol_version: u32,
+	suite_id: u32,
+	epoch: u64,
 	old_threshold: u32,
 	old_n: u32,
 	old_participants: &[ParticipantId],
@@ -1137,6 +1167,11 @@ pub fn compute_resharing_ssid(
 
 	// Domain separator
 	fips202::shake256_absorb(&mut state, DOMAIN_RESHARING_SSID);
+
+	// Protocol binding (version, suite, epoch)
+	fips202::shake256_absorb(&mut state, &protocol_version.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &suite_id.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &epoch.to_le_bytes());
 
 	// Old committee configuration
 	fips202::shake256_absorb(&mut state, &old_threshold.to_le_bytes());
@@ -1696,5 +1731,46 @@ mod tests {
 		let truncated = &serialized[..serialized.len() / 2];
 		let result: Result<NewShareData, _> = borsh::from_slice(truncated);
 		assert!(result.is_err(), "Should reject truncated data");
+	}
+
+	#[test]
+	fn test_resharing_ssid_binds_version_suite_and_epoch() {
+		let pk = make_test_public_key();
+		let nonce = [0x55u8; 32];
+		let old = vec![0u32, 1u32, 2u32];
+		let newp = vec![0u32, 1u32, 3u32];
+
+		let base = |epoch: u64| {
+			compute_resharing_ssid(
+				RESHARING_PROTOCOL_VERSION,
+				RESHARING_SUITE_ML_DSA_87,
+				epoch,
+				2,
+				3,
+				&old,
+				2,
+				3,
+				&newp,
+				&pk,
+				&nonce,
+			)
+		};
+
+		assert_ne!(base(0), base(1), "epoch must change the SSID");
+
+		let other_suite = compute_resharing_ssid(
+			RESHARING_PROTOCOL_VERSION,
+			RESHARING_SUITE_ML_DSA_87 + 1,
+			0,
+			2,
+			3,
+			&old,
+			2,
+			3,
+			&newp,
+			&pk,
+			&nonce,
+		);
+		assert_ne!(base(0), other_suite, "suite must change the SSID");
 	}
 }

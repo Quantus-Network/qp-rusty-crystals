@@ -66,6 +66,16 @@ pub fn new_test_protocol(
 	seed: [u8; 32],
 	session_nonce: &[u8; 32],
 ) -> ResharingProtocol<TestSigner> {
+	new_test_protocol_with_epoch(config, seed, session_nonce, 0)
+}
+
+/// Like [`new_test_protocol`], but with an explicit handoff epoch.
+pub fn new_test_protocol_with_epoch(
+	config: ResharingConfig,
+	seed: [u8; 32],
+	session_nonce: &[u8; 32],
+	epoch: u64,
+) -> ResharingProtocol<TestSigner> {
 	let signer_config = test_signer_config(&config);
-	ResharingProtocol::new(config, signer_config, seed, session_nonce)
+	ResharingProtocol::new(config, signer_config, seed, session_nonce, epoch)
 }

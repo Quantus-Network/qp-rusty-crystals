@@ -114,14 +114,20 @@ Round 2 entropy reveals are part of the public transcript. After Round 2, the `s
 
 ### Security Boundary
 
-Before Round 2 reveals are known, an attacker cannot predict the session seed unless they know every old committee member's entropy contribution. After Round 2, the seed is public. The protocol's replay protection comes from the SSID, which binds messages to the old committee, new committee, public key, and session nonce. The protocol's confidentiality depends on keeping Round 4 private messages encrypted and authenticated.
+Before Round 2 reveals are known, an attacker cannot predict the session seed unless they know every old committee member's entropy contribution. After Round 2, the seed is public. The protocol's replay protection comes from the SSID, which binds messages to the protocol version, cryptographic suite, handoff epoch, old committee, new committee, public key, and session nonce. The protocol's confidentiality depends on keeping Round 4 private messages encrypted and authenticated.
+
+### Mandatory Erasure at Finalize
+
+Because sub-share derivation is deterministic from the (public, post-Round-2) session seed and the old subset shares, erasure of pre-handoff state is the compensating control for forward secrecy: an attacker must compromise a machine **while it still holds old material** to recompute the handoff.
+
+On successful completion (`Action::Return`), the protocol zeroizes, in place: the caller-provided seed, this party's entropy, the session seed, all derived sub-shares `r_{I→J}`, all received Round 4 messages, the aggregated new-share working set, and — for old committee members — **the old share held in the config**. `old_share_erased()` reports whether the config's share is gone. The same erasure runs again on `Drop` (covering abort paths). Callers must still erase their own copies: the original share file/keystore entry and anything cloned before `ResharingConfig::new`.
 
 ## Security Properties
 
 | Property | Guarantee |
 |----------|-----------|
 | **Secrecy of `s`** | No party — not even any dealer — ever holds `s` in clear. Each `D_I` only handles `s_I^old`, which they already had. |
-| **Replay protection** | Every message carries an SSID derived from the old/new committees, public key, and session nonce. Messages with a mismatched SSID are ignored. |
+| **Replay protection** | Every message carries an SSID derived from the protocol version, suite ID, handoff epoch, old/new committees, public key, and session nonce (`RESHARING_SSID_V2`). Messages with a mismatched SSID are ignored; transcripts from other protocol versions, suites, or epochs cannot be replayed. |
 | **Session randomization** | Session seed incorporates the SSID and fresh entropy from all active old committee members via commit-reveal, so different sessions produce different deterministic sub-share splits even if entropy is accidentally reused. This does not provide post-compromise forward secrecy once the transcript is recorded. |
 | **Liveness with offline old members** | Round 1 commitments double as Ready signals. The session leader (lowest-ID new committee member) proposes the active set `Act` of ready members (`|Act| ≥ t_old`); dealers are assigned as `min(I ∩ Act)`, so resharing completes with up to `n_old − t_old` old members offline. The leader cannot break safety: parties verify `Act` against the Ready signals they received themselves, sub-share derivation is deterministic (dealer identity doesn't change values), and the seed stays unbiased because `Act` is fixed before any entropy is revealed and contains at least one honest member. A malicious leader can at most deny service or select among ready members; equivocating proposals lead to mismatched deterministic commitments and an abort. |
 | **Confidentiality of contributions** | Rounds 1-3, 5 broadcast only hash commitments; Round 4 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
@@ -177,6 +183,8 @@ sqrt(τ) · sqrt(||p_{i,1}||² / ν² + ||p_{i,2}||²) ≤ B'
 
 for the existing `(t_new, n_new)` hyperball parameters. This catches bounded, public-key-preserving zero-sum reshaping attacks that would pass the per-subshare coefficient bound but push later signing outside the intended proof regime.
 
+Round 5 additionally enforces a per-subset **stored-share norm guard** (`B_G` analog): each aggregated `s_J^new` individually must satisfy the same weighted-norm bound with `num_secrets = 1` (a single base secret's envelope, versus the `⌈C(N,T−1)/T⌉` shares summed at recovery time). This is defense in depth against inflating an individual stored share while arranging cancellation in the specific combinations the recovered-partial check sums.
+
 ## Usage
 
 ```rust
@@ -212,7 +220,9 @@ let signer_config = ResharingSignerConfig::new(
 )?;
 
 // Old committee members pass Some(existing_share); new-only parties pass None.
-let mut protocol = ResharingProtocol::new(config, signer_config, seed, &session_nonce)?;
+// `epoch` is a monotonic handoff counter for this public key (0 for the first
+// resharing after keygen), bound into the SSID against cross-epoch replay.
+let mut protocol = ResharingProtocol::new(config, signer_config, seed, &session_nonce, epoch)?;
 
 // Run protocol loop
 loop {

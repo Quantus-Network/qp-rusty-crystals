@@ -64,7 +64,8 @@ use super::types::{
 	ResharingOutput, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
 	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast,
 	ResharingSignerConfig, SubsetMask, SubsetPair, COMMITMENT_HASH_SIZE, ENTROPY_SIZE,
-	RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
+	RESHARING_PROTOCOL_VERSION, RESHARING_SSID_SIZE, RESHARING_SUITE_ML_DSA_87,
+	SUBSHARE_COEFF_BOUND,
 };
 use crate::keygen::dkg::TranscriptSigner;
 
@@ -301,6 +302,9 @@ pub struct ResharingProtocol<S: TranscriptSigner> {
 	/// Included in all messages to prevent cross-session replay attacks.
 	ssid: [u8; RESHARING_SSID_SIZE],
 
+	/// Monotonic handoff counter for this public key (included in the SSID).
+	epoch: u64,
+
 	/// Seed for entropy generation (provided by caller).
 	seed: [u8; 32],
 
@@ -379,27 +383,40 @@ pub struct ResharingProtocol<S: TranscriptSigner> {
 
 impl<S: TranscriptSigner> Drop for ResharingProtocol<S> {
 	fn drop(&mut self) {
-		// Zeroize all secret-bearing fields
-		self.seed.zeroize();
-		if let Some(ref mut entropy) = self.my_entropy {
-			entropy.zeroize();
-		}
-		if let Some(ref mut seed) = self.session_seed {
-			seed.zeroize();
-		}
-		// NewShareData implements ZeroizeOnDrop, but we explicitly clear the maps
-		// to ensure all values are dropped and zeroized
-		self.my_subshares.clear();
-		self.new_shares.clear();
-		// Also clear Round 4 messages which contain NewShareData contributions
-		self.pending_round4.clear();
-		self.round4_messages.clear();
-		// Note: ResharingConfig contains existing_share which has ZeroizeOnDrop,
-		// so it will be zeroized when config is dropped
+		self.zeroize_session_secrets();
 	}
 }
 
 impl<S: TranscriptSigner> ResharingProtocol<S> {
+	/// Securely erase all session secrets and intermediate share material.
+	///
+	/// Called automatically on successful completion and again on drop. The
+	/// completed output (if any) is preserved until [`Self::take_output`].
+	fn zeroize_session_secrets(&mut self) {
+		self.seed.zeroize();
+		if let Some(ref mut entropy) = self.my_entropy {
+			entropy.zeroize();
+		}
+		self.my_entropy = None;
+		if let Some(ref mut seed) = self.session_seed {
+			seed.zeroize();
+		}
+		self.session_seed = None;
+		// NewShareData implements ZeroizeOnDrop; clearing the maps drops values.
+		self.my_subshares.clear();
+		self.new_shares.clear();
+		self.pending_round4.clear();
+		self.round4_messages.clear();
+		self.config.zeroize_existing_share();
+	}
+
+	/// Whether the old committee share has been erased from the config.
+	///
+	/// After a successful handoff, old committee members should have `true`.
+	pub fn old_share_erased(&self) -> bool {
+		self.config.existing_share().is_none()
+	}
+
 	/// Create a new resharing protocol instance.
 	///
 	/// The config must be created using `ResharingConfig::new_for_old_member` (for old committee
@@ -413,15 +430,21 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	///   keys, used for Round 6 transcript acceptance
 	/// * `seed` - 32 bytes of cryptographic randomness for this party's entropy contribution
 	/// * `session_nonce` - Unique nonce for SSID computation (prevents cross-session replay)
+	/// * `epoch` - Monotonic handoff counter for this public key (0 for the first resharing
+	///   after keygen; the transport layer should increment for each subsequent handoff)
 	pub fn new(
 		config: ResharingConfig,
 		signer_config: ResharingSignerConfig<S>,
 		seed: [u8; 32],
 		session_nonce: &[u8; 32],
+		epoch: u64,
 	) -> Self {
 		let old_participants: Vec<_> = config.old_participants().iter().collect();
 		let new_participants: Vec<_> = config.new_participants().iter().collect();
 		let ssid = compute_resharing_ssid(
+			RESHARING_PROTOCOL_VERSION,
+			RESHARING_SUITE_ML_DSA_87,
+			epoch,
 			config.old_threshold(),
 			config.old_participants().len() as u32,
 			&old_participants,
@@ -438,6 +461,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			signer_config,
 			state: ResharingState::Round1Generate,
 			ssid,
+			epoch,
 			seed,
 			old_subset_order,
 			new_subset_order,
@@ -467,6 +491,11 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// to prevent cross-session replay attacks.
 	pub fn ssid(&self) -> &[u8; RESHARING_SSID_SIZE] {
 		&self.ssid
+	}
+
+	/// The handoff epoch baked into the SSID for this session.
+	pub fn epoch(&self) -> u64 {
+		self.epoch
 	}
 
 	/// Get the current protocol state.
@@ -1281,8 +1310,14 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		// broadcast commitments, sum them into new subset shares, and commit.
 		if self.config.role().is_new_committee() {
 			match self.verify_and_aggregate_new_shares() {
-				Ok(commits) => match self.verify_recovered_partial_norms() {
-					Ok(()) => share_commitments = commits,
+				Ok(commits) => match self.verify_stored_new_share_norms() {
+					Ok(()) => match self.verify_recovered_partial_norms() {
+						Ok(()) => share_commitments = commits,
+						Err(e) => {
+							success = false;
+							error_message = Some(e.to_string());
+						},
+					},
 					Err(e) => {
 						success = false;
 						error_message = Some(e.to_string());
@@ -1548,6 +1583,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		};
 
 		let output = self.build_output(certificate)?;
+		self.zeroize_session_secrets();
 		self.completed_output = Some(output.clone());
 		self.state = ResharingState::Done;
 		Ok(Action::Return(output))
@@ -1848,6 +1884,41 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 					"recovered partial for signing set {:?} exceeds partial-secret norm \
 					 bound: sqrt(tau) * weighted_norm = {:.0}, B = {:.0}",
 					signing_set, challenge_bound, bound
+				)));
+			}
+		}
+
+		Ok(())
+	}
+
+	/// Per-subset stored-share norm guard (`B_G` analog).
+	///
+	/// Before checking recovered signing partials (which sum several stored
+	/// subset shares and where zero-sum inflation can partially cancel), verify
+	/// each individual aggregated new subset share `s_J^new` is within the
+	/// single-share norm envelope. Defense in depth against attacks that
+	/// inflate individual stored shares while arranging cancellation in the
+	/// specific combinations the recovered-partial check sums.
+	fn verify_stored_new_share_norms(&self) -> Result<(), ResharingProtocolError> {
+		let threshold = self.config.new_threshold();
+		let parties = self.config.new_participants().len() as u32;
+		let (_, _, nu) = crate::protocol::signing::get_hyperball_params(threshold, parties)
+			.ok_or_else(|| {
+				ResharingProtocolError::ShareVerificationFailed(format!(
+					"no hyperball parameters for new configuration ({}, {})",
+					threshold, parties
+				))
+			})?;
+
+		let bound = stored_subset_share_norm_bound(threshold, parties, nu);
+
+		for (&j_mask, share) in &self.new_shares {
+			let weighted_norm = single_share_weighted_norm(share, nu);
+			if weighted_norm > bound {
+				return Err(ResharingProtocolError::ShareVerificationFailed(format!(
+					"stored new subset share {:b} exceeds single-share norm bound: \
+					 weighted_norm = {:.0}, B_G = {:.0}",
+					j_mask, weighted_norm, bound
 				)));
 			}
 		}
@@ -2170,17 +2241,56 @@ fn binomial(n: u32, k: u32) -> u64 {
 /// challenge amplification (`E_c[‖c·u‖₂²] = τ·‖u‖₂²`); both follow Mithril §3.4
 /// and footnote 3.
 fn partial_secret_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
-	let n = N as f64;
-	let dim = n * (K as f64 + L as f64 / (nu * nu));
-	let var_eta = ETA as f64 * (ETA as f64 + 1.0) / 3.0;
-	// Max number of base secrets a party aggregates in one signing session
-	// (RSSRecover balanced partition, Mithril §B): ⌈C(N, T−1)/T⌉.
 	let num_secrets = {
 		let c = binomial(parties, threshold - 1) as f64;
 		(c / threshold as f64).ceil()
 	};
+	partial_secret_norm_bound_with_num_secrets(threshold, parties, nu, num_secrets)
+}
+
+/// Norm bound for a single stored RSS subset share (`B_G` analog).
+///
+/// Uses the same Mithril §3.4 calibration as [`partial_secret_norm_bound`], but
+/// with `num_secrets = 1` because each stored subset share aggregates one base
+/// secret's worth of material rather than the `⌈C(N,T−1)/T⌉` shares summed at
+/// signing recovery time.
+fn stored_subset_share_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
+	partial_secret_norm_bound_with_num_secrets(threshold, parties, nu, 1.0)
+}
+
+fn partial_secret_norm_bound_with_num_secrets(
+	threshold: u32,
+	parties: u32,
+	nu: f64,
+	num_secrets: f64,
+) -> f64 {
+	let n = N as f64;
+	let dim = n * (K as f64 + L as f64 / (nu * nu));
+	let var_eta = ETA as f64 * (ETA as f64 + 1.0) / 3.0;
 	let base = 1.3 * (TAU as f64).sqrt() * (dim * var_eta * num_secrets).sqrt();
 	base * resharing_norm_enlargement(threshold, parties)
+}
+
+fn single_share_weighted_norm(share: &NewShareData, nu: f64) -> f64 {
+	let s1_sq: f64 = share
+		.s1
+		.iter()
+		.flat_map(|poly| poly.iter())
+		.map(|&c| {
+			let x = center_mod_q(c) as f64;
+			x * x
+		})
+		.sum();
+	let s2_sq: f64 = share
+		.s2
+		.iter()
+		.flat_map(|poly| poly.iter())
+		.map(|&c| {
+			let x = center_mod_q(c) as f64;
+			x * x
+		})
+		.sum();
+	(s1_sq / (nu * nu) + s2_sq).sqrt()
 }
 
 /// Per-config enlargement factor `κ` applied to the keygen-calibrated bound `B`.
@@ -3007,6 +3117,7 @@ mod tests {
 			test_signer_config(1, &[0, 1, 2]),
 			[1u8; 32],
 			&[2u8; 32],
+			0,
 		);
 		let session_seed = [9u8; 32];
 		protocol.session_seed = Some(session_seed);
@@ -3071,6 +3182,7 @@ mod tests {
 			test_signer_config(1, &[0, 1, 2]),
 			[1u8; 32],
 			&[2u8; 32],
+			0,
 		);
 
 		// This models a bounded zero-sum reshaping attack: +delta on one new RSS
