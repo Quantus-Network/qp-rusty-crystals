@@ -728,12 +728,12 @@ impl ResharingCertificate {
 		verifying_keys: &BTreeMap<ParticipantId, S::PublicKey>,
 	) -> bool {
 		let accept_hash = compute_accept_hash(&self.ssid, &self.transcript_hash);
-		new_participants.iter().all(|p| {
-			match (verifying_keys.get(p), self.accepts.get(p)) {
+		new_participants
+			.iter()
+			.all(|p| match (verifying_keys.get(p), self.accepts.get(p)) {
 				(Some(pk), Some(sig)) => S::verify_bytes(pk, &accept_hash, sig),
 				_ => false,
-			}
-		})
+			})
 	}
 }
 
@@ -1136,8 +1136,8 @@ pub struct ResharingOutput {
 ///
 /// * `protocol_version` - Wire/logic version ([`RESHARING_PROTOCOL_VERSION`])
 /// * `suite_id` - Cryptographic suite ([`RESHARING_SUITE_ML_DSA_87`])
-/// * `epoch` - Monotonic handoff counter for this public key (0 for the first
-///   resharing after keygen; increment for each subsequent handoff)
+/// * `epoch` - Monotonic handoff counter for this public key (0 for the first resharing after
+///   keygen; increment for each subsequent handoff)
 /// * `old_threshold` - Threshold of the old committee
 /// * `old_n` - Total parties in the old committee
 /// * `old_participants` - Participant IDs in the old committee

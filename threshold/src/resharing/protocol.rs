@@ -6,20 +6,19 @@
 //! See `resharing/mod.rs` for a full description of the cryptographic protocol.
 //! In short:
 //!
-//! - **Round 1 (Entropy commitment / Ready)**: Old committee members commit to fresh entropy.
-//!   The commitment doubles as a *Ready* signal for active-set selection.
-//! - **Act proposal**: The session leader (lowest-ID new committee member) proposes the active
-//!   set `Act` of old members that will participate: all old members once everyone has committed
-//!   (fast path), or the committed subset after the caller closes the ready window
-//!   ([`ResharingProtocol::close_ready_window`]). Every party checks `Act` is a subset of the
-//!   old committee with `|Act| >= t_old`, which guarantees every old RSS subset intersects `Act`.
-//! - **Round 2 (Entropy reveal)**: Active old committee members reveal entropy. All parties
-//!   compute the public session seed from the active members' reveals after checking the
-//!   commitments.
-//! - **Round 3 (Sub-share commitments)**: Each designated dealer (lowest-ID member of
-//!   `I ∩ Act`) broadcasts hash commitments to deterministic sub-shares `r_{I→J}` derived from
-//!   `s_I^old` and the public session seed. Other active members of the same subset recompute
-//!   and verify those commitments before Round 4.
+//! - **Round 1 (Entropy commitment / Ready)**: Old committee members commit to fresh entropy. The
+//!   commitment doubles as a *Ready* signal for active-set selection.
+//! - **Act proposal**: The session leader (lowest-ID new committee member) proposes the active set
+//!   `Act` of old members that will participate: all old members once everyone has committed (fast
+//!   path), or the committed subset after the caller closes the ready window
+//!   ([`ResharingProtocol::close_ready_window`]). Every party checks `Act` is a subset of the old
+//!   committee with `|Act| >= t_old`, which guarantees every old RSS subset intersects `Act`.
+//! - **Round 2 (Entropy reveal)**: Active old committee members reveal entropy. All parties compute
+//!   the public session seed from the active members' reveals after checking the commitments.
+//! - **Round 3 (Sub-share commitments)**: Each designated dealer (lowest-ID member of `I ∩ Act`)
+//!   broadcasts hash commitments to deterministic sub-shares `r_{I→J}` derived from `s_I^old` and
+//!   the public session seed. Other active members of the same subset recompute and verify those
+//!   commitments before Round 4.
 //! - **Round 4 (Private delivery)**: Dealers privately deliver `r_{I→J}` to new committee members.
 //! - **Round 5 (Verification)**: New committee members verify received sub-shares, sum them into
 //!   new shares `s_J^new`, and broadcast commitments so each new subset can cross-verify.
@@ -60,12 +59,11 @@ use crate::{
 
 use super::types::{
 	compute_accept_hash, compute_resharing_ssid, NewShareData, ResharingAccept,
-	ResharingActProposal, ResharingCertificate, ResharingConfig, ResharingMessage,
-	ResharingOutput, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
-	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast,
-	ResharingSignerConfig, SubsetMask, SubsetPair, COMMITMENT_HASH_SIZE, ENTROPY_SIZE,
-	RESHARING_PROTOCOL_VERSION, RESHARING_SSID_SIZE, RESHARING_SUITE_ML_DSA_87,
-	SUBSHARE_COEFF_BOUND,
+	ResharingActProposal, ResharingCertificate, ResharingConfig, ResharingMessage, ResharingOutput,
+	ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal, ResharingRound3Broadcast,
+	ResharingRound4Message, ResharingRound5Broadcast, ResharingSignerConfig, SubsetMask,
+	SubsetPair, COMMITMENT_HASH_SIZE, ENTROPY_SIZE, RESHARING_PROTOCOL_VERSION,
+	RESHARING_SSID_SIZE, RESHARING_SUITE_ML_DSA_87, SUBSHARE_COEFF_BOUND,
 };
 use crate::keygen::dkg::TranscriptSigner;
 
@@ -244,8 +242,8 @@ impl fmt::Display for ResharingProtocolError {
 /// # Protocol Rounds (session-randomized protocol with active-set liveness)
 ///
 /// - **Round 1**: Entropy commitment / Ready (old committee broadcasts `H(entropy)`)
-/// - **Act proposal**: Leader proposes the active set of ready old members (within the
-///   Round 1/2 waiting states)
+/// - **Act proposal**: Leader proposes the active set of ready old members (within the Round 1/2
+///   waiting states)
 /// - **Round 2**: Entropy reveal (active members reveal entropy, session seed computed)
 /// - **Round 3**: Sub-share commitments (designated dealers broadcast `H(r_{I→J})`)
 /// - **Round 4**: Private delivery (dealers send `r_{I→J}` to new committee)
@@ -430,8 +428,8 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	///   keys, used for Round 6 transcript acceptance
 	/// * `seed` - 32 bytes of cryptographic randomness for this party's entropy contribution
 	/// * `session_nonce` - Unique nonce for SSID computation (prevents cross-session replay)
-	/// * `epoch` - Monotonic handoff counter for this public key (0 for the first resharing
-	///   after keygen; the transport layer should increment for each subsequent handoff)
+	/// * `epoch` - Monotonic handoff counter for this public key (0 for the first resharing after
+	///   keygen; the transport layer should increment for each subsequent handoff)
 	pub fn new(
 		config: ResharingConfig,
 		signer_config: ResharingSignerConfig<S>,
@@ -538,7 +536,10 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// be online for resharing to succeed (they receive the new shares), so the
 	/// leader is always reachable in a viable session.
 	pub fn leader(&self) -> ParticipantId {
-		self.config.new_participants().get(0).expect("new committee is non-empty (validated)")
+		self.config
+			.new_participants()
+			.get(0)
+			.expect("new committee is non-empty (validated)")
 	}
 
 	/// The agreed active set `Act`, once known.
@@ -603,8 +604,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		if self.active_set.is_some() || self.config.my_party_id() != self.leader() {
 			return Ok(None);
 		}
-		let have_all =
-			self.round1_entropy_commits.len() >= self.config.old_participants().len();
+		let have_all = self.round1_entropy_commits.len() >= self.config.old_participants().len();
 		if !have_all && !self.ready_window_closed {
 			return Ok(None);
 		}
@@ -613,8 +613,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		let act: Vec<ParticipantId> = self.round1_entropy_commits.keys().copied().collect();
 		let required = self.config.old_threshold() as usize;
 		if act.len() < required {
-			let err =
-				ResharingProtocolError::InsufficientParties { required, received: act.len() };
+			let err = ResharingProtocolError::InsufficientParties { required, received: act.len() };
 			self.state = ResharingState::Failed(err.to_string());
 			return Err(err);
 		}
@@ -1536,9 +1535,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		Ok(Action::SendMany(data))
 	}
 
-	fn handle_accept_waiting(
-		&mut self,
-	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
+	fn handle_accept_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
 		let transcript_hash = self.transcript_hash.ok_or_else(|| {
 			ResharingProtocolError::InternalError(
 				"AcceptWaiting reached without a transcript hash".to_string(),
@@ -1546,8 +1543,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		})?;
 
 		// Need an acceptance from every new committee member.
-		let new_participants: Vec<ParticipantId> =
-			self.config.new_participants().iter().collect();
+		let new_participants: Vec<ParticipantId> = self.config.new_participants().iter().collect();
 		if !new_participants.iter().all(|p| self.accepts.contains_key(p)) {
 			return Ok(Action::Wait);
 		}
@@ -2778,10 +2774,7 @@ mod tests {
 	}
 
 	/// Build a `ResharingSignerConfig<TestSigner>` covering `participants`.
-	fn test_signer_config(
-		my_id: u32,
-		participants: &[u32],
-	) -> ResharingSignerConfig<TestSigner> {
+	fn test_signer_config(my_id: u32, participants: &[u32]) -> ResharingSignerConfig<TestSigner> {
 		let keys: BTreeMap<u32, u32> = participants.iter().map(|&p| (p, p)).collect();
 		ResharingSignerConfig::new(TestSigner { id: my_id }, keys, participants)
 			.expect("keys cover participants")

@@ -25,10 +25,10 @@
 //! ## Protocol Rounds (session-randomized protocol with active-set liveness)
 //!
 //! - **Round 1**: Entropy commitment / Ready - old committee broadcasts `H(entropy)`
-//! - **Act proposal**: The session leader (lowest-ID new committee member) proposes the active
-//!   set `Act` of ready old members. All old members once everyone commits (fast path), or the
-//!   committed subset after [`ResharingProtocol::close_ready_window`] — requires `|Act| >=
-//!   t_old`, so resharing succeeds even when up to `n_old - t_old` old members are offline
+//! - **Act proposal**: The session leader (lowest-ID new committee member) proposes the active set
+//!   `Act` of ready old members. All old members once everyone commits (fast path), or the
+//!   committed subset after [`ResharingProtocol::close_ready_window`] — requires `|Act| >= t_old`,
+//!   so resharing succeeds even when up to `n_old - t_old` old members are offline
 //! - **Round 2**: Entropy reveal - active members reveal entropy and a public session seed is
 //!   computed
 //! - **Round 3**: Sub-share commitments - designated dealers broadcast `H(r_{I→J})`
@@ -61,9 +61,9 @@
 //!
 //! - **Secrecy of `s`**: No party — not even the designated dealers — ever reconstructs the full
 //!   secret `s`. Each `D_I` only handles `s_I^old`, which they already had.
-//! - **Replay protection**: Each message includes an SSID derived from the protocol version,
-//!   suite ID, handoff epoch, old/new committees, the public key, and a session nonce. Messages
-//!   with a different SSID are ignored.
+//! - **Replay protection**: Each message includes an SSID derived from the protocol version, suite
+//!   ID, handoff epoch, old/new committees, the public key, and a session nonce. Messages with a
+//!   different SSID are ignored.
 //! - **Session randomization**: Rounds 1-2 commit to and reveal fresh entropy before deriving a
 //!   public session seed, making sub-share splits unpredictable before reveal and different across
 //!   fresh sessions. This is not post-compromise forward secrecy: a recorded transcript plus later
@@ -163,11 +163,11 @@ mod types;
 // Re-export public types
 pub use types::{
 	compute_accept_hash, compute_resharing_ssid, NewShareData, ResharingAccept,
-	ResharingActProposal, ResharingCertificate, ResharingConfig, ResharingMessage,
-	ResharingOutput, ResharingRole, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
+	ResharingActProposal, ResharingCertificate, ResharingConfig, ResharingMessage, ResharingOutput,
+	ResharingRole, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
 	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast,
 	ResharingSignerConfig, SubsetMask, SubsetPair, ENTROPY_SIZE, MAX_ACCEPT_SIGNATURE_LEN,
-	RESHARING_SSID_SIZE, RESHARING_PROTOCOL_VERSION, RESHARING_SUITE_ML_DSA_87,
+	RESHARING_PROTOCOL_VERSION, RESHARING_SSID_SIZE, RESHARING_SUITE_ML_DSA_87,
 	SUBSHARE_COEFF_BOUND,
 };
 

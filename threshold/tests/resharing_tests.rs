@@ -89,10 +89,7 @@ fn run_resharing_protocol_full(
 		new_participants.iter().all(|p| !offline.contains(p)),
 		"new committee members must be online (they receive the new shares)"
 	);
-	assert!(
-		slow.iter().all(|p| !offline.contains(p)),
-		"a party cannot be both slow and offline"
-	);
+	assert!(slow.iter().all(|p| !offline.contains(p)), "a party cannot be both slow and offline");
 
 	// Determine all parties involved (union of old and new), minus offline ones.
 	let mut all_parties: Vec<u32> =
@@ -4056,8 +4053,9 @@ fn test_tampered_accept_signature_aborts() {
 #[test]
 fn test_certificate_verification_rejects_missing_or_wrong_accepts() {
 	use common::TestSigner as Signer;
-	use qp_rusty_crystals_threshold::resharing::{compute_accept_hash, ResharingCertificate};
-	use qp_rusty_crystals_threshold::resharing::TranscriptSigner as _;
+	use qp_rusty_crystals_threshold::resharing::{
+		compute_accept_hash, ResharingCertificate, TranscriptSigner as _,
+	};
 	use std::collections::BTreeMap;
 
 	let ssid = [7u8; 32];

@@ -590,7 +590,8 @@ mod resharing_edge_cases {
 
 		let protocol_seed = [42u8; 32];
 		let session_nonce = [0x77u8; 32];
-		let mut protocol = crate::common::new_test_protocol(resharing_config, protocol_seed, &session_nonce);
+		let mut protocol =
+			crate::common::new_test_protocol(resharing_config, protocol_seed, &session_nonce);
 
 		// Before completion, take_output should return None
 		let output1 = protocol.take_output();
