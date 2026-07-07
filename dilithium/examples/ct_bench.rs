@@ -29,13 +29,13 @@
 //!
 //! Intentionally not tested:
 //!
-//! - whole `sign()` / `Keypair::generate()` calls (their duration varies with public
-//!   values: the abort count and rho, which is published in the public key)
-//! - `poly::challenge()` (variable-time by design; its input c~ = H(mu, w1) is a hash
-//!   output that is published for accepted attempts and unexploitable for rejected ones)
-//! - `packing::pack_sig()` (only called for the accepted attempt, so its inputs are
-//!   exactly the published signature bytes; the hint loop is branchless anyway as
-//!   defense-in-depth, but its weight-dependent store pattern is not a secret channel)
+//! - whole `sign()` / `Keypair::generate()` calls (their duration varies with public values: the
+//!   abort count and rho, which is published in the public key)
+//! - `poly::challenge()` (variable-time by design; its input c~ = H(mu, w1) is a hash output that
+//!   is published for accepted attempts and unexploitable for rejected ones)
+//! - `packing::pack_sig()` (only called for the accepted attempt, so its inputs are exactly the
+//!   published signature bytes; the hint loop is branchless anyway as defense-in-depth, but its
+//!   weight-dependent store pattern is not a secret channel)
 //! - `verify()` (operates exclusively on public data)
 //!
 //! # Harness design notes

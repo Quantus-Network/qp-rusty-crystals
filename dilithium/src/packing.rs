@@ -170,8 +170,8 @@ pub fn unpack_sig(
 
 	let mut k: usize = 0;
 	for i in 0..K {
-		if sig[idx + params::OMEGA + i] < k as u8
-			|| sig[idx + params::OMEGA + i] > params::OMEGA as u8
+		if sig[idx + params::OMEGA + i] < k as u8 ||
+			sig[idx + params::OMEGA + i] > params::OMEGA as u8
 		{
 			return false;
 		}
