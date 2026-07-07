@@ -121,6 +121,26 @@ jobs:
       - name: Check documentation
         run: cargo doc --workspace --locked --no-deps --all-features --document-private-items
 
+  stack-budget:
+    name: 📏 Stack Budget (thumbv7em)
+    needs: fast-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-stack-${{ hashFiles('**/Cargo.lock') }}
+      # Worst single frame is currently ~107 KB (sign::signature). A 128 KB budget
+      # leaves headroom for noise but trips if the ~56 KB materialized matrix A
+      # ever comes back. The script installs its own pinned nightly + llvm-tools.
+      - name: Check per-function stack frames against budget
+        run: ./stack-check.sh 128
+
   security-audit:
     name: 🔒 Security Audit
     needs: fast-checks

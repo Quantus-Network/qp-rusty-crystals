@@ -339,7 +339,7 @@ pub(crate) fn signature(
 	// Step 1: Unpack secret key components
 	let unpacked_sk = unpack_secret_key_for_signing(secret_key_bytes);
 
-	// Step 2: Prepare signing context (message hash, randomness, expanded matrix)
+	// Step 2: Prepare signing context (message hash, randomness, public seed rho)
 	let signing_ctx = prepare_signing_context(&unpacked_sk, message, hedge);
 
 	// Step 3: Make the rejection sampling lumpy to smear out timing signals

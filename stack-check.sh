@@ -13,17 +13,22 @@ set -euo pipefail
 TOOLCHAIN="${RUST_TOOLCHAIN:-nightly-2025-07-01}"
 TARGET="thumbv7em-none-eabihf"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-LLVMBIN="$(dirname "$(rustc +"$TOOLCHAIN" --print sysroot)")/${TOOLCHAIN}-$(rustc -vV | sed -n 's/host: //p')/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin"
-READOBJ="$LLVMBIN/llvm-readobj"
 
-rustup target add "$TARGET" --toolchain "$TOOLCHAIN" >/dev/null 2>&1 || true
+# Nightly is required for -Z emit-stack-sizes; llvm-readobj ships with the llvm-tools
+# component, not the base toolchain. All three installs are idempotent.
+rustup toolchain install "$TOOLCHAIN" --profile minimal >/dev/null
+rustup target add "$TARGET" --toolchain "$TOOLCHAIN" >/dev/null
+rustup component add llvm-tools --toolchain "$TOOLCHAIN" >/dev/null
+
+HOST="$(rustup run "$TOOLCHAIN" rustc -vV | sed -n 's/host: //p')"
+READOBJ="$(rustup run "$TOOLCHAIN" rustc --print sysroot)/lib/rustlib/$HOST/bin/llvm-readobj"
 
 echo "Building dilithium for $TARGET ($TOOLCHAIN) with -Z emit-stack-sizes ..."
 RUSTFLAGS="-Z emit-stack-sizes" rustup run "$TOOLCHAIN" cargo build --release \
   -p qp-rusty-crystals-dilithium --target "$TARGET" --no-default-features >/dev/null
 
-RLIB="$ROOT/target/$TARGET/release/libqp_rusty_crystals_dilithium.rlib"
-"$READOBJ" --stack-sizes "$RLIB" 2>/dev/null > /tmp/dilithium_stack_sizes.txt
+RLIB="${CARGO_TARGET_DIR:-$ROOT/target}/$TARGET/release/libqp_rusty_crystals_dilithium.rlib"
+"$READOBJ" --stack-sizes "$RLIB" > /tmp/dilithium_stack_sizes.txt
 
 python3 - "$@" <<'PY'
 import re, sys
