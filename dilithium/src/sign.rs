@@ -5,7 +5,6 @@ use crate::{
 	polyvec::{Polyveck, Polyvecl},
 	SensitiveBytes32,
 };
-use core::array;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const K: usize = params::K;
@@ -44,9 +43,6 @@ pub fn keypair(
 	key.copy_from_slice(&seedbuf[params::SEEDBYTES + params::CRHBYTES..]);
 
 	// Allocate polynomial structures
-	let mut mat: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
-	polyvec::matrix_expand(&mut mat, &rho);
-
 	let mut s1 = Polyvecl::default();
 	polyvec::l_uniform_eta(&mut s1, &rhoprime, 0);
 
@@ -56,8 +52,9 @@ pub fn keypair(
 	let mut s1hat = s1.clone();
 	polyvec::l_ntt(&mut s1hat);
 
+	// Compute t1 = A * s1hat, streaming A from rho so the full matrix is never materialized.
 	let mut t1 = Polyveck::default();
-	polyvec::matrix_pointwise_montgomery(&mut t1, &mat, &s1hat);
+	polyvec::matrix_pointwise_montgomery_streamed(&mut t1, &rho, &s1hat);
 	polyvec::k_reduce(&mut t1);
 	polyvec::k_invntt_tomont(&mut t1);
 	polyvec::k_add(&mut t1, &s2);
@@ -102,16 +99,20 @@ struct UnpackedSecretKey {
 	secret_poly_s2_ntt: Polyveck,
 }
 
-/// Signing context containing precomputed values
+/// Signing context containing precomputed values.
+///
+/// Holds the public seed `rho` rather than the expanded matrix A: A is regenerated on the fly
+/// per rejection-sampling attempt (see `matrix_pointwise_montgomery_streamed`), trading a small
+/// amount of recomputation for ~56 KB less peak stack on memory-constrained targets.
 struct SigningContext {
-	expanded_matrix_a: [Polyvecl; K],
+	public_seed_rho: [u8; params::SEEDBYTES],
 	message_hash_mu: [u8; params::CRHBYTES],
 	signing_entropy_rho_prime: [u8; params::CRHBYTES],
 }
 
 impl Drop for SigningContext {
 	fn drop(&mut self) {
-		// Only zeroize the sensitive entropy, not the polynomial matrix or message hash
+		// rho and mu are public; only the mask seed is sensitive.
 		self.signing_entropy_rho_prime.zeroize();
 	}
 }
@@ -203,11 +204,10 @@ fn prepare_signing_context(
 	// Zeroize sensitive hedge bytes after use
 	hedge_bytes.zeroize();
 
-	// Expand matrix A from public seed
-	let mut expanded_matrix_a: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
-	polyvec::matrix_expand(&mut expanded_matrix_a, &unpacked_sk.public_seed_rho);
+	// Keep the public seed; matrix A is streamed from it per attempt instead of materialized.
+	let public_seed_rho = unpacked_sk.public_seed_rho;
 
-	SigningContext { expanded_matrix_a, message_hash_mu, signing_entropy_rho_prime }
+	SigningContext { public_seed_rho, message_hash_mu, signing_entropy_rho_prime }
 }
 
 /// Compute z = y + cs1 and check if ||z||∞ < γ₁ - β
@@ -286,17 +286,17 @@ fn generate_masking_vector_and_commitment(
 	commitment_w1: &mut Polyveck,
 	commitment_w0: &mut Polyveck,
 	signature_z_temp: &mut Polyvecl,
-	expanded_matrix_a: &[Polyvecl; K],
+	public_seed_rho: &[u8; params::SEEDBYTES],
 	signing_entropy: &[u8; params::CRHBYTES],
 	attempt_nonce: u16,
 ) {
 	// Generate random masking vector y
 	polyvec::l_uniform_gamma1(masking_vector_y, signing_entropy, attempt_nonce);
 
-	// Compute commitment w = Ay
+	// Compute commitment w = Ay, streaming A from rho instead of using a materialized matrix.
 	*signature_z_temp = masking_vector_y.clone();
 	polyvec::l_ntt(signature_z_temp);
-	polyvec::matrix_pointwise_montgomery(commitment_w1, expanded_matrix_a, signature_z_temp);
+	polyvec::matrix_pointwise_montgomery_streamed(commitment_w1, public_seed_rho, signature_z_temp);
 	polyvec::k_reduce(commitment_w1);
 	polyvec::k_invntt_tomont(commitment_w1);
 	polyvec::k_caddq(commitment_w1);
@@ -339,7 +339,7 @@ pub(crate) fn signature(
 	// Step 1: Unpack secret key components
 	let unpacked_sk = unpack_secret_key_for_signing(secret_key_bytes);
 
-	// Step 2: Prepare signing context (message hash, randomness, expanded matrix)
+	// Step 2: Prepare signing context (message hash, randomness, public seed rho)
 	let signing_ctx = prepare_signing_context(&unpacked_sk, message, hedge);
 
 	// Step 3: Make the rejection sampling lumpy to smear out timing signals
@@ -379,7 +379,7 @@ pub(crate) fn signature(
 				&mut commitment_w1,
 				&mut commitment_w0,
 				&mut signature_z,
-				&signing_ctx.expanded_matrix_a,
+				&signing_ctx.public_seed_rho,
 				&signing_ctx.signing_entropy_rho_prime,
 				attempt_nonce,
 			);
@@ -477,7 +477,6 @@ pub(crate) fn verify(
 	let mut c2 = [0u8; params::C_DASH_BYTES];
 	// Allocate polynomial structures
 	let mut cp = Poly::default();
-	let mut mat: [Polyvecl; K] = array::from_fn(|_| Polyvecl::default());
 	let mut z = Polyvecl::default();
 	let mut t1 = Polyveck::default();
 	let mut w1 = Polyveck::default();
@@ -502,12 +501,11 @@ pub(crate) fn verify(
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut mu, &mut state);
 
-	// Matrix-vector multiplication; compute Az - c2^dt1
+	// Matrix-vector multiplication; compute Az - c2^dt1 (A streamed from rho)
 	poly::challenge(&mut cp, &c);
-	polyvec::matrix_expand(&mut mat, &rho);
 
 	polyvec::l_ntt(&mut z);
-	polyvec::matrix_pointwise_montgomery(&mut w1, &mat, &z);
+	polyvec::matrix_pointwise_montgomery_streamed(&mut w1, &rho, &z);
 
 	poly::ntt(&mut cp);
 	polyvec::k_shiftl(&mut t1);

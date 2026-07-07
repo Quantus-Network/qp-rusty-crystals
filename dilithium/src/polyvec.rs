@@ -55,6 +55,31 @@ pub fn matrix_pointwise_montgomery(t: &mut Polyveck, mat: &[Polyvecl; K], v: &Po
 	}
 }
 
+/// Streaming equivalent of `matrix_expand` followed by `matrix_pointwise_montgomery`.
+///
+/// Computes `t = A * v` (NTT domain) while generating each element `A[i][j]` of ExpandA on the
+/// fly from `rho`, so the full matrix (K*L polynomials, ~56 KB for ML-DSA-87) is never
+/// materialized. Peak extra working memory is two polynomials (~2 KB). The arithmetic and the
+/// accumulation order are identical to the non-streaming path, so the result is bit-for-bit the
+/// same; only peak stack usage differs.
+pub fn matrix_pointwise_montgomery_streamed(
+	t: &mut Polyveck,
+	rho: &[u8; params::SEEDBYTES],
+	v: &Polyvecl,
+) {
+	let mut a_ij = Poly::default();
+	let mut prod = Poly::default();
+	for (i, t_i) in t.vec.iter_mut().enumerate() {
+		poly::uniform(&mut a_ij, rho, (i << 8) as u16);
+		poly::pointwise_montgomery(t_i, &a_ij, &v.vec[0]);
+		for j in 1..L {
+			poly::uniform(&mut a_ij, rho, ((i << 8) + j) as u16);
+			poly::pointwise_montgomery(&mut prod, &a_ij, &v.vec[j]);
+			poly::add_ip(t_i, &prod);
+		}
+	}
+}
+
 pub fn l_uniform_eta(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], mut nonce: u16) {
 	for i in 0..L {
 		poly::uniform_eta(&mut v.vec[i], seed, nonce);
