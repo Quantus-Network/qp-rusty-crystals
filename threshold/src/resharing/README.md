@@ -32,12 +32,18 @@ Round 1: Entropy Commitment / Ready (Session Randomization)
 
 Act Proposal (Active-Set Selection)
 ├── The session leader (lowest-ID new committee member) proposes the active set Act:
-│   all old members once everyone has committed (fast path), or the committed subset
-│   after the caller closes the ready window (close_ready_window(), e.g. on a
-│   transport timeout).
+│   all old members once everyone has committed (fast path), the committed subset
+│   once every *expected* member has committed (set_expected_active_set(), for
+│   transports where some old members are structurally unreachable), or the
+│   committed subset after the caller closes the ready window
+│   (close_ready_window(), e.g. on a transport timeout).
 ├── Every party verifies: sender is the leader, Act ⊆ old committee, |Act| ≥ t_old.
 │   |Act| ≥ t_old guarantees every old subset I (size n_old − t_old + 1) intersects
 │   Act, so a live dealer exists for every subset.
+├── No party broadcasts its Round 2 reveal until it holds a Round 1 commitment from
+│   every Act member: every contributor's entropy is fixed before any reveal is
+│   sent, so a colluding member listed in Act cannot choose its entropy after
+│   seeing honest reveals to bias the session seed.
 └── If fewer than t_old old members are ready, the protocol aborts
     (InsufficientParties).
 
@@ -129,7 +135,7 @@ On successful completion (`Action::Return`), the protocol zeroizes, in place: th
 | **Secrecy of `s`** | No party — not even any dealer — ever holds `s` in clear. Each `D_I` only handles `s_I^old`, which they already had. |
 | **Replay protection** | Every message carries an SSID derived from the protocol version, suite ID, handoff epoch, old/new committees, public key, and session nonce (`RESHARING_SSID_V2`). Messages with a mismatched SSID are ignored; transcripts from other protocol versions, suites, or epochs cannot be replayed. |
 | **Session randomization** | Session seed incorporates the SSID and fresh entropy from all active old committee members via commit-reveal, so different sessions produce different deterministic sub-share splits even if entropy is accidentally reused. This does not provide post-compromise forward secrecy once the transcript is recorded. |
-| **Liveness with offline old members** | Round 1 commitments double as Ready signals. The session leader (lowest-ID new committee member) proposes the active set `Act` of ready members (`|Act| ≥ t_old`); dealers are assigned as `min(I ∩ Act)`, so resharing completes with up to `n_old − t_old` old members offline. The leader cannot break safety: parties verify `Act` against the Ready signals they received themselves, sub-share derivation is deterministic (dealer identity doesn't change values), and the seed stays unbiased because `Act` is fixed before any entropy is revealed and contains at least one honest member. A malicious leader can at most deny service or select among ready members; equivocating proposals lead to mismatched deterministic commitments and an abort. |
+| **Liveness with offline old members** | Round 1 commitments double as Ready signals. The session leader (lowest-ID new committee member) proposes the active set `Act` of ready members (`|Act| ≥ t_old`); dealers are assigned as `min(I ∩ Act)`, so resharing completes with up to `n_old − t_old` old members offline. Transports where some old members are structurally unreachable (e.g. a mesh spanning only the new committee) can use `set_expected_active_set` on the leader for a deterministic proposal without waiting for a timeout. The leader cannot break safety: parties verify `Act` against the Ready signals they received themselves, no party reveals entropy until it holds commitments from all of `Act` (so every contributor's entropy is fixed before any reveal), sub-share derivation is deterministic (dealer identity doesn't change values), and the seed stays unbiased because `Act` contains at least one honest member. A malicious leader can at most deny service or select among ready members; equivocating proposals lead to mismatched deterministic commitments and an abort. |
 | **Confidentiality of contributions** | Rounds 1-3, 5 broadcast only hash commitments; Round 4 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
 | **Cheating-dealer detection** | Old-subset peers recompute and verify Round 3 commitments before Round 4 whenever the old subset has another member. New-subset members verify delivered sub-shares against Round 3 commitments, reject over-large sub-share coefficients, and reject recovered signing partials that exceed the existing hyperball safety envelope. A final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching aggregate-secret corruption even when an old subset has size 1. If any verification fails, the protocol aborts. |
 | **PK Preservation** | Public key `t = A·s1 + s2` unchanged, verified at the end of Round 5 via a deterministic byte-equality check against the original PK. |
@@ -314,7 +320,7 @@ NewOnly parties skip Rounds 1-2 (entropy commit-reveal) and go directly to `Roun
 ## Limitations
 
 - Maximum 16 parties (due to u16 subset masks)
-- Requires at least `t_old` old committee members (and every new committee member) to be online. Offline old members are excluded from the active set after the caller closes the ready window (`close_ready_window()` on the leader, e.g. after a transport timeout); dealers fail over to `min(I ∩ Act)`. If an *active* dealer goes offline mid-session or cheats, the protocol still aborts (no mid-session re-deal in this implementation) — restart the session and the dead dealer will be excluded from the next active set.
+- Requires at least `t_old` old committee members (and every new committee member) to be online. Offline old members are excluded from the active set after the caller closes the ready window (`close_ready_window()` on the leader, e.g. after a transport timeout), or deterministically via `set_expected_active_set()` on the leader when the transport makes some old members structurally unreachable; dealers fail over to `min(I ∩ Act)`. If an *active* dealer goes offline mid-session or cheats, the protocol still aborts (no mid-session re-deal in this implementation) — restart the session and the dead dealer will be excluded from the next active set.
 - **Secure channels required for Round 4 private messages** (see Transport Security section above)
 - **Cryptographically random entropy required from each active old committee member** (see Entropy Requirements section above)
 

@@ -338,6 +338,11 @@ pub struct ResharingProtocol<S: TranscriptSigner> {
 	/// the Ready signals received so far instead of waiting for the full old
 	/// committee.
 	ready_window_closed: bool,
+	/// Set by [`Self::set_expected_active_set`]: the old committee members the
+	/// transport layer expects to be reachable. When set, the leader proposes
+	/// `Act` as soon as every expected member has committed, without waiting
+	/// for the full old committee or a `close_ready_window` timeout.
+	expected_active_set: Option<Vec<ParticipantId>>,
 
 	// ========================================================================
 	// Round 3-4: Sub-share commitment and delivery
@@ -469,6 +474,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			session_seed: None,
 			active_set: None,
 			ready_window_closed: false,
+			expected_active_set: None,
 			my_subshares: BTreeMap::new(),
 			my_round3: None,
 			round3_broadcasts: BTreeMap::new(),
@@ -586,6 +592,57 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		Ok(())
 	}
 
+	/// Declare which old committee members the transport layer expects to be
+	/// reachable (leader only). The leader then proposes the active set as
+	/// soon as every expected member has sent its Round 1 commitment, instead
+	/// of waiting for the full old committee or a `close_ready_window`
+	/// timeout.
+	///
+	/// Use this when the transport topology makes some old members
+	/// *structurally* unreachable — e.g. NEAR MPC's resharing mesh spans only
+	/// the new participant set, so old-only members can never connect and the
+	/// fast path (all old members ready) would stall forever.
+	///
+	/// This is deterministic where `close_ready_window` is timing-dependent:
+	/// commitments from members outside the expected set are still accepted
+	/// (and included in `Act`) if they arrive before the proposal, so this
+	/// never excludes a live member, and safety is unaffected — every party
+	/// still validates the proposed `Act` and reveals only after holding all
+	/// of `Act`'s commitments.
+	///
+	/// Call before or during Rounds 1-2, on the leader. Requires
+	/// `expected ⊆ old committee` and `|expected| ≥ t_old`.
+	pub fn set_expected_active_set(
+		&mut self,
+		expected: &[ParticipantId],
+	) -> Result<(), ResharingProtocolError> {
+		if self.config.my_party_id() != self.leader() {
+			return Err(ResharingProtocolError::InvalidState(format!(
+				"only the session leader ({}) can set the expected active set",
+				self.leader()
+			)));
+		}
+		if self.active_set.is_some() {
+			return Ok(());
+		}
+		let mut expected: Vec<ParticipantId> = expected.to_vec();
+		expected.sort_unstable();
+		expected.dedup();
+		if !expected.iter().all(|p| self.config.old_participants().contains(*p)) {
+			return Err(ResharingProtocolError::InvalidState(
+				"expected active set must be a subset of the old committee".to_string(),
+			));
+		}
+		if expected.len() < self.config.old_threshold() as usize {
+			return Err(ResharingProtocolError::InsufficientParties {
+				required: self.config.old_threshold() as usize,
+				received: expected.len(),
+			});
+		}
+		self.expected_active_set = Some(expected);
+		Ok(())
+	}
+
 	/// Whether `party` is in the agreed active set. `false` until `Act` is known.
 	fn is_active(&self, party: ParticipantId) -> bool {
 		self.active_set.as_ref().is_some_and(|act| act.binary_search(&party).is_ok())
@@ -594,10 +651,11 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// Leader-side active-set proposal.
 	///
 	/// Returns `Some(SendMany(..))` when this party is the leader and the
-	/// proposal is due: either every old committee member has sent its Round 1
-	/// commitment (fast path), or the caller closed the ready window. Aborts
-	/// with `InsufficientParties` if the window was closed with fewer than
-	/// `t_old` ready members.
+	/// proposal is due: every old committee member has sent its Round 1
+	/// commitment (fast path), every *expected* member has committed (when
+	/// [`Self::set_expected_active_set`] was called), or the caller closed
+	/// the ready window. Aborts with `InsufficientParties` if the window was
+	/// closed with fewer than `t_old` ready members.
 	fn maybe_propose_act(
 		&mut self,
 	) -> Result<Option<Action<ResharingOutput>>, ResharingProtocolError> {
@@ -605,7 +663,10 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			return Ok(None);
 		}
 		let have_all = self.round1_entropy_commits.len() >= self.config.old_participants().len();
-		if !have_all && !self.ready_window_closed {
+		let have_expected = self.expected_active_set.as_ref().is_some_and(|expected| {
+			expected.iter().all(|p| self.round1_entropy_commits.contains_key(p))
+		});
+		if !have_all && !have_expected && !self.ready_window_closed {
 			return Ok(None);
 		}
 
@@ -817,10 +878,15 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		if let Some(action) = self.maybe_propose_act()? {
 			return Ok(action);
 		}
-		// Advance once the active set is agreed. Round 1 commitments from Act
-		// members are awaited in Round2Waiting before the session seed is
-		// computed, so there is no need to block on them here.
-		if self.active_set.is_some() {
+		// Advance only once the active set is agreed AND we hold a Round 1
+		// commitment from every Act member. Our Round 2 reveal must not be
+		// broadcast while any Act member's entropy is still unfixed: a
+		// malicious leader could otherwise list a colluding member that
+		// commits only after observing honest reveals, choosing its entropy
+		// adaptively to bias the session seed. (An Act member that never
+		// commits stalls the session, like any active party going silent;
+		// abort on a transport timeout and restart without it.)
+		if self.have_act_commitments() {
 			self.state = ResharingState::Round2Generate;
 			self.poke()
 		} else {
@@ -852,6 +918,15 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			return;
 		}
 		self.round1_entropy_commits.insert(from, msg.commitment);
+	}
+
+	/// Round 1 commitment present for every active-set member. `false` until
+	/// the active set is known.
+	fn have_act_commitments(&self) -> bool {
+		match &self.active_set {
+			Some(act) => act.iter().all(|p| self.round1_entropy_commits.contains_key(p)),
+			None => false,
+		}
 	}
 
 	/// Entropy data (Round 1 commitment + Round 2 reveal) present for every
