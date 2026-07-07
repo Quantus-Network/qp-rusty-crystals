@@ -442,7 +442,10 @@ pub fn uniform_gamma1(a: &mut Poly, seed: &[u8; params::CRHBYTES], nonce: u16) {
 /// Implementation of H. Samples polynomial with TAU nonzero coefficients in {-1,1} using the output
 /// stream of SHAKE256(seed).
 ///
-/// Includes timing countermeasures using dummy operations to reduce side-channel leakage
+/// This is deliberately plain (variable-time) rejection sampling: its timing depends only on
+/// the bytes of `seed = c~ = H(mu, w1)`, a hash output. For an accepted attempt c~ is published
+/// in the signature; for rejected attempts it never leaves the device and cannot be inverted to
+/// recover w1. No secret-key material flows into this function.
 pub fn challenge(c: &mut Poly, seed: &[u8]) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, seed);
@@ -456,41 +459,22 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 		signs |= (byte as u64) << 8 * i;
 	}
 
-	// Create dummy state for timing countermeasures
-	let mut dummy_state = fips202::KeccakState::default();
-	let mut dummy_buf = [0u8; fips202::SHAKE256_RATE];
-
 	let mut pos: usize = 8;
 	c.coeffs.fill(0);
 
-	// For each position from N-TAU to N-1, we need to find a valid index
+	// Fisher-Yates style: for each position, rejection-sample a valid index b <= i.
 	for i in (N - params::TAU)..N {
-		let mut b: usize = 0;
-		let mut found = false;
-
-		// in vast majority of cases this outer loop will run exactly once
-		while !found {
-			// do 8 iterations no matter what to reduce timing variations
-			for _ in 0..8 {
-				if !found {
-					if pos >= fips202::SHAKE256_RATE {
-						fips202::shake256_squeezeblocks(&mut buf, 1, &mut state);
-						pos = 0;
-					} else {
-						// dummy operation
-						fips202::shake256_squeezeblocks(&mut dummy_buf, 1, &mut dummy_state);
-					}
-					b = buf[pos] as usize;
-					pos += 1;
-					// Update found flag without branching
-					let is_valid = ((b <= i) as u8) != 0;
-					found |= is_valid;
-				} else {
-					// Dummy operations when already found to reduce timing variations
-					fips202::shake256_squeezeblocks(&mut dummy_buf, 1, &mut dummy_state);
-				}
+		let b = loop {
+			if pos >= fips202::SHAKE256_RATE {
+				fips202::shake256_squeezeblocks(&mut buf, 1, &mut state);
+				pos = 0;
 			}
-		}
+			let candidate = buf[pos] as usize;
+			pos += 1;
+			if candidate <= i {
+				break candidate;
+			}
+		};
 
 		c.coeffs[i] = c.coeffs[b];
 		c.coeffs[b] = 1 - 2 * ((signs & 1) as i32);
