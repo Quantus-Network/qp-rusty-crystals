@@ -126,15 +126,14 @@ pub fn check_norm(a: &Poly, b: i32) -> bool {
 		result = true;
 	}
 
-	// Always process all coefficients to avoid early returns
+	// Always process all coefficients: an early exit would leak the index of the first
+	// out-of-bound coefficient of secret-derived data (e.g. z = y + c*s1).
 	for i in 0..N {
 		let mut t = a.coeffs[i] >> 31;
 		t = a.coeffs[i] - (t & 2 * a.coeffs[i]);
 
-		// Use bitwise OR to accumulate any failures without early exit
-		if t >= b {
-			result = true;
-		}
+		// Bitwise OR accumulation instead of a data-dependent branch
+		result |= t >= b;
 	}
 	result
 }
@@ -385,9 +384,14 @@ pub fn rej_eta(a: &mut [i32], buf: &[u8]) -> usize {
 			let nibble_valid = nibble < 15;
 			let has_space = ctr < alen;
 			let inc_ctr = nibble_valid & has_space;
-			let store_mask = -((inc_ctr & has_space) as i32);
-			// assign coeff to a[ctr] if store_mask == true
-			a[ctr % alen] = (coeff & store_mask) | (a[ctr % alen] & !store_mask);
+			let store_mask = -(inc_ctr as i32);
+			// Clamp the index instead of `ctr % alen`: division/modulo latency can be
+			// operand-dependent on some CPUs (KyberSlash class), and ctr is secret-derived.
+			// `min` compiles to a conditional move, and when ctr == alen the store mask is
+			// zero so the clamped slot is rewritten with its own value.
+			let idx = ctr.min(alen - 1);
+			// assign coeff to a[idx] if store_mask is all-ones
+			a[idx] = (coeff & store_mask) | (a[idx] & !store_mask);
 			ctr += inc_ctr as usize;
 		}
 	}
