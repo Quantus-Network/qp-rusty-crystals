@@ -812,9 +812,9 @@ dependencies = [
 
 [[package]]
 name = "qp-poseidon-core"
-version = "2.1.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78172860cd960773c72e97fba07ead9e5a1c13086c5746283744933e2e4a577b"
+checksum = "d3fd767cf8aaecf9369fab79255ff9e0ea439cdfef941976edbfb8ba70435b63"
 
 [[package]]
 name = "qp-rusty-crystals-dilithium"

@@ -28,7 +28,7 @@
 
 use qp_poseidon_core::{
 	hash_bytes, hash_to_bytes, hash_twice,
-	serialization::{bytes_to_digest, string_to_felts},
+	serialization::{bytes_to_digest_lossy, string_to_felts},
 };
 extern crate alloc;
 use alloc::vec::Vec;
@@ -90,13 +90,13 @@ impl WormholePair {
 		let mut secret_bytes = secret.into_bytes();
 		let mut preimage_felts = Vec::new();
 		let salt_felt = string_to_felts(ADDRESS_SALT);
-		// Encode the 32-byte secret as 4 felts via the 8-bytes/felt `bytes_to_digest`.
+		// Encode the 32-byte secret as 4 felts via the 8-bytes/felt `bytes_to_digest_lossy`.
 		// This encoding is non-injective (limbs ≥ the Goldilocks prime are reduced),
 		// which is harmless here: a secret deterministically maps to one canonical
 		// felt-tuple, and a collision would only alias the holder's own secret —
 		// it cannot forge another user's address without their secret. The same
 		// encoding is used when proving, so derivation stays consistent.
-		let mut secret_felt = bytes_to_digest(&secret_bytes);
+		let mut secret_felt = bytes_to_digest_lossy(&secret_bytes);
 		preimage_felts.extend_from_slice(&salt_felt);
 		preimage_felts.extend_from_slice(&secret_felt);
 		let inner_hash = hash_to_bytes(&preimage_felts);
@@ -123,7 +123,7 @@ impl WormholePair {
 mod tests {
 	use super::*;
 	use hex_literal::hex;
-	use qp_poseidon_core::serialization::{bytes_to_digest, bytes_to_felts};
+	use qp_poseidon_core::serialization::{bytes_to_digest_lossy, bytes_to_felts};
 
 	#[test]
 	fn test_generate_pair_from_secret() {
@@ -180,7 +180,7 @@ mod tests {
 	fn test_address_derivation_properties() {
 		// Arrange
 		let secret = hex!("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
-		let secret_felts = bytes_to_digest(&secret);
+		let secret_felts = bytes_to_digest_lossy(&secret);
 
 		// Act - Generate the pair
 		let mut secret_copy = secret;
@@ -254,7 +254,7 @@ mod tests {
 		// Arrange
 		let secret = [7u8; 32];
 
-		let secret_felts = bytes_to_digest(&secret);
+		let secret_felts = bytes_to_digest_lossy(&secret);
 
 		// Generate a pair normally (with salt)
 		let mut secret_copy = secret;
