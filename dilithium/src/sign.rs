@@ -342,117 +342,89 @@ pub(crate) fn signature(
 	// Step 2: Prepare signing context (message hash, randomness, public seed rho)
 	let signing_ctx = prepare_signing_context(&unpacked_sk, message, hedge);
 
-	// Step 3: Make the rejection sampling lumpy to smear out timing signals
-	// Set this to 1 to revert to standard rejection sampling
-	const MIN_SIGNING_ATTEMPTS: u16 = 16; // covers most cases, |max tau| < 0.1, while keeping runtime short (~1ms)
-
+	// Step 3: Fiat-Shamir with aborts. The *number* of rejection-sampling attempts is
+	// independent of the long-term secret key and is treated as public information, as in
+	// FIPS 204 and the reference implementation. What must not leak through timing is the
+	// arithmetic *within* each attempt; those operations are constant-time.
 	let mut masking_vector_y = Polyvecl::default();
 	let mut commitment_w1 = Polyveck::default();
 	let mut commitment_w0 = Polyveck::default();
-	let mut challenge_poly_c: Poly;
 	let mut hint_vector_h = Polyveck::default();
-	let mut signature_found = false;
-	let mut dummy_output = [0u8; params::SIGNBYTES]; // Dummy buffer for timing countermeasures
-	let mut valid_challenge = [0u8; params::C_DASH_BYTES];
-	let mut valid_signature_z = Polyvecl::default();
-	let mut valid_hint_h = Polyveck::default();
-	let mut attempt_nonce = 0;
+	let mut attempt_nonce: u16 = 0;
 
 	// Largest attempt_nonce for which the per-polynomial mask nonce (L*attempt_nonce + i,
 	// i < L) still fits in u16. Reaching this requires an astronomically improbable run of
 	// rejection-sampling failures, which would signal a broken RNG/entropy source.
 	const MAX_SAFE_ATTEMPT_NONCE: u16 = (u16::MAX - (L as u16 - 1)) / L as u16;
 
-	// this outer loop should run exactly once in the vast majority of cases
 	loop {
-		for _ in 0..MIN_SIGNING_ATTEMPTS {
-			// Fail loudly rather than silently wrap the nonce and reuse a mask y.
-			assert!(
-				attempt_nonce <= MAX_SAFE_ATTEMPT_NONCE,
-				"ML-DSA signing nonce overflow: rejection sampling failed implausibly many times"
-			);
+		// Fail loudly rather than silently wrap the nonce and reuse a mask y.
+		assert!(
+			attempt_nonce <= MAX_SAFE_ATTEMPT_NONCE,
+			"ML-DSA signing nonce overflow: rejection sampling failed implausibly many times"
+		);
 
-			// Generate masking vector and compute commitment
-			let mut signature_z = Polyvecl::default();
-			generate_masking_vector_and_commitment(
-				&mut masking_vector_y,
-				&mut commitment_w1,
-				&mut commitment_w0,
-				&mut signature_z,
-				&signing_ctx.public_seed_rho,
-				&signing_ctx.signing_entropy_rho_prime,
-				attempt_nonce,
-			);
+		// Generate masking vector and compute commitment
+		let mut signature_z = Polyvecl::default();
+		generate_masking_vector_and_commitment(
+			&mut masking_vector_y,
+			&mut commitment_w1,
+			&mut commitment_w0,
+			&mut signature_z,
+			&signing_ctx.public_seed_rho,
+			&signing_ctx.signing_entropy_rho_prime,
+			attempt_nonce,
+		);
 
-			// Generate challenge c = H(μ, w1) - use dummy buffer to avoid overwriting output
-			challenge_poly_c = generate_challenge_polynomial(
-				&mut dummy_output,
-				&commitment_w1,
-				&signing_ctx.message_hash_mu,
-			);
+		// Generate challenge c = H(μ, w1); the challenge bytes land in
+		// signature_output[..C_DASH_BYTES] and are kept there if this attempt is accepted.
+		let challenge_poly_c = generate_challenge_polynomial(
+			signature_output,
+			&commitment_w1,
+			&signing_ctx.message_hash_mu,
+		);
 
-			// Check first rejection condition: compute z = y + cs1 and check ||z||∞ < γ₁ - β
-			let condition1 = compute_and_check_signature_z(
-				&mut signature_z,
-				&masking_vector_y,
-				&challenge_poly_c,
-				&unpacked_sk.secret_poly_s1_ntt,
-			);
+		// All four rejection checks are always evaluated (no short-circuit between them),
+		// so a rejected attempt reveals only that it was rejected, not which bound failed.
 
-			// Check second rejection condition: compute w0 - cs2 and check ||w0 - cs2||∞ < γ₂ - β
-			let condition2 = compute_and_check_commitment_w0(
-				&mut commitment_w0,
-				&challenge_poly_c,
-				&unpacked_sk.secret_poly_s2_ntt,
-			);
+		// First rejection condition: compute z = y + cs1 and check ||z||∞ < γ₁ - β
+		let condition1 = compute_and_check_signature_z(
+			&mut signature_z,
+			&masking_vector_y,
+			&challenge_poly_c,
+			&unpacked_sk.secret_poly_s1_ntt,
+		);
 
-			// Compute challenge_t0 for third norm check and hint generation
-			let mut challenge_t0 = Polyveck::default();
-			let condition3 = compute_and_check_challenge_t0(
-				&mut challenge_t0,
-				&challenge_poly_c,
-				&unpacked_sk.secret_poly_t0_ntt,
-			);
+		// Second rejection condition: compute w0 - cs2 and check ||w0 - cs2||∞ < γ₂ - β
+		let condition2 = compute_and_check_commitment_w0(
+			&mut commitment_w0,
+			&challenge_poly_c,
+			&unpacked_sk.secret_poly_s2_ntt,
+		);
 
-			// Check fourth rejection condition: compute hint vector and check weight ≤ ω
-			let condition4 = compute_and_check_hint_vector(
-				&mut hint_vector_h,
-				&commitment_w0,
-				&challenge_t0,
-				&commitment_w1,
-			);
+		// Compute challenge_t0 for third norm check and hint generation
+		let mut challenge_t0 = Polyveck::default();
+		let condition3 = compute_and_check_challenge_t0(
+			&mut challenge_t0,
+			&challenge_poly_c,
+			&unpacked_sk.secret_poly_t0_ntt,
+		);
 
-			let all_conditions_met = condition1 && condition2 && condition3 && condition4;
+		// Fourth rejection condition: compute hint vector and check weight ≤ ω
+		let condition4 = compute_and_check_hint_vector(
+			&mut hint_vector_h,
+			&commitment_w0,
+			&challenge_t0,
+			&commitment_w1,
+		);
 
-			// Always call pack_sig to dummy buffer for constant timing
-			// Use empty hint vector when conditions aren't met to prevent out-of-bounds access
-			let safe_hint = if all_conditions_met { &hint_vector_h } else { &Polyveck::default() };
-			packing::pack_sig(&mut dummy_output, None, &signature_z, safe_hint);
-
-			// Store valid signature components if this is the first valid one
-			// This branch is data-dependent but the alternative complex branchless operations
-			// may actually introduce more timing variations due to memory access patterns
-			if all_conditions_met && !signature_found {
-				valid_challenge.copy_from_slice(&dummy_output[..params::C_DASH_BYTES]);
-				valid_signature_z = signature_z;
-				valid_hint_h = hint_vector_h.clone();
-				signature_found = true;
-			}
-
-			attempt_nonce += 1;
-			// Continue loop regardless to maintain constant timing
-		}
-
-		// After fixed iterations, pack the final signature and return if found
-		if signature_found {
-			packing::pack_sig(
-				signature_output,
-				Some(&valid_challenge),
-				&valid_signature_z,
-				&valid_hint_h,
-			);
+		if condition1 & condition2 & condition3 & condition4 {
+			// Challenge bytes are already in place; pack z and h around them.
+			packing::pack_sig(signature_output, None, &signature_z, &hint_vector_h);
 			return;
 		}
+
+		attempt_nonce += 1;
 	}
 }
 

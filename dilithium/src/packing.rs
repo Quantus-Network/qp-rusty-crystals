@@ -129,33 +129,25 @@ pub fn pack_sig(
 	idx += L * params::POLYZ_PACKEDBYTES;
 	sig[idx..idx + params::OMEGA + K].copy_from_slice(&[0u8; params::OMEGA + K]);
 
-	let mut k = 0;
-	let mut write_idx: u32;
+	// Branchless hint packing: the hint pattern is secret on rejected attempts, so no
+	// data-dependent branches. The write index is clamped with `min` (conditional move) and
+	// the store is masked; the counter advances with arithmetic instead of a branch.
+	let mut k: usize = 0;
 	for i in 0..K {
 		for j in 0..N {
 			let is_nonzero = h.vec[i].coeffs[j] != 0;
 			let has_space = k < params::OMEGA;
 			let should_store = is_nonzero & has_space;
 
-			let in_bounds_idx = (idx + k) as u32;
-			let out_bounds_idx = (idx + params::OMEGA - 1) as u32;
-			let has_space_choice = k < params::OMEGA;
-			if has_space_choice {
-				write_idx = in_bounds_idx;
-			} else {
-				write_idx = out_bounds_idx;
-			}
+			let write_idx = idx + k.min(params::OMEGA - 1);
 
 			// Create a mask from should_store (0x00 or 0xFF)
 			let mask = (should_store as i8).wrapping_neg() as u8;
 
-			// Branchless selection using bitwise operations
 			// if should_store { sig[write_idx] = j }
-			sig[write_idx as usize] = (j as u8 & mask) | (sig[write_idx as usize] & !mask);
+			sig[write_idx] = (j as u8 & mask) | (sig[write_idx] & !mask);
 
-			if is_nonzero {
-				k += 1;
-			}
+			k += is_nonzero as usize;
 		}
 		sig[idx + params::OMEGA + i] = k as u8;
 	}

@@ -24,6 +24,10 @@ path = "examples/stack_usage_demo.rs"
 name = "stack_probe"
 path = "examples/stack_probe.rs"
 
+[[example]]
+name = "ct_bench"
+path = "examples/ct_bench.rs"
+
 [dependencies]
 zeroize = { workspace = true }
 
