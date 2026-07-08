@@ -20,28 +20,47 @@ Without resharing, any change would require generating a new key and migrating a
 - **New Committee**: Parties that will hold new shares (threshold `t_new` of `n_new`)
 - **Overlap**: Parties may be in both committees
 
-### Protocol Rounds (5-round session-randomized protocol)
+### Protocol Rounds (session-randomized protocol with active-set liveness)
 
-This module uses **distributed per-subset re-sharing** with SSID-based replay protection and public session randomization. At no point does any party ever assemble the full secret `s`, and no individual share is exposed on public broadcast traffic. Round 4 private traffic does contain secret share material and requires an authenticated-encrypted channel.
+This module uses **distributed per-subset re-sharing** with SSID-based replay protection, public session randomization, and active-set liveness (resharing succeeds when up to `n_old − t_old` old members are offline). At no point does any party ever assemble the full secret `s`, and no individual share is exposed on public broadcast traffic. Round 4 private traffic does contain secret share material and requires an authenticated-encrypted channel.
 
 ```
-Round 1: Entropy Commitment (Session Randomization)
+Round 1: Entropy Commitment / Ready (Session Randomization)
 ├── Each old committee member generates fresh entropy and broadcasts H(entropy).
+├── The commitment doubles as that member's Ready signal.
 └── Commit-reveal prevents any party from biasing the session seed.
 
+Act Proposal (Active-Set Selection)
+├── The session leader (lowest-ID new committee member) proposes the active set Act:
+│   all old members once everyone has committed (fast path), the committed subset
+│   once every *expected* member has committed (set_expected_active_set(), for
+│   transports where some old members are structurally unreachable), or the
+│   committed subset after the caller closes the ready window
+│   (close_ready_window(), e.g. on a transport timeout).
+├── Every party verifies: sender is the leader, Act ⊆ old committee, |Act| ≥ t_old.
+│   |Act| ≥ t_old guarantees every old subset I (size n_old − t_old + 1) intersects
+│   Act, so a live dealer exists for every subset.
+├── No party broadcasts its Round 2 reveal until it holds a Round 1 commitment from
+│   every Act member: every contributor's entropy is fixed before any reveal is
+│   sent, so a colluding member listed in Act cannot choose its entropy after
+│   seeing honest reveals to bias the session seed.
+└── If fewer than t_old old members are ready, the protocol aborts
+    (InsufficientParties).
+
 Round 2: Entropy Reveal (Public Session Seed)
-├── Old committee members reveal their entropy.
+├── Active old committee members reveal their entropy.
 ├── All parties verify reveals against Round 1 commitments.
-└── Session seed = SHAKE256("resharing-session-seed-v1" || party_1 || entropy_1 || ...)
-    computed deterministically from all contributions in sorted party ID order.
+└── Session seed = SHAKE256("resharing-session-seed-v1" || ssid || party_1 || entropy_1 || ...)
+    computed deterministically from the active set's contributions in sorted party ID order.
 
 Round 3: Per-Subset Commitments
-├── For each old subset I, the designated dealer D_I (lowest-ID old participant in I)
-│   deterministically derives bounded sub-shares r_{I→J} for every new subset J such that
-│   Σ_J r_{I→J} = s_I^old. The derivation incorporates the public session seed for
-│   per-session randomization.
+├── For each old subset I, the designated dealer D_I = min(I ∩ Act) (lowest-ID active
+│   old participant in I) deterministically derives bounded sub-shares r_{I→J} for every
+│   new subset J such that Σ_J r_{I→J} = s_I^old. The derivation incorporates the public
+│   session seed for per-session randomization. All members of I hold the same s_I^old
+│   and the derivation is deterministic, so dealer identity does not affect the values.
 ├── D_I broadcasts H(r_{I→J}) for each (I, J).
-└── Every other old member of I recomputes the same r_{I→J} values and verifies
+└── Every other active member of I recomputes the same r_{I→J} values and verifies
     D_I's commitments before any Round 4 private delivery occurs.
 
 Round 4: Private Sub-Share Reveal (⚠️ REQUIRES SECURE CHANNEL)
@@ -58,13 +77,27 @@ Round 5: Verification + Public-Key Invariant
 │   even when their old subset has size 1.
 └── If any verification fails, the protocol aborts. (No blame attribution is
     attempted since it's not always possible to identify the misbehaving party.)
+
+Round 6: Signed Transcript Acceptance (Certificate)
+├── After all Round 5 checks pass, each party computes the transcript hash:
+│   SHAKE256("resharing-transcript-v1" || ssid || Act || session_seed ||
+│   Round 3 broadcasts (Act, sorted) || Round 5 broadcasts (Act ∪ new, sorted)).
+├── Each new committee member signs
+│   SHAKE256("resharing-accept-v1" || ssid || transcript_hash) with its
+│   long-term key (TranscriptSigner) and broadcasts the signature.
+├── Every party verifies every acceptance against its *own* transcript hash.
+│   A dealer that equivocated (sent different broadcasts to different parties)
+│   causes verification to fail on at least one honest party, which aborts.
+└── The output includes a ResharingCertificate (ssid, Act, transcript hash,
+    acceptance signatures) verifiable by any third party holding the new
+    committee's verifying keys.
 ```
 
 Because `Σ_J s_J^new = Σ_J Σ_I r_{I→J} = Σ_I s_I^old = s`, the secret — and hence the public key `t = A·s1 + s2` — is preserved.
 
 ## Session Randomization and Threat Model
 
-The 5-round protocol provides public session randomization, replay protection, and anti-bias commit-reveal. It does **not** provide post-compromise forward secrecy.
+The protocol provides public session randomization, replay protection, and anti-bias commit-reveal. It does **not** provide post-compromise forward secrecy.
 
 Round 2 entropy reveals are part of the public transcript. After Round 2, the `session_seed` is public transcript material. Because sub-shares are derived deterministically from `session_seed`, `i_mask`, and `s_I^old`, an attacker who records the transcript and later compromises old subset shares can recompute the resharing randomness and derive the corresponding new shares.
 
@@ -87,18 +120,26 @@ Round 2 entropy reveals are part of the public transcript. After Round 2, the `s
 
 ### Security Boundary
 
-Before Round 2 reveals are known, an attacker cannot predict the session seed unless they know every old committee member's entropy contribution. After Round 2, the seed is public. The protocol's replay protection comes from the SSID, which binds messages to the old committee, new committee, public key, and session nonce. The protocol's confidentiality depends on keeping Round 4 private messages encrypted and authenticated.
+Before Round 2 reveals are known, an attacker cannot predict the session seed unless they know every old committee member's entropy contribution. After Round 2, the seed is public. The protocol's replay protection comes from the SSID, which binds messages to the protocol version, cryptographic suite, handoff epoch, old committee, new committee, public key, and session nonce. The protocol's confidentiality depends on keeping Round 4 private messages encrypted and authenticated.
+
+### Mandatory Erasure at Finalize
+
+Because sub-share derivation is deterministic from the (public, post-Round-2) session seed and the old subset shares, erasure of pre-handoff state is the compensating control for forward secrecy: an attacker must compromise a machine **while it still holds old material** to recompute the handoff.
+
+On successful completion (`Action::Return`), the protocol zeroizes, in place: the caller-provided seed, this party's entropy, the session seed, all derived sub-shares `r_{I→J}`, all received Round 4 messages, the aggregated new-share working set, and — for old committee members — **the old share held in the config**. `old_share_erased()` reports whether the config's share is gone. The same erasure runs again on `Drop` (covering abort paths). Callers must still erase their own copies: the original share file/keystore entry and anything cloned before `ResharingConfig::new`.
 
 ## Security Properties
 
 | Property | Guarantee |
 |----------|-----------|
 | **Secrecy of `s`** | No party — not even any dealer — ever holds `s` in clear. Each `D_I` only handles `s_I^old`, which they already had. |
-| **Replay protection** | Every message carries an SSID derived from the old/new committees, public key, and session nonce. Messages with a mismatched SSID are ignored. |
-| **Session randomization** | Session seed incorporates the SSID and fresh entropy from all old committee members via commit-reveal, so different sessions produce different deterministic sub-share splits even if entropy is accidentally reused. This does not provide post-compromise forward secrecy once the transcript is recorded. |
+| **Replay protection** | Every message carries an SSID derived from the protocol version, suite ID, handoff epoch, old/new committees, public key, and session nonce (`RESHARING_SSID_V2`). Messages with a mismatched SSID are ignored; transcripts from other protocol versions, suites, or epochs cannot be replayed. |
+| **Session randomization** | Session seed incorporates the SSID and fresh entropy from all active old committee members via commit-reveal, so different sessions produce different deterministic sub-share splits even if entropy is accidentally reused. This does not provide post-compromise forward secrecy once the transcript is recorded. |
+| **Liveness with offline old members** | Round 1 commitments double as Ready signals. The session leader (lowest-ID new committee member) proposes the active set `Act` of ready members (`|Act| ≥ t_old`); dealers are assigned as `min(I ∩ Act)`, so resharing completes with up to `n_old − t_old` old members offline. Transports where some old members are structurally unreachable (e.g. a mesh spanning only the new committee) can use `set_expected_active_set` on the leader for a deterministic proposal without waiting for a timeout. The leader cannot break safety: parties verify `Act` against the Ready signals they received themselves, no party reveals entropy until it holds commitments from all of `Act` (so every contributor's entropy is fixed before any reveal), sub-share derivation is deterministic (dealer identity doesn't change values), and the seed stays unbiased because `Act` contains at least one honest member. A malicious leader can at most deny service or select among ready members; equivocating proposals lead to mismatched deterministic commitments and an abort. |
 | **Confidentiality of contributions** | Rounds 1-3, 5 broadcast only hash commitments; Round 4 sub-shares travel privately. Even an unbounded eavesdropper learns nothing about any `s_I^old` from the public transcript. |
 | **Cheating-dealer detection** | Old-subset peers recompute and verify Round 3 commitments before Round 4 whenever the old subset has another member. New-subset members verify delivered sub-shares against Round 3 commitments, reject over-large sub-share coefficients, and reject recovered signing partials that exceed the existing hyperball safety envelope. A final partial-public-key sum check reconstructs `T` from `Σ_J t_J^new`, catching aggregate-secret corruption even when an old subset has size 1. If any verification fails, the protocol aborts. |
 | **PK Preservation** | Public key `t = A·s1 + s2` unchanged, verified at the end of Round 5 via a deterministic byte-equality check against the original PK. |
+| **Transcript agreement + attestation** | Round 6: every new committee member signs the transcript hash with its long-term key; every party verifies all acceptances against its own transcript hash, so completion implies all parties observed identical broadcasts (equivocation ⇒ abort). The resulting `ResharingCertificate` lets a third party holding the new committee's verifying keys confirm the whole new committee attested to the handoff. It attests process integrity and PK preservation, not share-distribution properties (that would require ZK proofs). |
 
 ## Why Custom Protocol?
 
@@ -148,11 +189,13 @@ sqrt(τ) · sqrt(||p_{i,1}||² / ν² + ||p_{i,2}||²) ≤ B'
 
 for the existing `(t_new, n_new)` hyperball parameters. This catches bounded, public-key-preserving zero-sum reshaping attacks that would pass the per-subshare coefficient bound but push later signing outside the intended proof regime.
 
+Round 5 additionally enforces a per-subset **stored-share norm guard** (`B_G` analog): each aggregated `s_J^new` individually must satisfy the same weighted-norm bound with `num_secrets = 1` (a single base secret's envelope, versus the `⌈C(N,T−1)/T⌉` shares summed at recovery time). This is defense in depth against inflating an individual stored share while arranging cancellation in the specific combinations the recovered-partial check sums.
+
 ## Usage
 
 ```rust
 use qp_rusty_crystals_threshold::resharing::{
-    ResharingConfig, ResharingProtocol, Action,
+    ResharingConfig, ResharingProtocol, ResharingSignerConfig, Action,
 };
 use rand::RngCore;
 
@@ -174,8 +217,18 @@ let config = ResharingConfig::new(
     public_key,
 )?;
 
+// Long-term-key signer for Round 6 transcript acceptance (e.g. Ed25519),
+// plus the verifying keys of every new committee member.
+let signer_config = ResharingSignerConfig::new(
+    my_signer,          // implements TranscriptSigner
+    verifying_keys,     // BTreeMap<ParticipantId, PublicKey>, covers new committee
+    &new_participants,
+)?;
+
 // Old committee members pass Some(existing_share); new-only parties pass None.
-let mut protocol = ResharingProtocol::new(config, my_existing_share, seed, &session_nonce)?;
+// `epoch` is a monotonic handoff counter for this public key (0 for the first
+// resharing after keygen), bound into the SSID against cross-epoch replay.
+let mut protocol = ResharingProtocol::new(config, signer_config, seed, &session_nonce, epoch)?;
 
 // Run protocol loop
 loop {
@@ -187,6 +240,8 @@ loop {
         Action::Return(output) => {
             // Resharing complete
             let new_share = output.private_share;
+            // Publicly verifiable proof of the handoff:
+            let certificate = output.certificate;
             break;
         }
     }
@@ -206,7 +261,7 @@ provide its own encryption layer.
 
 | Message Type | Transport Requirement |
 |--------------|----------------------|
-| `Action::SendMany` (Rounds 1, 2, 3, 5) | Authenticated broadcast (integrity only) |
+| `Action::SendMany` (Rounds 1, 2, 3, 5, 6) | Authenticated broadcast (integrity only) |
 | `Action::SendPrivate` (Round 4) | **Authenticated encryption required** (confidentiality + integrity) |
 
 If `SendPrivate` messages are sent over an unencrypted channel, an eavesdropper can recover
@@ -243,28 +298,31 @@ Each party has a role determined by committee membership:
 
 ## Message Types
 
-- `Round1EntropyCommitment`: Hash commitment to entropy `H(entropy)` for session randomization
+- `Round1EntropyCommitment`: Hash commitment to entropy `H(entropy)` for session randomization; doubles as the sender's Ready signal
+- `ActProposal`: The leader's proposed active set `Act` (sorted, `⊆` old committee, `|Act| ≥ t_old`)
 - `Round2EntropyReveal`: Revealed entropy (32 bytes) — verified against Round 1 commitment
 - `Round3Broadcast`: Per-subset commitment hashes `H(r_{I→J})` (no plaintext shares)
 - `Round4Message`: Private sub-share reveal (**requires secure channel**) — one message per (dealer, recipient) carrying every `r_{I→J}` the dealer owes that recipient. Dealers handle self-deals locally and never emit `SendPrivate(self, _)`.
 - `Round5Broadcast`: Commitments to computed `s_J^new`, partial public-key contributions `t_J^new`
+- `Accept`: Signed acceptance of the transcript hash by a new committee member (Round 6); the collected signatures form the `ResharingCertificate`
 
 ## State Machine
 
 ```
 Round1Generate -> Round1Waiting -> Round2Generate -> Round2Waiting
     -> Round3Generate -> Round3Waiting -> Round4Generate -> Round4Waiting
-    -> Round5Generate -> Round5Waiting -> Combining -> Done
+    -> Round5Generate -> Round5Waiting -> Combining
+    -> AcceptGenerate -> AcceptWaiting -> Done
 ```
 
-NewOnly parties skip Rounds 1-2 (entropy commit-reveal) and go directly to `Round2Waiting`.
+NewOnly parties skip Rounds 1-2 (entropy commit-reveal) and go directly to `Round2Waiting`. The Act proposal is emitted and consumed within the `Round1Waiting`/`Round2Waiting` states; parties do not advance past them until `Act` is agreed. Old members outside `Act` observe (they verify and, if in the new committee, receive shares) but do not contribute entropy or deal.
 
 ## Limitations
 
 - Maximum 16 parties (due to u16 subset masks)
-- Requires every designated dealer to be online; if a dealer is offline or cheats, the protocol aborts (no recovery / re-deal in this implementation)
+- Requires at least `t_old` old committee members (and every new committee member) to be online. Offline old members are excluded from the active set after the caller closes the ready window (`close_ready_window()` on the leader, e.g. after a transport timeout), or deterministically via `set_expected_active_set()` on the leader when the transport makes some old members structurally unreachable; dealers fail over to `min(I ∩ Act)`. If an *active* dealer goes offline mid-session or cheats, the protocol still aborts (no mid-session re-deal in this implementation) — restart the session and the dead dealer will be excluded from the next active set.
 - **Secure channels required for Round 4 private messages** (see Transport Security section above)
-- **Cryptographically random entropy required from each old committee member** (see Entropy Requirements section above)
+- **Cryptographically random entropy required from each active old committee member** (see Entropy Requirements section above)
 
 ## Coefficient Growth and Signing Security
 

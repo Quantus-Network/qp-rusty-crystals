@@ -16,6 +16,9 @@ use qp_rusty_crystals_threshold::resharing::{
 	ResharingProtocol, ResharingState,
 };
 
+mod common;
+use common::{new_test_protocol, TestSigner};
+
 /// Helper to run the resharing protocol locally with simulated message passing.
 fn run_resharing_protocol(
 	old_threshold: u32,
@@ -46,19 +49,71 @@ fn run_resharing_protocol_with_tamper(
 	new_participants: Vec<u32>,
 	old_shares: &HashMap<u32, PrivateKeyShare>,
 	public_key: &PublicKey,
-	mut tamper: Option<TamperFn>,
+	tamper: Option<TamperFn>,
 ) -> Result<HashMap<u32, PrivateKeyShare>, String> {
-	// Determine all parties involved (union of old and new)
+	run_resharing_protocol_full(
+		old_threshold,
+		old_participants,
+		new_threshold,
+		new_participants,
+		old_shares,
+		public_key,
+		tamper,
+		&[],
+		&[],
+		None,
+	)
+}
+
+/// Full-options harness: like `run_resharing_protocol_with_tamper`, but parties
+/// listed in `offline` are never instantiated and receive no messages —
+/// simulating dead nodes — and parties listed in `slow` are frozen (not poked,
+/// no message delivery) until the ready window closes — simulating live nodes
+/// that lag past the leader's ready timeout and are therefore excluded from the
+/// active set. When the protocol goes quiescent (no progress because the leader
+/// is waiting for Ready signals that will never arrive), the harness calls
+/// `close_ready_window()` on the leader once, mimicking a production transport
+/// timeout, and unfreezes slow parties so they catch up as non-active observers.
+///
+/// When `expected_act` is `Some`, the harness calls `set_expected_active_set`
+/// on the leader after construction and *fails* on quiescence instead of
+/// closing the ready window — proving the expected set alone (no transport
+/// timeout) unblocks the session.
+#[allow(clippy::too_many_arguments)]
+fn run_resharing_protocol_full(
+	old_threshold: u32,
+	old_participants: Vec<u32>,
+	new_threshold: u32,
+	new_participants: Vec<u32>,
+	old_shares: &HashMap<u32, PrivateKeyShare>,
+	public_key: &PublicKey,
+	mut tamper: Option<TamperFn>,
+	offline: &[u32],
+	slow: &[u32],
+	expected_act: Option<&[u32]>,
+) -> Result<HashMap<u32, PrivateKeyShare>, String> {
+	assert!(
+		new_participants.iter().all(|p| !offline.contains(p)),
+		"new committee members must be online (they receive the new shares)"
+	);
+	assert!(slow.iter().all(|p| !offline.contains(p)), "a party cannot be both slow and offline");
+
+	// Determine all parties involved (union of old and new), minus offline ones.
 	let mut all_parties: Vec<u32> =
 		old_participants.iter().chain(new_participants.iter()).cloned().collect();
 	all_parties.sort();
 	all_parties.dedup();
+	all_parties.retain(|p| !offline.contains(p));
+
+	// The session leader: lowest-ID new committee member.
+	let leader = *new_participants.iter().min().expect("non-empty new committee");
+	assert!(!slow.contains(&leader), "the leader cannot be slow (it closes the ready window)");
 
 	// Session nonce for SSID computation (shared by all parties in this resharing)
 	let session_nonce = [0x99u8; 32];
 
 	// Create protocol instances for each party
-	let mut protocols: HashMap<u32, ResharingProtocol> = HashMap::new();
+	let mut protocols: HashMap<u32, ResharingProtocol<TestSigner>> = HashMap::new();
 
 	for &party_id in &all_parties {
 		let existing_share = old_shares.get(&party_id).cloned();
@@ -83,8 +138,18 @@ fn run_resharing_protocol_with_tamper(
 			*byte = ((party_id as u8).wrapping_mul(i as u8)).wrapping_add(0x42);
 		}
 
-		let protocol = ResharingProtocol::new(config, seed, &session_nonce);
+		let protocol = new_test_protocol(config, seed, &session_nonce);
 		protocols.insert(party_id, protocol);
+	}
+
+	// With an expected active set, the leader proposes as soon as every
+	// expected member has committed — no transport timeout needed.
+	if let Some(expected) = expected_act {
+		protocols
+			.get_mut(&leader)
+			.expect("leader is online")
+			.set_expected_active_set(expected)
+			.map_err(|e| format!("set_expected_active_set failed: {}", e))?;
 	}
 
 	// Message queues for each party
@@ -96,6 +161,8 @@ fn run_resharing_protocol_with_tamper(
 	// Run the protocol until all parties are done
 	let max_iterations = 1000;
 	let mut iteration = 0;
+	let mut ready_window_closed = false;
+	let mut quiescent_iterations = 0;
 
 	loop {
 		iteration += 1;
@@ -110,8 +177,19 @@ fn run_resharing_protocol_with_tamper(
 			break;
 		}
 
+		// Whether any message was delivered or any non-Wait action was produced
+		// this iteration. If not, the protocol is quiescent (stalled waiting for
+		// offline parties).
+		let mut any_activity = false;
+
 		// Process each party
 		for &party_id in &all_parties {
+			// Slow parties are frozen (no delivery, no poke) until the ready
+			// window closes; their inbound messages accumulate in the queue.
+			if !ready_window_closed && slow.contains(&party_id) {
+				continue;
+			}
+
 			let protocol = protocols.get_mut(&party_id).unwrap();
 
 			// Skip if already done or failed
@@ -124,6 +202,7 @@ fn run_resharing_protocol_with_tamper(
 			let messages_to_deliver: Vec<_> = std::mem::take(messages);
 
 			for (from, data) in messages_to_deliver {
+				any_activity = true;
 				protocol.message(from, data).unwrap();
 			}
 
@@ -133,6 +212,7 @@ fn run_resharing_protocol_with_tamper(
 					// Nothing to do
 				},
 				Ok(Action::SendMany(data)) => {
+					any_activity = true;
 					let payload = match tamper.as_mut() {
 						Some(f) => f(party_id, None, data),
 						None => data,
@@ -147,6 +227,7 @@ fn run_resharing_protocol_with_tamper(
 					}
 				},
 				Ok(Action::SendPrivate(to, data)) => {
+					any_activity = true;
 					// Send to specific party. We deliberately do NOT loop self-private
 					// messages back: the protocol must handle self-deals locally and
 					// never emit SendPrivate(self, _).
@@ -160,22 +241,70 @@ fn run_resharing_protocol_with_tamper(
 						Some(f) => f(party_id, Some(to), data),
 						None => data,
 					};
-					message_queues.get_mut(&to).unwrap().push((party_id, payload));
+					// Messages to offline parties are dropped (dead node).
+					if let Some(queue) = message_queues.get_mut(&to) {
+						queue.push((party_id, payload));
+					}
 				},
 				Ok(Action::Return(_)) => {
-					// Protocol complete for this party
+					// Protocol complete for this party. Counts as activity so
+					// the iteration where the last parties finish is not
+					// mistaken for quiescence.
+					any_activity = true;
 				},
 				Err(e) => {
 					return Err(format!("Protocol error for party {}: {}", party_id, e));
 				},
 			}
 		}
+
+		// Quiescence handling: with offline old members, the leader waits for
+		// Ready signals that never arrive. Mimic a production transport timeout
+		// by closing the ready window on the leader once.
+		if !any_activity {
+			if expected_act.is_some() && !ready_window_closed {
+				// The expected active set must unblock the session on its own;
+				// needing a timeout means the deterministic path failed.
+				let states: Vec<String> = all_parties
+					.iter()
+					.map(|p| format!("{}: {:?}", p, protocols[p].state()))
+					.collect();
+				return Err(format!(
+					"protocol went quiescent despite an expected active set; states: [{}]",
+					states.join(", ")
+				));
+			}
+			if !ready_window_closed {
+				ready_window_closed = true;
+				protocols
+					.get_mut(&leader)
+					.expect("leader is online")
+					.close_ready_window()
+					.map_err(|e| format!("close_ready_window failed: {}", e))?;
+			} else {
+				quiescent_iterations += 1;
+				if quiescent_iterations > 5 {
+					let states: Vec<String> = all_parties
+						.iter()
+						.map(|p| format!("{}: {:?}", p, protocols[p].state()))
+						.collect();
+					return Err(format!(
+						"Protocol deadlocked after ready window closed; states: [{}]",
+						states.join(", ")
+					));
+				}
+			}
+		}
 	}
 
-	// Collect new shares from new committee members
+	// Collect outputs from every online party (new members carry shares;
+	// old-only observers carry just the certificate).
 	let mut new_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	let verifying_keys: std::collections::BTreeMap<u32, u32> =
+		all_parties.iter().map(|&p| (p, p)).collect();
+	let mut reference_transcript_hash: Option<[u8; 32]> = None;
 
-	for &party_id in &new_participants {
+	for &party_id in &all_parties {
 		let protocol = protocols.get_mut(&party_id).unwrap();
 
 		if protocol.is_failed() {
@@ -186,13 +315,38 @@ fn run_resharing_protocol_with_tamper(
 			return Err(format!("Party {} not done", party_id));
 		}
 
-		// Get the output using take_output
-		if let Some(output) = protocol.take_output() {
+		let Some(output) = protocol.take_output() else {
+			return Err(format!("Party {} has no output", party_id));
+		};
+
+		// Every party must emit a valid certificate over the same transcript.
+		let cert = &output.certificate;
+		if !cert.verify::<TestSigner>(&new_participants, &verifying_keys) {
+			return Err(format!("Party {}'s certificate does not verify", party_id));
+		}
+		match reference_transcript_hash {
+			None => reference_transcript_hash = Some(cert.transcript_hash),
+			Some(reference) =>
+				if cert.transcript_hash != reference {
+					return Err(format!(
+						"Party {} disagrees on the certificate transcript hash",
+						party_id
+					));
+				},
+		}
+
+		// Old committee members must erase their pre-handoff share on success.
+		if old_participants.contains(&party_id) && !protocol.old_share_erased() {
+			return Err(format!(
+				"Party {} did not erase its old share after successful resharing",
+				party_id
+			));
+		}
+
+		if new_participants.contains(&party_id) {
 			if let Some(share) = output.private_share {
 				new_shares.insert(party_id, share);
 			}
-		} else {
-			return Err(format!("Party {} has no output", party_id));
 		}
 	}
 
@@ -434,7 +588,7 @@ fn test_resharing_protocol_creation() {
 
 	let protocol_seed = [42u8; 32];
 	let session_nonce = [0x88u8; 32];
-	let protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
+	let protocol = new_test_protocol(resharing_config, protocol_seed, &session_nonce);
 	assert_eq!(*protocol.state(), ResharingState::Round1Generate);
 }
 
@@ -457,7 +611,7 @@ fn test_resharing_protocol_round1_generation() {
 
 	let protocol_seed = [42u8; 32];
 	let session_nonce = [0x55u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
+	let mut protocol = new_test_protocol(resharing_config, protocol_seed, &session_nonce);
 
 	// First poke should generate Round 1 message (entropy commitment)
 	let action = protocol.poke().expect("poke should succeed");
@@ -501,7 +655,7 @@ fn test_resharing_new_party_skips_round1() {
 
 	let protocol_seed = [42u8; 32];
 	let session_nonce = [0x66u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
+	let mut protocol = new_test_protocol(resharing_config, protocol_seed, &session_nonce);
 
 	// New party should skip Round 1-2 (entropy commit-reveal) and wait
 	let action = protocol.poke().expect("poke should succeed");
@@ -852,7 +1006,7 @@ fn test_valid_resharing_configuration_succeeds() {
 	.expect("valid config");
 
 	let session_nonce = [0xFFu8; 32];
-	let _protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
+	let _protocol = new_test_protocol(resharing_config, [42u8; 32], &session_nonce);
 
 	// Valid: NewOnly with None
 	let resharing_config2 = ResharingConfig::new(
@@ -866,7 +1020,7 @@ fn test_valid_resharing_configuration_succeeds() {
 	)
 	.expect("valid config for NewOnly");
 
-	let _protocol2 = ResharingProtocol::new(resharing_config2, [42u8; 32], &session_nonce);
+	let _protocol2 = new_test_protocol(resharing_config2, [42u8; 32], &session_nonce);
 }
 
 #[test]
@@ -931,7 +1085,7 @@ fn test_resharing_round1_message_from_non_member_ignored() {
 	.expect("valid config");
 
 	let session_nonce = [0x44u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
+	let mut protocol = new_test_protocol(resharing_config, [42u8; 32], &session_nonce);
 
 	// Generate Round 1 message first
 	let _ = protocol.poke().expect("poke should succeed");
@@ -979,8 +1133,8 @@ fn test_resharing_duplicate_message_ignored() {
 	.expect("valid config");
 
 	let session_nonce = [0x33u8; 32];
-	let mut protocol0 = ResharingProtocol::new(config0, [0u8; 32], &session_nonce);
-	let mut protocol1 = ResharingProtocol::new(config1, [1u8; 32], &session_nonce);
+	let mut protocol0 = new_test_protocol(config0, [0u8; 32], &session_nonce);
+	let mut protocol1 = new_test_protocol(config1, [1u8; 32], &session_nonce);
 
 	// Generate Round 0 messages
 	let msg0 = match protocol0.poke().expect("poke should succeed") {
@@ -1045,7 +1199,7 @@ fn test_old_only_party_behavior() {
 	.expect("valid config");
 
 	let session_nonce = [0x22u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
+	let mut protocol = new_test_protocol(resharing_config, [42u8; 32], &session_nonce);
 
 	// Party should participate in Round 0 (entropy commitment)
 	let action = protocol.poke().expect("poke should succeed");
@@ -1076,7 +1230,7 @@ fn test_new_only_party_behavior() {
 	.expect("valid config");
 
 	let session_nonce = [0x11u8; 32];
-	let mut protocol = ResharingProtocol::new(resharing_config, [42u8; 32], &session_nonce);
+	let mut protocol = new_test_protocol(resharing_config, [42u8; 32], &session_nonce);
 
 	// New party should skip Round 1-2 (entropy commit-reveal) and wait
 	let action = protocol.poke().expect("poke should succeed");
@@ -1565,7 +1719,7 @@ fn run_resharing_protocol_with_seeds(
 	let session_nonce = [0xCCu8; 32];
 
 	// Create protocol instances for each party with the provided seeds
-	let mut protocols: HashMap<u32, ResharingProtocol> = HashMap::new();
+	let mut protocols: HashMap<u32, ResharingProtocol<TestSigner>> = HashMap::new();
 
 	for &party_id in &all_parties {
 		let existing_share = old_shares.get(&party_id).cloned();
@@ -1583,7 +1737,7 @@ fn run_resharing_protocol_with_seeds(
 
 		// Use the provided seed for this party
 		let seed = party_seeds.get(&party_id).copied().unwrap_or([0u8; 32]);
-		let protocol = ResharingProtocol::new(config, seed, &session_nonce);
+		let protocol = new_test_protocol(config, seed, &session_nonce);
 		protocols.insert(party_id, protocol);
 	}
 
@@ -3626,4 +3780,571 @@ fn test_recovered_partial_variance_3_of_5() {
 // overshoot ≤ κ assertion runs in the default suite alongside the cheaper configs.
 fn test_recovered_partial_variance_4_of_6() {
 	analyze_recovered_partials(4, 6, 10);
+}
+
+// ============================================================================
+// Active-Set Liveness Tests (Ready round + dealer failover)
+// ============================================================================
+
+/// Resharing away from a dead node: the main operational reason to reshare.
+/// Old committee {0,1,2} (t=2) with party 2 offline; new committee {0,1,3}.
+/// The leader (party 0) closes the ready window, Act = {0,1} >= t_old, and
+/// dealers for subsets containing party 2 fail over to the other member.
+#[test]
+fn test_resharing_succeeds_with_offline_old_party() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 3],
+		&old_shares,
+		&public_key,
+		None,
+		&[2], // party 2 is offline
+		&[],
+		None,
+	);
+
+	assert!(result.is_ok(), "Resharing with offline old party failed: {:?}", result.err());
+	let new_shares = result.unwrap();
+	assert_eq!(new_shares.len(), 3);
+	assert!(new_shares.contains_key(&0));
+	assert!(new_shares.contains_key(&1));
+	assert!(new_shares.contains_key(&3));
+
+	// The new committee can sign under the unchanged public key, including a
+	// signer pair containing the joining party.
+	let new_config = ThresholdConfig::new(2, 3).expect("valid config");
+	let signing_shares =
+		vec![new_shares.get(&0).unwrap().clone(), new_shares.get(&3).unwrap().clone()];
+	let is_valid =
+		run_signing_and_verify(&signing_shares, &public_key, new_config, b"offline reshare", b"");
+	assert!(is_valid, "Signature with reshared shares should verify");
+}
+
+/// Dealer failover for the lowest-ID old participant: party 0 previously dealt
+/// every subset containing it; with party 0 offline, dealers must fail over to
+/// `min(I ∩ Act)`. Also exercises a leader (party 1) that differs from the
+/// lowest old ID.
+#[test]
+fn test_resharing_offline_lowest_id_dealer_fails_over() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![1, 2, 3],
+		&old_shares,
+		&public_key,
+		None,
+		&[0], // the would-be default dealer for every subset containing it
+		&[],
+		None,
+	);
+
+	assert!(result.is_ok(), "Resharing with offline dealer failed: {:?}", result.err());
+	let new_shares = result.unwrap();
+	assert_eq!(new_shares.len(), 3);
+
+	let new_config = ThresholdConfig::new(2, 3).expect("valid config");
+	let signing_shares =
+		vec![new_shares.get(&2).unwrap().clone(), new_shares.get(&3).unwrap().clone()];
+	let is_valid =
+		run_signing_and_verify(&signing_shares, &public_key, new_config, b"dealer failover", b"");
+	assert!(is_valid, "Signature with reshared shares should verify");
+}
+
+/// Below-threshold participation must abort: with only 1 of 3 old members
+/// online and t_old = 2, closing the ready window aborts with
+/// InsufficientParties instead of producing shares.
+#[test]
+fn test_resharing_aborts_below_old_threshold() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 3],
+		&old_shares,
+		&public_key,
+		None,
+		&[1, 2], // only old party 0 remains: |Act| = 1 < t_old = 2
+		&[],
+		None,
+	);
+
+	let err = result.expect_err("resharing below the old threshold must abort");
+	assert!(
+		err.contains("Insufficient parties"),
+		"expected InsufficientParties abort, got: {}",
+		err
+	);
+}
+
+/// Only the session leader (lowest-ID new committee member) may close the
+/// ready window.
+#[test]
+fn test_close_ready_window_requires_leader() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let session_nonce = [0x77u8; 32];
+	let make_protocol = |party_id: u32| {
+		let share = shares.iter().find(|s| s.party_id() == party_id).cloned();
+		let config = ResharingConfig::new(
+			share,
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 3],
+			party_id,
+			public_key.clone(),
+		)
+		.expect("valid config");
+		new_test_protocol(config, [9u8; 32], &session_nonce)
+	};
+
+	// Party 1 is not the leader (leader = min{0,1,3} = 0).
+	let mut non_leader = make_protocol(1);
+	assert_eq!(non_leader.leader(), 0);
+	assert!(non_leader.close_ready_window().is_err(), "non-leader must be rejected");
+
+	// Party 0 is the leader; closing is accepted (and idempotent).
+	let mut leader = make_protocol(0);
+	assert!(leader.close_ready_window().is_ok());
+	assert!(leader.close_ready_window().is_ok());
+}
+
+/// A slow-but-online old member that misses the ready window is excluded from
+/// `Act` but, as a new committee member, must still catch up as an observer and
+/// receive its new shares. Old committee {0,1,2} (t=2), new committee {1,2,3};
+/// party 2 (in both committees) is frozen until the leader closes the ready
+/// window, so Act = {0,1}. Party 2 contributes no entropy and deals nothing,
+/// yet must end up with a working share of the unchanged key.
+#[test]
+fn test_slow_old_member_excluded_from_act_still_gets_new_shares() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![1, 2, 3],
+		&old_shares,
+		&public_key,
+		None,
+		&[],
+		&[2], // party 2 lags past the ready window
+		None,
+	);
+
+	assert!(result.is_ok(), "Resharing with slow old member failed: {:?}", result.err());
+	let new_shares = result.unwrap();
+	assert_eq!(new_shares.len(), 3);
+
+	// The slow party's share must be genuine: sign with a pair that includes it.
+	let new_config = ThresholdConfig::new(2, 3).expect("valid config");
+	let signing_shares =
+		vec![new_shares.get(&2).unwrap().clone(), new_shares.get(&3).unwrap().clone()];
+	let is_valid =
+		run_signing_and_verify(&signing_shares, &public_key, new_config, b"slow observer", b"");
+	assert!(is_valid, "Signature with the slow party's reshared share should verify");
+}
+
+/// A slow-but-online OldOnly member (leaving the committee) that misses the
+/// ready window is excluded from `Act` and participates purely as an observer:
+/// it contributes no entropy, deals nothing, receives no shares — but must
+/// still complete the session cleanly. The harness requires every online party
+/// (including the observer) to reach Done without a protocol error before it
+/// returns, so a successful run is the assertion.
+#[test]
+fn test_slow_old_only_member_observes_and_completes() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 3],
+		&old_shares,
+		&public_key,
+		None,
+		&[],
+		&[2], // party 2 is OldOnly and lags past the ready window
+		None,
+	);
+
+	assert!(result.is_ok(), "Resharing with slow OldOnly observer failed: {:?}", result.err());
+	let new_shares = result.unwrap();
+	assert_eq!(new_shares.len(), 3);
+	assert!(!new_shares.contains_key(&2), "OldOnly observer must not receive a share");
+
+	let new_config = ThresholdConfig::new(2, 3).expect("valid config");
+	let signing_shares =
+		vec![new_shares.get(&1).unwrap().clone(), new_shares.get(&3).unwrap().clone()];
+	let is_valid =
+		run_signing_and_verify(&signing_shares, &public_key, new_config, b"oldonly observer", b"");
+	assert!(is_valid, "Signature with reshared shares should verify");
+}
+
+// ============================================================================
+// Round 6: Signed Transcript Acceptance (Certificate)
+// ============================================================================
+//
+// Certificate coverage for the happy path is built into the harness: every
+// successful `run_resharing_protocol_full` call verifies each party's
+// certificate against the new committee's keys and checks that all parties
+// agree on the transcript hash.
+
+/// A corrupted acceptance signature must abort the protocol on every party
+/// that receives it: signature verification against the local transcript hash
+/// fails in the Accept round.
+#[test]
+fn test_tampered_accept_signature_aborts() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	// Corrupt party 1's broadcast Accept signature in flight.
+	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
+		if sender != 1 {
+			return data;
+		}
+		let msg: ResharingMessage = match borsh::from_slice(&data) {
+			Ok(m) => m,
+			Err(_) => return data,
+		};
+		if let ResharingMessage::Accept(mut accept) = msg {
+			accept.signature[4] ^= 0xFF;
+			return borsh::to_vec(&ResharingMessage::Accept(accept))
+				.expect("re-serialize tampered accept");
+		}
+		data
+	});
+
+	let result = run_resharing_protocol_with_tamper(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		Some(tamper),
+	);
+
+	let err = result.expect_err("tampered acceptance signature must be detected");
+	assert!(
+		err.contains("invalid transcript acceptance"),
+		"expected acceptance verification failure, got: {}",
+		err
+	);
+}
+
+/// Certificate verification must fail when an acceptance is missing or when
+/// the transcript hash it signs differs from the certificate's.
+#[test]
+fn test_certificate_verification_rejects_missing_or_wrong_accepts() {
+	use common::TestSigner as Signer;
+	use qp_rusty_crystals_threshold::resharing::{
+		compute_accept_hash, ResharingCertificate, TranscriptSigner as _,
+	};
+	use std::collections::BTreeMap;
+
+	let ssid = [7u8; 32];
+	let transcript_hash = [9u8; 32];
+	let accept_hash = compute_accept_hash(&ssid, &transcript_hash);
+	let new_participants = vec![0u32, 1u32];
+	let keys: BTreeMap<u32, u32> = new_participants.iter().map(|&p| (p, p)).collect();
+
+	let mut accepts: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+	accepts.insert(0, Signer { id: 0 }.sign(&accept_hash));
+	accepts.insert(1, Signer { id: 1 }.sign(&accept_hash));
+
+	let cert = ResharingCertificate {
+		ssid,
+		active_set: vec![0, 1],
+		transcript_hash,
+		accepts: accepts.clone(),
+	};
+	assert!(cert.verify::<Signer>(&new_participants, &keys), "valid certificate must verify");
+
+	// Missing an acceptance.
+	let mut missing = cert.clone();
+	missing.accepts.remove(&1);
+	assert!(!missing.verify::<Signer>(&new_participants, &keys));
+
+	// Acceptance over a different transcript hash.
+	let other_hash = compute_accept_hash(&ssid, &[10u8; 32]);
+	let mut wrong = cert.clone();
+	wrong.accepts.insert(1, Signer { id: 1 }.sign(&other_hash));
+	assert!(!wrong.verify::<Signer>(&new_participants, &keys));
+
+	// Signature by the wrong party.
+	let mut forged = cert;
+	forged.accepts.insert(1, Signer { id: 0 }.sign(&accept_hash));
+	assert!(!forged.verify::<Signer>(&new_participants, &keys));
+}
+
+// ============================================================================
+// Commit-reveal binding vs the Act proposal
+// ============================================================================
+
+/// An honest active member must not broadcast its Round 2 entropy reveal until
+/// it holds a Round 1 commitment from *every* Act member. Otherwise a
+/// malicious leader could list a colluding member that commits only after
+/// observing honest reveals, choosing its entropy adaptively to bias the
+/// session seed.
+///
+/// Old = new = {0, 1, 2} (t = 2), leader = 0. Party 2's commitment is
+/// delivered to the leader (so the fast-path Act = {0, 1, 2}) but withheld
+/// from party 1. After receiving the Act proposal, party 1 must keep waiting;
+/// only once party 2's commitment arrives may it reveal.
+#[test]
+fn test_no_reveal_until_all_act_commitments_held() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let session_nonce = [0x55u8; 32];
+	let make_protocol = |party_id: u32| {
+		let share = shares.iter().find(|s| s.party_id() == party_id).cloned();
+		let config = ResharingConfig::new(
+			share,
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			party_id,
+			public_key.clone(),
+		)
+		.expect("valid config");
+		let mut seed = [9u8; 32];
+		seed[0..4].copy_from_slice(&party_id.to_le_bytes());
+		new_test_protocol(config, seed, &session_nonce)
+	};
+
+	let mut leader = make_protocol(0);
+	let mut party1 = make_protocol(1);
+	let mut party2 = make_protocol(2);
+
+	// Round 1: everyone emits its entropy commitment.
+	let commit0 = match leader.poke().expect("leader round 1") {
+		Action::SendMany(data) => data,
+		other => panic!("expected leader commitment broadcast, got {:?}", other),
+	};
+	let commit1 = match party1.poke().expect("party 1 round 1") {
+		Action::SendMany(data) => data,
+		other => panic!("expected party 1 commitment broadcast, got {:?}", other),
+	};
+	let commit2 = match party2.poke().expect("party 2 round 1") {
+		Action::SendMany(data) => data,
+		other => panic!("expected party 2 commitment broadcast, got {:?}", other),
+	};
+
+	// Leader receives all commitments and proposes Act = {0, 1, 2} (fast path).
+	leader.message(1, commit1).expect("deliver c1 to leader");
+	leader.message(2, commit2.clone()).expect("deliver c2 to leader");
+	let act_proposal = match leader.poke().expect("leader act proposal") {
+		Action::SendMany(data) => data,
+		other => panic!("expected Act proposal broadcast, got {:?}", other),
+	};
+	assert_eq!(leader.active_set(), Some(&[0u32, 1, 2][..]));
+
+	// Party 1 receives the leader's commitment and the Act proposal, but NOT
+	// party 2's commitment. It must not reveal yet.
+	party1.message(0, commit0).expect("deliver c0 to party 1");
+	party1.message(0, act_proposal).expect("deliver act proposal to party 1");
+	assert_eq!(party1.active_set(), Some(&[0u32, 1, 2][..]));
+	assert!(
+		matches!(party1.poke().expect("party 1 waits"), Action::Wait),
+		"party 1 must not reveal while an Act member's commitment is missing"
+	);
+	assert!(
+		matches!(party1.state(), ResharingState::Round1Waiting),
+		"party 1 must stay in Round1Waiting, was {:?}",
+		party1.state()
+	);
+
+	// Once party 2's commitment arrives, party 1 reveals.
+	party1.message(2, commit2).expect("deliver c2 to party 1");
+	match party1.poke().expect("party 1 reveals") {
+		Action::SendMany(data) => {
+			let msg: ResharingMessage = borsh::from_slice(&data).expect("decode reveal");
+			assert!(
+				matches!(msg, ResharingMessage::Round2(_)),
+				"expected a Round 2 entropy reveal"
+			);
+		},
+		other => panic!("expected party 1's Round 2 reveal, got {:?}", other),
+	}
+}
+
+// ============================================================================
+// Expected active set (deterministic Act proposal for partial-mesh transports)
+// ============================================================================
+
+/// With `set_expected_active_set`, the leader proposes Act as soon as every
+/// expected member has committed — no `close_ready_window` transport timeout
+/// is needed. Models NEAR MPC's topology, where the resharing mesh spans only
+/// the new participant set and old-only members are structurally unreachable:
+/// old {0, 1, 2} (t = 2), new {1, 2, 3}, party 0 offline, expected = {1, 2}.
+/// The harness fails on quiescence when an expected set is provided, so
+/// success proves the deterministic path unblocked the session by itself.
+#[test]
+fn test_expected_active_set_completes_without_timeout() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![1, 2, 3],
+		&old_shares,
+		&public_key,
+		None,
+		&[0], // structurally unreachable (not in the new mesh)
+		&[],
+		Some(&[1, 2]),
+	);
+
+	assert!(result.is_ok(), "Resharing with expected active set failed: {:?}", result.err());
+	let new_shares = result.unwrap();
+	assert_eq!(new_shares.len(), 3);
+
+	let new_config = ThresholdConfig::new(2, 3).expect("valid config");
+	let signing_shares =
+		vec![new_shares.get(&1).unwrap().clone(), new_shares.get(&3).unwrap().clone()];
+	let is_valid =
+		run_signing_and_verify(&signing_shares, &public_key, new_config, b"expected act", b"");
+	assert!(is_valid, "Signature with reshared shares should verify");
+}
+
+/// A committed member outside the expected set is still included in Act: the
+/// expected set is a liveness floor, not a cap. Everyone is online here, and
+/// messages flow freely, so whether Act ends up {1, 2} or {0, 1, 2} depends on
+/// arrival order — either way the session must complete without a timeout.
+#[test]
+fn test_expected_active_set_does_not_exclude_live_members() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 2],
+		&old_shares,
+		&public_key,
+		None,
+		&[],
+		&[],
+		Some(&[0, 1]),
+	);
+
+	assert!(result.is_ok(), "Resharing with expected subset failed: {:?}", result.err());
+	let new_shares = result.unwrap();
+	assert_eq!(new_shares.len(), 3);
+
+	let new_config = ThresholdConfig::new(2, 3).expect("valid config");
+	let signing_shares =
+		vec![new_shares.get(&0).unwrap().clone(), new_shares.get(&2).unwrap().clone()];
+	let is_valid =
+		run_signing_and_verify(&signing_shares, &public_key, new_config, b"expected floor", b"");
+	assert!(is_valid, "Signature with reshared shares should verify");
+}
+
+/// `set_expected_active_set` validation: leader-only, must be a subset of the
+/// old committee, and must have at least `t_old` members.
+#[test]
+fn test_set_expected_active_set_validation() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let session_nonce = [0x66u8; 32];
+	let make_protocol = |party_id: u32| {
+		let share = shares.iter().find(|s| s.party_id() == party_id).cloned();
+		let config = ResharingConfig::new(
+			share,
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![1, 2, 3],
+			party_id,
+			public_key.clone(),
+		)
+		.expect("valid config");
+		new_test_protocol(config, [9u8; 32], &session_nonce)
+	};
+
+	// Leader = min{1, 2, 3} = 1. Non-leaders are rejected.
+	let mut non_leader = make_protocol(2);
+	assert_eq!(non_leader.leader(), 1);
+	assert!(non_leader.set_expected_active_set(&[1, 2]).is_err(), "non-leader must be rejected");
+
+	let mut leader = make_protocol(1);
+	// Not a subset of the old committee.
+	assert!(leader.set_expected_active_set(&[1, 3]).is_err(), "must be a subset of old");
+	// Below the old threshold.
+	assert!(leader.set_expected_active_set(&[1]).is_err(), "must have at least t_old members");
+	// Valid (duplicates tolerated).
+	assert!(leader.set_expected_active_set(&[2, 1, 2]).is_ok());
 }
