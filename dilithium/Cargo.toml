@@ -27,6 +27,9 @@ path = "examples/stack_probe.rs"
 [[example]]
 name = "ct_bench"
 path = "examples/ct_bench.rs"
+# The harness times the crate-internal secret samplers, which are only exposed
+# via the `ct-internals` feature. Skip building this example without it.
+required-features = ["ct-internals"]
 
 [dependencies]
 zeroize = { workspace = true }
@@ -46,3 +49,6 @@ harness = false
 
 [features]
 default = []
+# Exposes the crate-internal secret samplers (`polyvec::ct_internals`) so the
+# `ct_bench` constant-time harness can time them directly. Not for production use.
+ct-internals = []

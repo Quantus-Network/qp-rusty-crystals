@@ -3,8 +3,12 @@
 //! Run with:
 //!
 //! ```bash
-//! cargo run --release -p qp-rusty-crystals-dilithium --example ct_bench
+//! cargo run --release -p qp-rusty-crystals-dilithium --features ct-internals --example ct_bench
 //! ```
+//!
+//! The `ct-internals` feature is required: it exposes the crate-internal secret
+//! samplers (`polyvec::ct_internals`) that this harness times. They are not part
+//! of the public API, so the example is skipped for normal builds.
 //!
 //! # What we measure — and what we deliberately do not
 //!
@@ -67,6 +71,7 @@ use qp_rusty_crystals_dilithium::{
 	packing, params, poly,
 	poly::Poly,
 	polyvec,
+	polyvec::ct_internals::{k_uniform_eta, l_uniform_eta, l_uniform_gamma1},
 	polyvec::{Polyveck, Polyvecl},
 };
 
@@ -133,8 +138,8 @@ fn keygen_s1s2_sampling(runner: &mut CtRunner, rng: &mut BenchRng) {
 		runner.run_one(class, || {
 			let mut s1 = Polyvecl::default();
 			let mut s2 = Polyveck::default();
-			polyvec::l_uniform_eta(&mut s1, black_box(&seed), 0);
-			polyvec::k_uniform_eta(&mut s2, black_box(&seed), L as u16);
+			l_uniform_eta(&mut s1, black_box(&seed), 0);
+			k_uniform_eta(&mut s2, black_box(&seed), L as u16);
 			black_box((&s1, &s2));
 		});
 	}
@@ -235,7 +240,7 @@ fn sign_mask_expansion(runner: &mut CtRunner, rng: &mut BenchRng) {
 		seed.copy_from_slice(if is_left { &fixed } else { &scratch });
 		runner.run_one(class, || {
 			let mut y = Polyvecl::default();
-			polyvec::l_uniform_gamma1(&mut y, black_box(&seed), 0);
+			l_uniform_gamma1(&mut y, black_box(&seed), 0);
 			black_box(&y);
 		});
 	}
