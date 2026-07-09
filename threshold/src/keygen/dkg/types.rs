@@ -385,7 +385,10 @@ pub struct Round1Broadcast {
 }
 
 /// Round 1 private: Shared secret K_S (leader to subset members).
-#[derive(Clone, BorshSerialize, BorshDeserialize)]
+///
+/// Carries the secret `shared_secret` (K_S), so it is zeroized on drop. Queued
+/// copies awaiting delivery therefore never leave K_S in freed heap memory.
+#[derive(Clone, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
 pub struct Round1Private {
 	/// Session identifier binding this message to a specific DKG session.
 	pub ssid: [u8; DKG_SSID_SIZE],

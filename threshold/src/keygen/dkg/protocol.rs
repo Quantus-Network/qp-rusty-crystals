@@ -417,16 +417,27 @@ pub struct Dkg<S: TranscriptSigner> {
 	ssid: [u8; DKG_SSID_SIZE],
 	/// Master seed for deriving all randomness (32 bytes, cryptographically random).
 	seed: [u8; 32],
-	pending_privates: Vec<(ParticipantId, Vec<u8>)>,
+	/// Round 1 private messages awaiting delivery, held as zeroizing
+	/// [`Round1Private`] structs (not pre-serialized byte buffers) so the queued
+	/// K_S material is wiped on drop rather than left in a freed `Vec<u8>`.
+	pending_privates: Vec<(ParticipantId, Round1Private)>,
 	/// Buffer for messages that arrive before we're ready to process them.
 	message_buffer: DkgMessageBuffer,
 }
 
 impl<S: TranscriptSigner> Drop for Dkg<S> {
 	fn drop(&mut self) {
-		// Zeroize sensitive data when the DKG is dropped
+		// Zeroize sensitive data when the DKG is dropped. Queued and buffered
+		// Round 1 private messages carry K_S, so wipe them too rather than freeing
+		// heap allocations that still contain secret bytes.
 		self.state.zeroize();
 		self.seed.zeroize();
+		for (_, private) in self.pending_privates.iter_mut() {
+			private.zeroize();
+		}
+		for private in self.message_buffer.round1_privates.values_mut() {
+			private.zeroize();
+		}
 	}
 }
 
@@ -485,7 +496,9 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// * `Ok(DkgAction)` - The action to perform
 	/// * `Err(DkgError)` - If the protocol encounters an error
 	pub fn poke(&mut self) -> Result<DkgAction, DkgError> {
-		if let Some((to, data)) = self.pending_privates.pop() {
+		if let Some((to, private)) = self.pending_privates.pop() {
+			let data = borsh::to_vec(&DkgMessage::Round1Private(private))
+				.map_err(|e| DkgError::InternalError(e.to_string()))?;
 			return Ok(DkgAction::SendPrivate(to, data));
 		}
 
@@ -999,17 +1012,18 @@ impl<S: TranscriptSigner> Dkg<S> {
 							subset_mask: subset,
 							shared_secret: secret,
 						};
-						let msg = DkgMessage::Round1Private(private);
-						let data = borsh::to_vec(&msg)
-							.map_err(|e| DkgError::InternalError(e.to_string()))?;
-						self.pending_privates.push((party, data));
+						// Queue the zeroizing struct; serialize only when popped for
+						// sending, so K_S is never parked in a plain byte buffer.
+						self.pending_privates.push((party, private));
 					}
 				}
 			}
 
 			self.state.privates_sent = true;
 
-			if let Some((to, data)) = self.pending_privates.pop() {
+			if let Some((to, private)) = self.pending_privates.pop() {
+				let data = borsh::to_vec(&DkgMessage::Round1Private(private))
+					.map_err(|e| DkgError::InternalError(e.to_string()))?;
 				return Ok(DkgAction::SendPrivate(to, data));
 			}
 		}
