@@ -456,6 +456,16 @@ pub(crate) fn verify(
 	let mut state = fips202::KeccakState::default(); // shake256_init()
 
 	packing::unpack_pk(&mut rho, &mut t1, pk);
+
+	// Reject the degenerate all-zero t1 public key. With t1 = 0 the term c*2^d*t1 in the
+	// verification relation vanishes for every challenge c, so w1 = UseHint(h, Az) no longer
+	// binds the challenge to the key. An attacker can then forge a signature (z = 0, empty
+	// hint, c = H(mu || w1Encode(0))) with no secret key. Honest key generation never yields
+	// t1 = 0, so rejecting it costs nothing and closes the malicious-key forgery.
+	if t1.vec.iter().all(|p| p.coeffs.iter().all(|&c| c == 0)) {
+		return false;
+	}
+
 	if !packing::unpack_sig(&mut c, &mut z, &mut h, sig) {
 		return false;
 	}
@@ -817,6 +827,55 @@ mod tests {
 		assert!(
 			!polyvecl_eq(&y1, &y2),
 			"mask y was reused across two different messages (Bug Class 3)"
+		);
+	}
+
+	// Malicious-key forgery (degenerate all-zero t1): a public key whose t1 is entirely zero
+	// makes the verification relation w1 = UseHint(h, Az - c*2^d*t1) independent of the
+	// challenge c, because the c*2^d*t1 term vanishes for every c. An attacker can then pick
+	// z = 0 and an empty hint, so the verifier reconstructs w1 = 0, precompute
+	// c = H(mu || w1Encode(0)), and place that c in the signature. Verification then finds
+	// c == c2 and accepts, even though the attacker possesses no secret key. A successful
+	// verify must imply possession of a real secret key, so this key must be rejected.
+	#[test]
+	fn test_forged_signature_with_zero_t1_is_rejected() {
+		// Public key with arbitrary rho and an all-zero t1 (the t1 byte region stays zero).
+		let mut pk = [0u8; params::PUBLICKEYBYTES];
+		pk[..params::SEEDBYTES].copy_from_slice(&[0x42u8; params::SEEDBYTES]);
+
+		let m = b"forge me without a secret key";
+
+		// Recompute mu exactly as verify() does: mu = CRH(H(pk) || m).
+		let mut mu = [0u8; params::CRHBYTES];
+		fips202::shake256(&mut mu, &pk);
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, &mu);
+		fips202::shake256_absorb(&mut state, m);
+		fips202::shake256_finalize(&mut state);
+		fips202::shake256_squeeze(&mut mu, &mut state);
+
+		// With z = 0, h = 0 and t1 = 0 the verifier reconstructs w1 = 0.
+		let w1 = Polyveck::default();
+		let mut buf = [0u8; K * params::POLYW1_PACKEDBYTES];
+		polyvec::k_pack_w1(&mut buf, &w1);
+
+		// Pick the challenge to equal the verifier's own recomputation: c = H(mu || w1Encode(0)).
+		let mut c = [0u8; params::C_DASH_BYTES];
+		let mut cstate = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut cstate, &mu);
+		fips202::shake256_absorb(&mut cstate, &buf);
+		fips202::shake256_finalize(&mut cstate);
+		fips202::shake256_squeeze(&mut c, &mut cstate);
+
+		// Assemble the forged signature (c, z = 0, empty hint).
+		let z = Polyvecl::default();
+		let h = Polyveck::default();
+		let mut sig = [0u8; params::SIGNBYTES];
+		packing::pack_sig(&mut sig, Some(&c), &z, &h);
+
+		assert!(
+			!super::verify(&sig, m, &pk),
+			"signature forged under an all-zero-t1 public key must be rejected"
 		);
 	}
 

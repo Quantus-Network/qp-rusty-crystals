@@ -222,11 +222,21 @@ impl PublicKey {
 	///
 	/// Returns a PublicKey
 	pub fn from_bytes(bytes: &[u8]) -> Result<PublicKey, KeyParsingError> {
-		let result = bytes.try_into();
-		match result {
-			Ok(bytes) => Ok(PublicKey { bytes }),
-			Err(_) => Err(KeyParsingError::BadPublicKey),
+		let bytes: [u8; PUBLICKEYBYTES] =
+			bytes.try_into().map_err(|_| KeyParsingError::BadPublicKey)?;
+
+		// Reject the degenerate all-zero t1 public key. With t1 = 0 the challenge term in the
+		// verification relation vanishes, letting an attacker forge signatures without any
+		// secret key (see `sign::verify`). Honest key generation never produces t1 = 0, so
+		// this only rejects malformed/malicious keys and never a legitimate one.
+		let mut rho = [0u8; params::SEEDBYTES];
+		let mut t1 = crate::polyvec::Polyveck::default();
+		crate::packing::unpack_pk(&mut rho, &mut t1, &bytes);
+		if t1.vec.iter().all(|p| p.coeffs.iter().all(|&c| c == 0)) {
+			return Err(KeyParsingError::BadPublicKey);
 		}
+
+		Ok(PublicKey { bytes })
 	}
 
 	/// Verify a signature for a given message with a public key.
@@ -343,5 +353,24 @@ mod tests {
 		let keys = Keypair::generate(get_random_bytes());
 		let big_msg = vec![0u8; MAX_MESSAGE_SIZE + 1];
 		assert!(!keys.verify(&big_msg, &[0u8; SIGNBYTES], None));
+	}
+
+	// Malicious-key forgery defense: a public key with an all-zero t1 makes verification
+	// independent of the challenge, enabling signature forgery without a secret key.
+	// `from_bytes` must reject such a key so it can never be constructed or stored.
+	#[test]
+	fn from_bytes_rejects_zero_t1_public_key() {
+		use super::{KeyParsingError, PublicKey, PUBLICKEYBYTES};
+
+		// Arbitrary rho, all-zero t1 region.
+		let mut pk = [0u8; PUBLICKEYBYTES];
+		pk[..crate::params::SEEDBYTES].copy_from_slice(&[0x42u8; crate::params::SEEDBYTES]);
+
+		assert!(matches!(PublicKey::from_bytes(&pk), Err(KeyParsingError::BadPublicKey)));
+
+		// A genuine public key must still round-trip through from_bytes.
+		let keys = Keypair::generate(get_random_bytes());
+		let good = keys.public.to_bytes();
+		assert!(PublicKey::from_bytes(&good).is_ok());
 	}
 }
