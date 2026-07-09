@@ -170,7 +170,12 @@ impl fmt::Display for DkgError {
 /// `Return` carries a boxed [`DkgOutput`] because the output is ~2.8 KB
 /// (full Dilithium key material) and inlining it would balloon every other
 /// variant. See `clippy::large_enum_variant`.
-#[derive(Debug)]
+///
+/// `Debug` is implemented manually (rather than derived) so that the
+/// [`SendPrivate`](DkgAction::SendPrivate) transport bytes — which carry the
+/// serialized Round 1 secret K_S — are never rendered. A derived formatter would
+/// print the raw `Vec<u8>`, persisting key material into any log or trace that
+/// includes `{:?}` output. Only the recipient and payload length are shown.
 pub enum DkgAction {
 	/// Wait for more messages before proceeding.
 	Wait,
@@ -190,6 +195,29 @@ pub enum DkgAction {
 	SendPrivate(ParticipantId, Vec<u8>),
 	/// DKG is complete, return the output.
 	Return(Box<DkgOutput>),
+}
+
+impl fmt::Debug for DkgAction {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			DkgAction::Wait => f.write_str("Wait"),
+			// Broadcast payloads are public, but the serialized bytes are noise in
+			// a log; show only the length for consistency with SendPrivate.
+			DkgAction::SendMany(data) => f
+				.debug_tuple("SendMany")
+				.field(&format_args!("{} bytes", data.len()))
+				.finish(),
+			// The payload is the serialized Round 1 private message (K_S). Never
+			// render the bytes; keep the recipient and length for diagnostics.
+			DkgAction::SendPrivate(to, data) => f
+				.debug_struct("SendPrivate")
+				.field("to", to)
+				.field("payload", &format_args!("<{} bytes redacted>", data.len()))
+				.finish(),
+			// Delegates to DkgOutput's Debug, which redacts the private share.
+			DkgAction::Return(output) => f.debug_tuple("Return").field(output).finish(),
+		}
+	}
 }
 
 // ============================================================================
@@ -1980,6 +2008,43 @@ mod tests {
 
 	/// Test session nonce for DKG tests.
 	const TEST_SESSION_NONCE: [u8; 32] = [0xDEu8; 32];
+
+	/// The `SendPrivate` payload carries the borsh-serialized Round 1 private
+	/// message (K_S). Its `Debug` output must never expose those secret bytes,
+	/// otherwise any downstream `{:?}` logging persists key material outside the
+	/// encrypted transport path.
+	#[test]
+	fn send_private_debug_does_not_leak_shared_secret() {
+		// A recognizable K_S: every byte 0xAB (== 171 decimal) so we can search
+		// for the exact form a derived `Debug` on `Vec<u8>` would print.
+		let secret_marker = [0xABu8; SHARED_SECRET_SIZE];
+		let private = Round1Private {
+			ssid: [0x11u8; DKG_SSID_SIZE],
+			from_party_id: 7,
+			subset_mask: 0b011,
+			shared_secret: secret_marker,
+		};
+		let data = borsh::to_vec(&DkgMessage::Round1Private(private)).unwrap();
+
+		// Sanity: the secret really is inside the transport payload.
+		assert!(
+			data.windows(SHARED_SECRET_SIZE).any(|w| w == secret_marker),
+			"test setup: secret not present in serialized payload"
+		);
+
+		let action = DkgAction::SendPrivate(3, data);
+		let rendered = format!("{action:?}");
+
+		// A derived `Debug` renders the payload as `[.., 171, 171, ..]`; the
+		// redacting impl must emit no run of the secret bytes.
+		assert!(
+			!rendered.contains("171, 171"),
+			"SendPrivate Debug leaked raw secret bytes: {rendered}"
+		);
+		// Still useful for debugging: recipient visible, payload redacted.
+		assert!(rendered.contains("to: 3"), "recipient should stay visible: {rendered}");
+		assert!(rendered.contains("redacted"), "payload should be redacted: {rendered}");
+	}
 
 	#[derive(Clone, Debug)]
 	struct TestSigner {
