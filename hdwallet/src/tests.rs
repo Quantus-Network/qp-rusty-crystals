@@ -402,6 +402,55 @@ mod hdwallet_tests {
 	}
 
 	#[test]
+	fn test_passphrase_unicode_normalization() {
+		// BIP39 mandates NFKD normalization before PBKDF2: canonically equivalent
+		// passphrases must derive the same seed. "café" spelled with a precomposed
+		// U+00E9 vs a decomposed "e" + U+0301 combining acute accent.
+		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let composed = "caf\u{00e9}";
+		let decomposed = "cafe\u{0301}";
+		assert_ne!(composed.as_bytes(), decomposed.as_bytes());
+
+		let seed_composed = mnemonic_to_seed(mnemonic.to_string(), Some(composed)).unwrap();
+		let seed_decomposed = mnemonic_to_seed(mnemonic.to_string(), Some(decomposed)).unwrap();
+		assert_eq!(
+			seed_composed, seed_decomposed,
+			"canonically equivalent passphrases must derive the same seed"
+		);
+
+		// The normalized form must feed PBKDF2 (NFKD of both spellings is the
+		// decomposed byte string), matching what standard BIP39 tooling computes.
+		let reference = bip39::Mnemonic::parse_in_normalized(bip39::Language::English, mnemonic)
+			.unwrap()
+			.to_seed_normalized(decomposed);
+		assert_eq!(seed_composed, reference);
+
+		// Same guarantee through the borrowing derivation helpers.
+		let key_composed =
+			crate::derive_key_from_mnemonic(mnemonic, Some(composed), "m/44'/189189'/0'/0'/0'")
+				.unwrap();
+		let key_decomposed =
+			crate::derive_key_from_mnemonic(mnemonic, Some(decomposed), "m/44'/189189'/0'/0'/0'")
+				.unwrap();
+		assert_eq!(key_composed.secret.to_bytes(), key_decomposed.secret.to_bytes());
+	}
+
+	#[test]
+	fn test_mnemonic_unicode_normalization() {
+		// NFKD also applies to the mnemonic itself: U+00A0 (no-break space) has a
+		// compatibility decomposition to a plain space, so a mnemonic pasted with
+		// non-breaking separators must parse and derive identically.
+		let ascii = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let nbsp = ascii.replace(' ', "\u{00a0}");
+		assert_ne!(ascii.as_bytes(), nbsp.as_bytes());
+
+		let seed_ascii = mnemonic_to_seed(ascii.to_string(), None).unwrap();
+		let seed_nbsp = mnemonic_to_seed(nbsp, None)
+			.expect("NFKD-equivalent mnemonic must parse after normalization");
+		assert_eq!(seed_ascii, seed_nbsp);
+	}
+
+	#[test]
 	fn test_derive_key_from_seed_different_paths() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
