@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 
 use qp_rusty_crystals_threshold::{
-	compute_ssid, generate_subsets_of_size, generate_with_dealer, get_hyperball_params,
-	verify_signature, ParticipantList, PrivateKeyShare, PublicKey, Round1Broadcast,
-	Round2Broadcast, Round3Broadcast, ThresholdConfig, ThresholdSigner,
+	compute_ssid, generate_with_dealer, get_hyperball_params, verify_signature, ParticipantList,
+	PrivateKeyShare, PublicKey, Round1Broadcast, Round2Broadcast, Round3Broadcast, ThresholdConfig,
+	ThresholdSigner,
 };
 
 use qp_rusty_crystals_threshold::resharing::{
@@ -18,6 +18,25 @@ use qp_rusty_crystals_threshold::resharing::{
 
 mod common;
 use common::{new_test_protocol, TestSigner};
+
+/// Local reimplementation of the crate's (now crate-private) subset enumerator,
+/// used only to build expected combinations in these tests. The crate no longer
+/// re-exports its internal `generate_subsets_of_size` helper.
+fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
+	if size == 0 || size > n || n > 16 {
+		return Vec::new();
+	}
+	let mut subsets = Vec::new();
+	let max_val: u32 = 1u32 << n;
+	let mut subset: u32 = (1u32 << size) - 1;
+	while subset < max_val {
+		subsets.push(subset as u16);
+		let c = subset & subset.wrapping_neg();
+		let r = subset + c;
+		subset = (((r ^ subset) >> 2) / c) | r;
+	}
+	subsets
+}
 
 /// Helper to run the resharing protocol locally with simulated message passing.
 fn run_resharing_protocol(

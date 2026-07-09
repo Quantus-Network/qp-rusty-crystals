@@ -99,25 +99,43 @@ pub(crate) fn compute_sharing_patterns(
 	Ok(patterns)
 }
 
-/// Generate all subsets of exactly `size` elements from `n` elements.
-/// Uses Gosper's hack to efficiently enumerate subsets.
-pub fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
-	if size > n || size == 0 {
+/// Generate all subsets of exactly `size` elements from `n` elements, encoded as
+/// `u16` bitmasks. Uses Gosper's hack to efficiently enumerate subsets.
+///
+/// # Domain
+///
+/// Subset masks are `u16`, so at most 16 elements (`n <= 16`) are representable.
+/// Out-of-domain inputs (`n > 16`, `size == 0`, or `size > n`) return an empty
+/// vector rather than overflowing the mask arithmetic. This matters because, done
+/// naively in `u16`, `n == 16` makes the loop sentinel `1 << 16` and `size == 16`
+/// makes the initial mask `(1 << 16) - 1` — both overflow `u16` (a panic under
+/// overflow checks, or a silent wrap that also corrupts the Gosper iteration and
+/// yields truncated/empty enumeration). Iteration is therefore performed in `u32`
+/// and narrowed to the `u16` mask domain, which the bounds above make lossless.
+pub(crate) fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
+	// A u16 mask cannot represent more than 16 elements.
+	if size == 0 || size > n || n > 16 {
 		return Vec::new();
 	}
 
 	let mut subsets = Vec::new();
-	let max_val: u16 = 1 << n;
+	// Sentinel one past the largest n-bit mask; computed in u32 so that n == 16
+	// (sentinel == 65536) does not overflow.
+	let max_val: u32 = 1u32 << n;
 
-	// Start with the smallest subset of the given size
-	let mut subset: u16 = (1 << size) - 1;
+	// Start with the smallest subset of the given size (low `size` bits set).
+	let mut subset: u32 = (1u32 << size) - 1;
 
 	while subset < max_val {
-		subsets.push(subset);
+		// `subset < max_val <= 1 << 16` and `subset` is a valid n-bit mask, so it
+		// always fits in u16 here.
+		subsets.push(subset as u16);
 
-		// Gosper's hack to get next subset of same size
-		let c = subset & (!subset + 1); // lowest set bit
-		let r = subset + c; // next higher number with same bits, except one moved left
+		// Gosper's hack to get the next subset of the same size. Computed in u32
+		// to avoid overflow at the top of the range; `subset >= 1` in the loop, so
+		// the lowest-set-bit divisor `c` is never zero.
+		let c = subset & subset.wrapping_neg(); // lowest set bit
+		let r = subset + c; // next higher number with same popcount
 		subset = (((r ^ subset) >> 2) / c) | r;
 	}
 
@@ -313,6 +331,46 @@ mod tests {
 		// C(5, 3) = 10 subsets of size 3
 		let subsets = generate_subsets_of_size(5, 3);
 		assert_eq!(subsets.len(), 10);
+	}
+
+	/// The full 16-bit mask domain (n == 16, size == 16) must enumerate correctly
+	/// rather than overflow the mask arithmetic. Before the u32-based rewrite,
+	/// `n == 16` computed the sentinel as `1u16 << 16` and `size == 16` the initial
+	/// mask as `(1u16 << 16) - 1`, panicking under overflow checks.
+	#[test]
+	fn test_generate_subsets_of_size_full_u16_domain() {
+		// n = 16 previously panicked on `1u16 << 16`.
+		for size in 1..=16 {
+			let subsets = generate_subsets_of_size(16, size);
+			assert_eq!(
+				subsets.len(),
+				binomial(16, size),
+				"n=16, size={} should yield C(16, {}) masks",
+				size,
+				size
+			);
+			for &mask in &subsets {
+				assert_eq!(
+					mask.count_ones() as usize,
+					size,
+					"each mask must have exactly `size` bits set"
+				);
+			}
+		}
+
+		// size == 16 selects the single full mask.
+		let full = generate_subsets_of_size(16, 16);
+		assert_eq!(full, alloc::vec![0xFFFFu16]);
+	}
+
+	/// Inputs outside the representable 16-bit domain return an empty vector
+	/// instead of panicking or wrapping into corrupt state.
+	#[test]
+	fn test_generate_subsets_of_size_rejects_out_of_domain() {
+		assert!(generate_subsets_of_size(17, 1).is_empty(), "n > 16 is not representable");
+		assert!(generate_subsets_of_size(20, 10).is_empty(), "n > 16 is not representable");
+		assert!(generate_subsets_of_size(4, 0).is_empty(), "size == 0 yields no subsets");
+		assert!(generate_subsets_of_size(3, 5).is_empty(), "size > n yields no subsets");
 	}
 
 	#[test]
