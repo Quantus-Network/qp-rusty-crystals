@@ -700,7 +700,7 @@ impl<S: crate::keygen::dkg::TranscriptSigner> ResharingSignerConfig<S> {
 /// material. A verifier that additionally holds the broadcast transcript can
 /// recompute `transcript_hash` and the `Σ_J t_J^new = T` public-key check
 /// independently.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, BorshSerialize)]
 pub struct ResharingCertificate {
 	/// Session identifier of the completed session.
 	pub ssid: [u8; RESHARING_SSID_SIZE],
@@ -712,6 +712,52 @@ pub struct ResharingCertificate {
 	/// Acceptance signatures from every new committee member, keyed by
 	/// participant ID.
 	pub accepts: BTreeMap<ParticipantId, Vec<u8>>,
+}
+
+impl BorshDeserialize for ResharingCertificate {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; RESHARING_SSID_SIZE]>::deserialize_reader(reader)?;
+
+		// active_set is at most one entry per old committee member.
+		let active_len = u32::deserialize_reader(reader)? as usize;
+		if active_len > MAX_PARTIES as usize {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingCertificate.active_set exceeds MAX_PARTIES",
+			));
+		}
+		let mut active_set = Vec::with_capacity(active_len);
+		for _ in 0..active_len {
+			active_set.push(ParticipantId::deserialize_reader(reader)?);
+		}
+
+		let transcript_hash = <[u8; COMMITMENT_HASH_SIZE]>::deserialize_reader(reader)?;
+
+		// accepts holds at most one signature per new committee member.
+		let accepts_len = u32::deserialize_reader(reader)? as usize;
+		if accepts_len > MAX_PARTIES as usize {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingCertificate.accepts exceeds MAX_PARTIES",
+			));
+		}
+		let mut accepts = BTreeMap::new();
+		for _ in 0..accepts_len {
+			let party_id = ParticipantId::deserialize_reader(reader)?;
+			let sig_len = u32::deserialize_reader(reader)? as usize;
+			if sig_len > MAX_ACCEPT_SIGNATURE_LEN {
+				return Err(borsh::io::Error::new(
+					borsh::io::ErrorKind::InvalidData,
+					"ResharingCertificate accept signature exceeds MAX_ACCEPT_SIGNATURE_LEN",
+				));
+			}
+			// Read incrementally rather than pre-allocating the claimed length.
+			let signature = crate::broadcast::read_length_prefixed(reader, sig_len)?;
+			accepts.insert(party_id, signature);
+		}
+
+		Ok(Self { ssid, active_set, transcript_hash, accepts })
+	}
 }
 
 impl ResharingCertificate {
@@ -1772,5 +1818,64 @@ mod tests {
 			&nonce,
 		);
 		assert_ne!(base(0), other_suite, "suite must change the SSID");
+	}
+
+	#[test]
+	fn test_resharing_certificate_roundtrip_within_bounds() {
+		let mut accepts = BTreeMap::new();
+		accepts.insert(1u32, alloc::vec![9u8; 16]);
+		accepts.insert(2u32, alloc::vec![3u8; 4627]);
+
+		let cert = ResharingCertificate {
+			ssid: TEST_SSID,
+			active_set: alloc::vec![0, 1, 2],
+			transcript_hash: [7u8; COMMITMENT_HASH_SIZE],
+			accepts,
+		};
+
+		let bytes = borsh::to_vec(&cert).unwrap();
+		let back: ResharingCertificate = borsh::from_slice(&bytes).unwrap();
+		assert_eq!(back.active_set, cert.active_set);
+		assert_eq!(back.accepts, cert.accepts);
+		assert_eq!(back.transcript_hash, cert.transcript_hash);
+	}
+
+	/// A fully-present certificate whose `active_set` count exceeds `MAX_PARTIES`
+	/// must be rejected. Before the bounded deserializer this parsed successfully
+	/// (borsh would happily build the oversized collection).
+	#[test]
+	fn test_resharing_certificate_rejects_oversized_active_set() {
+		let huge = MAX_PARTIES + 100;
+
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&[0u8; RESHARING_SSID_SIZE]); // ssid
+		payload.extend_from_slice(&huge.to_le_bytes()); // active_set len
+		for i in 0..huge {
+			payload.extend_from_slice(&i.to_le_bytes()); // ParticipantId entries
+		}
+		payload.extend_from_slice(&[0u8; COMMITMENT_HASH_SIZE]); // transcript_hash
+		payload.extend_from_slice(&0u32.to_le_bytes()); // accepts len = 0
+
+		let result: Result<ResharingCertificate, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "active_set exceeding MAX_PARTIES must be rejected");
+	}
+
+	/// Same, for the `accepts` map count.
+	#[test]
+	fn test_resharing_certificate_rejects_oversized_accepts() {
+		let huge = MAX_PARTIES + 50;
+
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&[0u8; RESHARING_SSID_SIZE]); // ssid
+		payload.extend_from_slice(&0u32.to_le_bytes()); // active_set len = 0
+		payload.extend_from_slice(&[0u8; COMMITMENT_HASH_SIZE]); // transcript_hash
+		payload.extend_from_slice(&huge.to_le_bytes()); // accepts len
+		for i in 0..huge {
+			payload.extend_from_slice(&i.to_le_bytes()); // key: ParticipantId
+			payload.extend_from_slice(&0u32.to_le_bytes()); // value: empty signature
+		}
+
+		let result: Result<ResharingCertificate, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "accepts exceeding MAX_PARTIES must be rejected");
 	}
 }
