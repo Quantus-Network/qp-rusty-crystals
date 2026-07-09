@@ -13,10 +13,18 @@ const NROUNDS: usize = 24;
 /// state is cleared from memory when no longer needed. The `Copy` trait is
 /// intentionally NOT implemented to prevent accidental copies that could
 /// leave sensitive data in memory (HQ8).
+///
+/// The `s` (sponge lanes) and `pos` (offset within the current block) fields
+/// are private. This is deliberate: `pos` must satisfy the invariant
+/// `pos <= rate`, and the squeeze/absorb routines rely on it to make forward
+/// progress. Exposing the fields would let a caller (for example one that
+/// restores a state from untrusted bytes) construct a state with `pos > rate`,
+/// which previously caused `keccak_squeeze` to loop forever. Keeping the
+/// fields private makes that state unrepresentable from outside this module.
 #[derive(Clone, Default, Zeroize, ZeroizeOnDrop)]
 pub struct KeccakState {
-	pub s: [u64; 25],
-	pub pos: usize,
+	s: [u64; 25],
+	pos: usize,
 }
 
 impl KeccakState {
@@ -353,7 +361,11 @@ fn keccak_squeeze(out: &mut [u8], s: &mut [u64; 25], mut pos: usize, r: usize) -
 	let mut outlen = out.len();
 	let mut out_idx = 0;
 	while outlen != 0 {
-		if pos == r {
+		// `>=` (rather than `==`) is a defensive guard: a well-formed state always
+		// has `pos <= r`, but if an out-of-range `pos` ever reaches here we must
+		// still permute and reset so the loop makes progress. Without this, a
+		// `pos > r` would emit zero bytes per iteration and spin forever.
+		if pos >= r {
 			keccakf1600_statepermute(s);
 			pos = 0;
 		}
@@ -583,6 +595,37 @@ mod tests {
 			shake256_squeeze(&mut output, &mut state);
 			assert_eq!(output, test.output, "Input failed with {:?}", test.input);
 		}
+	}
+
+	#[test]
+	fn keccak_squeeze_terminates_with_out_of_range_pos() {
+		// Regression (availability): a `pos` greater than the rate must not make
+		// keccak_squeeze loop forever. Before hardening, `pos > r` meant the inner
+		// `while i < r` loop emitted zero bytes, so `outlen` was never decremented
+		// and the outer `while outlen != 0` spun indefinitely. This test wedges an
+		// out-of-range position (as an untrusted/corrupted state could) and requires
+		// the call to return with a valid in-range position.
+		let mut s = [0u64; 25];
+		let mut out = [0u8; 32];
+		let bad_pos = SHAKE256_RATE + 1;
+		let new_pos = keccak_squeeze(&mut out, &mut s, bad_pos, SHAKE256_RATE);
+		assert!(new_pos <= SHAKE256_RATE, "squeeze must return an in-range position");
+	}
+
+	#[test]
+	fn shake256_squeeze_terminates_with_corrupted_state_pos() {
+		// End-to-end version through the public squeeze entry point. We reach into
+		// the (module-private) `pos` field to simulate a state whose invariant was
+		// violated - e.g. restored from untrusted bytes - and require that squeezing
+		// still terminates and yields a full block of output.
+		let mut state = KeccakState::default();
+		shake256_absorb(&mut state, b"availability");
+		shake256_finalize(&mut state);
+		state.pos = usize::MAX;
+
+		let mut out = [0u8; 64];
+		shake256_squeeze(&mut out, &mut state);
+		assert!(state.pos <= SHAKE256_RATE, "state position must be back in range");
 	}
 
 	#[test]
