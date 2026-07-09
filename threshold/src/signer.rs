@@ -454,7 +454,16 @@ impl ThresholdSigner {
 		let single_commitment_size = 8 * 736; // K * POLY_Q_SIZE
 		let expected_len = k * single_commitment_size;
 
+		// Reject duplicate reveals up front: replaying one party's Round 2 broadcast
+		// must never be counted twice, or the aggregate (and thus the challenge
+		// material for the response) would be silently corrupted.
+		let mut seen_parties: BTreeSet<u32> = BTreeSet::new();
+
 		for r2 in other_round2 {
+			if !seen_parties.insert(r2.party_id) {
+				return Err(ThresholdError::DuplicateBroadcast { party_id: r2.party_id });
+			}
+
 			// Empty commitment_data is NOT allowed - every participant must contribute.
 			// Allowing empty data would let an attacker bypass commitment binding.
 			if r2.commitment_data.is_empty() {
@@ -504,16 +513,46 @@ impl ThresholdSigner {
 			});
 		}
 
-		// Aggregate commitments into round2_data (mutable borrow scope)
+		// Aggregate commitments without mutating persistent state until every reveal
+		// is validated and unpacked. Two properties are enforced here:
+		//
+		// 1. The reveal set must be *exactly* the participants recorded during Round 2
+		//    — no missing, no extra, no duplicate parties. Duplicates were rejected
+		//    above; combined with the exact-count and all-expected-present checks
+		//    below, this pins the reveal set to the session set (an unexpected party
+		//    would force either a duplicate or a missing expected party).
+		// 2. The aggregate is built in a local buffer and only committed once all
+		//    reveals unpack successfully. A malformed-but-hash-bound reveal that fails
+		//    mid-stream therefore leaves `w_aggregated` untouched, so the signer stays
+		//    in a clean AfterRound2 state that a corrected retry can aggregate exactly
+		//    once (rather than double-counting earlier reveals).
 		{
+			let me = self.private_key.party_id();
 			let round2_data =
-				self.state.round2_data.as_mut().ok_or(ThresholdError::InvalidState {
+				self.state.round2_data.as_ref().ok_or(ThresholdError::InvalidState {
 					current: "AfterRound2", // phase already validated above
 					expected: "AfterRound2",
 				})?;
 
+			// Exactly one reveal per other participant recorded at Round 2.
+			let expected_others = round2_data.active_participants.len().saturating_sub(1);
+			if other_round2.len() != expected_others {
+				return Err(ThresholdError::WrongPartyCount {
+					provided: other_round2.len() + 1,
+					required: round2_data.active_participants.len() as u32,
+				});
+			}
+			for other in round2_data.active_participants.others(me) {
+				if !seen_parties.contains(&other) {
+					return Err(ThresholdError::MissingBroadcast { party_id: other });
+				}
+			}
+
+			// Build the aggregate locally (temporary validated state); commit only on
+			// full success so a failed unpack cannot leave partially-mutated state.
+			let mut aggregated = round2_data.w_aggregated.clone();
 			for r2 in other_round2 {
-				for k_idx in 0..k {
+				for (k_idx, agg) in aggregated.iter_mut().take(k).enumerate() {
 					let start = k_idx * single_commitment_size;
 					let end = start + single_commitment_size;
 
@@ -525,9 +564,16 @@ impl ThresholdSigner {
 								k_idx, e
 							),
 						})?;
-					aggregate_commitments_dilithium(&mut round2_data.w_aggregated[k_idx], &w_other);
+					aggregate_commitments_dilithium(agg, &w_other);
 				}
 			}
+
+			// All reveals validated and unpacked: commit the aggregate atomically.
+			self.state
+				.round2_data
+				.as_mut()
+				.expect("round2_data present in AfterRound2")
+				.w_aggregated = aggregated;
 		}
 
 		// Get immutable references for response generation
