@@ -85,8 +85,8 @@
 //!
 //! The hyperball sampling parameters are pre-computed to accommodate this wider
 //! distribution with substantial safety margins (>99% headroom in tested
-//! configurations). The `coefficient_stats()` method on `PrivateKeyShare` can
-//! be used to monitor coefficient ranges if desired.
+//! configurations). Coefficient ranges are monitored by the analysis helpers
+//! in the integration test suite (see `threshold/tests/resharing_tests.rs`).
 //!
 //! # Usage
 //!

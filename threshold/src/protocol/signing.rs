@@ -208,7 +208,11 @@ pub(crate) fn verify_commitment_hash(
 }
 
 /// Convert PrivateKeyShare to the SecretShare format used by recover_share.
-pub fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
+///
+/// This copies the raw secret `s1`/`s2` share material, so it must remain
+/// crate-internal: exposing it publicly would defeat the intentional opacity
+/// of `PrivateKeyShare`.
+pub(crate) fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
 	let mut shares: BTreeMap<u16, SecretShare> = BTreeMap::new();
 
 	for (subset_id, share_data) in share.shares() {

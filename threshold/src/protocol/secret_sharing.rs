@@ -27,12 +27,16 @@ use crate::{
 };
 
 /// Secret share for a single party.
+///
+/// Contains raw secret `s1`/`s2` share material and must never leave the
+/// crate; `PrivateKeyShare` is the only share-bearing type in the public API
+/// and it is intentionally opaque.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SecretShare {
 	/// Share of the s1 polynomial vector.
-	pub s1_share: polyvec::Polyvecl,
+	pub(crate) s1_share: polyvec::Polyvecl,
 	/// Share of the s2 polynomial vector.
-	pub s2_share: polyvec::Polyveck,
+	pub(crate) s2_share: polyvec::Polyveck,
 }
 
 /// Compute sharing patterns for a (threshold, parties) configuration.
