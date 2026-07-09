@@ -154,12 +154,21 @@ pub fn pack_sig(
 }
 
 /// Unpack signature sig = (z, h, c).
+///
+/// The hint vector is sparse: only the coefficients listed in the encoded hint
+/// section are set to 1. `h` is therefore zeroed on entry so the output represents
+/// only the current signature — otherwise a reused (or attacker-poisoned) `h`
+/// buffer would retain stale hint bits from a previous parse, letting a signature
+/// that encodes fewer/zero hints verify or canonicalize against hidden data.
 pub fn unpack_sig(
 	c: &mut [u8; params::C_DASH_BYTES],
 	z: &mut Polyvecl,
 	h: &mut Polyveck,
 	sig: &[u8; params::SIGNBYTES],
 ) -> bool {
+	// Overwrite, don't merge: clear any prior hint bits before decoding this signature.
+	*h = Polyveck::default();
+
 	c.copy_from_slice(&sig[..params::C_DASH_BYTES]);
 
 	let mut idx = params::C_DASH_BYTES;
@@ -420,6 +429,42 @@ mod tests {
 		for i in 0..K {
 			for j in 0..N {
 				assert_eq!(0, unpacked_h.vec[i].coeffs[j], "Expected zero hint at [{},{}]", i, j);
+			}
+		}
+	}
+
+	// unpack_sig must overwrite the destination hint vector, not merge into it. A
+	// reused (or attacker-poisoned) `h` buffer must not leak stale hint bits from a
+	// previous parse into a later signature that encodes fewer/zero hints. Otherwise
+	// direct users of the public packing API could verify or canonicalize bytes
+	// against hidden hint data that is not present in the supplied signature.
+	#[test]
+	fn unpack_sig_clears_stale_hints_from_reused_buffer() {
+		// A syntactically valid signature with an empty hint vector.
+		let c = [0x99u8; params::C_DASH_BYTES];
+		let z = Polyvecl::default();
+		let h = Polyveck::default();
+		let mut packed_sig = [0u8; params::SIGNBYTES];
+		pack_sig(&mut packed_sig, Some(&c), &z, &h);
+
+		// Reuse output buffers that already hold hint bits from a "previous" parse.
+		let mut unpacked_c = [0u8; params::C_DASH_BYTES];
+		let mut unpacked_z = Polyvecl::default();
+		let mut unpacked_h = Polyveck::default();
+		unpacked_h.vec[0].coeffs[5] = 1;
+		unpacked_h.vec[K - 1].coeffs[N - 1] = 1;
+
+		assert!(unpack_sig(&mut unpacked_c, &mut unpacked_z, &mut unpacked_h, &packed_sig));
+
+		// The empty-hint signature must yield an all-zero hint vector: the stale bits
+		// must have been cleared, not preserved.
+		for i in 0..K {
+			for j in 0..N {
+				assert_eq!(
+					0, unpacked_h.vec[i].coeffs[j],
+					"stale hint survived unpack_sig at [{},{}]",
+					i, j
+				);
 			}
 		}
 	}
