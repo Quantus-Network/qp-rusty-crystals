@@ -4,7 +4,6 @@ use crate::{
 	errors::{KeyParsingError, KeyParsingError::BadSecretKey, SignatureError},
 	params, SensitiveBytes32,
 };
-use alloc::vec;
 use core::fmt;
 
 pub const SECRETKEYBYTES: usize = crate::params::SECRETKEYBYTES;
@@ -176,27 +175,26 @@ impl SecretKey {
 		if msg.len() > MAX_MESSAGE_SIZE {
 			return Err(SignatureError::MessageTooLong);
 		}
+		// The message is hashed as `domain_prefix || msg`. Only the small (<= 257
+		// byte) domain prefix is materialized; `msg` is passed by reference and
+		// absorbed directly, so an attacker-sized message is never copied.
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
 					return Err(SignatureError::ContextTooLong);
 				}
 				let x_len = x.len();
-				let msg_len = msg.len();
-				let mut m = vec![0; msg_len + 2 + x_len];
-				m[1] = x_len as u8;
-				m[2..2 + x_len].copy_from_slice(x);
-				m[2 + x_len..].copy_from_slice(msg);
+				let mut prefix = [0u8; 2 + 255];
+				prefix[1] = x_len as u8;
+				prefix[2..2 + x_len].copy_from_slice(x);
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
+				crate::sign::signature(&mut sig, &prefix[..2 + x_len], msg, &self.bytes, hedge);
 				Ok(sig)
 			},
 			None => {
 				let mut sig: Signature = [0u8; SIGNBYTES];
 				// Prefix 2 zero bytes (domain_sep=0, context_len=0) for pure signatures
-				let mut m = vec![0u8; msg.len() + 2];
-				m[2..2 + msg.len()].copy_from_slice(msg);
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
+				crate::sign::signature(&mut sig, &[0u8, 0u8], msg, &self.bytes, hedge);
 				Ok(sig)
 			},
 		}
@@ -258,24 +256,20 @@ impl PublicKey {
 		if msg.len() > MAX_MESSAGE_SIZE {
 			return false;
 		}
+		// As in `sign`, only the small domain prefix is materialized; the message
+		// is absorbed by reference rather than copied into a full-size buffer.
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
 					return false;
 				}
 				let x_len = x.len();
-				let msg_len = msg.len();
-				let mut m = vec![0; msg_len + 2 + x_len];
-				m[1] = x_len as u8;
-				m[2..2 + x_len].copy_from_slice(x);
-				m[2 + x_len..].copy_from_slice(msg);
-				crate::sign::verify(sig, m.as_slice(), &self.bytes)
+				let mut prefix = [0u8; 2 + 255];
+				prefix[1] = x_len as u8;
+				prefix[2..2 + x_len].copy_from_slice(x);
+				crate::sign::verify(sig, &prefix[..2 + x_len], msg, &self.bytes)
 			},
-			None => {
-				let mut m = vec![0; msg.len() + 2];
-				m[2..2 + msg.len()].copy_from_slice(msg);
-				crate::sign::verify(sig, m.as_slice(), &self.bytes)
-			},
+			None => crate::sign::verify(sig, &[0u8, 0u8], msg, &self.bytes),
 		}
 	}
 }

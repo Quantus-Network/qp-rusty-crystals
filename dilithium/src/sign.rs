@@ -153,13 +153,21 @@ fn unpack_secret_key_for_signing(
 	}
 }
 
-/// Compute the message representative μ = H(tr || M').
+/// Compute the message representative μ = H(tr || pre || M).
+///
+/// The domain prefix `pre` (FIPS 204 domain separator + context) and the caller's
+/// message `M` are absorbed as separate slices rather than a single concatenated
+/// buffer. SHAKE256 absorption is incremental, so this is bit-identical to hashing
+/// `pre || M` while avoiding a heap copy of the (attacker-controlled, up to 64 MiB)
+/// message — closing an allocation-amplification DoS on the signing path.
 fn derive_message_hash(
 	public_key_hash_tr: &[u8; params::TR_BYTES],
+	domain_prefix: &[u8],
 	message: &[u8],
 ) -> [u8; params::CRHBYTES] {
 	let mut keccak_state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut keccak_state, public_key_hash_tr);
+	fips202::shake256_absorb(&mut keccak_state, domain_prefix);
 	fips202::shake256_absorb(&mut keccak_state, message);
 	fips202::shake256_finalize(&mut keccak_state);
 	let mut message_hash_mu = [0u8; params::CRHBYTES];
@@ -190,11 +198,13 @@ fn derive_mask_seed(
 /// Compute message hash and signing randomness
 fn prepare_signing_context(
 	unpacked_sk: &UnpackedSecretKey,
+	domain_prefix: &[u8],
 	message: &[u8],
 	hedge_randomness: Option<[u8; params::SEEDBYTES]>,
 ) -> SigningContext {
-	// Compute message hash μ = H(tr || pre || msg) where pre = (0, 0) for pure signatures
-	let message_hash_mu = derive_message_hash(&unpacked_sk.public_key_hash_tr, message);
+	// Compute message hash μ = H(tr || pre || msg) where pre is the domain prefix.
+	let message_hash_mu =
+		derive_message_hash(&unpacked_sk.public_key_hash_tr, domain_prefix, message);
 
 	// Generate signing randomness ρ' = H(K || rnd || μ)
 	let mut hedge_bytes = hedge_randomness.unwrap_or([0u8; params::SEEDBYTES]);
@@ -329,9 +339,14 @@ fn generate_challenge_polynomial(
 	challenge_poly_c
 }
 
-/// Main signature generation function
+/// Main signature generation function.
+///
+/// The message to be hashed is `domain_prefix || message`; the two are absorbed
+/// as separate slices (never concatenated) so the caller-controlled `message` is
+/// not copied into a fresh heap buffer.
 pub(crate) fn signature(
 	signature_output: &mut [u8; params::SIGNBYTES],
+	domain_prefix: &[u8],
 	message: &[u8],
 	secret_key_bytes: &[u8; params::SECRETKEYBYTES],
 	hedge: Option<[u8; params::SEEDBYTES]>,
@@ -340,7 +355,7 @@ pub(crate) fn signature(
 	let unpacked_sk = unpack_secret_key_for_signing(secret_key_bytes);
 
 	// Step 2: Prepare signing context (message hash, randomness, public seed rho)
-	let signing_ctx = prepare_signing_context(&unpacked_sk, message, hedge);
+	let signing_ctx = prepare_signing_context(&unpacked_sk, domain_prefix, message, hedge);
 
 	// Step 3: Fiat-Shamir with aborts. The *number* of rejection-sampling attempts is
 	// independent of the long-term secret key and is treated as public information, as in
@@ -433,12 +448,18 @@ pub(crate) fn signature(
 /// # Arguments
 ///
 /// * 'sig' - signature to verify (must be SIGNBYTES)
+/// * 'domain_prefix' - FIPS 204 domain separator + context (hashed before the message)
 /// * 'm' - message that is claimed to be signed
 /// * 'pk' - public key (must be PUBLICKEYBYTES)
+///
+/// The message representative is hashed over `domain_prefix || m`, with the two
+/// absorbed as separate slices so the caller-controlled `m` is never copied into a
+/// fresh heap buffer (avoids allocation-amplification DoS on the verify path).
 ///
 /// Returns 'true' if the verification process was successful, 'false' otherwise
 pub(crate) fn verify(
 	sig: &[u8; params::SIGNBYTES],
+	domain_prefix: &[u8],
 	m: &[u8],
 	pk: &[u8; params::PUBLICKEYBYTES],
 ) -> bool {
@@ -476,9 +497,11 @@ pub(crate) fn verify(
 		return false;
 	}
 
-	// Compute CRH(H(rho, t1), pre, msg) with pre=(0,0)
+	// Compute CRH(H(rho, t1) || pre || msg). The domain prefix and message are
+	// absorbed as separate slices (SHAKE256 is incremental), matching the signer.
 	fips202::shake256(&mut mu, pk);
 	fips202::shake256_absorb(&mut state, &mu);
+	fips202::shake256_absorb(&mut state, domain_prefix);
 	fips202::shake256_absorb(&mut state, m);
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut mu, &mut state);
@@ -533,6 +556,7 @@ mod tests {
 		bytes
 	}
 
+
 	#[test]
 	fn self_verify_hedged() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];
@@ -541,8 +565,8 @@ mod tests {
 		let msg = get_random_msg();
 		let mut sig = [0u8; crate::params::SIGNBYTES];
 		let hedge = get_random_bytes();
-		super::signature(&mut sig, &msg, &sk, Some(hedge.0));
-		assert!(super::verify(&sig, &msg, &pk));
+		super::signature(&mut sig, &[], &msg, &sk, Some(hedge.0));
+		assert!(super::verify(&sig, &[], &msg, &pk));
 	}
 
 	#[test]
@@ -552,8 +576,8 @@ mod tests {
 		super::keypair(&mut pk, &mut sk, get_random_bytes());
 		let msg = get_random_msg();
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, &msg, &sk, None);
-		assert!(super::verify(&sig, &msg, &pk));
+		super::signature(&mut sig, &[], &msg, &sk, None);
+		assert!(super::verify(&sig, &[], &msg, &pk));
 	}
 
 	#[test]
@@ -564,8 +588,8 @@ mod tests {
 
 		let empty_msg: &[u8] = &[];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, empty_msg, &sk, None);
-		assert!(super::verify(&sig, empty_msg, &pk));
+		super::signature(&mut sig, &[], empty_msg, &sk, None);
+		assert!(super::verify(&sig, &[], empty_msg, &pk));
 	}
 
 	#[test]
@@ -576,8 +600,8 @@ mod tests {
 
 		let msg = [0x42u8];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, &msg, &sk, None);
-		assert!(super::verify(&sig, &msg, &pk));
+		super::signature(&mut sig, &[], &msg, &sk, None);
+		assert!(super::verify(&sig, &[], &msg, &pk));
 	}
 
 	#[test]
@@ -588,8 +612,8 @@ mod tests {
 
 		let large_msg = vec![0xABu8; 10000];
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, &large_msg, &sk, None);
-		assert!(super::verify(&sig, &large_msg, &pk));
+		super::signature(&mut sig, &[], &large_msg, &sk, None);
+		assert!(super::verify(&sig, &[], &large_msg, &pk));
 	}
 
 	#[test]
@@ -604,13 +628,13 @@ mod tests {
 
 		let hedge = get_random_bytes();
 
-		super::signature(&mut sig1, msg, &sk, Some(hedge.0));
-		super::signature(&mut sig2, msg, &sk, Some(hedge.0));
+		super::signature(&mut sig1, &[], msg, &sk, Some(hedge.0));
+		super::signature(&mut sig2, &[], msg, &sk, Some(hedge.0));
 
 		// Deterministic signing should produce identical signatures
 		assert_eq!(sig1, sig2);
-		assert!(super::verify(&sig1, msg, &pk));
-		assert!(super::verify(&sig2, msg, &pk));
+		assert!(super::verify(&sig1, &[], msg, &pk));
+		assert!(super::verify(&sig2, &[], msg, &pk));
 	}
 
 	#[test]
@@ -626,13 +650,13 @@ mod tests {
 		let hedge1 = get_random_bytes();
 		let hedge2 = get_random_bytes();
 
-		super::signature(&mut sig1, msg, &sk, Some(hedge1.0));
-		super::signature(&mut sig2, msg, &sk, Some(hedge2.0));
+		super::signature(&mut sig1, &[], msg, &sk, Some(hedge1.0));
+		super::signature(&mut sig2, &[], msg, &sk, Some(hedge2.0));
 
 		// Hedged signing should produce different signatures (with high probability)
 		assert_ne!(sig1, sig2);
-		assert!(super::verify(&sig1, msg, &pk));
-		assert!(super::verify(&sig2, msg, &pk));
+		assert!(super::verify(&sig1, &[], msg, &pk));
+		assert!(super::verify(&sig2, &[], msg, &pk));
 	}
 
 	#[test]
@@ -645,12 +669,12 @@ mod tests {
 		let msg2 = b"different message";
 		let mut sig = [0u8; crate::params::SIGNBYTES];
 
-		super::signature(&mut sig, msg1, &sk, None);
+		super::signature(&mut sig, &[], msg1, &sk, None);
 
 		// Should verify with correct message
-		assert!(super::verify(&sig, msg1, &pk));
+		assert!(super::verify(&sig, &[], msg1, &pk));
 		// Should fail with wrong message
-		assert!(!super::verify(&sig, msg2, &pk));
+		assert!(!super::verify(&sig, &[], msg2, &pk));
 	}
 
 	#[test]
@@ -666,12 +690,12 @@ mod tests {
 		let msg = b"test message";
 		let mut sig = [0u8; crate::params::SIGNBYTES];
 
-		super::signature(&mut sig, msg, &sk1, None);
+		super::signature(&mut sig, &[], msg, &sk1, None);
 
 		// Should verify with correct key
-		assert!(super::verify(&sig, msg, &pk1));
+		assert!(super::verify(&sig, &[], msg, &pk1));
 		// Should fail with wrong key
-		assert!(!super::verify(&sig, msg, &pk2));
+		assert!(!super::verify(&sig, &[], msg, &pk2));
 	}
 
 	#[test]
@@ -682,26 +706,26 @@ mod tests {
 
 		let msg = b"test message";
 		let mut sig = [0u8; crate::params::SIGNBYTES];
-		super::signature(&mut sig, msg, &sk, None);
+		super::signature(&mut sig, &[], msg, &sk, None);
 
 		// Original signature should verify
-		assert!(super::verify(&sig, msg, &pk));
+		assert!(super::verify(&sig, &[], msg, &pk));
 
 		// Corrupt first byte
 		let original_byte = sig[0];
 		sig[0] = sig[0].wrapping_add(1);
-		assert!(!super::verify(&sig, msg, &pk));
+		assert!(!super::verify(&sig, &[], msg, &pk));
 
 		// Restore and corrupt last byte
 		sig[0] = original_byte;
 		let last_idx = sig.len() - 1;
 		let original_last = sig[last_idx];
 		sig[last_idx] = sig[last_idx].wrapping_add(1);
-		assert!(!super::verify(&sig, msg, &pk));
+		assert!(!super::verify(&sig, &[], msg, &pk));
 
 		// Restore and verify it works again
 		sig[last_idx] = original_last;
-		assert!(super::verify(&sig, msg, &pk));
+		assert!(super::verify(&sig, &[], msg, &pk));
 	}
 
 	// Note: Invalid signature length tests are in ml_dsa_87.rs since the internal
@@ -758,9 +782,9 @@ mod tests {
 
 		for msg in &messages {
 			let mut sig = [0u8; crate::params::SIGNBYTES];
-			super::signature(&mut sig, msg, &sk, None);
+			super::signature(&mut sig, &[], msg, &sk, None);
 			assert!(
-				super::verify(&sig, msg, &pk),
+				super::verify(&sig, &[], msg, &pk),
 				"Failed to verify message: {:?}",
 				String::from_utf8_lossy(msg)
 			);
@@ -817,8 +841,8 @@ mod tests {
 
 		let mut sig1 = [0u8; params::SIGNBYTES];
 		let mut sig2 = [0u8; params::SIGNBYTES];
-		super::signature(&mut sig1, b"message one", &sk, None);
-		super::signature(&mut sig2, b"message two", &sk, None);
+		super::signature(&mut sig1, &[], b"message one", &sk, None);
+		super::signature(&mut sig2, &[], b"message two", &sk, None);
 
 		assert_ne!(sig1, sig2, "deterministic signatures of different messages must differ");
 
@@ -874,7 +898,7 @@ mod tests {
 		packing::pack_sig(&mut sig, Some(&c), &z, &h);
 
 		assert!(
-			!super::verify(&sig, m, &pk),
+			!super::verify(&sig, &[], m, &pk),
 			"signature forged under an all-zero-t1 public key must be rejected"
 		);
 	}
@@ -889,7 +913,7 @@ mod tests {
 
 		let msg = b"K must influence the mask";
 		let mut sig_original = [0u8; params::SIGNBYTES];
-		super::signature(&mut sig_original, msg, &sk, None);
+		super::signature(&mut sig_original, &[], msg, &sk, None);
 
 		// K is stored at offset [SEEDBYTES, 2*SEEDBYTES) in the packed secret key.
 		let mut sk_flipped = sk;
@@ -897,14 +921,14 @@ mod tests {
 		assert_ne!(sk, sk_flipped, "test setup should change the stored K");
 
 		let mut sig_flipped = [0u8; params::SIGNBYTES];
-		super::signature(&mut sig_flipped, msg, &sk_flipped, None);
+		super::signature(&mut sig_flipped, &[], msg, &sk_flipped, None);
 
 		assert_ne!(
 			sig_original, sig_flipped,
 			"flipping a byte of K did not change the signature (Bug Class 2)"
 		);
 		// K only seeds the mask; the signature stays valid under the unchanged public key.
-		assert!(super::verify(&sig_flipped, msg, &pk));
+		assert!(super::verify(&sig_flipped, &[], msg, &pk));
 	}
 
 	// Bug Class 3 (truncated/incorrect hash-input assembly): pin ρ' = H(K || rnd || μ) for
