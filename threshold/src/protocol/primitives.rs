@@ -108,6 +108,7 @@ const N_COEFFS: usize = N as usize;
 /// }
 /// let result: Polyvecl = acc.finalize();
 /// ```
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct NttAccumulator<const VECS: usize> {
 	coeffs: [[u64; N_COEFFS]; VECS],
 }

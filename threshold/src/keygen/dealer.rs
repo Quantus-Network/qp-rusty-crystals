@@ -12,6 +12,8 @@ use qp_rusty_crystals_dilithium::{
 	poly, polyvec,
 };
 
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
 use crate::{
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
@@ -220,7 +222,7 @@ pub fn generate_with_dealer(
 }
 
 /// Internal secret share structure used during key generation.
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 struct SecretShare {
 	s1_share: polyvec::Polyvecl,
 	s2_share: polyvec::Polyveck,
@@ -278,6 +280,10 @@ fn generate_threshold_shares(
 		for (j, s2_poly) in s2_share.vec.iter_mut().enumerate().take(K) {
 			poly::uniform_eta(s2_poly, &share_seed, (L + j) as u16);
 		}
+
+		// The plaintext seed is no longer needed; wipe it rather than leaving it
+		// on the stack until the next iteration overwrites (or drops) it.
+		share_seed.zeroize();
 
 		// Compute NTT of s1 share and accumulate
 		let mut s1h_share = s1_share.clone();
