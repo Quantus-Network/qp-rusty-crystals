@@ -330,17 +330,25 @@ impl DkgMessageBuffer {
 // Seed-based Randomness Derivation
 // ============================================================================
 
-/// Derive randomness for DKG Round 1 from a master seed.
+/// Derive randomness for DKG Round 1 from a master seed and session identifier.
 ///
 /// This uses SHAKE256 to derive all random values needed for Round 1:
 /// - `my_randomness`: The party's commitment randomness
 /// - `shared_secrets`: One secret per subset where this party is leader
 ///
+/// The [`DKG_SSID_SIZE`]-byte `ssid` (which incorporates the session nonce) is
+/// mixed into every derivation so that a retry with a fresh `session_nonce`
+/// produces fresh randomness even when `seed` is a deterministic derived-key
+/// contribution (`derive_dkg_contribution`). Without this binding, an adversary
+/// who observed honest Round 2 reveals from a failed attempt could predict the
+/// same values on retry and grind `global_randomness`.
+///
 /// Formula:
-/// - `my_randomness = SHAKE256("dkg-r1-rand" || seed || party_id)[0..32]`
-/// - `shared_secret[i] = SHAKE256("dkg-r1-ss" || seed || party_id || subset_mask)[0..32]`
+/// - `my_randomness = SHAKE256("dkg-r1-rand" || seed || party_id || ssid)[0..32]`
+/// - `shared_secret[i] = SHAKE256("dkg-r1-ss" || seed || party_id || subset_mask || ssid)[0..32]`
 fn derive_round1_randomness(
 	seed: &[u8; 32],
+	ssid: &[u8; DKG_SSID_SIZE],
 	party_id: ParticipantId,
 	leader_subsets: &[SubsetMask],
 ) -> ([u8; RANDOMNESS_SIZE], BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>) {
@@ -350,6 +358,7 @@ fn derive_round1_randomness(
 	fips202::shake256_absorb(&mut state, seed);
 	let party_bytes = party_id.to_le_bytes();
 	fips202::shake256_absorb(&mut state, &party_bytes);
+	fips202::shake256_absorb(&mut state, ssid);
 	fips202::shake256_finalize(&mut state);
 
 	let mut my_randomness = [0u8; RANDOMNESS_SIZE];
@@ -364,6 +373,7 @@ fn derive_round1_randomness(
 		fips202::shake256_absorb(&mut state, &party_bytes);
 		let subset_bytes = subset.to_le_bytes();
 		fips202::shake256_absorb(&mut state, &subset_bytes); // SubsetMask is u16 = 2 bytes
+		fips202::shake256_absorb(&mut state, ssid);
 		fips202::shake256_finalize(&mut state);
 
 		let mut secret = [0u8; SHARED_SECRET_SIZE];
@@ -890,7 +900,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 		// Derive all randomness from the master seed
 		let leader_subsets = config.my_leader_subsets();
 		let (my_randomness, my_shared_secrets) =
-			derive_round1_randomness(&self.seed, config.my_party_id, &leader_subsets);
+			derive_round1_randomness(&self.seed, &self.ssid, config.my_party_id, &leader_subsets);
 
 		let my_commitment = h_commit(&self.ssid, config.my_party_id, &my_randomness);
 
@@ -2022,6 +2032,63 @@ mod tests {
 
 	/// Test session nonce for DKG tests.
 	const TEST_SESSION_NONCE: [u8; 32] = [0xDEu8; 32];
+
+	/// A deterministic derived-key contribution (same share + tweak) must not
+	/// pin Round 1 randomness across DKG retries. Before the SSID binding fix,
+	/// `derive_round1_randomness` ignored `session_nonce`, so an honest party
+	/// replayed the same `my_randomness` on every retry and a malicious peer who
+	/// had seen Round 2 reveals could predict it.
+	#[test]
+	fn test_round1_randomness_changes_with_session_nonce() {
+		use crate::derivation::derive_dkg_contribution;
+		use crate::keys::SecretShareData;
+		use alloc::collections::BTreeMap;
+
+		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
+		let mut shares = BTreeMap::new();
+		shares.insert(
+			0b011,
+			SecretShareData { s1: [[42i32; 256]; L], s2: [[42i32; 256]; K] },
+		);
+		let master_share = PrivateKeyShare::new(
+			0,
+			3,
+			2,
+			[0u8; 32],
+			[0u8; 32],
+			[0u8; 64],
+			shares,
+			dkg_participants,
+		);
+		let tweak = [0x55u8; 32];
+		let contribution = derive_dkg_contribution(&master_share, &tweak);
+
+		let nonce_a = [0xA1u8; 32];
+		let nonce_b = [0xB2u8; 32];
+		let ssid_a = compute_dkg_ssid(2, 3, &[0, 1, 2], &nonce_a);
+		let ssid_b = compute_dkg_ssid(2, 3, &[0, 1, 2], &nonce_b);
+		let leader_subsets = [0b011u16];
+
+		let (rand_a, secrets_a) =
+			derive_round1_randomness(&contribution, &ssid_a, 0, &leader_subsets);
+		let (rand_b, secrets_b) =
+			derive_round1_randomness(&contribution, &ssid_b, 0, &leader_subsets);
+
+		assert_ne!(
+			rand_a, rand_b,
+			"same derived-key contribution must yield different Round 1 randomness per session nonce"
+		);
+		assert_ne!(
+			secrets_a[&0b011], secrets_b[&0b011],
+			"leader subset secrets must also change with session nonce"
+		);
+
+		// Same nonce → reproducible (honest parties in one session agree).
+		let (rand_a2, secrets_a2) =
+			derive_round1_randomness(&contribution, &ssid_a, 0, &leader_subsets);
+		assert_eq!(rand_a, rand_a2);
+		assert_eq!(secrets_a[&0b011], secrets_a2[&0b011]);
+	}
 
 	/// The `SendPrivate` payload carries the borsh-serialized Round 1 private
 	/// message (K_S). Its `Debug` output must never expose those secret bytes,
