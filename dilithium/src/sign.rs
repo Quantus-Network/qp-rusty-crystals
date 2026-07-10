@@ -81,7 +81,7 @@ pub fn keypair(
 	polyvec::k_uniform_eta(&mut s2, &rhoprime, L as u16);
 
 	// t1 = high bits of A*s1 + s2 (public); t0 = low bits (kept in the secret key).
-	let (t1, t0) = derive_public_components(&rho, &s1, &s2);
+	let (t1, mut t0) = derive_public_components(&rho, &s1, &s2);
 
 	packing::pack_pk(pk, &rho, &t1);
 
@@ -90,12 +90,17 @@ pub fn keypair(
 
 	packing::pack_sk(sk, &rho, &tr, &key, &t0, &s1, &s2);
 
-	// Zeroize sensitive intermediate seed material
+	// Zeroize sensitive intermediate material. `s1`, `s2`, and `t0` are the
+	// secret polynomials; now that they're packed into `sk` the working copies
+	// must not linger on the stack. (`rho`/`tr`/`t1` are public.)
 	seedbuf.zeroize();
 	seed_bytes.zeroize();
 	preimage.zeroize();
 	rhoprime.zeroize();
 	key.zeroize();
+	s1.zeroize();
+	s2.zeroize();
+	t0.zeroize();
 }
 
 /// Re-derive the public key that corresponds to a secret key.
