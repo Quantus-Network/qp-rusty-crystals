@@ -10,6 +10,37 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 const K: usize = params::K;
 const L: usize = params::L;
 
+/// Derive the public high bits `t1` and secret low bits `t0` from the public
+/// seed `rho` and secret vectors `s1`, `s2`.
+///
+/// Computes `t = A(rho)·s1 + s2` (streaming `A` from `rho` so the full matrix
+/// is never materialized) and splits it via `power2round` into `t1` (public)
+/// and `t0` (secret). Both key generation and the `Keypair` consistency check
+/// go through this single routine, so the public key derived at import can
+/// never disagree with the one produced at generation. The transient NTT copy
+/// of `s1` is zeroized before returning.
+fn derive_public_components(
+	rho: &[u8; params::SEEDBYTES],
+	s1: &Polyvecl,
+	s2: &Polyveck,
+) -> (Polyveck, Polyveck) {
+	let mut s1hat = s1.clone();
+	polyvec::l_ntt(&mut s1hat);
+
+	let mut t1 = Polyveck::default();
+	polyvec::matrix_pointwise_montgomery_streamed(&mut t1, rho, &s1hat);
+	polyvec::k_reduce(&mut t1);
+	polyvec::k_invntt_tomont(&mut t1);
+	polyvec::k_add(&mut t1, s2);
+	polyvec::k_caddq(&mut t1);
+
+	let mut t0 = Polyveck::default();
+	polyvec::k_power2round(&mut t1, &mut t0);
+
+	s1hat.zeroize();
+	(t1, t0)
+}
+
 /// Generate public and private key.
 ///
 /// # Arguments
@@ -49,19 +80,8 @@ pub fn keypair(
 	let mut s2 = Polyveck::default();
 	polyvec::k_uniform_eta(&mut s2, &rhoprime, L as u16);
 
-	let mut s1hat = s1.clone();
-	polyvec::l_ntt(&mut s1hat);
-
-	// Compute t1 = A * s1hat, streaming A from rho so the full matrix is never materialized.
-	let mut t1 = Polyveck::default();
-	polyvec::matrix_pointwise_montgomery_streamed(&mut t1, &rho, &s1hat);
-	polyvec::k_reduce(&mut t1);
-	polyvec::k_invntt_tomont(&mut t1);
-	polyvec::k_add(&mut t1, &s2);
-	polyvec::k_caddq(&mut t1);
-
-	let mut t0 = Polyveck::default();
-	polyvec::k_power2round(&mut t1, &mut t0);
+	// t1 = high bits of A*s1 + s2 (public); t0 = low bits (kept in the secret key).
+	let (t1, t0) = derive_public_components(&rho, &s1, &s2);
 
 	packing::pack_pk(pk, &rho, &t1);
 
@@ -96,19 +116,8 @@ pub(crate) fn public_key_from_secret(
 	let mut s2 = Polyveck::default();
 	packing::unpack_sk(&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk);
 
-	let mut s1hat = s1.clone();
-	polyvec::l_ntt(&mut s1hat);
-
-	// t1 = A*s1 + s2, then keep only the high bits (power2round), matching keygen.
-	let mut t1 = Polyveck::default();
-	polyvec::matrix_pointwise_montgomery_streamed(&mut t1, &rho, &s1hat);
-	polyvec::k_reduce(&mut t1);
-	polyvec::k_invntt_tomont(&mut t1);
-	polyvec::k_add(&mut t1, &s2);
-	polyvec::k_caddq(&mut t1);
-
-	let mut t0_derived = Polyveck::default();
-	polyvec::k_power2round(&mut t1, &mut t0_derived);
+	// Same derivation as key generation; the stored `t0` is recomputed and discarded.
+	let (t1, mut t0_derived) = derive_public_components(&rho, &s1, &s2);
 
 	let mut pk = [0u8; params::PUBLICKEYBYTES];
 	packing::pack_pk(&mut pk, &rho, &t1);
@@ -116,7 +125,6 @@ pub(crate) fn public_key_from_secret(
 	// Only rho/s1/s2 are needed to derive the public key; wipe the secret copies.
 	key.zeroize();
 	s1.zeroize();
-	s1hat.zeroize();
 	s2.zeroize();
 	t0.zeroize();
 	t0_derived.zeroize();
