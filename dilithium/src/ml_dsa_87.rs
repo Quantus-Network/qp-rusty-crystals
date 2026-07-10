@@ -68,6 +68,19 @@ impl Keypair {
 	/// * 'bytes' - private and public keys bytes
 	///
 	/// Returns a Keypair
+	///
+	/// # Consistency check
+	///
+	/// The public half is re-derived from the secret half and must match the
+	/// supplied public-key bytes exactly; otherwise this returns
+	/// [`KeyParsingError::BadKeypair`]. This prevents importing a keypair whose
+	/// public key does not correspond to its secret key — which would otherwise
+	/// let an object sign with one key while advertising an unrelated public key
+	/// (e.g. a receive address the victim cannot spend from).
+	///
+	/// Note: the `secret` and `public` fields are public, so callers can still
+	/// construct or mutate a `Keypair` with mismatched halves directly. This
+	/// check only guards the deserialization/import path.
 	pub fn from_bytes(bytes: &[u8]) -> Result<Keypair, KeyParsingError> {
 		if bytes.len() != SECRETKEYBYTES + PUBLICKEYBYTES {
 			return Err(KeyParsingError::BadKeypair);
@@ -77,6 +90,15 @@ impl Keypair {
 			SecretKey::from_bytes(secret_bytes).map_err(|_| KeyParsingError::BadKeypair)?;
 		let public =
 			PublicKey::from_bytes(public_bytes).map_err(|_| KeyParsingError::BadKeypair)?;
+
+		// Enforce the cross-field invariant: the public key must be the one that
+		// corresponds to the secret key. The derived pk is public data, so a
+		// non-constant-time comparison is fine.
+		let derived_public = crate::sign::public_key_from_secret(&secret.bytes);
+		if derived_public != public.bytes {
+			return Err(KeyParsingError::BadKeypair);
+		}
+
 		Ok(Keypair { secret, public })
 	}
 
@@ -347,6 +369,31 @@ mod tests {
 		let keys = Keypair::generate(get_random_bytes());
 		let big_msg = vec![0u8; MAX_MESSAGE_SIZE + 1];
 		assert!(!keys.verify(&big_msg, &[0u8; SIGNBYTES], None));
+	}
+
+	// A keypair blob whose public half does not correspond to its secret half must
+	// be rejected. Otherwise an imported keypair could sign with one key while
+	// advertising an unrelated public key (e.g. an unspendable receive address).
+	#[test]
+	fn from_bytes_rejects_mismatched_public_key() {
+		use super::{Keypair, KeyParsingError, KEYPAIRBYTES, SECRETKEYBYTES};
+
+		let keys_a = Keypair::generate(get_random_bytes());
+		let keys_b = Keypair::generate(get_random_bytes());
+
+		// Genuine keypair bytes must round-trip.
+		let good = keys_a.to_bytes();
+		assert!(Keypair::from_bytes(&good).is_ok(), "honest keypair must be accepted");
+
+		// Splice A's secret key with B's (unrelated) public key.
+		let mut forged = [0u8; KEYPAIRBYTES];
+		forged[..SECRETKEYBYTES].copy_from_slice(&keys_a.secret.to_bytes());
+		forged[SECRETKEYBYTES..].copy_from_slice(&keys_b.public.to_bytes());
+
+		assert!(
+			matches!(Keypair::from_bytes(&forged), Err(KeyParsingError::BadKeypair)),
+			"public key not derived from the secret key must be rejected"
+		);
 	}
 
 	// Malicious-key forgery defense: a public key with an all-zero t1 makes verification

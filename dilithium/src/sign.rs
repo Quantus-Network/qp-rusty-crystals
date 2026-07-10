@@ -78,6 +78,51 @@ pub fn keypair(
 	key.zeroize();
 }
 
+/// Re-derive the public key that corresponds to a secret key.
+///
+/// Recomputes `t1` from the secret key's `(rho, s1, s2)` exactly as
+/// [`keypair`] does, and packs `pk = (rho, t1)`. Callers use this to enforce
+/// the cross-field invariant that a supplied public key actually belongs to a
+/// secret key (rather than trusting a concatenated blob). The secret
+/// polynomials are zeroized before returning.
+pub(crate) fn public_key_from_secret(
+	sk: &[u8; params::SECRETKEYBYTES],
+) -> [u8; params::PUBLICKEYBYTES] {
+	let mut rho = [0u8; params::SEEDBYTES];
+	let mut tr = [0u8; params::TR_BYTES];
+	let mut key = [0u8; params::SEEDBYTES];
+	let mut t0 = Polyveck::default();
+	let mut s1 = Polyvecl::default();
+	let mut s2 = Polyveck::default();
+	packing::unpack_sk(&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk);
+
+	let mut s1hat = s1.clone();
+	polyvec::l_ntt(&mut s1hat);
+
+	// t1 = A*s1 + s2, then keep only the high bits (power2round), matching keygen.
+	let mut t1 = Polyveck::default();
+	polyvec::matrix_pointwise_montgomery_streamed(&mut t1, &rho, &s1hat);
+	polyvec::k_reduce(&mut t1);
+	polyvec::k_invntt_tomont(&mut t1);
+	polyvec::k_add(&mut t1, &s2);
+	polyvec::k_caddq(&mut t1);
+
+	let mut t0_derived = Polyveck::default();
+	polyvec::k_power2round(&mut t1, &mut t0_derived);
+
+	let mut pk = [0u8; params::PUBLICKEYBYTES];
+	packing::pack_pk(&mut pk, &rho, &t1);
+
+	// Only rho/s1/s2 are needed to derive the public key; wipe the secret copies.
+	key.zeroize();
+	s1.zeroize();
+	s1hat.zeroize();
+	s2.zeroize();
+	t0.zeroize();
+	t0_derived.zeroize();
+	pk
+}
+
 /// Compute a signature for a given message from a private (secret) key.
 ///
 /// # Arguments
