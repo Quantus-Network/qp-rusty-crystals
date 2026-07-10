@@ -1930,6 +1930,27 @@ where
 	let threshold_config = ThresholdConfig::new(threshold, total_parties)
 		.map_err(|e| DkgError::InternalError(e.to_string()))?;
 
+	// Validate vector lengths up front. Without this, mismatched lengths would
+	// reach `DkgConfig::new(...).unwrap()` (panic on a length/participant error)
+	// or, when too few signers are supplied, the driver loop's `dkgs[party_id]`
+	// indexing — turning a `Result`-returning API into a process abort.
+	if signers.len() != total_parties as usize {
+		return Err(DkgError::InvalidState(format!(
+			"expected {} signers for {} parties, got {}",
+			total_parties,
+			total_parties,
+			signers.len()
+		)));
+	}
+	if public_keys.len() != total_parties as usize {
+		return Err(DkgError::InvalidState(format!(
+			"expected {} public keys for {} parties, got {}",
+			total_parties,
+			total_parties,
+			public_keys.len()
+		)));
+	}
+
 	let participants: Vec<ParticipantId> = (0..total_parties).collect();
 
 	let mut pk_map: BTreeMap<ParticipantId, S::PublicKey> = BTreeMap::new();
@@ -1949,7 +1970,7 @@ where
 				signer,
 				pk_map.clone(),
 			)
-			.unwrap();
+			.map_err(|e| DkgError::InvalidState(e.to_string()))?;
 
 			// Derive party-specific seed: SHAKE256(master_seed || "dkg-party" || party_id)
 			let mut state = fips202::KeccakState::default();
@@ -1962,9 +1983,9 @@ where
 			let mut party_seed = [0u8; 32];
 			fips202::shake256_squeeze(&mut party_seed, &mut state);
 
-			Dkg::new(config, party_seed, session_nonce)
+			Ok(Dkg::new(config, party_seed, session_nonce))
 		})
-		.collect();
+		.collect::<Result<Vec<Dkg<S>>, DkgError>>()?;
 
 	let mut outputs: Vec<Option<DkgOutput>> = vec![None; total_parties as usize];
 	let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> =
@@ -2183,6 +2204,32 @@ mod tests {
 				panic!("DKG failed: {:?}", e);
 			},
 		}
+	}
+
+	/// Mismatched input vector lengths must return a `DkgError`, not panic.
+	/// `run_local_dkg` is public, so untrusted setup parameters reaching a
+	/// `.unwrap()` or `dkgs[party_id]` index would be an availability DoS.
+	#[test]
+	fn test_run_local_dkg_rejects_mismatched_lengths() {
+		let seed = [7u8; 32];
+
+		// Too few signers (and the driver loop would otherwise index out of bounds).
+		let signers: Vec<TestSigner> = (0..2).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let result = run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE);
+		assert!(matches!(result, Err(DkgError::InvalidState(_))), "too few signers must error");
+
+		// Too many signers (index would fall outside all_participants).
+		let signers: Vec<TestSigner> = (0..4).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let result = run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE);
+		assert!(matches!(result, Err(DkgError::InvalidState(_))), "too many signers must error");
+
+		// Mismatched public key count (would fail DkgConfig::new before the fix).
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..2).collect();
+		let result = run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE);
+		assert!(matches!(result, Err(DkgError::InvalidState(_))), "wrong pk count must error");
 	}
 
 	#[test]
