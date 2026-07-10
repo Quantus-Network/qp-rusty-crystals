@@ -817,4 +817,40 @@ mod tests {
 			Ok(_) => panic!("Should reject public key with TR not matching private key TR"),
 		}
 	}
+
+	/// The direct signer must enforce the ML-DSA `MAX_MESSAGE_SIZE` bound before
+	/// hashing/cloning the message, matching the higher-level
+	/// `DilithiumSignProtocol` guard. Without the check, `round2_reveal` would
+	/// hash an oversized buffer and retain it in state to produce a signature
+	/// that verification then rejects.
+	#[test]
+	fn test_round2_reveal_rejects_oversized_message() {
+		use qp_rusty_crystals_dilithium::ml_dsa_87::MAX_MESSAGE_SIZE;
+
+		use crate::generate_with_dealer;
+
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[7u8; 32], config).unwrap();
+
+		let mut s0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+		let mut s1 = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
+
+		let ssid = [0u8; 32];
+		let _r1_0 = s0.round1_commit_with_seed(&ssid, &[1u8; 32]).unwrap();
+		let r1_1 = s1.round1_commit_with_seed(&ssid, &[2u8; 32]).unwrap();
+
+		// One byte over the ML-DSA limit: rejected before any expensive work.
+		let oversized = alloc::vec![0u8; MAX_MESSAGE_SIZE + 1];
+		let err = s0
+			.round2_reveal(&ssid, &oversized, b"", core::slice::from_ref(&r1_1))
+			.expect_err("oversized message must be rejected");
+		assert!(
+			matches!(err, ThresholdError::MessageTooLong { length } if length == MAX_MESSAGE_SIZE + 1),
+			"expected MessageTooLong, got {err:?}"
+		);
+
+		// A normal-sized message is still accepted (state advances to Round 2).
+		let ok = s0.round2_reveal(&ssid, b"hello", b"", core::slice::from_ref(&r1_1));
+		assert!(ok.is_ok(), "in-bounds message must still be accepted: {ok:?}");
+	}
 }

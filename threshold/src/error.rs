@@ -3,6 +3,8 @@
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
+use qp_rusty_crystals_dilithium::ml_dsa_87::MAX_MESSAGE_SIZE;
+
 /// Result type for threshold operations.
 pub type ThresholdResult<T> = Result<T, ThresholdError>;
 
@@ -76,6 +78,15 @@ pub enum ThresholdError {
 	},
 	/// Context too long (must be ≤ 255 bytes).
 	ContextTooLong {
+		/// Length provided.
+		length: usize,
+	},
+	/// Message too long (must be ≤ [`MAX_MESSAGE_SIZE`]).
+	///
+	/// Messages above this bound are rejected by ML-DSA verification, so signing
+	/// them can never yield a usable signature; rejecting up front denies a
+	/// low-cost denial-of-service vector on the direct signer path.
+	MessageTooLong {
 		/// Length provided.
 		length: usize,
 	},
@@ -218,6 +229,9 @@ impl fmt::Display for ThresholdError {
 			ThresholdError::ContextTooLong { length } => {
 				write!(f, "Context too long: {} bytes (max: 255)", length)
 			},
+			ThresholdError::MessageTooLong { length } => {
+				write!(f, "Message too long: {} bytes (max: {})", length, MAX_MESSAGE_SIZE)
+			},
 			ThresholdError::CombinationFailed => {
 				write!(f, "Signature combination failed")
 			},
@@ -334,6 +348,18 @@ pub fn validate_threshold_params(t: u32, n: u32) -> ThresholdResult<()> {
 pub fn validate_context(ctx: &[u8]) -> ThresholdResult<()> {
 	if ctx.len() > 255 {
 		return Err(ThresholdError::ContextTooLong { length: ctx.len() });
+	}
+	Ok(())
+}
+
+/// Validate message length against the ML-DSA [`MAX_MESSAGE_SIZE`] bound.
+///
+/// The direct `ThresholdSigner` path must enforce this before hashing/cloning
+/// attacker-controlled bytes: a message above the bound cannot produce a
+/// verifiable signature, so accepting it only wastes memory and CPU.
+pub fn validate_message(message: &[u8]) -> ThresholdResult<()> {
+	if message.len() > MAX_MESSAGE_SIZE {
+		return Err(ThresholdError::MessageTooLong { length: message.len() });
 	}
 	Ok(())
 }

@@ -507,6 +507,9 @@ pub(crate) fn process_round2(
 	context: &[u8],
 	other_party_ids: &[ParticipantId],
 ) -> ThresholdResult<Round2Data> {
+	// Enforce the ML-DSA size bounds before hashing/cloning attacker-controlled
+	// input: oversized messages can never yield a verifiable signature.
+	crate::error::validate_message(message)?;
 	crate::error::validate_context(context)?;
 
 	let k = config.k_iterations() as usize;
@@ -804,6 +807,8 @@ pub(crate) fn combine_signature(
 	w_aggregated: &[polyvec::Polyveck],
 	all_responses: &[Vec<polyvec::Polyvecl>],
 ) -> ThresholdResult<Vec<u8>> {
+	// Enforce the ML-DSA size bounds before hashing the message into μ.
+	crate::error::validate_message(message)?;
 	crate::error::validate_context(context)?;
 
 	let k_iterations = config.k_iterations() as usize;
