@@ -1595,7 +1595,12 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			return self.handle_accept_waiting();
 		}
 
-		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash);
+		let active_set = self.active_set.clone().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"AcceptGenerate reached without an agreed active set".to_string(),
+			)
+		})?;
+		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash, &active_set);
 		let signature = self.signer_config.my_signer.sign(&accept_hash);
 		let my_id = self.config.my_party_id();
 		self.accepts.insert(my_id, signature.as_ref().to_vec());
@@ -1623,10 +1628,16 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			return Ok(Action::Wait);
 		}
 
+		let active_set = self.active_set.clone().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"AcceptWaiting reached without an agreed active set".to_string(),
+			)
+		})?;
+
 		// Verify every signature against *our own* transcript hash. A signer
 		// that observed a different transcript (dealer equivocation, tampered
 		// broadcast) produces a signature that fails here, and we abort.
-		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash);
+		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash, &active_set);
 		for p in &new_participants {
 			let pk = self.signer_config.verifying_keys.get(p).ok_or_else(|| {
 				ResharingProtocolError::InternalError(format!(
@@ -1648,7 +1659,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 
 		let certificate = ResharingCertificate {
 			ssid: self.ssid,
-			active_set: self.active_set.clone().expect("set before transcript hash"),
+			active_set,
 			transcript_hash,
 			accepts: self.accepts.clone(),
 		};

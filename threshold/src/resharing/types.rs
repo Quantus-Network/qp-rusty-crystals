@@ -625,9 +625,10 @@ pub const MAX_ACCEPT_SIGNATURE_LEN: usize = 8192;
 /// causes signature verification to fail on at least one honest party, which
 /// then aborts.
 ///
-/// The signature is over `SHAKE256("resharing-accept-v1" || ssid ||
-/// transcript_hash)`, domain-separating acceptances from any other use of the
-/// same long-term key.
+/// The signature is over `SHAKE256("resharing-accept-v2" || ssid ||
+/// transcript_hash || len(active_set) || active_set)` (see
+/// [`compute_accept_hash`]), domain-separating acceptances from any other use
+/// of the same long-term key and binding the certificate's `active_set`.
 #[derive(Debug, Clone, BorshSerialize)]
 pub struct ResharingAccept {
 	/// Session identifier binding this message to the resharing session.
@@ -773,7 +774,8 @@ impl ResharingCertificate {
 		new_participants: &[ParticipantId],
 		verifying_keys: &BTreeMap<ParticipantId, S::PublicKey>,
 	) -> bool {
-		let accept_hash = compute_accept_hash(&self.ssid, &self.transcript_hash);
+		let accept_hash =
+			compute_accept_hash(&self.ssid, &self.transcript_hash, &self.active_set);
 		new_participants
 			.iter()
 			.all(|p| match (verifying_keys.get(p), self.accepts.get(p)) {
@@ -784,19 +786,39 @@ impl ResharingCertificate {
 }
 
 /// Domain separator for the acceptance hash.
-const ACCEPT_DOMAIN: &[u8] = b"resharing-accept-v1";
+///
+/// Bumped to v2 when `active_set` was folded into the hash; a v1 signature can
+/// therefore never be reinterpreted as a v2 acceptance.
+const ACCEPT_DOMAIN: &[u8] = b"resharing-accept-v2";
 
 /// Compute the 32-byte hash that new committee members sign to accept the
-/// session transcript: `SHAKE256("resharing-accept-v1" || ssid || transcript_hash)`.
+/// session transcript:
+/// `SHAKE256("resharing-accept-v2" || ssid || transcript_hash || len(active_set) || active_set)`.
+///
+/// `active_set` is bound directly (in addition to being committed inside
+/// `transcript_hash`) so that a party holding *only* the certificate — which
+/// cannot recompute `transcript_hash` from the full transcript — still
+/// authenticates the certificate's explicit `active_set` field. Without this,
+/// `active_set` could be rewritten while `ssid`/`transcript_hash`/`accepts`
+/// stayed valid, and the tampered certificate would still verify.
+///
+/// Callers pass `active_set` in the same order stored in the certificate
+/// (the protocol keeps it strictly sorted), so honest signers and verifiers
+/// hash an identical byte string.
 pub fn compute_accept_hash(
 	ssid: &[u8; RESHARING_SSID_SIZE],
 	transcript_hash: &[u8; COMMITMENT_HASH_SIZE],
+	active_set: &[ParticipantId],
 ) -> [u8; 32] {
 	use qp_rusty_crystals_dilithium::fips202;
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, ACCEPT_DOMAIN);
 	fips202::shake256_absorb(&mut state, ssid);
 	fips202::shake256_absorb(&mut state, transcript_hash);
+	fips202::shake256_absorb(&mut state, &(active_set.len() as u32).to_le_bytes());
+	for &p in active_set {
+		fips202::shake256_absorb(&mut state, &p.to_le_bytes());
+	}
 	fips202::shake256_finalize(&mut state);
 	let mut out = [0u8; 32];
 	fips202::shake256_squeeze(&mut out, &mut state);

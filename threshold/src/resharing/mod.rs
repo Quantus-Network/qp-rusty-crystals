@@ -35,8 +35,8 @@
 //! - **Round 4**: Private delivery - dealers send `r_{I→J}` to new committee (**secure channel**)
 //! - **Round 5**: Verification - share commitments, partial PKs
 //! - **Round 6**: Signed transcript acceptance - new committee members sign the transcript hash
-//!   with their long-term keys ([`TranscriptSigner`]); the collected signatures form a publicly
-//!   verifiable [`ResharingCertificate`]
+//!   (bound together with the `active_set`) using their long-term keys ([`TranscriptSigner`]);
+//!   the collected signatures form a publicly verifiable [`ResharingCertificate`]
 //!
 //! For each old RSS subset `I` (a `k_old`-subset of the old committee whose members all hold the
 //! η-bounded share `s_I^old`), the lowest-ID *active* member of `I` (the "designated dealer"
@@ -75,8 +75,10 @@
 //! - **Public key preservation**: `t = A·s1 + s2` is unchanged.
 //! - **Transcript agreement + attestation**: Round 6 acceptance signatures are verified by every
 //!   party against its own transcript hash, so completion implies all parties observed identical
-//!   broadcasts (equivocation causes an abort). The resulting certificate is verifiable by third
-//!   parties holding the new committee's verifying keys.
+//!   broadcasts (equivocation causes an abort). The signed hash also binds the certificate's
+//!   `active_set` directly, so a third party holding only the certificate (and the new committee's
+//!   verifying keys) authenticates both the transcript hash *and* the named active old members;
+//!   the `active_set` field cannot be rewritten without invalidating the signatures.
 //!
 //! # Proactive Security Model
 //!
