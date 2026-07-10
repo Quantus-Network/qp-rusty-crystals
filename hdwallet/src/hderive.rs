@@ -48,6 +48,21 @@ impl FromStr for ChildNumber {
 
 	fn from_str(child: &str) -> Result<ChildNumber, Error> {
 		let child = child.strip_suffix('\'').ok_or(Error::NotHardened)?;
+
+		// Enforce a canonical decimal encoding before parsing. `u32::from_str`
+		// tolerates a leading '+' and any number of leading zeros, so "44'",
+		// "+44'", "0044'" and "000000044'" would all decode to the same child
+		// index. Since the child index (not the string) feeds the HMAC step,
+		// those distinct path strings would derive byte-identical keys and
+		// addresses — collapsing textually distinct paths onto one identity.
+		// Require: non-empty, ASCII digits only, and no redundant leading zero.
+		if child.is_empty() || !child.bytes().all(|b| b.is_ascii_digit()) {
+			return Err(Error::InvalidChildNumber);
+		}
+		if child.len() > 1 && child.starts_with('0') {
+			return Err(Error::InvalidChildNumber);
+		}
+
 		let index: u32 = child.parse().map_err(|_| Error::InvalidChildNumber)?;
 		if index & HARDENED_BIT != 0 {
 			return Err(Error::InvalidChildNumber);
@@ -218,5 +233,31 @@ mod tests {
 	fn non_hardened_path_rejected() {
 		assert_eq!("m/44'/60'/0".parse::<DerivationPath>().unwrap_err(), Error::NotHardened);
 		assert_eq!("0".parse::<ChildNumber>().unwrap_err(), Error::NotHardened);
+	}
+
+	// Non-canonical decimal spellings must be rejected. Otherwise "+44'",
+	// "0044'", etc. would alias to the same child index as "44'" and derive
+	// byte-identical keys/addresses, collapsing distinct path strings onto one
+	// on-chain identity.
+	#[test]
+	fn non_canonical_child_numbers_rejected() {
+		// The canonical form still works.
+		assert_eq!("44'".parse::<ChildNumber>().unwrap(), ChildNumber(44 | HARDENED_BIT));
+		assert_eq!("0'".parse::<ChildNumber>().unwrap(), ChildNumber(HARDENED_BIT));
+
+		for bad in ["+44'", "0044'", "000000044'", "+0'", "00'", " 44'", "44 '", "4_4'"] {
+			assert_eq!(
+				bad.parse::<ChildNumber>().unwrap_err(),
+				Error::InvalidChildNumber,
+				"non-canonical child number {:?} must be rejected",
+				bad
+			);
+		}
+
+		// And the same via a full path so the aliasing can't slip in mid-path.
+		assert_eq!(
+			"m/44'/189189189'/+0'".parse::<DerivationPath>().unwrap_err(),
+			Error::InvalidChildNumber
+		);
 	}
 }
