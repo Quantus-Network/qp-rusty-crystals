@@ -1028,17 +1028,24 @@ impl NewShareData {
 	///
 	/// Returns `true` if all coefficients satisfy `|coeff| <= bound`.
 	/// This is used to reject malicious sub-shares with excessively large coefficients.
+	///
+	/// The magnitude is computed with [`i32::unsigned_abs`], which returns a
+	/// `u32` and therefore handles `i32::MIN` correctly. Using `i32::abs` here
+	/// would panic on `i32::MIN` in overflow-checking builds and, worse, wrap
+	/// back to a negative value in release builds — letting a dealer's
+	/// `i32::MIN` coefficient slip past this trust-boundary check.
 	pub fn coefficients_within_bound(&self, bound: i32) -> bool {
+		let bound = bound.max(0) as u32;
 		for poly in &self.s1 {
 			for &coeff in poly {
-				if coeff.abs() > bound {
+				if coeff.unsigned_abs() > bound {
 					return false;
 				}
 			}
 		}
 		for poly in &self.s2 {
 			for &coeff in poly {
-				if coeff.abs() > bound {
+				if coeff.unsigned_abs() > bound {
 					return false;
 				}
 			}
@@ -1048,17 +1055,19 @@ impl NewShareData {
 
 	/// Find the maximum absolute coefficient value.
 	///
-	/// Useful for debugging and diagnostics.
-	pub fn max_abs_coefficient(&self) -> i32 {
-		let mut max_abs = 0i32;
+	/// Useful for debugging and diagnostics. Returns a `u32` because the
+	/// magnitude of `i32::MIN` (2_147_483_648) does not fit in an `i32`; the
+	/// magnitude is computed with the non-overflowing [`i32::unsigned_abs`].
+	pub fn max_abs_coefficient(&self) -> u32 {
+		let mut max_abs = 0u32;
 		for poly in &self.s1 {
 			for &coeff in poly {
-				max_abs = max_abs.max(coeff.abs());
+				max_abs = max_abs.max(coeff.unsigned_abs());
 			}
 		}
 		for poly in &self.s2 {
 			for &coeff in poly {
-				max_abs = max_abs.max(coeff.abs());
+				max_abs = max_abs.max(coeff.unsigned_abs());
 			}
 		}
 		max_abs

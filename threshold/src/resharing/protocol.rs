@@ -3432,6 +3432,30 @@ mod tests {
 		assert_eq!(share.max_abs_coefficient(), 500);
 	}
 
+	/// A malicious dealer can set a coefficient to `i32::MIN`, whose magnitude
+	/// (2_147_483_648) is not representable as a positive `i32`. `i32::abs()`
+	/// would panic on it in overflow-checking builds and wrap back to
+	/// `i32::MIN` (still negative) in release builds, letting the oversized
+	/// coefficient pass the `> bound` check. The fixed helpers use
+	/// `unsigned_abs()` and must reject it in every build profile.
+	#[test]
+	fn test_coefficients_within_bound_rejects_i32_min() {
+		let mut share = NewShareData::new();
+		share.s1[0][0] = i32::MIN;
+		assert!(
+			!share.coefficients_within_bound(SUBSHARE_COEFF_BOUND),
+			"i32::MIN coefficient must be rejected, not silently accepted"
+		);
+		// The diagnostic must report the true magnitude without overflowing.
+		assert_eq!(share.max_abs_coefficient(), 2_147_483_648u32);
+
+		// The same edge case in s2.
+		let mut share = NewShareData::new();
+		share.s2[K - 1][N as usize - 1] = i32::MIN;
+		assert!(!share.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+		assert_eq!(share.max_abs_coefficient(), 2_147_483_648u32);
+	}
+
 	#[test]
 	fn test_honest_subshares_within_bound() {
 		// Verify that honestly-derived sub-shares are well within the coefficient bound
