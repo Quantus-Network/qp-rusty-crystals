@@ -194,7 +194,7 @@ pub fn uniform(a: &mut Poly, seed: &[u8; params::SEEDBYTES], nonce: u16) {
 
 /// Bit-pack polynomial t1 with coefficients fitting in 10 bits.
 /// Input coefficients are assumed to be standard representatives.
-pub fn t1_pack(r: &mut [u8], a: &Poly) {
+pub(crate) fn t1_pack(r: &mut [u8], a: &Poly) {
 	for i in 0..N / 4 {
 		r[5 * i + 0] = (a.coeffs[4 * i + 0] >> 0) as u8;
 		r[5 * i + 1] = ((a.coeffs[4 * i + 0] >> 8) | (a.coeffs[4 * i + 1] << 2)) as u8;
@@ -206,7 +206,7 @@ pub fn t1_pack(r: &mut [u8], a: &Poly) {
 
 /// Unpack polynomial t1 with 9-bit coefficients.
 /// Output coefficients are standard representatives.
-pub fn t1_unpack(r: &mut Poly, a: &[u8]) {
+pub(crate) fn t1_unpack(r: &mut Poly, a: &[u8]) {
 	for i in 0..N / 4 {
 		r.coeffs[4 * i + 0] =
 			(((a[5 * i + 0] >> 0) as u32 | (a[5 * i + 1] as u32) << 8) & 0x3FF) as i32;
@@ -220,7 +220,7 @@ pub fn t1_unpack(r: &mut Poly, a: &[u8]) {
 }
 
 /// Bit-pack polynomial t0 with coefficients in [-2^{D-1}, 2^{D-1}].
-pub fn t0_pack(r: &mut [u8], a: &Poly) {
+pub(crate) fn t0_pack(r: &mut [u8], a: &Poly) {
 	let mut t = [0i32; 8];
 
 	for i in 0..N / 8 {
@@ -258,7 +258,7 @@ pub fn t0_pack(r: &mut [u8], a: &Poly) {
 
 /// Unpack polynomial t0 with coefficients in ]-2^{D-1}, 2^{D-1}].
 /// Output coefficients lie in ]Q-2^{D-1},Q+2^{D-1}].
-pub fn t0_unpack(r: &mut Poly, a: &[u8]) {
+pub(crate) fn t0_unpack(r: &mut Poly, a: &[u8]) {
 	for i in 0..N / 8 {
 		r.coeffs[8 * i + 0] = a[13 * i + 0] as i32;
 		r.coeffs[8 * i + 0] |= (a[13 * i + 1] as i32) << 8;
@@ -440,7 +440,12 @@ pub fn uniform_gamma1(a: &mut Poly, seed: &[u8; params::CRHBYTES], nonce: u16) {
 
 	let mut buf = [0u8; UNIFORM_GAMMA1_NBLOCKS * fips202::SHAKE256_RATE];
 	fips202::shake256_squeezeblocks(&mut buf, UNIFORM_GAMMA1_NBLOCKS, &mut state);
-	z_unpack(a, &buf);
+	// The squeeze buffer is a multiple of the rate and always >= POLYZ_PACKEDBYTES,
+	// so `first_chunk` yields the exact prefix the codec consumes.
+	let z_bytes = buf
+		.first_chunk::<{ params::POLYZ_PACKEDBYTES }>()
+		.expect("gamma1 buffer covers POLYZ_PACKEDBYTES");
+	z_unpack(a, z_bytes);
 }
 
 /// Implementation of H. Samples polynomial with TAU nonzero coefficients in {-1,1} using the output
@@ -488,7 +493,7 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 
 /// Bit-pack polynomial with coefficients in [-ETA,ETA]. Input coefficients are assumed to lie in
 /// [Q-ETA,Q+ETA].
-pub fn eta_pack(r: &mut [u8], a: &Poly) {
+pub(crate) fn eta_pack(r: &mut [u8], a: &Poly) {
 	let mut t = [0u8; 8];
 	for i in 0..N / 8 {
 		t[0] = (params::ETA as i32 - a.coeffs[8 * i + 0]) as u8;
@@ -507,7 +512,7 @@ pub fn eta_pack(r: &mut [u8], a: &Poly) {
 }
 
 /// Unpack polynomial with coefficients in [-ETA,ETA].
-pub fn eta_unpack(r: &mut Poly, a: &[u8]) {
+pub(crate) fn eta_unpack(r: &mut Poly, a: &[u8]) {
 	for i in 0..N / 8 {
 		r.coeffs[8 * i + 0] = (a[3 * i + 0] & 0x07) as i32;
 		r.coeffs[8 * i + 1] = ((a[3 * i + 0] >> 3) & 0x07) as i32;
@@ -531,7 +536,10 @@ pub fn eta_unpack(r: &mut Poly, a: &[u8]) {
 
 /// Bit-pack polynomial z with coefficients in [-(GAMMA1 - 1), GAMMA1 - 1].
 /// Input coefficients are assumed to be standard representatives.
-pub fn z_pack(r: &mut [u8], a: &Poly) {
+///
+/// The output buffer is an exact-size array so a too-short destination is
+/// rejected at compile time rather than panicking on an out-of-bounds write.
+pub fn z_pack(r: &mut [u8; params::POLYZ_PACKEDBYTES], a: &Poly) {
 	let mut t = [0i32; 2];
 
 	for i in 0..N / 2 {
@@ -549,7 +557,10 @@ pub fn z_pack(r: &mut [u8], a: &Poly) {
 
 /// Unpack polynomial z with coefficients in [-(GAMMA1 - 1), GAMMA1 - 1].
 /// Output coefficients are standard representatives.
-pub fn z_unpack(r: &mut Poly, a: &[u8]) {
+///
+/// The input is an exact-size array so a truncated slice is rejected at compile
+/// time rather than panicking on an out-of-bounds read.
+pub fn z_unpack(r: &mut Poly, a: &[u8; params::POLYZ_PACKEDBYTES]) {
 	for i in 0..N / 2 {
 		r.coeffs[2 * i + 0] = a[5 * i + 0] as i32;
 		r.coeffs[2 * i + 0] |= (a[5 * i + 1] as i32) << 8;
@@ -568,7 +579,7 @@ pub fn z_unpack(r: &mut Poly, a: &[u8]) {
 
 /// Bit-pack polynomial w1 with coefficients in [0, 15].
 /// Input coefficients are assumed to be standard representatives.
-pub fn w1_pack(r: &mut [u8], a: &Poly) {
+pub(crate) fn w1_pack(r: &mut [u8], a: &Poly) {
 	for i in 0..N / 2 {
 		r[i] = (a.coeffs[2 * i + 0] | (a.coeffs[2 * i + 1] << 4)) as u8;
 	}

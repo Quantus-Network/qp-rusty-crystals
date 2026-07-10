@@ -321,8 +321,12 @@ fn generate_challenge_polynomial(
 	commitment_w1: &Polyveck,
 	message_hash_mu: &[u8; params::CRHBYTES],
 ) -> Poly {
-	// Pack w1 into signature buffer temporarily
-	polyvec::k_pack_w1(signature_buffer, commitment_w1);
+	// Pack w1 into signature buffer temporarily. The buffer is the full
+	// signature buffer, comfortably larger than K * POLYW1_PACKEDBYTES.
+	let w1_region = signature_buffer
+		.first_chunk_mut::<{ K * params::POLYW1_PACKEDBYTES }>()
+		.expect("signature buffer covers the packed w1 region");
+	polyvec::k_pack_w1(w1_region, commitment_w1);
 
 	let mut keccak_state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut keccak_state, message_hash_mu);

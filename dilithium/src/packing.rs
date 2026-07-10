@@ -122,8 +122,11 @@ pub fn pack_sig(
 	}
 
 	let mut idx = params::C_DASH_BYTES;
-	for i in 0..L {
-		poly::z_pack(&mut sig[idx + i * params::POLYZ_PACKEDBYTES..], &z.vec[i]);
+	// `as_chunks_mut` splits the buffer into exact-size `&mut [u8; POLYZ_PACKEDBYTES]`
+	// arrays, so no per-polynomial length check or fallible conversion is needed.
+	let (z_chunks, _) = sig[idx..].as_chunks_mut::<{ params::POLYZ_PACKEDBYTES }>();
+	for (chunk, zi) in z_chunks.iter_mut().zip(z.vec.iter()).take(L) {
+		poly::z_pack(chunk, zi);
 	}
 
 	idx += L * params::POLYZ_PACKEDBYTES;
@@ -172,8 +175,11 @@ pub fn unpack_sig(
 	c.copy_from_slice(&sig[..params::C_DASH_BYTES]);
 
 	let mut idx = params::C_DASH_BYTES;
-	for i in 0..L {
-		poly::z_unpack(&mut z.vec[i], &sig[idx + i * params::POLYZ_PACKEDBYTES..]);
+	// Exact-size chunks: each `&[u8; POLYZ_PACKEDBYTES]` is produced by the split,
+	// so a truncated per-polynomial slice can't reach `z_unpack`.
+	let (z_chunks, _) = sig[idx..].as_chunks::<{ params::POLYZ_PACKEDBYTES }>();
+	for (chunk, zi) in z_chunks.iter().zip(z.vec.iter_mut()).take(L) {
+		poly::z_unpack(zi, chunk);
 	}
 	idx += L * params::POLYZ_PACKEDBYTES;
 
