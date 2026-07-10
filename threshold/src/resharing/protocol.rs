@@ -2196,7 +2196,15 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			}
 		}
 		let rho = self.derive_rho();
-		let recovered = crate::protocol::partial_pk::pack_combined_pk(&rho, canonical.values());
+		// Reject partial PKs with non-canonical coefficients. An attacker-supplied
+		// coefficient near i32::MAX would otherwise overflow the i32 accumulation
+		// inside `pack_combined_pk` (panic in debug, silent wrap in release).
+		let recovered = crate::protocol::partial_pk::pack_combined_pk(&rho, canonical.values())
+			.map_err(|_| {
+				ResharingProtocolError::ShareVerificationFailed(
+					"a Round 5 partial public key contains out-of-range coefficients".to_string(),
+				)
+			})?;
 		if recovered.as_bytes() != self.config.public_key().as_bytes() {
 			return Err(ResharingProtocolError::ShareVerificationFailed(
 				"recovered public key does not match the original — a dealer corrupted at \

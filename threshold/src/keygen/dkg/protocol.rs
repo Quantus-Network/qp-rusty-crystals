@@ -1448,8 +1448,14 @@ impl<S: TranscriptSigner> Dkg<S> {
 			&transcript_hash,
 		)?;
 
-		// Combine partial PKs to get final public key
-		let public_key = pack_combined_pk(&rho, all_partial_pks.values().map(|pk| &pk.t));
+		// Combine partial PKs to get final public key. Reject any partial PK with
+		// non-canonical coefficients rather than overflowing the i32 accumulation.
+		let public_key = pack_combined_pk(&rho, all_partial_pks.values().map(|pk| &pk.t))
+			.map_err(|_| {
+				DkgError::InvalidMessage(
+					"a partial public key contains out-of-range coefficients".into(),
+				)
+			})?;
 
 		// Build private key share
 		let private_share = build_private_share(config, my_contributions, &rho, &public_key)?;
