@@ -2845,7 +2845,7 @@ mod tests {
 	const TEST_SSID: [u8; RESHARING_SSID_SIZE] = [0xABu8; RESHARING_SSID_SIZE];
 
 	/// Minimal transcript signer for unit tests: "signature" = party_id || hash.
-	#[derive(Clone)]
+	#[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 	pub(crate) struct TestSigner {
 		pub id: u32,
 	}

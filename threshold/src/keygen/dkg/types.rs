@@ -47,7 +47,19 @@ use qp_rusty_crystals_dilithium::fips202;
 ///
 /// This allows the DKG protocol to be agnostic to the signature scheme used.
 /// Implementors can use Ed25519, ML-DSA, or any other scheme.
-pub trait TranscriptSigner {
+///
+/// # Zeroization
+///
+/// `TranscriptSigner` requires [`ZeroizeOnDrop`] because implementors hold a
+/// long-term signing key (`my_signer` in [`DkgConfig`]). The DKG/resharing
+/// state machines own the signer for the whole protocol lifetime and rely on
+/// dropping the configuration to erase that key at their zeroization boundary.
+/// Making the guarantee part of the trait — rather than an unenforced integrator
+/// convention — ensures a signer holding raw secret-key bytes cannot leave them
+/// in freed process memory after the protocol completes or aborts. Implementors
+/// that wrap already-zeroizing key types (e.g. dilithium's `SecretKey`) can
+/// satisfy this with `#[derive(Zeroize, ZeroizeOnDrop)]` or a marker impl.
+pub trait TranscriptSigner: ZeroizeOnDrop {
 	/// The signature type produced by this signer.
 	type Signature: Clone + AsRef<[u8]>;
 
@@ -791,7 +803,7 @@ mod tests {
 	/// Test SSID for DKG type tests.
 	const TEST_SSID: [u8; DKG_SSID_SIZE] = [0xDD; DKG_SSID_SIZE];
 
-	#[derive(Clone, Debug)]
+	#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 	struct TestSigner {
 		id: u32,
 	}

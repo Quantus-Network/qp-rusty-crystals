@@ -236,7 +236,7 @@ mod tests {
 	/// Test session nonce for DKG tests.
 	const TEST_SESSION_NONCE: [u8; 32] = [0xDF; 32];
 
-	#[derive(Clone, Debug)]
+	#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 	struct TestSigner {
 		id: u32,
 	}

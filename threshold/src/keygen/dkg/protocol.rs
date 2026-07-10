@@ -2148,7 +2148,7 @@ mod tests {
 		assert!(rendered.contains("redacted"), "payload should be redacted: {rendered}");
 	}
 
-	#[derive(Clone, Debug)]
+	#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 	struct TestSigner {
 		id: u32,
 	}
@@ -2308,6 +2308,11 @@ mod tests {
 			}
 		}
 
+		// `sk` is a dilithium `SecretKey`, which is itself `ZeroizeOnDrop`, so the
+		// secret-key bytes are wiped when this signer is dropped. `pk` is public.
+		// The marker impl satisfies the `TranscriptSigner: ZeroizeOnDrop` bound.
+		impl zeroize::ZeroizeOnDrop for DilithiumSigner {}
+
 		impl TranscriptSigner for DilithiumSigner {
 			type Signature = Vec<u8>;
 			type PublicKey = PublicKey;
@@ -2389,7 +2394,7 @@ mod tests {
 	#[test]
 	fn test_dkg_rejects_bad_signature() {
 		// A signer that produces bad signatures for party 2
-		#[derive(Clone, Debug)]
+		#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 		struct BadSigner {
 			id: u32,
 			produce_bad_sig: bool,
