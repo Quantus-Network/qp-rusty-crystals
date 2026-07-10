@@ -322,8 +322,8 @@ mod hdwallet_tests {
 			"wormhole first_hash derivation changed"
 		);
 		assert_eq!(
-			w.secret,
-			hex!("30051cfa3abd462d3bc26da2d660e90ba8af6080b7fe95d9fd3f3b37c7d9ce4b"),
+			w.secret.as_bytes(),
+			&hex!("30051cfa3abd462d3bc26da2d660e90ba8af6080b7fe95d9fd3f3b37c7d9ce4b"),
 			"wormhole secret derivation changed"
 		);
 	}
@@ -337,7 +337,7 @@ mod hdwallet_tests {
 		let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
 		println!("address    = {}", hex(&w.address));
 		println!("first_hash = {}", hex(&w.first_hash));
-		println!("secret     = {}", hex(&w.secret));
+		println!("secret     = {}", hex(w.secret.as_bytes()));
 	}
 
 	#[test]
@@ -501,10 +501,10 @@ mod hdwallet_tests {
 			generate_wormhole_from_seed((&mut seed).into(), "m/44'/189189189'/0'").unwrap();
 
 		// Verify wormhole pair has expected structure
-		assert_eq!(wormhole.secret.len(), 32);
+		assert_eq!(wormhole.secret.as_bytes().len(), 32);
 		assert_eq!(wormhole.address.len(), 32);
 		assert_eq!(wormhole.first_hash.len(), 32);
-		assert_ne!(wormhole.secret, [0u8; 32]);
+		assert_ne!(wormhole.secret.as_bytes(), &[0u8; 32]);
 		assert_ne!(wormhole.address, [0u8; 32]);
 	}
 
