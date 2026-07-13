@@ -54,6 +54,11 @@ use crate::{
 	},
 };
 
+/// Packed size in bytes of one commitment (one `Polyveck` of K polynomials,
+/// 736 bytes each in the 23-bit encoding). Round 2 commitment data is
+/// `k_iterations` of these, concatenated.
+const SINGLE_COMMITMENT_SIZE: usize = 8 * 736; // K * POLY_Q_SIZE
+
 /// A threshold signer for a single party.
 ///
 /// Each party in the threshold scheme creates one `ThresholdSigner` with their
@@ -160,6 +165,22 @@ impl SignerState {
 			current: self.phase_name(),
 			expected: "AfterRound1",
 		})
+	}
+
+	/// Verify AfterRound2 phase and return (round1_data, round2_data).
+	fn expect_round2(&self) -> ThresholdResult<(&Round1Data, &Round2Data)> {
+		if self.phase != SigningPhase::AfterRound2 {
+			return Err(ThresholdError::InvalidState {
+				current: self.phase_name(),
+				expected: "AfterRound2",
+			});
+		}
+		let err =
+			|| ThresholdError::InvalidState { current: self.phase_name(), expected: "AfterRound2" };
+		Ok((
+			self.round1_data.as_ref().ok_or_else(err)?,
+			self.round2_data.as_ref().ok_or_else(err)?,
+		))
 	}
 
 	/// Verify AfterRound3 phase and return (round2_data, my_responses, message, context).
@@ -449,14 +470,99 @@ impl ThresholdSigner {
 		other_round1: &[Round1Broadcast],
 		other_round2: &[Round2Broadcast],
 	) -> ThresholdResult<Round3Broadcast> {
-		// Validate inputs first (before state mutation)
 		let k = self.config.k_iterations() as usize;
-		let single_commitment_size = 8 * 736; // K * POLY_Q_SIZE
-		let expected_len = k * single_commitment_size;
 
-		// Reject duplicate reveals up front: replaying one party's Round 2 broadcast
-		// must never be counted twice, or the aggregate (and thus the challenge
-		// material for the response) would be silently corrupted.
+		// Validate all reveals against their Round 1 commitments before touching
+		// any state (duplicates, sizes, hash binding).
+		let seen_parties = Self::validate_reveals_against_commitments(
+			ssid,
+			other_round1,
+			other_round2,
+			k,
+		)?;
+
+		// Check state
+		if self.state.phase != SigningPhase::AfterRound2 {
+			return Err(ThresholdError::InvalidState {
+				current: self.state.phase_name(),
+				expected: "AfterRound2",
+			});
+		}
+
+		// Aggregate commitments without mutating persistent state until every reveal
+		// is validated and unpacked. Two properties are enforced here:
+		//
+		// 1. The reveal set must be *exactly* the participants recorded during Round 2
+		//    — no missing, no extra, no duplicate parties (see
+		//    `check_reveal_set_exact`).
+		// 2. Every reveal is fully validated *before* the first write to persistent
+		//    state (validate-then-commit; see `validate_reveals_unpack` /
+		//    `aggregate_reveals`). A malformed-but-hash-bound reveal therefore
+		//    leaves `w_aggregated` untouched, so the signer stays in a clean
+		//    AfterRound2 state that a corrected retry can aggregate exactly once
+		//    (rather than double-counting earlier reveals).
+		{
+			let me = self.private_key.party_id();
+			let round2_data =
+				self.state.round2_data.as_mut().ok_or(ThresholdError::InvalidState {
+					current: "AfterRound2", // phase already validated above
+					expected: "AfterRound2",
+				})?;
+
+			Self::check_reveal_set_exact(round2_data, me, other_round2, &seen_parties)?;
+			Self::validate_reveals_unpack(other_round2, k)?;
+
+			if Self::aggregate_reveals(round2_data, other_round2, k).is_err() {
+				// Defensive, believed unreachable: the same bytes unpacked
+				// successfully in `validate_reveals_unpack`. The aggregate may now
+				// be partially mutated, so returning an error alone would let a
+				// retry double-aggregate the committed reveals. Reset the signing
+				// session instead: the caller must restart from Round 1, which
+				// re-derives a clean aggregate.
+				self.state = SignerState::default();
+				return Err(ThresholdError::InvalidData(
+					"Round 3 aggregation failed after validation (logic bug); \
+					 signing session reset — restart from Round 1"
+						.to_string(),
+				));
+			}
+		}
+
+		// Generate the response from the committed aggregate.
+		let (round1_data, round2_data) = self.state.expect_round2()?;
+		let responses =
+			generate_round3_response(&self.private_key, &self.config, round1_data, round2_data)?;
+
+		// Pack responses for broadcast
+		let packed_response = pack_responses(&responses);
+		let broadcast = Round3Broadcast::new(*ssid, self.private_key.party_id(), packed_response);
+
+		// Update state - clear round1_data as it's no longer needed
+		// (dropping the Option zeroizes its contents via ZeroizeOnDrop).
+		self.state.my_responses = Some(responses);
+		self.state.round1_data = None;
+		self.state.phase = SigningPhase::AfterRound3;
+
+		Ok(broadcast)
+	}
+
+	/// Validate Round 2 reveals against their Round 1 commitments: reject
+	/// duplicate reveals, empty or mis-sized commitment data, reveals without a
+	/// matching Round 1 broadcast, and reveals whose data does not hash to the
+	/// Round 1 commitment. Touches no state; returns the set of revealing
+	/// party IDs for the exact-set check.
+	///
+	/// Rejecting duplicates up front matters because replaying one party's
+	/// Round 2 broadcast must never be counted twice, or the aggregate (and
+	/// thus the challenge material for the response) would be silently
+	/// corrupted.
+	fn validate_reveals_against_commitments(
+		ssid: &[u8; 32],
+		other_round1: &[Round1Broadcast],
+		other_round2: &[Round2Broadcast],
+		k: usize,
+	) -> ThresholdResult<BTreeSet<u32>> {
+		let expected_len = k * SINGLE_COMMITMENT_SIZE;
 		let mut seen_parties: BTreeSet<u32> = BTreeSet::new();
 
 		for r2 in other_round2 {
@@ -505,133 +611,89 @@ impl ThresholdSigner {
 			}
 		}
 
-		// Check state
-		if self.state.phase != SigningPhase::AfterRound2 {
-			return Err(ThresholdError::InvalidState {
-				current: self.state.phase_name(),
-				expected: "AfterRound2",
+		Ok(seen_parties)
+	}
+
+	/// Check that the reveal set is *exactly* the other participants recorded
+	/// during Round 2 — no missing, no extra. Duplicates were already rejected
+	/// while building `seen_parties`; combined with the exact-count and
+	/// all-expected-present checks here, this pins the reveal set to the
+	/// session set (an unexpected party would force either a duplicate or a
+	/// missing expected party).
+	fn check_reveal_set_exact(
+		round2_data: &Round2Data,
+		me: u32,
+		other_round2: &[Round2Broadcast],
+		seen_parties: &BTreeSet<u32>,
+	) -> ThresholdResult<()> {
+		let expected_others = round2_data.active_participants.len().saturating_sub(1);
+		if other_round2.len() != expected_others {
+			return Err(ThresholdError::WrongPartyCount {
+				provided: other_round2.len() + 1,
+				required: round2_data.active_participants.len() as u32,
 			});
 		}
-
-		// Aggregate commitments without mutating persistent state until every reveal
-		// is validated and unpacked. Two properties are enforced here:
-		//
-		// 1. The reveal set must be *exactly* the participants recorded during Round 2
-		//    — no missing, no extra, no duplicate parties. Duplicates were rejected
-		//    above; combined with the exact-count and all-expected-present checks
-		//    below, this pins the reveal set to the session set (an unexpected party
-		//    would force either a duplicate or a missing expected party).
-		// 2. Every reveal is fully validated *before* the first write to persistent
-		//    state (validate-then-commit). A malformed-but-hash-bound reveal therefore
-		//    leaves `w_aggregated` untouched, so the signer stays in a clean
-		//    AfterRound2 state that a corrected retry can aggregate exactly once
-		//    (rather than double-counting earlier reveals).
-		{
-			let me = self.private_key.party_id();
-			let round2_data =
-				self.state.round2_data.as_mut().ok_or(ThresholdError::InvalidState {
-					current: "AfterRound2", // phase already validated above
-					expected: "AfterRound2",
-				})?;
-
-			// Exactly one reveal per other participant recorded at Round 2.
-			let expected_others = round2_data.active_participants.len().saturating_sub(1);
-			if other_round2.len() != expected_others {
-				return Err(ThresholdError::WrongPartyCount {
-					provided: other_round2.len() + 1,
-					required: round2_data.active_participants.len() as u32,
-				});
-			}
-			for other in round2_data.active_participants.others(me) {
-				if !seen_parties.contains(&other) {
-					return Err(ThresholdError::MissingBroadcast { party_id: other });
-				}
-			}
-
-			// Pass 1 (validate): unpack every chunk of every reveal, holding at most
-			// one transient Polyveck at a time. No persistent state is touched, so a
-			// failure here is a clean rejection. This deliberately avoids cloning the
-			// whole existing aggregate as a scratch buffer: for large k_iterations
-			// (e.g. k=1600 for 4-of-6) that clone roughly doubled peak memory during
-			// Round 3 (tens of MB), whereas re-unpacking in the commit pass below
-			// costs only a second run of cheap bit-unpacking.
-			for r2 in other_round2 {
-				for k_idx in 0..k {
-					let start = k_idx * single_commitment_size;
-					let end = start + single_commitment_size;
-
-					unpack_commitment_dilithium(&r2.commitment_data[start..end]).map_err(
-						|e| ThresholdError::InvalidCommitmentData {
-							party_id: r2.party_id,
-							reason: format!(
-								"Commitment passed hash check but failed to unpack (k={}): {}",
-								k_idx, e
-							),
-						},
-					)?;
-				}
-			}
-
-			// Pass 2 (commit): aggregate directly into persistent state, in place.
-			// Unpacking is deterministic over the same bytes, so after pass 1
-			// succeeded it cannot fail here. A failure would indicate a logic bug;
-			// rather than panicking, it is handled defensively below.
-			let mut commit_failed = false;
-			'commit: for r2 in other_round2 {
-				for (k_idx, agg) in round2_data.w_aggregated.iter_mut().take(k).enumerate() {
-					let start = k_idx * single_commitment_size;
-					let end = start + single_commitment_size;
-
-					match unpack_commitment_dilithium(&r2.commitment_data[start..end]) {
-						Ok(w_other) => aggregate_commitments_dilithium(agg, &w_other),
-						Err(_) => {
-							commit_failed = true;
-							break 'commit;
-						},
-					}
-				}
-			}
-			if commit_failed {
-				// Defensive, believed unreachable: the same bytes unpacked
-				// successfully in pass 1. The aggregate may now be partially
-				// mutated, so returning an error alone would let a retry
-				// double-aggregate the committed reveals. Reset the signing
-				// session instead: the caller must restart from Round 1, which
-				// re-derives a clean aggregate.
-				self.state = SignerState::default();
-				return Err(ThresholdError::InvalidData(
-					"Round 3 aggregation failed after validation (logic bug); \
-					 signing session reset — restart from Round 1"
-						.to_string(),
-				));
+		for other in round2_data.active_participants.others(me) {
+			if !seen_parties.contains(&other) {
+				return Err(ThresholdError::MissingBroadcast { party_id: other });
 			}
 		}
+		Ok(())
+	}
 
-		// Get immutable references for response generation
-		let round1_data = self.state.round1_data.as_ref().ok_or(ThresholdError::InvalidState {
-			current: "AfterRound2", // phase already validated above
-			expected: "AfterRound2",
-		})?;
-		let round2_data = self.state.round2_data.as_ref().ok_or(ThresholdError::InvalidState {
-			current: "AfterRound2", // phase already validated above
-			expected: "AfterRound2",
-		})?;
+	/// Validation pass of the aggregation: unpack every chunk of every reveal,
+	/// holding at most one transient `Polyveck` at a time, and discard the
+	/// results. No persistent state is touched, so a failure here is a clean
+	/// rejection.
+	///
+	/// This deliberately avoids cloning the whole existing aggregate as a
+	/// scratch buffer: for large k_iterations (e.g. k=1600 for 4-of-6) that
+	/// clone roughly doubled peak memory during Round 3 (tens of MB), whereas
+	/// re-unpacking in [`Self::aggregate_reveals`] costs only a second run of
+	/// cheap bit-unpacking.
+	fn validate_reveals_unpack(other_round2: &[Round2Broadcast], k: usize) -> ThresholdResult<()> {
+		for r2 in other_round2 {
+			for k_idx in 0..k {
+				let start = k_idx * SINGLE_COMMITMENT_SIZE;
+				let end = start + SINGLE_COMMITMENT_SIZE;
 
-		// Generate response
-		let responses =
-			generate_round3_response(&self.private_key, &self.config, round1_data, round2_data)?;
+				unpack_commitment_dilithium(&r2.commitment_data[start..end]).map_err(|e| {
+					ThresholdError::InvalidCommitmentData {
+						party_id: r2.party_id,
+						reason: format!(
+							"Commitment passed hash check but failed to unpack (k={}): {}",
+							k_idx, e
+						),
+					}
+				})?;
+			}
+		}
+		Ok(())
+	}
 
-		// Pack responses for broadcast
-		let packed_response = pack_responses(&responses);
-		let broadcast = Round3Broadcast::new(*ssid, self.private_key.party_id(), packed_response);
+	/// Commit pass of the aggregation: aggregate every reveal directly into
+	/// `round2_data.w_aggregated`, in place. Unpacking is deterministic over
+	/// the same bytes, so after [`Self::validate_reveals_unpack`] succeeded
+	/// this cannot fail. `Err` indicates a logic bug and means the aggregate
+	/// may be partially mutated — the caller must poison the session rather
+	/// than allow a retry.
+	fn aggregate_reveals(
+		round2_data: &mut Round2Data,
+		other_round2: &[Round2Broadcast],
+		k: usize,
+	) -> Result<(), ()> {
+		for r2 in other_round2 {
+			for (k_idx, agg) in round2_data.w_aggregated.iter_mut().take(k).enumerate() {
+				let start = k_idx * SINGLE_COMMITMENT_SIZE;
+				let end = start + SINGLE_COMMITMENT_SIZE;
 
-		// Update state - clear round1_data as it's no longer needed
-		// (dropping the Option zeroizes its contents via ZeroizeOnDrop).
-		self.state.my_responses = Some(responses);
-		self.state.round1_data = None;
-		self.state.phase = SigningPhase::AfterRound3;
-
-		Ok(broadcast)
+				match unpack_commitment_dilithium(&r2.commitment_data[start..end]) {
+					Ok(w_other) => aggregate_commitments_dilithium(agg, &w_other),
+					Err(_) => return Err(()),
+				}
+			}
+		}
+		Ok(())
 	}
 
 	/// Collect all Round 3 responses with duplicate detection.
@@ -761,11 +823,10 @@ impl ThresholdSigner {
 		&self,
 		message: &[u8],
 		context: &[u8],
-		_all_round2: &[Round2Broadcast],
+		all_round2: &[Round2Broadcast],
 		all_round3: &[Round3Broadcast],
 	) -> ThresholdResult<Signature> {
-		let (round2_data, my_responses, bound_message, bound_context) =
-			self.state.expect_round3()?;
+		let (_, _, bound_message, bound_context) = self.state.expect_round3()?;
 
 		// Round 3 responses are bound to the message/context captured in Round 2.
 		// Combining against anything else would silently yield an invalid signature,
@@ -777,18 +838,8 @@ impl ThresholdSigner {
 			));
 		}
 
-		let all_responses = self.collect_responses(my_responses, all_round3)?;
-
-		let signature_bytes = combine_signature(
-			&self.public_key,
-			&self.config,
-			bound_message,
-			bound_context,
-			&round2_data.w_aggregated,
-			&all_responses,
-		)?;
-
-		Ok(Signature::from_vec(signature_bytes))
+		// Identical to `combine` once the binding check has passed.
+		self.combine(all_round2, all_round3)
 	}
 }
 
