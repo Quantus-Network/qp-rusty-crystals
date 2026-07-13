@@ -53,8 +53,9 @@ use qp_rusty_crystals_dilithium::fips202;
 /// `TranscriptSigner` requires [`Zeroize`] + [`ZeroizeOnDrop`] because
 /// implementors hold a long-term signing key (`my_signer` in [`DkgConfig`]).
 /// The DKG/resharing state machines own the signer for the whole protocol
-/// lifetime and rely on dropping the configuration to erase that key at their
-/// zeroization boundary.
+/// lifetime and call its `zeroize()` method directly at their zeroization
+/// boundary, so key erasure does not depend on the implementor's `Drop`
+/// behavior.
 ///
 /// **Implement this with `#[derive(Zeroize, ZeroizeOnDrop)]`** (using
 /// `#[zeroize(skip)]` on non-secret fields such as public keys). The derive

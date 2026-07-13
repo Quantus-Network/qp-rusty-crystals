@@ -281,11 +281,16 @@ impl<S: TranscriptSigner> Zeroize for DkgState<S> {
 		}
 		self.my_contributions = None;
 
-		// Drop the config, which owns the transcript signer (this party's
-		// long-term authentication key). The `TranscriptSigner: Zeroize +
-		// ZeroizeOnDrop` bound guarantees that dropping the signer erases any
-		// secret-key bytes it holds, so the authentication key does not survive
-		// past this zeroization boundary in freed memory.
+		// Explicitly zeroize the transcript signer (this party's long-term
+		// authentication key) before dropping the config that owns it.
+		// `ZeroizeOnDrop` is only a marker trait: a hand-written implementation
+		// may satisfy `TranscriptSigner: Zeroize + ZeroizeOnDrop` without its
+		// `Drop` ever calling `zeroize()`. Invoking the `Zeroize` method here
+		// makes erasure a state-machine invariant rather than a matter of
+		// downstream implementer discipline.
+		if let Some(ref mut config) = self.config {
+			config.my_signer.zeroize();
+		}
 		self.config = None;
 
 		// Clear non-sensitive data
@@ -525,6 +530,88 @@ mod tests {
 		fn public_key(&self) -> Self::PublicKey {
 			self.id
 		}
+	}
+
+	/// A signer whose `ZeroizeOnDrop` is a *bare marker*: `Zeroize` is
+	/// implemented correctly, but `Drop` never calls it. This is legal under
+	/// the trait contract (`ZeroizeOnDrop` carries no behavior of its own), so
+	/// the state machine must not rely on drop side effects to erase the key.
+	struct LazySigner {
+		id: u32,
+		secret: Vec<u8>,
+		zeroized: Rc<Cell<bool>>,
+	}
+
+	impl Zeroize for LazySigner {
+		fn zeroize(&mut self) {
+			self.secret.zeroize();
+			self.zeroized.set(true);
+		}
+	}
+
+	// Deliberately no `Drop` impl: dropping a LazySigner frees the secret
+	// without wiping it.
+	impl ZeroizeOnDrop for LazySigner {}
+
+	impl TranscriptSigner for LazySigner {
+		type Signature = Vec<u8>;
+		type PublicKey = u32;
+
+		fn sign(&self, hash: &[u8; 32]) -> Self::Signature {
+			let mut sig = Vec::with_capacity(36);
+			sig.extend_from_slice(&self.id.to_le_bytes());
+			sig.extend_from_slice(hash);
+			sig
+		}
+
+		fn verify(pk: &Self::PublicKey, hash: &[u8; 32], sig: &Self::Signature) -> bool {
+			Self::verify_bytes(pk, hash, sig)
+		}
+
+		fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
+			if sig.len() < 36 {
+				return false;
+			}
+			let sig_id = u32::from_le_bytes(sig[..4].try_into().unwrap());
+			sig_id == *pk && &sig[4..36] == hash
+		}
+
+		fn public_key(&self) -> Self::PublicKey {
+			self.id
+		}
+	}
+
+	/// `DkgState::zeroize()` must invoke the signer's `Zeroize` impl directly
+	/// instead of relying on `ZeroizeOnDrop` drop side effects: a bare-marker
+	/// implementation satisfies the trait bounds but wipes nothing on drop.
+	#[test]
+	fn zeroize_erases_key_even_for_bare_marker_zeroize_on_drop() {
+		let zeroized = Rc::new(Cell::new(false));
+
+		let mut public_keys = BTreeMap::new();
+		public_keys.insert(0u32, 0u32);
+		public_keys.insert(1u32, 1u32);
+		public_keys.insert(2u32, 2u32);
+
+		let signer =
+			LazySigner { id: 0, secret: [0xCDu8; 64].to_vec(), zeroized: zeroized.clone() };
+
+		let config = DkgConfig::new(
+			ThresholdConfig::new(2, 3).unwrap(),
+			0,
+			Vec::from([0u32, 1, 2]),
+			signer,
+			public_keys,
+		)
+		.unwrap();
+
+		let mut state = DkgState::new(config);
+		state.zeroize();
+		assert!(
+			zeroized.get(),
+			"DkgState::zeroize() must explicitly zeroize the transcript signer; \
+			 dropping a bare-marker ZeroizeOnDrop signer wipes nothing"
+		);
 	}
 
 	/// Regression test: `DkgState::zeroize()` must erase the transcript signer's

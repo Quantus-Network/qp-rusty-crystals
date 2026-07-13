@@ -411,6 +411,14 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		self.pending_round4.clear();
 		self.round4_messages.clear();
 		self.config.zeroize_existing_share();
+		// Explicitly zeroize the transcript signer (this party's long-term
+		// authentication key). `ZeroizeOnDrop` is only a marker trait, so
+		// relying on the signer's own Drop would leave erasure to downstream
+		// implementer discipline; calling `zeroize()` makes it an invariant.
+		// Safe here: the signer is only used for the Round 6 acceptance
+		// signature, which has already been produced by the time this runs
+		// (successful completion or drop).
+		self.signer_config.my_signer.zeroize();
 	}
 
 	/// Whether the old committee share has been erased from the config.
