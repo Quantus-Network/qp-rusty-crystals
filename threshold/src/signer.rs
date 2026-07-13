@@ -529,7 +529,7 @@ impl ThresholdSigner {
 		{
 			let me = self.private_key.party_id();
 			let round2_data =
-				self.state.round2_data.as_ref().ok_or(ThresholdError::InvalidState {
+				self.state.round2_data.as_mut().ok_or(ThresholdError::InvalidState {
 					current: "AfterRound2", // phase already validated above
 					expected: "AfterRound2",
 				})?;
@@ -574,18 +574,36 @@ impl ThresholdSigner {
 
 			// Pass 2 (commit): aggregate directly into persistent state, in place.
 			// Unpacking is deterministic over the same bytes, so after pass 1
-			// succeeded it cannot fail here — the commit is all-or-nothing.
-			let round2_data =
-				self.state.round2_data.as_mut().expect("round2_data present in AfterRound2");
-			for r2 in other_round2 {
+			// succeeded it cannot fail here. A failure would indicate a logic bug;
+			// rather than panicking, it is handled defensively below.
+			let mut commit_failed = false;
+			'commit: for r2 in other_round2 {
 				for (k_idx, agg) in round2_data.w_aggregated.iter_mut().take(k).enumerate() {
 					let start = k_idx * single_commitment_size;
 					let end = start + single_commitment_size;
 
-					let w_other = unpack_commitment_dilithium(&r2.commitment_data[start..end])
-						.expect("chunk validated in pass 1; unpack is deterministic");
-					aggregate_commitments_dilithium(agg, &w_other);
+					match unpack_commitment_dilithium(&r2.commitment_data[start..end]) {
+						Ok(w_other) => aggregate_commitments_dilithium(agg, &w_other),
+						Err(_) => {
+							commit_failed = true;
+							break 'commit;
+						},
+					}
 				}
+			}
+			if commit_failed {
+				// Defensive, believed unreachable: the same bytes unpacked
+				// successfully in pass 1. The aggregate may now be partially
+				// mutated, so returning an error alone would let a retry
+				// double-aggregate the committed reveals. Reset the signing
+				// session instead: the caller must restart from Round 1, which
+				// re-derives a clean aggregate.
+				self.state = SignerState::default();
+				return Err(ThresholdError::InvalidData(
+					"Round 3 aggregation failed after validation (logic bug); \
+					 signing session reset — restart from Round 1"
+						.to_string(),
+				));
 			}
 		}
 
