@@ -103,16 +103,31 @@ pub fn keypair(
 	t0.zeroize();
 }
 
-/// Re-derive the public key that corresponds to a secret key.
+/// Re-derive the public key that corresponds to a secret key, verifying the
+/// secret key's internal invariants along the way.
 ///
-/// Recomputes `t1` from the secret key's `(rho, s1, s2)` exactly as
-/// [`keypair`] does, and packs `pk = (rho, t1)`. Callers use this to enforce
-/// the cross-field invariant that a supplied public key actually belongs to a
-/// secret key (rather than trusting a concatenated blob). The secret
-/// polynomials are zeroized before returning.
+/// Recomputes `t1` and `t0` from the secret key's `(rho, s1, s2)` exactly as
+/// [`keypair`] does, and packs `pk = (rho, t1)`. In addition to re-deriving
+/// the public key, this checks the two remaining packed-SK invariants:
+///
+/// - the stored `t0` must equal the re-derived low bits of `A·s1 + s2`, and
+/// - the stored `tr` must equal `SHAKE256(pk)`.
+///
+/// Signing uses the stored `tr` (bound into the message digest) and `t0`
+/// (hint computation), so a blob with a corrupted `tr`/`t0` region would
+/// import "successfully" and then produce signatures that fail under the
+/// advertised public key. Rejecting such blobs here fails fast at import and
+/// avoids ever signing with an inconsistent key (corrupted-key signing is the
+/// setup for fault-style analyses on Dilithium).
+///
+/// Returns `None` if either invariant is violated. The comparisons are not
+/// constant-time; timing can only differ for an already-corrupted blob, and
+/// the honest path compares all-equal data.
+///
+/// The secret polynomials are zeroized before returning.
 pub(crate) fn public_key_from_secret(
 	sk: &[u8; params::SECRETKEYBYTES],
-) -> [u8; params::PUBLICKEYBYTES] {
+) -> Option<[u8; params::PUBLICKEYBYTES]> {
 	let mut rho = [0u8; params::SEEDBYTES];
 	let mut tr = [0u8; params::TR_BYTES];
 	let mut key = [0u8; params::SEEDBYTES];
@@ -121,19 +136,36 @@ pub(crate) fn public_key_from_secret(
 	let mut s2 = Polyveck::default();
 	packing::unpack_sk(&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk);
 
-	// Same derivation as key generation; the stored `t0` is recomputed and discarded.
+	// Same derivation as key generation.
 	let (t1, mut t0_derived) = derive_public_components(&rho, &s1, &s2);
 
 	let mut pk = [0u8; params::PUBLICKEYBYTES];
 	packing::pack_pk(&mut pk, &rho, &t1);
 
-	// Only rho/s1/s2 are needed to derive the public key; wipe the secret copies.
+	// Invariant: stored t0 must be the low bits actually derived from (rho, s1, s2).
+	let t0_consistent = t0
+		.vec
+		.iter()
+		.zip(t0_derived.vec.iter())
+		.all(|(stored, derived)| stored.coeffs == derived.coeffs);
+
+	// Invariant: stored tr must be the hash of the (re-derived) public key.
+	let mut tr_derived = [0u8; params::TR_BYTES];
+	fips202::shake256(&mut tr_derived, &pk);
+	let tr_consistent = tr == tr_derived;
+
+	// Only rho/t1 are public; wipe the secret copies.
 	key.zeroize();
 	s1.zeroize();
 	s2.zeroize();
 	t0.zeroize();
 	t0_derived.zeroize();
-	pk
+
+	if t0_consistent && tr_consistent {
+		Some(pk)
+	} else {
+		None
+	}
 }
 
 /// Compute a signature for a given message from a private (secret) key.

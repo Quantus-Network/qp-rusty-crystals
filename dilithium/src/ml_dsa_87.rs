@@ -78,6 +78,12 @@ impl Keypair {
 	/// let an object sign with one key while advertising an unrelated public key
 	/// (e.g. a receive address the victim cannot spend from).
 	///
+	/// The secret key's internal invariants are checked as well: the stored
+	/// `t0` must match the low bits re-derived from `(rho, s1, s2)`, and the
+	/// stored `tr` must equal `SHAKE256(pk)`. Signing uses both fields, so a
+	/// blob corrupted in those regions would otherwise import cleanly and then
+	/// produce signatures that fail under the advertised public key.
+	///
 	/// Note: the `secret` and `public` fields are public, so callers can still
 	/// construct or mutate a `Keypair` with mismatched halves directly. This
 	/// check only guards the deserialization/import path.
@@ -91,10 +97,12 @@ impl Keypair {
 		let public =
 			PublicKey::from_bytes(public_bytes).map_err(|_| KeyParsingError::BadKeypair)?;
 
-		// Enforce the cross-field invariant: the public key must be the one that
-		// corresponds to the secret key. The derived pk is public data, so a
-		// non-constant-time comparison is fine.
-		let derived_public = crate::sign::public_key_from_secret(&secret.bytes);
+		// Enforce the cross-field invariants: the secret key must be internally
+		// consistent (tr, t0) and the public key must be the one that corresponds
+		// to it. The derived pk is public data, so a non-constant-time comparison
+		// is fine.
+		let derived_public = crate::sign::public_key_from_secret(&secret.bytes)
+			.ok_or(KeyParsingError::BadKeypair)?;
 		if derived_public != public.bytes {
 			return Err(KeyParsingError::BadKeypair);
 		}
@@ -393,6 +401,41 @@ mod tests {
 		assert!(
 			matches!(Keypair::from_bytes(&forged), Err(KeyParsingError::BadKeypair)),
 			"public key not derived from the secret key must be rejected"
+		);
+	}
+
+	// The packed secret key stores tr = SHAKE256(pk) and t0 (low bits of
+	// A·s1 + s2) alongside (rho, s1, s2). Signing uses the stored tr and t0, so
+	// a blob with honest rho/s1/s2/pk but a corrupted tr or t0 region would
+	// import cleanly and then produce signatures that fail under the advertised
+	// public key. `from_bytes` must reject such blobs at import.
+	#[test]
+	fn from_bytes_rejects_corrupted_tr_or_t0() {
+		use super::{Keypair, KeyParsingError, SECRETKEYBYTES};
+		use crate::params::{POLYT0_PACKEDBYTES, SEEDBYTES, TR_BYTES};
+
+		let keys = Keypair::generate(get_random_bytes());
+		let good = keys.to_bytes();
+		assert!(Keypair::from_bytes(&good).is_ok(), "honest keypair must be accepted");
+
+		// SK layout: rho (32) || key (32) || tr (64) || s1 || s2 || t0.
+		let tr_offset = 2 * SEEDBYTES;
+		let t0_offset = SECRETKEYBYTES - crate::params::K * POLYT0_PACKEDBYTES;
+
+		// Corrupt one byte inside the stored tr region only.
+		let mut bad_tr = good;
+		bad_tr[tr_offset + TR_BYTES / 2] ^= 0x01;
+		assert!(
+			matches!(Keypair::from_bytes(&bad_tr), Err(KeyParsingError::BadKeypair)),
+			"secret key with corrupted tr must be rejected"
+		);
+
+		// Corrupt one byte inside the stored t0 region only.
+		let mut bad_t0 = good;
+		bad_t0[t0_offset] ^= 0x01;
+		assert!(
+			matches!(Keypair::from_bytes(&bad_t0), Err(KeyParsingError::BadKeypair)),
+			"secret key with corrupted t0 must be rejected"
 		);
 	}
 
