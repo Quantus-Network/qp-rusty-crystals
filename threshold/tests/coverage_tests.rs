@@ -725,6 +725,7 @@ mod error_display {
 			},
 			ThresholdError::InvalidPartyId { party_id: 5, max_id: 3 },
 			ThresholdError::WrongPartyCount { provided: 2, required: 3 },
+			ThresholdError::RevealSetMismatch { provided: 1, expected: 2 },
 			ThresholdError::InvalidSignatureShare { party_id: 1, reason: "bounds check failed" },
 			ThresholdError::ContextTooLong { length: 300 },
 			ThresholdError::CombinationFailed,

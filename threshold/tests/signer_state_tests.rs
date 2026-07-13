@@ -212,8 +212,8 @@ fn test_round3_rejects_incomplete_reveal_set() {
 		.expect_err("missing participant reveal must be rejected");
 
 	assert!(
-		matches!(err, ThresholdError::WrongPartyCount { provided: 1, required: 2 }),
-		"expected WrongPartyCount for the incomplete reveal set, got: {err:?}"
+		matches!(err, ThresholdError::RevealSetMismatch { provided: 1, expected: 2 }),
+		"expected RevealSetMismatch for the incomplete reveal set, got: {err:?}"
 	);
 }
 

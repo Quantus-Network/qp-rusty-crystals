@@ -628,9 +628,9 @@ impl ThresholdSigner {
 	) -> ThresholdResult<()> {
 		let expected_others = round2_data.active_participants.len().saturating_sub(1);
 		if other_round2.len() != expected_others {
-			return Err(ThresholdError::WrongPartyCount {
+			return Err(ThresholdError::RevealSetMismatch {
 				provided: other_round2.len() + 1,
-				required: round2_data.active_participants.len() as u32,
+				expected: round2_data.active_participants.len() as u32,
 			});
 		}
 		for other in round2_data.active_participants.others(me) {
