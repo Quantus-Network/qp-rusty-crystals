@@ -148,8 +148,7 @@ fn setup_through_round2(
 	let context = b"replay ctx";
 	let participant_list = ParticipantList::new(&[0u32, 1u32]).unwrap();
 	let attempt_nonce = [0x11; 32];
-	let ssid =
-		compute_ssid(&public_key, 2, 3, &participant_list, message, context, &attempt_nonce);
+	let ssid = compute_ssid(&public_key, 2, 3, &participant_list, message, context, &attempt_nonce);
 
 	let r1: Vec<Round1Broadcast> = signers
 		.iter_mut()
@@ -165,8 +164,7 @@ fn setup_through_round2(
 		.iter_mut()
 		.enumerate()
 		.map(|(i, s)| {
-			let others: Vec<_> =
-				r1.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+			let others: Vec<_> = r1.iter().filter(|r| r.party_id != i as u32).cloned().collect();
 			s.round2_reveal(&ssid, message, context, &others).unwrap()
 		})
 		.collect();

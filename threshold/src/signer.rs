@@ -177,10 +177,7 @@ impl SignerState {
 		}
 		let err =
 			|| ThresholdError::InvalidState { current: self.phase_name(), expected: "AfterRound2" };
-		Ok((
-			self.round1_data.as_ref().ok_or_else(err)?,
-			self.round2_data.as_ref().ok_or_else(err)?,
-		))
+		Ok((self.round1_data.as_ref().ok_or_else(err)?, self.round2_data.as_ref().ok_or_else(err)?))
 	}
 
 	/// Verify AfterRound3 phase and return (round2_data, my_responses, message, context).
@@ -474,12 +471,8 @@ impl ThresholdSigner {
 
 		// Validate all reveals against their Round 1 commitments before touching
 		// any state (duplicates, sizes, hash binding).
-		let seen_parties = Self::validate_reveals_against_commitments(
-			ssid,
-			other_round1,
-			other_round2,
-			k,
-		)?;
+		let seen_parties =
+			Self::validate_reveals_against_commitments(ssid, other_round1, other_round2, k)?;
 
 		// Check state
 		if self.state.phase != SigningPhase::AfterRound2 {
@@ -492,15 +485,13 @@ impl ThresholdSigner {
 		// Aggregate commitments without mutating persistent state until every reveal
 		// is validated and unpacked. Two properties are enforced here:
 		//
-		// 1. The reveal set must be *exactly* the participants recorded during Round 2
-		//    — no missing, no extra, no duplicate parties (see
-		//    `check_reveal_set_exact`).
-		// 2. Every reveal is fully validated *before* the first write to persistent
-		//    state (validate-then-commit; see `validate_reveals_unpack` /
-		//    `aggregate_reveals`). A malformed-but-hash-bound reveal therefore
-		//    leaves `w_aggregated` untouched, so the signer stays in a clean
-		//    AfterRound2 state that a corrected retry can aggregate exactly once
-		//    (rather than double-counting earlier reveals).
+		// 1. The reveal set must be *exactly* the participants recorded during Round 2 — no
+		//    missing, no extra, no duplicate parties (see `check_reveal_set_exact`).
+		// 2. Every reveal is fully validated *before* the first write to persistent state
+		//    (validate-then-commit; see `validate_reveals_unpack` / `aggregate_reveals`). A
+		//    malformed-but-hash-bound reveal therefore leaves `w_aggregated` untouched, so the
+		//    signer stays in a clean AfterRound2 state that a corrected retry can aggregate exactly
+		//    once (rather than double-counting earlier reveals).
 		{
 			let me = self.private_key.party_id();
 			let round2_data =

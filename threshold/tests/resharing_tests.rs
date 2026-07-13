@@ -4202,12 +4202,7 @@ fn test_certificate_verification_rejects_missing_or_wrong_accepts() {
 	accepts.insert(0, Signer { id: 0 }.sign(&accept_hash));
 	accepts.insert(1, Signer { id: 1 }.sign(&accept_hash));
 
-	let cert = ResharingCertificate {
-		ssid,
-		active_set,
-		transcript_hash,
-		accepts: accepts.clone(),
-	};
+	let cert = ResharingCertificate { ssid, active_set, transcript_hash, accepts: accepts.clone() };
 	assert!(cert.verify::<Signer>(&new_participants, &keys), "valid certificate must verify");
 
 	// Missing an acceptance.
@@ -4253,12 +4248,7 @@ fn test_certificate_rejects_forged_active_set() {
 	accepts.insert(0, Signer { id: 0 }.sign(&accept_hash));
 	accepts.insert(1, Signer { id: 1 }.sign(&accept_hash));
 
-	let cert = ResharingCertificate {
-		ssid,
-		active_set: real_active_set,
-		transcript_hash,
-		accepts,
-	};
+	let cert = ResharingCertificate { ssid, active_set: real_active_set, transcript_hash, accepts };
 	assert!(cert.verify::<Signer>(&new_participants, &keys), "honest certificate must verify");
 
 	// Attacker rewrites active_set (drops party 2 / claims a different handoff

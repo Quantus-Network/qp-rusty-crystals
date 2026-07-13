@@ -71,8 +71,10 @@ use qp_rusty_crystals_dilithium::{
 	packing, params, poly,
 	poly::Poly,
 	polyvec,
-	polyvec::ct_internals::{k_uniform_eta, l_uniform_eta, l_uniform_gamma1},
-	polyvec::{Polyveck, Polyvecl},
+	polyvec::{
+		ct_internals::{k_uniform_eta, l_uniform_eta, l_uniform_gamma1},
+		Polyveck, Polyvecl,
+	},
 };
 
 const L: usize = params::L;

@@ -387,7 +387,7 @@ mod tests {
 	// advertising an unrelated public key (e.g. an unspendable receive address).
 	#[test]
 	fn from_bytes_rejects_mismatched_public_key() {
-		use super::{Keypair, KeyParsingError, KEYPAIRBYTES, SECRETKEYBYTES};
+		use super::{KeyParsingError, Keypair, KEYPAIRBYTES, SECRETKEYBYTES};
 
 		let keys_a = Keypair::generate(get_random_bytes());
 		let keys_b = Keypair::generate(get_random_bytes());
@@ -414,7 +414,7 @@ mod tests {
 	// public key. `from_bytes` must reject such blobs at import.
 	#[test]
 	fn from_bytes_rejects_corrupted_tr_or_t0() {
-		use super::{Keypair, KeyParsingError, SECRETKEYBYTES};
+		use super::{KeyParsingError, Keypair, SECRETKEYBYTES};
 		use crate::params::{POLYT0_PACKEDBYTES, SEEDBYTES, TR_BYTES};
 
 		let keys = Keypair::generate(get_random_bytes());

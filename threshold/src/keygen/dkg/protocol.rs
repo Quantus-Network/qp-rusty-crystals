@@ -203,10 +203,8 @@ impl fmt::Debug for DkgAction {
 			DkgAction::Wait => f.write_str("Wait"),
 			// Broadcast payloads are public, but the serialized bytes are noise in
 			// a log; show only the length for consistency with SendPrivate.
-			DkgAction::SendMany(data) => f
-				.debug_tuple("SendMany")
-				.field(&format_args!("{} bytes", data.len()))
-				.finish(),
+			DkgAction::SendMany(data) =>
+				f.debug_tuple("SendMany").field(&format_args!("{} bytes", data.len())).finish(),
 			// The payload is the serialized Round 1 private message (K_S). Never
 			// render the bytes; keep the recipient and length for diagnostics.
 			DkgAction::SendPrivate(to, data) => f
@@ -1450,8 +1448,8 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 		// Combine partial PKs to get final public key. Reject any partial PK with
 		// non-canonical coefficients rather than overflowing the i32 accumulation.
-		let public_key = pack_combined_pk(&rho, all_partial_pks.values().map(|pk| &pk.t))
-			.map_err(|_| {
+		let public_key =
+			pack_combined_pk(&rho, all_partial_pks.values().map(|pk| &pk.t)).map_err(|_| {
 				DkgError::InvalidMessage(
 					"a partial public key contains out-of-range coefficients".into(),
 				)
@@ -2067,16 +2065,12 @@ mod tests {
 	/// had seen Round 2 reveals could predict it.
 	#[test]
 	fn test_round1_randomness_changes_with_session_nonce() {
-		use crate::derivation::derive_dkg_contribution;
-		use crate::keys::SecretShareData;
+		use crate::{derivation::derive_dkg_contribution, keys::SecretShareData};
 		use alloc::collections::BTreeMap;
 
 		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
 		let mut shares = BTreeMap::new();
-		shares.insert(
-			0b011,
-			SecretShareData { s1: [[42i32; 256]; L], s2: [[42i32; 256]; K] },
-		);
+		shares.insert(0b011, SecretShareData { s1: [[42i32; 256]; L], s2: [[42i32; 256]; K] });
 		let master_share = PrivateKeyShare::new(
 			0,
 			3,

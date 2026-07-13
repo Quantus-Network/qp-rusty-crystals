@@ -650,7 +650,6 @@ mod tests {
 		bytes
 	}
 
-
 	#[test]
 	fn self_verify_hedged() {
 		let mut pk = [0u8; crate::params::PUBLICKEYBYTES];

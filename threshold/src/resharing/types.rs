@@ -776,8 +776,7 @@ impl ResharingCertificate {
 		new_participants: &[ParticipantId],
 		verifying_keys: &BTreeMap<ParticipantId, S::PublicKey>,
 	) -> bool {
-		let accept_hash =
-			compute_accept_hash(&self.ssid, &self.transcript_hash, &self.active_set);
+		let accept_hash = compute_accept_hash(&self.ssid, &self.transcript_hash, &self.active_set);
 		new_participants
 			.iter()
 			.all(|p| match (verifying_keys.get(p), self.accepts.get(p)) {
@@ -1920,11 +1919,8 @@ mod tests {
 	#[test]
 	fn test_resharing_accept_rejects_truncated_signature() {
 		// Honest round-trip still works.
-		let accept = ResharingAccept {
-			ssid: TEST_SSID,
-			party_id: 3,
-			signature: alloc::vec![0xAAu8; 4627],
-		};
+		let accept =
+			ResharingAccept { ssid: TEST_SSID, party_id: 3, signature: alloc::vec![0xAAu8; 4627] };
 		let bytes = borsh::to_vec(&accept).unwrap();
 		let back: ResharingAccept = borsh::from_slice(&bytes).unwrap();
 		assert_eq!(back.party_id, accept.party_id);

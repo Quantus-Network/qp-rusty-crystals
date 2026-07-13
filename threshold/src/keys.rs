@@ -245,7 +245,6 @@ impl PrivateKeyShare {
 	pub(crate) fn shares(&self) -> &BTreeMap<u16, SecretShareData> {
 		&self.shares
 	}
-
 }
 
 impl Zeroize for PrivateKeyShare {

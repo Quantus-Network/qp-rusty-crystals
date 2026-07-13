@@ -81,7 +81,10 @@ pub enum PackCombinedPkError {
 /// crafted coefficient near `i32::MAX` would panic in debug builds and wrap
 /// silently in release builds. Rejecting out-of-range coefficients up front keeps
 /// the running sum bounded below `2Q` and makes the accumulation overflow-free.
-pub fn pack_combined_pk<'a, I>(rho: &[u8; 32], partial_ts: I) -> Result<PublicKey, PackCombinedPkError>
+pub fn pack_combined_pk<'a, I>(
+	rho: &[u8; 32],
+	partial_ts: I,
+) -> Result<PublicKey, PackCombinedPkError>
 where
 	I: IntoIterator<Item = &'a [[i32; N as usize]; K]>,
 {

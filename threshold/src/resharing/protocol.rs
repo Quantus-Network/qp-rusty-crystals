@@ -2148,8 +2148,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		// its own index bit (e.g. the full-committee mask) with an attacker-chosen
 		// `t_partial`, and use it to cancel a public-key deviation introduced by corrupted
 		// residuals — making this invariant check pass on a broken reshare.
-		let allowed_masks: BTreeSet<SubsetMask> =
-			self.new_subset_order.iter().copied().collect();
+		let allowed_masks: BTreeSet<SubsetMask> = self.new_subset_order.iter().copied().collect();
 
 		let mut canonical: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
 		for (party, broadcast) in &self.round5_broadcasts {
@@ -3382,11 +3381,7 @@ mod tests {
 		let err = protocol
 			.verify_public_key_preservation()
 			.expect_err("non-canonical partial PK mask must be rejected");
-		assert!(
-			err.to_string().contains("non-canonical subset"),
-			"unexpected error: {}",
-			err
-		);
+		assert!(err.to_string().contains("non-canonical subset"), "unexpected error: {}", err);
 	}
 
 	#[test]

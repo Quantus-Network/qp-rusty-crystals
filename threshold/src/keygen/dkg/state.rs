@@ -538,11 +538,7 @@ mod tests {
 		public_keys.insert(1u32, 1u32);
 		public_keys.insert(2u32, 2u32);
 
-		let signer = SpySigner {
-			id: 0,
-			secret: [0xABu8; 64].to_vec(),
-			zeroized: zeroized.clone(),
-		};
+		let signer = SpySigner { id: 0, secret: [0xABu8; 64].to_vec(), zeroized: zeroized.clone() };
 
 		let config = DkgConfig::new(
 			ThresholdConfig::new(2, 3).unwrap(),
