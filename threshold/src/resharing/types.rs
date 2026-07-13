@@ -650,8 +650,10 @@ impl BorshDeserialize for ResharingAccept {
 				"ResharingAccept.signature exceeds MAX_ACCEPT_SIGNATURE_LEN",
 			));
 		}
-		let mut signature = alloc::vec![0u8; sig_len];
-		reader.read_exact(&mut signature)?;
+		// Chunked read: don't allocate the claimed length up front, so a
+		// truncated body cannot force an allocation larger than what was
+		// actually delivered (same pattern as the certificate accepts).
+		let signature = crate::broadcast::read_length_prefixed(reader, sig_len)?;
 		Ok(Self { ssid, party_id, signature })
 	}
 }
@@ -1908,5 +1910,43 @@ mod tests {
 
 		let result: Result<ResharingCertificate, _> = borsh::from_slice(&payload);
 		assert!(result.is_err(), "accepts exceeding MAX_PARTIES must be rejected");
+	}
+
+	/// Regression test (security review): a `ResharingAccept` whose signature
+	/// length prefix claims the maximum but whose body is truncated must fail
+	/// deserialization without allocating the full claimed length up front
+	/// (the chunked `read_length_prefixed` path, mirroring the certificate
+	/// accepts and Round 2/3 broadcasts).
+	#[test]
+	fn test_resharing_accept_rejects_truncated_signature() {
+		// Honest round-trip still works.
+		let accept = ResharingAccept {
+			ssid: TEST_SSID,
+			party_id: 3,
+			signature: alloc::vec![0xAAu8; 4627],
+		};
+		let bytes = borsh::to_vec(&accept).unwrap();
+		let back: ResharingAccept = borsh::from_slice(&bytes).unwrap();
+		assert_eq!(back.party_id, accept.party_id);
+		assert_eq!(back.signature, accept.signature);
+
+		// Claim the maximum signature length but deliver only a few bytes.
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&TEST_SSID); // ssid
+		payload.extend_from_slice(&3u32.to_le_bytes()); // party_id
+		payload.extend_from_slice(&(MAX_ACCEPT_SIGNATURE_LEN as u32).to_le_bytes()); // claimed len
+		payload.extend_from_slice(&[0xBBu8; 8]); // truncated body
+
+		let result: Result<ResharingAccept, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "truncated accept signature must be rejected");
+
+		// A length above the maximum is rejected outright.
+		let mut oversized = Vec::new();
+		oversized.extend_from_slice(&TEST_SSID);
+		oversized.extend_from_slice(&3u32.to_le_bytes());
+		oversized.extend_from_slice(&((MAX_ACCEPT_SIGNATURE_LEN + 1) as u32).to_le_bytes());
+
+		let result: Result<ResharingAccept, _> = borsh::from_slice(&oversized);
+		assert!(result.is_err(), "oversized accept signature length must be rejected");
 	}
 }
