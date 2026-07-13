@@ -662,6 +662,47 @@ mod hdwallet_tests {
 		}
 	}
 
+	/// The mnemonic-based helpers must validate the derivation path *before*
+	/// BIP39 seed stretching, matching the seed-based entrypoints. The error
+	/// precedence makes the ordering observable: with a bogus mnemonic AND a
+	/// bad path, a path error proves the cheap check ran first, while a
+	/// Bip39Error would prove the expensive mnemonic work ran first.
+	#[test]
+	fn test_mnemonic_helpers_validate_path_before_seed_stretching() {
+		use crate::{
+			derive_key_from_mnemonic, derive_wormhole_from_mnemonic, MAX_DERIVATION_PATH_BYTES,
+		};
+
+		let bogus_mnemonic = "not a valid bip39 mnemonic phrase at all";
+		let mut oversized = String::from("m");
+		while oversized.len() <= MAX_DERIVATION_PATH_BYTES {
+			oversized.push_str("/1'");
+		}
+
+		let err = derive_key_from_mnemonic(bogus_mnemonic, None, &oversized).unwrap_err();
+		assert!(
+			matches!(err, HDLatticeError::PathTooLong(_)),
+			"path must be rejected before seed stretching, got {err:?}"
+		);
+
+		// WormholePair has no Debug impl (it holds a secret), so match instead
+		// of unwrap_err.
+		match derive_wormhole_from_mnemonic(bogus_mnemonic, None, &oversized) {
+			Err(HDLatticeError::PathTooLong(_)) => {},
+			Err(other) => panic!("path must be rejected before seed stretching, got {other:?}"),
+			Ok(_) => panic!("expected PathTooLong, got Ok"),
+		}
+
+		// The wormhole chain-ID check must also precede seed work: this path is
+		// syntactically valid but uses the Dilithium chain ID, not the wormhole one.
+		match derive_wormhole_from_mnemonic(bogus_mnemonic, None, "m/44'/189189'/0'") {
+			Err(HDLatticeError::InvalidWormholePath(_)) => {},
+			Err(other) =>
+				panic!("wrong chain ID must be rejected before seed stretching, got {other:?}"),
+			Ok(_) => panic!("expected InvalidWormholePath, got Ok"),
+		}
+	}
+
 	/// Mnemonic and passphrase inputs must be size-capped before Unicode
 	/// normalization and seed derivation, mirroring the derivation-path caps.
 	/// Without bounds, a caller-controlled huge passphrase (or a huge
