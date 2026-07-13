@@ -521,11 +521,11 @@ impl ThresholdSigner {
 		//    above; combined with the exact-count and all-expected-present checks
 		//    below, this pins the reveal set to the session set (an unexpected party
 		//    would force either a duplicate or a missing expected party).
-		// 2. The aggregate is built in a local buffer and only committed once all
-		//    reveals unpack successfully. A malformed-but-hash-bound reveal that fails
-		//    mid-stream therefore leaves `w_aggregated` untouched, so the signer stays
-		//    in a clean AfterRound2 state that a corrected retry can aggregate exactly
-		//    once (rather than double-counting earlier reveals).
+		// 2. Every reveal is fully validated *before* the first write to persistent
+		//    state (validate-then-commit). A malformed-but-hash-bound reveal therefore
+		//    leaves `w_aggregated` untouched, so the signer stays in a clean
+		//    AfterRound2 state that a corrected retry can aggregate exactly once
+		//    (rather than double-counting earlier reveals).
 		{
 			let me = self.private_key.party_id();
 			let round2_data =
@@ -548,32 +548,45 @@ impl ThresholdSigner {
 				}
 			}
 
-			// Build the aggregate locally (temporary validated state); commit only on
-			// full success so a failed unpack cannot leave partially-mutated state.
-			let mut aggregated = round2_data.w_aggregated.clone();
+			// Pass 1 (validate): unpack every chunk of every reveal, holding at most
+			// one transient Polyveck at a time. No persistent state is touched, so a
+			// failure here is a clean rejection. This deliberately avoids cloning the
+			// whole existing aggregate as a scratch buffer: for large k_iterations
+			// (e.g. k=1600 for 4-of-6) that clone roughly doubled peak memory during
+			// Round 3 (tens of MB), whereas re-unpacking in the commit pass below
+			// costs only a second run of cheap bit-unpacking.
 			for r2 in other_round2 {
-				for (k_idx, agg) in aggregated.iter_mut().take(k).enumerate() {
+				for k_idx in 0..k {
 					let start = k_idx * single_commitment_size;
 					let end = start + single_commitment_size;
 
-					let w_other = unpack_commitment_dilithium(&r2.commitment_data[start..end])
-						.map_err(|e| ThresholdError::InvalidCommitmentData {
+					unpack_commitment_dilithium(&r2.commitment_data[start..end]).map_err(
+						|e| ThresholdError::InvalidCommitmentData {
 							party_id: r2.party_id,
 							reason: format!(
 								"Commitment passed hash check but failed to unpack (k={}): {}",
 								k_idx, e
 							),
-						})?;
-					aggregate_commitments_dilithium(agg, &w_other);
+						},
+					)?;
 				}
 			}
 
-			// All reveals validated and unpacked: commit the aggregate atomically.
-			self.state
-				.round2_data
-				.as_mut()
-				.expect("round2_data present in AfterRound2")
-				.w_aggregated = aggregated;
+			// Pass 2 (commit): aggregate directly into persistent state, in place.
+			// Unpacking is deterministic over the same bytes, so after pass 1
+			// succeeded it cannot fail here — the commit is all-or-nothing.
+			let round2_data =
+				self.state.round2_data.as_mut().expect("round2_data present in AfterRound2");
+			for r2 in other_round2 {
+				for (k_idx, agg) in round2_data.w_aggregated.iter_mut().take(k).enumerate() {
+					let start = k_idx * single_commitment_size;
+					let end = start + single_commitment_size;
+
+					let w_other = unpack_commitment_dilithium(&r2.commitment_data[start..end])
+						.expect("chunk validated in pass 1; unpack is deterministic");
+					aggregate_commitments_dilithium(agg, &w_other);
+				}
+			}
 		}
 
 		// Get immutable references for response generation
@@ -852,5 +865,72 @@ mod tests {
 		// A normal-sized message is still accepted (state advances to Round 2).
 		let ok = s0.round2_reveal(&ssid, b"hello", b"", core::slice::from_ref(&r1_1));
 		assert!(ok.is_ok(), "in-bounds message must still be accepted: {ok:?}");
+	}
+
+	/// Regression test for the validate-then-commit property of
+	/// `round3_respond` (preserved across the removal of the full aggregate
+	/// clone): a reveal that passes the commitment-hash check but fails to
+	/// unpack must be rejected *without* mutating `w_aggregated`, so a
+	/// corrected retry produces exactly the same response as a signer that
+	/// never saw the malformed attempt.
+	#[test]
+	fn test_round3_malformed_reveal_leaves_state_clean_for_retry() {
+		use crate::{
+			broadcast::{Round1Broadcast, Round2Broadcast},
+			generate_with_dealer,
+			protocol::signing::compute_commitment_hash,
+		};
+
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[9u8; 32], config).unwrap();
+
+		let mut s0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+		let mut s1 = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
+		// Control signer: identical to s0 (same share, same seeds) but never
+		// fed the malformed reveal.
+		let mut c0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+
+		let ssid = [0x5Au8; 32];
+		let r1_0 = s0.round1_commit_with_seed(&ssid, &[1u8; 32]).unwrap();
+		let r1_1 = s1.round1_commit_with_seed(&ssid, &[2u8; 32]).unwrap();
+		let r1_c = c0.round1_commit_with_seed(&ssid, &[1u8; 32]).unwrap();
+		assert_eq!(r1_0, r1_c, "control signer must mirror s0 exactly");
+
+		let msg = b"atomicity";
+		let ctx = b"";
+		s0.round2_reveal(&ssid, msg, ctx, core::slice::from_ref(&r1_1)).unwrap();
+		c0.round2_reveal(&ssid, msg, ctx, core::slice::from_ref(&r1_1)).unwrap();
+		let r2_1 = s1.round2_reveal(&ssid, msg, ctx, core::slice::from_ref(&r1_0)).unwrap();
+
+		// Forge a malformed-but-hash-bound reveal from party 1: correct length,
+		// bound to a matching (forged) Round 1 hash, but every 23-bit
+		// coefficient is 2^23 - 1 >= Q, so unpacking fails.
+		let k = config.k_iterations() as usize;
+		let garbage = alloc::vec![0xFFu8; k * 8 * 736];
+		let forged_hash = compute_commitment_hash(&ssid, 1, &garbage);
+		let fake_r1 = Round1Broadcast::new(ssid, 1, forged_hash);
+		let fake_r2 = Round2Broadcast::new(ssid, 1, garbage);
+
+		let err = s0
+			.round3_respond(&ssid, core::slice::from_ref(&fake_r1), core::slice::from_ref(&fake_r2))
+			.expect_err("hash-bound but malformed reveal must be rejected");
+		assert!(
+			matches!(err, ThresholdError::InvalidCommitmentData { party_id: 1, .. }),
+			"expected InvalidCommitmentData for party 1, got {err:?}"
+		);
+
+		// The corrected retry must succeed and match the control signer's
+		// response byte-for-byte: any residue from the failed attempt (e.g. a
+		// partially-applied aggregate) would change the challenge material.
+		let r3_retry = s0
+			.round3_respond(&ssid, core::slice::from_ref(&r1_1), core::slice::from_ref(&r2_1))
+			.expect("corrected retry must succeed after a rejected reveal");
+		let r3_control = c0
+			.round3_respond(&ssid, core::slice::from_ref(&r1_1), core::slice::from_ref(&r2_1))
+			.expect("control signer round 3");
+		assert_eq!(
+			r3_retry, r3_control,
+			"retry after rejected reveal must match a signer that never saw it"
+		);
 	}
 }
