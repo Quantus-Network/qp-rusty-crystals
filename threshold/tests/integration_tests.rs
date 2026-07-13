@@ -552,7 +552,7 @@ fn test_dealer_sign_6_of_6() {
 // ============================================================================
 
 /// Simple test signer for DKG transcript signing.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 struct TestSigner {
 	id: u32,
 }

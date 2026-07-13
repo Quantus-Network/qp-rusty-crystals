@@ -52,6 +52,33 @@ pub const MAX_COMMITMENT_DATA_SIZE: usize = 10_500_000;
 /// 640 = 4480) = 7_168_000 bytes. We round up to 8 MB for margin.
 pub const MAX_RESPONSE_SIZE: usize = 8_000_000;
 
+/// Read exactly `len` bytes from `reader` without trusting `len` for the up-front
+/// allocation size.
+///
+/// The caller has already rejected `len` values above the per-field maximum, but
+/// that maximum can be several megabytes (see [`MAX_COMMITMENT_DATA_SIZE`]). A
+/// malicious peer can advertise a large `len` and then truncate the payload;
+/// `vec![0u8; len]` would eagerly allocate (and zero) the full claimed size
+/// *before* `read_exact` discovers the truncation, letting a few-byte message
+/// force a multi-megabyte allocation. Growing the buffer in bounded chunks caps
+/// the transient allocation to what the peer actually delivered (plus one chunk)
+/// and fails fast on a short payload.
+pub(crate) fn read_length_prefixed<R: borsh::io::Read>(
+	reader: &mut R,
+	len: usize,
+) -> borsh::io::Result<Vec<u8>> {
+	// Cap per-step growth so `len` alone cannot drive the allocation size.
+	const CHUNK: usize = 64 * 1024;
+	let mut buf = Vec::new();
+	while buf.len() < len {
+		let step = (len - buf.len()).min(CHUNK);
+		let filled = buf.len();
+		buf.resize(filled + step, 0);
+		reader.read_exact(&mut buf[filled..])?;
+	}
+	Ok(buf)
+}
+
 /// Round 1 broadcast message: commitment hash.
 ///
 /// In Round 1, each party generates random values and computes a commitment.
@@ -130,9 +157,9 @@ impl BorshDeserialize for Round2Broadcast {
 			));
 		}
 
-		// Now safe to allocate and read
-		let mut commitment_data = vec![0u8; len];
-		reader.read_exact(&mut commitment_data)?;
+		// Read incrementally so a truncated payload cannot force an up-front
+		// allocation of the full (attacker-chosen) `len`.
+		let commitment_data = read_length_prefixed(reader, len)?;
 
 		Ok(Self { ssid, party_id, commitment_data })
 	}
@@ -194,9 +221,9 @@ impl BorshDeserialize for Round3Broadcast {
 			));
 		}
 
-		// Now safe to allocate and read
-		let mut response = vec![0u8; len];
-		reader.read_exact(&mut response)?;
+		// Read incrementally so a truncated payload cannot force an up-front
+		// allocation of the full (attacker-chosen) `len`.
+		let response = read_length_prefixed(reader, len)?;
 
 		Ok(Self { ssid, party_id, response })
 	}
@@ -404,6 +431,35 @@ mod tests {
 		let serialized = borsh::to_vec(&broadcast).unwrap();
 		let recovered: Round3Broadcast = borsh::from_slice(&serialized).unwrap();
 		assert_eq!(recovered, broadcast);
+	}
+
+	/// A within-bounds length prefix whose body is truncated must fail without
+	/// pre-allocating the claimed length. We can only observe the error here (the
+	/// bounded-allocation behavior is exercised by `read_length_prefixed`), but
+	/// this locks in that a lying-then-truncated payload is rejected.
+	#[test]
+	fn test_round2_deserialize_rejects_truncated_body() {
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&TEST_SSID);
+		payload.extend_from_slice(&1u32.to_le_bytes()); // party_id
+		payload.extend_from_slice(&1000u32.to_le_bytes()); // claims 1000 bytes...
+		payload.extend_from_slice(&[0u8; 10]); // ...but only 10 are present
+
+		let result: Result<Round2Broadcast, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "truncated commitment_data must be rejected");
+	}
+
+	#[test]
+	fn test_read_length_prefixed_matches_requested_len() {
+		let data = [7u8; 200];
+		let mut reader = &data[..];
+		let out = read_length_prefixed(&mut reader, 200).unwrap();
+		assert_eq!(out, data);
+
+		// Short input for the requested length must error, not hang or over-read.
+		let short = [1u8; 5];
+		let mut reader = &short[..];
+		assert!(read_length_prefixed(&mut reader, 1000).is_err());
 	}
 
 	#[test]

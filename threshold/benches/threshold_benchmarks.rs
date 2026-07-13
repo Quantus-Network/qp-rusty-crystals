@@ -16,7 +16,7 @@ use qp_rusty_crystals_threshold::{
 
 /// Simple test signer for DKG benchmarks.
 /// Uses a trivial signature scheme (just ID + hash) for benchmarking purposes.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 struct BenchSigner {
 	id: u32,
 }

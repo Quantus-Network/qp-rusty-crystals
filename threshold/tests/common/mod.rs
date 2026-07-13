@@ -12,7 +12,7 @@ use qp_rusty_crystals_threshold::resharing::{
 /// party ID matches the public key (which is just the party ID) and that the
 /// embedded hash matches, so signatures over a *different* transcript hash
 /// fail verification exactly like a real scheme.
-#[derive(Clone)]
+#[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct TestSigner {
 	pub id: u32,
 }

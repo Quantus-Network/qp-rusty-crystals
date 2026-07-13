@@ -625,9 +625,10 @@ pub const MAX_ACCEPT_SIGNATURE_LEN: usize = 8192;
 /// causes signature verification to fail on at least one honest party, which
 /// then aborts.
 ///
-/// The signature is over `SHAKE256("resharing-accept-v1" || ssid ||
-/// transcript_hash)`, domain-separating acceptances from any other use of the
-/// same long-term key.
+/// The signature is over `SHAKE256("resharing-accept-v2" || ssid ||
+/// transcript_hash || len(active_set) || active_set)` (see
+/// [`compute_accept_hash`]), domain-separating acceptances from any other use
+/// of the same long-term key and binding the certificate's `active_set`.
 #[derive(Debug, Clone, BorshSerialize)]
 pub struct ResharingAccept {
 	/// Session identifier binding this message to the resharing session.
@@ -649,8 +650,10 @@ impl BorshDeserialize for ResharingAccept {
 				"ResharingAccept.signature exceeds MAX_ACCEPT_SIGNATURE_LEN",
 			));
 		}
-		let mut signature = alloc::vec![0u8; sig_len];
-		reader.read_exact(&mut signature)?;
+		// Chunked read: don't allocate the claimed length up front, so a
+		// truncated body cannot force an allocation larger than what was
+		// actually delivered (same pattern as the certificate accepts).
+		let signature = crate::broadcast::read_length_prefixed(reader, sig_len)?;
 		Ok(Self { ssid, party_id, signature })
 	}
 }
@@ -700,7 +703,7 @@ impl<S: crate::keygen::dkg::TranscriptSigner> ResharingSignerConfig<S> {
 /// material. A verifier that additionally holds the broadcast transcript can
 /// recompute `transcript_hash` and the `Σ_J t_J^new = T` public-key check
 /// independently.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, BorshSerialize)]
 pub struct ResharingCertificate {
 	/// Session identifier of the completed session.
 	pub ssid: [u8; RESHARING_SSID_SIZE],
@@ -712,6 +715,52 @@ pub struct ResharingCertificate {
 	/// Acceptance signatures from every new committee member, keyed by
 	/// participant ID.
 	pub accepts: BTreeMap<ParticipantId, Vec<u8>>,
+}
+
+impl BorshDeserialize for ResharingCertificate {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; RESHARING_SSID_SIZE]>::deserialize_reader(reader)?;
+
+		// active_set is at most one entry per old committee member.
+		let active_len = u32::deserialize_reader(reader)? as usize;
+		if active_len > MAX_PARTIES as usize {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingCertificate.active_set exceeds MAX_PARTIES",
+			));
+		}
+		let mut active_set = Vec::with_capacity(active_len);
+		for _ in 0..active_len {
+			active_set.push(ParticipantId::deserialize_reader(reader)?);
+		}
+
+		let transcript_hash = <[u8; COMMITMENT_HASH_SIZE]>::deserialize_reader(reader)?;
+
+		// accepts holds at most one signature per new committee member.
+		let accepts_len = u32::deserialize_reader(reader)? as usize;
+		if accepts_len > MAX_PARTIES as usize {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingCertificate.accepts exceeds MAX_PARTIES",
+			));
+		}
+		let mut accepts = BTreeMap::new();
+		for _ in 0..accepts_len {
+			let party_id = ParticipantId::deserialize_reader(reader)?;
+			let sig_len = u32::deserialize_reader(reader)? as usize;
+			if sig_len > MAX_ACCEPT_SIGNATURE_LEN {
+				return Err(borsh::io::Error::new(
+					borsh::io::ErrorKind::InvalidData,
+					"ResharingCertificate accept signature exceeds MAX_ACCEPT_SIGNATURE_LEN",
+				));
+			}
+			// Read incrementally rather than pre-allocating the claimed length.
+			let signature = crate::broadcast::read_length_prefixed(reader, sig_len)?;
+			accepts.insert(party_id, signature);
+		}
+
+		Ok(Self { ssid, active_set, transcript_hash, accepts })
+	}
 }
 
 impl ResharingCertificate {
@@ -727,7 +776,7 @@ impl ResharingCertificate {
 		new_participants: &[ParticipantId],
 		verifying_keys: &BTreeMap<ParticipantId, S::PublicKey>,
 	) -> bool {
-		let accept_hash = compute_accept_hash(&self.ssid, &self.transcript_hash);
+		let accept_hash = compute_accept_hash(&self.ssid, &self.transcript_hash, &self.active_set);
 		new_participants
 			.iter()
 			.all(|p| match (verifying_keys.get(p), self.accepts.get(p)) {
@@ -738,19 +787,39 @@ impl ResharingCertificate {
 }
 
 /// Domain separator for the acceptance hash.
-const ACCEPT_DOMAIN: &[u8] = b"resharing-accept-v1";
+///
+/// Bumped to v2 when `active_set` was folded into the hash; a v1 signature can
+/// therefore never be reinterpreted as a v2 acceptance.
+const ACCEPT_DOMAIN: &[u8] = b"resharing-accept-v2";
 
 /// Compute the 32-byte hash that new committee members sign to accept the
-/// session transcript: `SHAKE256("resharing-accept-v1" || ssid || transcript_hash)`.
+/// session transcript:
+/// `SHAKE256("resharing-accept-v2" || ssid || transcript_hash || len(active_set) || active_set)`.
+///
+/// `active_set` is bound directly (in addition to being committed inside
+/// `transcript_hash`) so that a party holding *only* the certificate — which
+/// cannot recompute `transcript_hash` from the full transcript — still
+/// authenticates the certificate's explicit `active_set` field. Without this,
+/// `active_set` could be rewritten while `ssid`/`transcript_hash`/`accepts`
+/// stayed valid, and the tampered certificate would still verify.
+///
+/// Callers pass `active_set` in the same order stored in the certificate
+/// (the protocol keeps it strictly sorted), so honest signers and verifiers
+/// hash an identical byte string.
 pub fn compute_accept_hash(
 	ssid: &[u8; RESHARING_SSID_SIZE],
 	transcript_hash: &[u8; COMMITMENT_HASH_SIZE],
+	active_set: &[ParticipantId],
 ) -> [u8; 32] {
 	use qp_rusty_crystals_dilithium::fips202;
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, ACCEPT_DOMAIN);
 	fips202::shake256_absorb(&mut state, ssid);
 	fips202::shake256_absorb(&mut state, transcript_hash);
+	fips202::shake256_absorb(&mut state, &(active_set.len() as u32).to_le_bytes());
+	for &p in active_set {
+		fips202::shake256_absorb(&mut state, &p.to_le_bytes());
+	}
 	fips202::shake256_finalize(&mut state);
 	let mut out = [0u8; 32];
 	fips202::shake256_squeeze(&mut out, &mut state);
@@ -960,17 +1029,24 @@ impl NewShareData {
 	///
 	/// Returns `true` if all coefficients satisfy `|coeff| <= bound`.
 	/// This is used to reject malicious sub-shares with excessively large coefficients.
+	///
+	/// The magnitude is computed with [`i32::unsigned_abs`], which returns a
+	/// `u32` and therefore handles `i32::MIN` correctly. Using `i32::abs` here
+	/// would panic on `i32::MIN` in overflow-checking builds and, worse, wrap
+	/// back to a negative value in release builds — letting a dealer's
+	/// `i32::MIN` coefficient slip past this trust-boundary check.
 	pub fn coefficients_within_bound(&self, bound: i32) -> bool {
+		let bound = bound.max(0) as u32;
 		for poly in &self.s1 {
 			for &coeff in poly {
-				if coeff.abs() > bound {
+				if coeff.unsigned_abs() > bound {
 					return false;
 				}
 			}
 		}
 		for poly in &self.s2 {
 			for &coeff in poly {
-				if coeff.abs() > bound {
+				if coeff.unsigned_abs() > bound {
 					return false;
 				}
 			}
@@ -980,17 +1056,19 @@ impl NewShareData {
 
 	/// Find the maximum absolute coefficient value.
 	///
-	/// Useful for debugging and diagnostics.
-	pub fn max_abs_coefficient(&self) -> i32 {
-		let mut max_abs = 0i32;
+	/// Useful for debugging and diagnostics. Returns a `u32` because the
+	/// magnitude of `i32::MIN` (2_147_483_648) does not fit in an `i32`; the
+	/// magnitude is computed with the non-overflowing [`i32::unsigned_abs`].
+	pub fn max_abs_coefficient(&self) -> u32 {
+		let mut max_abs = 0u32;
 		for poly in &self.s1 {
 			for &coeff in poly {
-				max_abs = max_abs.max(coeff.abs());
+				max_abs = max_abs.max(coeff.unsigned_abs());
 			}
 		}
 		for poly in &self.s2 {
 			for &coeff in poly {
-				max_abs = max_abs.max(coeff.abs());
+				max_abs = max_abs.max(coeff.unsigned_abs());
 			}
 		}
 		max_abs
@@ -1772,5 +1850,99 @@ mod tests {
 			&nonce,
 		);
 		assert_ne!(base(0), other_suite, "suite must change the SSID");
+	}
+
+	#[test]
+	fn test_resharing_certificate_roundtrip_within_bounds() {
+		let mut accepts = BTreeMap::new();
+		accepts.insert(1u32, alloc::vec![9u8; 16]);
+		accepts.insert(2u32, alloc::vec![3u8; 4627]);
+
+		let cert = ResharingCertificate {
+			ssid: TEST_SSID,
+			active_set: alloc::vec![0, 1, 2],
+			transcript_hash: [7u8; COMMITMENT_HASH_SIZE],
+			accepts,
+		};
+
+		let bytes = borsh::to_vec(&cert).unwrap();
+		let back: ResharingCertificate = borsh::from_slice(&bytes).unwrap();
+		assert_eq!(back.active_set, cert.active_set);
+		assert_eq!(back.accepts, cert.accepts);
+		assert_eq!(back.transcript_hash, cert.transcript_hash);
+	}
+
+	/// A fully-present certificate whose `active_set` count exceeds `MAX_PARTIES`
+	/// must be rejected. Before the bounded deserializer this parsed successfully
+	/// (borsh would happily build the oversized collection).
+	#[test]
+	fn test_resharing_certificate_rejects_oversized_active_set() {
+		let huge = MAX_PARTIES + 100;
+
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&[0u8; RESHARING_SSID_SIZE]); // ssid
+		payload.extend_from_slice(&huge.to_le_bytes()); // active_set len
+		for i in 0..huge {
+			payload.extend_from_slice(&i.to_le_bytes()); // ParticipantId entries
+		}
+		payload.extend_from_slice(&[0u8; COMMITMENT_HASH_SIZE]); // transcript_hash
+		payload.extend_from_slice(&0u32.to_le_bytes()); // accepts len = 0
+
+		let result: Result<ResharingCertificate, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "active_set exceeding MAX_PARTIES must be rejected");
+	}
+
+	/// Same, for the `accepts` map count.
+	#[test]
+	fn test_resharing_certificate_rejects_oversized_accepts() {
+		let huge = MAX_PARTIES + 50;
+
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&[0u8; RESHARING_SSID_SIZE]); // ssid
+		payload.extend_from_slice(&0u32.to_le_bytes()); // active_set len = 0
+		payload.extend_from_slice(&[0u8; COMMITMENT_HASH_SIZE]); // transcript_hash
+		payload.extend_from_slice(&huge.to_le_bytes()); // accepts len
+		for i in 0..huge {
+			payload.extend_from_slice(&i.to_le_bytes()); // key: ParticipantId
+			payload.extend_from_slice(&0u32.to_le_bytes()); // value: empty signature
+		}
+
+		let result: Result<ResharingCertificate, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "accepts exceeding MAX_PARTIES must be rejected");
+	}
+
+	/// Regression test (security review): a `ResharingAccept` whose signature
+	/// length prefix claims the maximum but whose body is truncated must fail
+	/// deserialization without allocating the full claimed length up front
+	/// (the chunked `read_length_prefixed` path, mirroring the certificate
+	/// accepts and Round 2/3 broadcasts).
+	#[test]
+	fn test_resharing_accept_rejects_truncated_signature() {
+		// Honest round-trip still works.
+		let accept =
+			ResharingAccept { ssid: TEST_SSID, party_id: 3, signature: alloc::vec![0xAAu8; 4627] };
+		let bytes = borsh::to_vec(&accept).unwrap();
+		let back: ResharingAccept = borsh::from_slice(&bytes).unwrap();
+		assert_eq!(back.party_id, accept.party_id);
+		assert_eq!(back.signature, accept.signature);
+
+		// Claim the maximum signature length but deliver only a few bytes.
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&TEST_SSID); // ssid
+		payload.extend_from_slice(&3u32.to_le_bytes()); // party_id
+		payload.extend_from_slice(&(MAX_ACCEPT_SIGNATURE_LEN as u32).to_le_bytes()); // claimed len
+		payload.extend_from_slice(&[0xBBu8; 8]); // truncated body
+
+		let result: Result<ResharingAccept, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "truncated accept signature must be rejected");
+
+		// A length above the maximum is rejected outright.
+		let mut oversized = Vec::new();
+		oversized.extend_from_slice(&TEST_SSID);
+		oversized.extend_from_slice(&3u32.to_le_bytes());
+		oversized.extend_from_slice(&((MAX_ACCEPT_SIGNATURE_LEN + 1) as u32).to_le_bytes());
+
+		let result: Result<ResharingAccept, _> = borsh::from_slice(&oversized);
+		assert!(result.is_err(), "oversized accept signature length must be rejected");
 	}
 }

@@ -106,7 +106,9 @@ fn acvp_siggen_ml_dsa_87() {
 				if deterministic { None } else { Some(fixed::<32>(&hexs(test, "rnd"), "rnd")) };
 
 			let mut sig = [0u8; SIGNBYTES];
-			crate::sign::signature(&mut sig, &message, &sk, hedge);
+			// The internal (Sign_internal) API hashes the message directly, with no
+			// domain prefix; pass an empty prefix.
+			crate::sign::signature(&mut sig, &[], &message, &sk, hedge);
 
 			assert_eq!(
 				sig.as_slice(),
@@ -136,7 +138,7 @@ fn acvp_sigver_ml_dsa_87() {
 			// A length-mutated signature cannot verify; treat as rejection.
 			let sig_bytes = hexs(test, "signature");
 			let got = match <[u8; SIGNBYTES]>::try_from(sig_bytes.as_slice()) {
-				Ok(sig) => crate::sign::verify(&sig, &message, &pk),
+				Ok(sig) => crate::sign::verify(&sig, &[], &message, &pk),
 				Err(_) => false,
 			};
 

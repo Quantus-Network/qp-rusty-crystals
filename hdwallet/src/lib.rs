@@ -13,6 +13,7 @@ use alloc::{
 use bip39::{Language, Mnemonic};
 use core::str::FromStr;
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
+use unicode_normalization::{is_nfkd_quick, IsNormalized, UnicodeNormalization};
 
 use zeroize::Zeroizing;
 
@@ -98,17 +99,41 @@ pub fn mnemonic_to_seed(
 	parse_mnemonic_to_seed(mnemonic.as_str(), passphrase)
 }
 
+/// NFKD-normalize a potentially secret string. Returns `None` when the input is already
+/// normalized (the common all-ASCII case), so no extra heap copy of the secret is made.
+/// When a normalized copy is required it is wrapped in `Zeroizing` so it is wiped on drop.
+fn nfkd_owned(s: &str) -> Option<Zeroizing<String>> {
+	match is_nfkd_quick(s.chars()) {
+		IsNormalized::Yes => None,
+		// `Maybe` is treated as not-normalized; NFKD is idempotent, so re-normalizing is safe.
+		_ => Some(Zeroizing::new(s.nfkd().collect())),
+	}
+}
+
 /// Shared parser that does not take ownership of the mnemonic.
 /// Used by both `mnemonic_to_seed` (which owns and zeroizes the String) and the
 /// `derive_*_from_mnemonic` helpers (which borrow the caller's `&str` and avoid
 /// the redundant heap copy a `to_string()` would create).
+///
+/// BIP39 requires NFKD Unicode normalization of both the mnemonic and the passphrase
+/// before PBKDF2. The bip39 crate's `parse_in_normalized`/`to_seed_normalized` APIs
+/// assume the *caller* already normalized their inputs, so we normalize here. Without
+/// this, canonically equivalent inputs (e.g. a composed "é" vs a decomposed "e"+combining
+/// accent in a passphrase) would silently derive different seeds and thus different keys.
 fn parse_mnemonic_to_seed(
 	mnemonic: &str,
 	passphrase: Option<&str>,
 ) -> Result<[u8; 64], HDLatticeError> {
+	let normalized_mnemonic = nfkd_owned(mnemonic);
+	let mnemonic = normalized_mnemonic.as_ref().map_or(mnemonic, |m| m.as_str());
+
+	let passphrase = passphrase.unwrap_or("");
+	let normalized_passphrase = nfkd_owned(passphrase);
+	let passphrase = normalized_passphrase.as_ref().map_or(passphrase, |p| p.as_str());
+
 	let parsed_mnemonic = Mnemonic::parse_in_normalized(Language::English, mnemonic)
 		.map_err(|e| HDLatticeError::Bip39Error(e.to_string()))?;
-	Ok(parsed_mnemonic.to_seed_normalized(passphrase.unwrap_or("")))
+	Ok(parsed_mnemonic.to_seed_normalized(passphrase))
 }
 
 /// Derive a Dilithium keypair from a seed at the given BIP44 path

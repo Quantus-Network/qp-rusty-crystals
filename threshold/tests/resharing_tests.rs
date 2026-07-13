@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 
 use qp_rusty_crystals_threshold::{
-	compute_ssid, convert_shares, generate_subsets_of_size, generate_with_dealer,
-	get_hyperball_params, verify_signature, ParticipantList, PrivateKeyShare, PublicKey,
-	Round1Broadcast, Round2Broadcast, Round3Broadcast, ThresholdConfig, ThresholdSigner,
+	compute_ssid, generate_with_dealer, get_hyperball_params, verify_signature, ParticipantList,
+	PrivateKeyShare, PublicKey, Round1Broadcast, Round2Broadcast, Round3Broadcast, ThresholdConfig,
+	ThresholdSigner,
 };
 
 use qp_rusty_crystals_threshold::resharing::{
@@ -18,6 +18,25 @@ use qp_rusty_crystals_threshold::resharing::{
 
 mod common;
 use common::{new_test_protocol, TestSigner};
+
+/// Local reimplementation of the crate's (now crate-private) subset enumerator,
+/// used only to build expected combinations in these tests. The crate no longer
+/// re-exports its internal `generate_subsets_of_size` helper.
+fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
+	if size == 0 || size > n || n > 16 {
+		return Vec::new();
+	}
+	let mut subsets = Vec::new();
+	let max_val: u32 = 1u32 << n;
+	let mut subset: u32 = (1u32 << size) - 1;
+	while subset < max_val {
+		subsets.push(subset as u16);
+		let c = subset & subset.wrapping_neg();
+		let r = subset + c;
+		subset = (((r ^ subset) >> 2) / c) | r;
+	}
+	subsets
+}
 
 /// Helper to run the resharing protocol locally with simulated message passing.
 fn run_resharing_protocol(
@@ -2762,7 +2781,7 @@ fn test_coefficient_growth_tracking() {
 	// Get baseline coefficient stats from DKG shares
 	println!("Round 0 (DKG baseline):");
 	for share in &dkg_shares {
-		let (max_abs, min_c, max_c) = share.coefficient_stats();
+		let (max_abs, min_c, max_c) = coefficient_stats(share);
 		println!("  Party {}: max_abs={}, range=[{}, {}]", share.party_id(), max_abs, min_c, max_c);
 	}
 
@@ -2794,7 +2813,7 @@ fn test_coefficient_growth_tracking() {
 			println!("\nRound {}:", round);
 			for party_id in [0, 1, 2] {
 				let share = current_shares.get(&party_id).unwrap();
-				let (max_abs, min_c, max_c) = share.coefficient_stats();
+				let (max_abs, min_c, max_c) = coefficient_stats(share);
 				println!("  Party {}: max_abs={}, range=[{}, {}]", party_id, max_abs, min_c, max_c);
 			}
 			checkpoint_idx += 1;
@@ -2891,6 +2910,83 @@ fn test_resharing_aborts_on_round4_omission() {
 }
 
 // ============================================================================
+// Test-only secret share extraction
+// ============================================================================
+//
+// `PrivateKeyShare` is intentionally opaque: the production API exposes no way
+// to read the secret s1/s2 subset shares. The statistical analyses below need
+// the raw coefficients, so the tests recover them from the share's borsh
+// serialization (which necessarily contains the secret material, since shares
+// must be storable). These mirror structs replicate the serialized field
+// layout of `PrivateKeyShare`; if that layout changes, deserialization here
+// fails loudly and this block must be updated.
+
+/// Mirror of the crate-private `SecretShareData` (L=7, K=8 for ML-DSA-87).
+#[derive(borsh::BorshDeserialize)]
+struct RawSubsetShare {
+	s1: [[i32; 256]; 7],
+	s2: [[i32; 256]; 8],
+}
+
+/// Mirror of `PrivateKeyShare`'s borsh layout.
+#[allow(dead_code)]
+#[derive(borsh::BorshDeserialize)]
+struct RawPrivateKeyShare {
+	party_id: u32,
+	total_parties: u32,
+	threshold: u32,
+	/// `ParticipantList` serializes as just its sorted participants vector.
+	dkg_participants: Vec<u32>,
+	key: [u8; 32],
+	rho: [u8; 32],
+	tr: [u8; 64],
+	shares: std::collections::BTreeMap<u16, RawSubsetShare>,
+}
+
+/// Extract the secret subset shares from a `PrivateKeyShare` via serialization.
+fn extract_subset_shares(
+	share: &PrivateKeyShare,
+) -> std::collections::BTreeMap<u16, RawSubsetShare> {
+	let bytes = borsh::to_vec(share).expect("serialize private key share");
+	let raw: RawPrivateKeyShare =
+		borsh::from_slice(&bytes).expect("parse serialized private key share layout");
+	raw.shares
+}
+
+/// Center a coefficient into (-Q/2, Q/2].
+fn center_coefficient(coeff: i32) -> i32 {
+	const Q: i64 = 8380417;
+	const HALF_Q: i64 = Q / 2;
+	let c = coeff as i64;
+	(if c > HALF_Q { c - Q } else { c }) as i32
+}
+
+/// Collect all centered coefficients from all subset shares of one share.
+fn collect_share_coefficients(share: &PrivateKeyShare) -> Vec<i32> {
+	let mut coeffs = Vec::new();
+	for data in extract_subset_shares(share).values() {
+		for poly in data.s1.iter().chain(data.s2.iter()) {
+			coeffs.extend(poly.iter().map(|&c| center_coefficient(c)));
+		}
+	}
+	coeffs
+}
+
+/// Compute `(max_abs_coeff, min_coeff, max_coeff)` over the centered
+/// coefficients of all subset shares of one share.
+fn coefficient_stats(share: &PrivateKeyShare) -> (i32, i32, i32) {
+	let mut max_abs: i32 = 0;
+	let mut min_coeff: i32 = 0;
+	let mut max_coeff: i32 = 0;
+	for c in collect_share_coefficients(share) {
+		max_abs = max_abs.max(c.abs());
+		min_coeff = min_coeff.min(c);
+		max_coeff = max_coeff.max(c);
+	}
+	(max_abs, min_coeff, max_coeff)
+}
+
+// ============================================================================
 // Coefficient Distribution Analysis
 // ============================================================================
 
@@ -2898,7 +2994,7 @@ fn test_resharing_aborts_on_round4_omission() {
 fn collect_coefficients(shares: &HashMap<u32, PrivateKeyShare>) -> Vec<i32> {
 	let mut coeffs = Vec::new();
 	for share in shares.values() {
-		coeffs.extend(share.collect_all_coefficients());
+		coeffs.extend(collect_share_coefficients(share));
 	}
 	coeffs
 }
@@ -3429,7 +3525,7 @@ fn extract_recovered_coefficients(
 		return None;
 	}
 
-	let shares = convert_shares(share);
+	let shares = extract_subset_shares(share);
 	let threshold = share.threshold();
 	let parties = share.total_parties();
 	let t = threshold as usize;
@@ -3488,15 +3584,15 @@ fn extract_recovered_coefficients(
 		}
 
 		if let Some(secret_share) = shares.get(&u_translated) {
-			for (poly_idx, poly) in secret_share.s1_share.vec.iter().enumerate().take(7) {
-				for (coeff_idx, &coeff) in poly.coeffs.iter().enumerate() {
+			for (poly_idx, poly) in secret_share.s1.iter().enumerate() {
+				for (coeff_idx, &coeff) in poly.iter().enumerate() {
 					let c = coeff as i64;
 					let centered = if c > HALF_Q { c - Q } else { c };
 					s1_acc[poly_idx * 256 + coeff_idx] += centered;
 				}
 			}
-			for (poly_idx, poly) in secret_share.s2_share.vec.iter().enumerate().take(8) {
-				for (coeff_idx, &coeff) in poly.coeffs.iter().enumerate() {
+			for (poly_idx, poly) in secret_share.s2.iter().enumerate() {
+				for (coeff_idx, &coeff) in poly.iter().enumerate() {
 					let c = coeff as i64;
 					let centered = if c > HALF_Q { c - Q } else { c };
 					s2_acc[poly_idx * 256 + coeff_idx] += centered;
@@ -4097,7 +4193,8 @@ fn test_certificate_verification_rejects_missing_or_wrong_accepts() {
 
 	let ssid = [7u8; 32];
 	let transcript_hash = [9u8; 32];
-	let accept_hash = compute_accept_hash(&ssid, &transcript_hash);
+	let active_set = vec![0u32, 1u32];
+	let accept_hash = compute_accept_hash(&ssid, &transcript_hash, &active_set);
 	let new_participants = vec![0u32, 1u32];
 	let keys: BTreeMap<u32, u32> = new_participants.iter().map(|&p| (p, p)).collect();
 
@@ -4105,12 +4202,7 @@ fn test_certificate_verification_rejects_missing_or_wrong_accepts() {
 	accepts.insert(0, Signer { id: 0 }.sign(&accept_hash));
 	accepts.insert(1, Signer { id: 1 }.sign(&accept_hash));
 
-	let cert = ResharingCertificate {
-		ssid,
-		active_set: vec![0, 1],
-		transcript_hash,
-		accepts: accepts.clone(),
-	};
+	let cert = ResharingCertificate { ssid, active_set, transcript_hash, accepts: accepts.clone() };
 	assert!(cert.verify::<Signer>(&new_participants, &keys), "valid certificate must verify");
 
 	// Missing an acceptance.
@@ -4119,7 +4211,7 @@ fn test_certificate_verification_rejects_missing_or_wrong_accepts() {
 	assert!(!missing.verify::<Signer>(&new_participants, &keys));
 
 	// Acceptance over a different transcript hash.
-	let other_hash = compute_accept_hash(&ssid, &[10u8; 32]);
+	let other_hash = compute_accept_hash(&ssid, &[10u8; 32], &cert.active_set);
 	let mut wrong = cert.clone();
 	wrong.accepts.insert(1, Signer { id: 1 }.sign(&other_hash));
 	assert!(!wrong.verify::<Signer>(&new_participants, &keys));
@@ -4128,6 +4220,54 @@ fn test_certificate_verification_rejects_missing_or_wrong_accepts() {
 	let mut forged = cert;
 	forged.accepts.insert(1, Signer { id: 0 }.sign(&accept_hash));
 	assert!(!forged.verify::<Signer>(&new_participants, &keys));
+}
+
+/// A certificate's `active_set` must be authenticated by the acceptance
+/// signatures. Rewriting `active_set` while leaving `ssid`, `transcript_hash`,
+/// and `accepts` untouched must make verification fail — otherwise an attacker
+/// could publish a certificate that falsely names the old committee members who
+/// participated in the handoff.
+#[test]
+fn test_certificate_rejects_forged_active_set() {
+	use common::TestSigner as Signer;
+	use qp_rusty_crystals_threshold::resharing::{
+		compute_accept_hash, ResharingCertificate, TranscriptSigner as _,
+	};
+	use std::collections::BTreeMap;
+
+	let ssid = [7u8; 32];
+	let transcript_hash = [9u8; 32];
+	// The active set the new committee actually attested to.
+	let real_active_set = vec![0u32, 1u32, 2u32];
+	let accept_hash = compute_accept_hash(&ssid, &transcript_hash, &real_active_set);
+
+	let new_participants = vec![0u32, 1u32];
+	let keys: BTreeMap<u32, u32> = new_participants.iter().map(|&p| (p, p)).collect();
+
+	let mut accepts: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+	accepts.insert(0, Signer { id: 0 }.sign(&accept_hash));
+	accepts.insert(1, Signer { id: 1 }.sign(&accept_hash));
+
+	let cert = ResharingCertificate { ssid, active_set: real_active_set, transcript_hash, accepts };
+	assert!(cert.verify::<Signer>(&new_participants, &keys), "honest certificate must verify");
+
+	// Attacker rewrites active_set (drops party 2 / claims a different handoff
+	// set) but keeps ssid, transcript_hash, and the collected signatures. With
+	// active_set bound into the acceptance hash, verification must now fail.
+	let mut forged = cert.clone();
+	forged.active_set = vec![0u32, 1u32];
+	assert!(
+		!forged.verify::<Signer>(&new_participants, &keys),
+		"certificate with a forged active_set must not verify"
+	);
+
+	// Reordering the members is also a mutation of the signed set.
+	let mut reordered = cert;
+	reordered.active_set = vec![2u32, 1u32, 0u32];
+	assert!(
+		!reordered.verify::<Signer>(&new_participants, &keys),
+		"certificate with a reordered active_set must not verify"
+	);
 }
 
 // ============================================================================

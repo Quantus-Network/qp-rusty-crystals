@@ -39,7 +39,7 @@ const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v2"
 /// Derive a DKG contribution from a master share and tweak.
 ///
 /// This function produces a deterministic 32-byte value that a party uses
-/// as their randomness contribution in the DKG protocol. The contribution
+/// as their per-party seed input in the DKG protocol. The contribution
 /// incorporates secret material from the master share, ensuring that:
 ///
 /// 1. Only parties with valid master shares can compute their contribution
@@ -52,7 +52,17 @@ const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v2"
 /// * `tweak` - The derivation tweak (computed from account_id + path by the caller)
 ///
 /// # Returns
-/// A 32-byte contribution for DKG randomness
+/// A 32-byte contribution passed as the `seed` argument to [`crate::keygen::dkg::Dkg::new`].
+///
+/// # Session freshness
+///
+/// The contribution alone does **not** include a DKG session nonce. Callers
+/// **must** supply a fresh, unique `session_nonce` to [`crate::keygen::dkg::Dkg::new`]
+/// for every DKG attempt (including retries of the same derived key). Round 1
+/// randomness and leader subset secrets are derived from both this seed and the
+/// session SSID (which incorporates `session_nonce`), so a retry with a new
+/// nonce produces fresh honest randomness even though the contribution is
+/// unchanged.
 ///
 /// # Security
 ///

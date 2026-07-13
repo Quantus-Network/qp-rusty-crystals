@@ -3,6 +3,8 @@
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
+use qp_rusty_crystals_dilithium::ml_dsa_87::MAX_MESSAGE_SIZE;
+
 /// Result type for threshold operations.
 pub type ThresholdResult<T> = Result<T, ThresholdError>;
 
@@ -25,12 +27,24 @@ pub enum ThresholdError {
 		/// Maximum valid party ID.
 		max_id: u32,
 	},
-	/// Wrong number of parties (requires exactly threshold).
+	/// Wrong number of parties for Round 2 setup (requires exactly threshold).
 	WrongPartyCount {
 		/// Number of parties provided.
 		provided: usize,
-		/// Required threshold (exact).
+		/// Required signing-set size (equal to threshold under the protocol).
 		required: u32,
+	},
+	/// Round 3 reveal set does not match the signing session recorded at Round 2.
+	///
+	/// Distinct from [`ThresholdError::WrongPartyCount`]: this fires when the
+	/// caller supplies too few or too many Round 2 reveals relative to
+	/// `active_participants`, not when Round 2 is started with the wrong number
+	/// of parties.
+	RevealSetMismatch {
+		/// Total parties implied by the supplied reveals (others + self).
+		provided: usize,
+		/// Expected signing-session size from Round 2.
+		expected: u32,
 	},
 	/// Invalid signature share.
 	InvalidSignatureShare {
@@ -76,6 +90,15 @@ pub enum ThresholdError {
 	},
 	/// Context too long (must be ≤ 255 bytes).
 	ContextTooLong {
+		/// Length provided.
+		length: usize,
+	},
+	/// Message too long (must be ≤ [`MAX_MESSAGE_SIZE`]).
+	///
+	/// Messages above this bound are rejected by ML-DSA verification, so signing
+	/// them can never yield a usable signature; rejecting up front denies a
+	/// low-cost denial-of-service vector on the direct signer path.
+	MessageTooLong {
 		/// Length provided.
 		length: usize,
 	},
@@ -189,8 +212,15 @@ impl fmt::Display for ThresholdError {
 			ThresholdError::WrongPartyCount { provided, required } => {
 				write!(
 					f,
-					"Wrong party count: provided {}, requires exactly {} (threshold)",
+					"Wrong party count: provided {}, requires exactly {} parties in signing set",
 					provided, required
+				)
+			},
+			ThresholdError::RevealSetMismatch { provided, expected } => {
+				write!(
+					f,
+					"Round 3 reveal set mismatch: {} parties in reveal set, expected exactly {} for this signing session",
+					provided, expected
 				)
 			},
 			ThresholdError::InvalidSignatureShare { party_id, reason } => {
@@ -217,6 +247,9 @@ impl fmt::Display for ThresholdError {
 			},
 			ThresholdError::ContextTooLong { length } => {
 				write!(f, "Context too long: {} bytes (max: 255)", length)
+			},
+			ThresholdError::MessageTooLong { length } => {
+				write!(f, "Message too long: {} bytes (max: {})", length, MAX_MESSAGE_SIZE)
 			},
 			ThresholdError::CombinationFailed => {
 				write!(f, "Signature combination failed")
@@ -338,6 +371,18 @@ pub fn validate_context(ctx: &[u8]) -> ThresholdResult<()> {
 	Ok(())
 }
 
+/// Validate message length against the ML-DSA [`MAX_MESSAGE_SIZE`] bound.
+///
+/// The direct `ThresholdSigner` path must enforce this before hashing/cloning
+/// attacker-controlled bytes: a message above the bound cannot produce a
+/// verifiable signature, so accepting it only wastes memory and CPU.
+pub fn validate_message(message: &[u8]) -> ThresholdResult<()> {
+	if message.len() > MAX_MESSAGE_SIZE {
+		return Err(ThresholdError::MessageTooLong { length: message.len() });
+	}
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -372,5 +417,20 @@ mod tests {
 	#[test]
 	fn test_invalid_context() {
 		assert!(validate_context(&vec![0u8; 256]).is_err());
+	}
+
+	#[test]
+	fn reveal_set_mismatch_display_distinguishes_from_wrong_party_count() {
+		let reveal_err = ThresholdError::RevealSetMismatch { provided: 1, expected: 2 };
+		let party_err = ThresholdError::WrongPartyCount { provided: 1, required: 2 };
+
+		let reveal_display = reveal_err.to_string();
+		let party_display = party_err.to_string();
+
+		assert!(reveal_display.contains("reveal set"));
+		assert!(reveal_display.contains("signing session"));
+		assert!(!reveal_display.contains("threshold"));
+		assert!(party_display.contains("signing set"));
+		assert!(!party_display.contains("threshold"));
 	}
 }

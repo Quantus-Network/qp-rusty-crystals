@@ -39,7 +39,7 @@
 //! do not advance past those states until they know `Act`.
 
 use alloc::{
-	collections::BTreeMap,
+	collections::{BTreeMap, BTreeSet},
 	format,
 	string::{String, ToString},
 	vec::Vec,
@@ -1595,7 +1595,12 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			return self.handle_accept_waiting();
 		}
 
-		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash);
+		let active_set = self.active_set.clone().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"AcceptGenerate reached without an agreed active set".to_string(),
+			)
+		})?;
+		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash, &active_set);
 		let signature = self.signer_config.my_signer.sign(&accept_hash);
 		let my_id = self.config.my_party_id();
 		self.accepts.insert(my_id, signature.as_ref().to_vec());
@@ -1623,10 +1628,16 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			return Ok(Action::Wait);
 		}
 
+		let active_set = self.active_set.clone().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"AcceptWaiting reached without an agreed active set".to_string(),
+			)
+		})?;
+
 		// Verify every signature against *our own* transcript hash. A signer
 		// that observed a different transcript (dealer equivocation, tampered
 		// broadcast) produces a signature that fails here, and we abort.
-		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash);
+		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash, &active_set);
 		for p in &new_participants {
 			let pk = self.signer_config.verifying_keys.get(p).ok_or_else(|| {
 				ResharingProtocolError::InternalError(format!(
@@ -1648,7 +1659,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 
 		let certificate = ResharingCertificate {
 			ssid: self.ssid,
-			active_set: self.active_set.clone().expect("set before transcript hash"),
+			active_set,
 			transcript_hash,
 			accepts: self.accepts.clone(),
 		};
@@ -2130,9 +2141,27 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	///
 	/// Only accepts partial PK contributions from parties that are actually in the new subset.
 	fn verify_public_key_preservation(&self) -> Result<(), ResharingProtocolError> {
+		// The public key is the sum of exactly one partial PK per canonical new subset
+		// (`new_subset_order`). Any other `j_mask` is not part of that sum, so we must
+		// reject it outright rather than fold it in: otherwise a new committee member could
+		// inject an extra term keyed by a non-canonical superset mask that still contains
+		// its own index bit (e.g. the full-committee mask) with an attacker-chosen
+		// `t_partial`, and use it to cancel a public-key deviation introduced by corrupted
+		// residuals — making this invariant check pass on a broken reshare.
+		let allowed_masks: BTreeSet<SubsetMask> = self.new_subset_order.iter().copied().collect();
+
 		let mut canonical: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
 		for (party, broadcast) in &self.round5_broadcasts {
 			for (j_mask, t_partial) in &broadcast.partial_pks {
+				// Reject partial PKs keyed by any mask that is not a canonical new subset.
+				// An honest party never broadcasts one; a malicious party could use it to
+				// smuggle a compensating term into the public-key sum.
+				if !allowed_masks.contains(j_mask) {
+					return Err(ResharingProtocolError::ShareVerificationFailed(format!(
+						"party {} broadcast a partial PK for non-canonical subset {:b}",
+						party, j_mask
+					)));
+				}
 				// Only accept partial PKs from parties that are in this new subset
 				if !self.config.new_participants().is_in_mask(*party, *j_mask) {
 					log::warn!(
@@ -2166,7 +2195,15 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			}
 		}
 		let rho = self.derive_rho();
-		let recovered = crate::protocol::partial_pk::pack_combined_pk(&rho, canonical.values());
+		// Reject partial PKs with non-canonical coefficients. An attacker-supplied
+		// coefficient near i32::MAX would otherwise overflow the i32 accumulation
+		// inside `pack_combined_pk` (panic in debug, silent wrap in release).
+		let recovered = crate::protocol::partial_pk::pack_combined_pk(&rho, canonical.values())
+			.map_err(|_| {
+				ResharingProtocolError::ShareVerificationFailed(
+					"a Round 5 partial public key contains out-of-range coefficients".to_string(),
+				)
+			})?;
 		if recovered.as_bytes() != self.config.public_key().as_bytes() {
 			return Err(ResharingProtocolError::ShareVerificationFailed(
 				"recovered public key does not match the original — a dealer corrupted at \
@@ -2815,7 +2852,7 @@ mod tests {
 	const TEST_SSID: [u8; RESHARING_SSID_SIZE] = [0xABu8; RESHARING_SSID_SIZE];
 
 	/// Minimal transcript signer for unit tests: "signature" = party_id || hash.
-	#[derive(Clone)]
+	#[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 	pub(crate) struct TestSigner {
 		pub id: u32,
 	}
@@ -3287,6 +3324,67 @@ mod tests {
 	}
 
 	#[test]
+	fn test_public_key_preservation_rejects_non_canonical_mask() {
+		// Regression test (security review): `verify_public_key_preservation` must reject a
+		// Round 5 broadcast that carries a partial PK keyed by a mask outside the canonical
+		// `new_subset_order`. Otherwise a malicious new committee member could inject an
+		// extra term keyed by a superset mask that still contains its own index bit (e.g.
+		// the full-committee mask) with an attacker-chosen `t_partial`, and use it to cancel
+		// a public-key deviation introduced by corrupted residuals — passing the invariant
+		// check on a broken reshare.
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[13u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[0].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(0, &[0, 1, 2]),
+			[1u8; 32],
+			&[2u8; 32],
+			0,
+		);
+
+		// With new n = 3, threshold = 2, the canonical subsets are the size-2 masks
+		// {0b011, 0b101, 0b110}. The full-committee mask 0b111 is never canonical, yet it
+		// contains party 0's index bit, so the old `is_in_mask` gate would have accepted it.
+		let full_mask: SubsetMask = 0b111;
+		assert!(
+			!protocol.new_subset_order.contains(&full_mask),
+			"full-committee mask must not be a canonical subset"
+		);
+		assert!(protocol.config.new_participants().is_in_mask(0, full_mask));
+
+		let mut protocol = protocol;
+		let mut partial_pks: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
+		partial_pks.insert(full_mask, [[7i32; N as usize]; K]);
+		protocol.round5_broadcasts.insert(
+			0,
+			ResharingRound5Broadcast {
+				ssid: protocol.ssid,
+				party_id: 0,
+				share_commitments: BTreeMap::new(),
+				partial_pks,
+				success: true,
+				error_message: None,
+			},
+		);
+
+		let err = protocol
+			.verify_public_key_preservation()
+			.expect_err("non-canonical partial PK mask must be rejected");
+		assert!(err.to_string().contains("non-canonical subset"), "unexpected error: {}", err);
+	}
+
+	#[test]
 	fn test_protocol_error_display() {
 		let err = ResharingProtocolError::InvalidState("test".to_string());
 		assert!(err.to_string().contains("Invalid state"));
@@ -3335,6 +3433,30 @@ mod tests {
 
 		share.s1[L - 1][N as usize - 1] = 500;
 		assert_eq!(share.max_abs_coefficient(), 500);
+	}
+
+	/// A malicious dealer can set a coefficient to `i32::MIN`, whose magnitude
+	/// (2_147_483_648) is not representable as a positive `i32`. `i32::abs()`
+	/// would panic on it in overflow-checking builds and wrap back to
+	/// `i32::MIN` (still negative) in release builds, letting the oversized
+	/// coefficient pass the `> bound` check. The fixed helpers use
+	/// `unsigned_abs()` and must reject it in every build profile.
+	#[test]
+	fn test_coefficients_within_bound_rejects_i32_min() {
+		let mut share = NewShareData::new();
+		share.s1[0][0] = i32::MIN;
+		assert!(
+			!share.coefficients_within_bound(SUBSHARE_COEFF_BOUND),
+			"i32::MIN coefficient must be rejected, not silently accepted"
+		);
+		// The diagnostic must report the true magnitude without overflowing.
+		assert_eq!(share.max_abs_coefficient(), 2_147_483_648u32);
+
+		// The same edge case in s2.
+		let mut share = NewShareData::new();
+		share.s2[K - 1][N as usize - 1] = i32::MIN;
+		assert!(!share.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+		assert_eq!(share.max_abs_coefficient(), 2_147_483_648u32);
 	}
 
 	#[test]

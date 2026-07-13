@@ -85,8 +85,8 @@
 //!
 //! The hyperball sampling parameters are pre-computed to accommodate this wider
 //! distribution with substantial safety margins (>99% headroom in tested
-//! configurations). The `coefficient_stats()` method on `PrivateKeyShare` can
-//! be used to monitor coefficient ranges if desired.
+//! configurations). Coefficient ranges are monitored by the analysis helpers
+//! in the integration test suite (see `threshold/tests/resharing_tests.rs`).
 //!
 //! # Usage
 //!
@@ -236,7 +236,7 @@ mod tests {
 	/// Test session nonce for DKG tests.
 	const TEST_SESSION_NONCE: [u8; 32] = [0xDF; 32];
 
-	#[derive(Clone, Debug)]
+	#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 	struct TestSigner {
 		id: u32,
 	}

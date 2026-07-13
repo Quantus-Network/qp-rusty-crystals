@@ -243,13 +243,16 @@ impl fmt::Display for SignProtocolError {
 pub struct Round4Broadcast {
 	/// Session identifier binding this message to a specific signing session.
 	pub ssid: [u8; SSID_SIZE],
-	/// The combined signature bytes.
-	pub signature: Vec<u8>,
+	/// The combined signature. Using the exact-size [`Signature`] type (rather
+	/// than a raw `Vec<u8>`) bounds deserialization to exactly `SIGNATURE_SIZE`
+	/// bytes, so a malformed Round 4 message cannot advertise an oversized
+	/// signature payload before the SSID/leader checks run.
+	pub signature: Signature,
 }
 
 impl Round4Broadcast {
 	/// Create a new Round 4 broadcast.
-	pub fn new(ssid: [u8; SSID_SIZE], signature: Vec<u8>) -> Self {
+	pub fn new(ssid: [u8; SSID_SIZE], signature: Signature) -> Self {
 		Self { ssid, signature }
 	}
 }
@@ -944,10 +947,7 @@ impl DilithiumSignProtocol {
 				match self.signer.combine(&r2_vec, &r3_vec) {
 					Ok(signature) => {
 						// Success! Broadcast signature to all parties
-						let r4 = Round4Broadcast {
-							ssid: self.ssid,
-							signature: signature.as_bytes().to_vec(),
-						};
+						let r4 = Round4Broadcast { ssid: self.ssid, signature: signature.clone() };
 						let msg = SigningMessage::Round4Complete(r4);
 						let data = self.serialize_message(&msg)?;
 						self.state = SignProtocolState::Done;
@@ -1168,10 +1168,9 @@ impl DilithiumSignProtocol {
 				}
 
 				if matches!(self.state, SignProtocolState::WaitingForLeaderDecision) {
-					// We're ready for it - process immediately
-					if let Some(signature) = Signature::from_bytes(&r4.signature) {
-						self.received_signature = Some(signature);
-					}
+					// We're ready for it - process immediately. The signature was
+					// already length-validated during deserialization.
+					self.received_signature = Some(r4.signature);
 				} else if matches!(
 					self.state,
 					SignProtocolState::Round1Generate |
@@ -1255,10 +1254,9 @@ impl DilithiumSignProtocol {
 	/// collected all Round 3 messages (possible when network ordering is not guaranteed).
 	fn process_buffered_round4_complete(&mut self) {
 		if let Some(r4) = self.message_buffer.take_round4_complete() {
-			// SSID already verified when the message was received
-			if let Some(signature) = Signature::from_bytes(&r4.signature) {
-				self.received_signature = Some(signature);
-			}
+			// SSID already verified when the message was received; the signature
+			// was length-validated during deserialization.
+			self.received_signature = Some(r4.signature);
 		}
 	}
 }
@@ -1932,7 +1930,7 @@ mod tests {
 		// (this can happen if leader finishes all rounds faster)
 		let round4_msg = SigningMessage::Round4Complete(Round4Broadcast {
 			ssid: *follower.ssid(),
-			signature: valid_sig.as_bytes().to_vec(),
+			signature: valid_sig.clone(),
 		});
 		let round4_data = follower.serialize_message(&round4_msg).unwrap();
 		follower.message(0, round4_data).unwrap();
@@ -2400,5 +2398,32 @@ mod tests {
 		);
 
 		assert!(result.is_ok(), "Should accept 255-byte context");
+	}
+
+	/// A Round 4 message whose signature field is not exactly `SIGNATURE_SIZE`
+	/// bytes must be rejected at deserialization. Before switching the field to
+	/// the exact-size `Signature` type, the derived `Vec<u8>` deserializer
+	/// accepted any length up to the message cap.
+	#[test]
+	fn test_round4_rejects_wrong_size_signature() {
+		use crate::broadcast::SIGNATURE_SIZE;
+
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&[0xABu8; SSID_SIZE]); // ssid
+		payload.extend_from_slice(&100u32.to_le_bytes()); // sig len = 100 (wrong)
+		payload.extend_from_slice(&[0u8; 100]);
+
+		let result: Result<Round4Broadcast, _> = borsh::from_slice(&payload);
+		assert!(
+			result.is_err(),
+			"Round4Broadcast must reject a signature that is not SIGNATURE_SIZE bytes"
+		);
+
+		// A correctly-sized signature round-trips.
+		let sig = Signature::from_bytes(&[7u8; SIGNATURE_SIZE]).unwrap();
+		let r4 = Round4Broadcast::new([0xABu8; SSID_SIZE], sig);
+		let bytes = borsh::to_vec(&r4).unwrap();
+		let recovered: Round4Broadcast = borsh::from_slice(&bytes).unwrap();
+		assert_eq!(recovered.signature.as_bytes(), r4.signature.as_bytes());
 	}
 }

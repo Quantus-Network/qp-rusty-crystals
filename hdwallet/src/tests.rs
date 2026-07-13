@@ -322,8 +322,8 @@ mod hdwallet_tests {
 			"wormhole first_hash derivation changed"
 		);
 		assert_eq!(
-			w.secret,
-			hex!("30051cfa3abd462d3bc26da2d660e90ba8af6080b7fe95d9fd3f3b37c7d9ce4b"),
+			w.secret.as_bytes(),
+			&hex!("30051cfa3abd462d3bc26da2d660e90ba8af6080b7fe95d9fd3f3b37c7d9ce4b"),
 			"wormhole secret derivation changed"
 		);
 	}
@@ -337,7 +337,7 @@ mod hdwallet_tests {
 		let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
 		println!("address    = {}", hex(&w.address));
 		println!("first_hash = {}", hex(&w.first_hash));
-		println!("secret     = {}", hex(&w.secret));
+		println!("secret     = {}", hex(w.secret.as_bytes()));
 	}
 
 	#[test]
@@ -402,6 +402,55 @@ mod hdwallet_tests {
 	}
 
 	#[test]
+	fn test_passphrase_unicode_normalization() {
+		// BIP39 mandates NFKD normalization before PBKDF2: canonically equivalent
+		// passphrases must derive the same seed. "café" spelled with a precomposed
+		// U+00E9 vs a decomposed "e" + U+0301 combining acute accent.
+		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let composed = "caf\u{00e9}";
+		let decomposed = "cafe\u{0301}";
+		assert_ne!(composed.as_bytes(), decomposed.as_bytes());
+
+		let seed_composed = mnemonic_to_seed(mnemonic.to_string(), Some(composed)).unwrap();
+		let seed_decomposed = mnemonic_to_seed(mnemonic.to_string(), Some(decomposed)).unwrap();
+		assert_eq!(
+			seed_composed, seed_decomposed,
+			"canonically equivalent passphrases must derive the same seed"
+		);
+
+		// The normalized form must feed PBKDF2 (NFKD of both spellings is the
+		// decomposed byte string), matching what standard BIP39 tooling computes.
+		let reference = bip39::Mnemonic::parse_in_normalized(bip39::Language::English, mnemonic)
+			.unwrap()
+			.to_seed_normalized(decomposed);
+		assert_eq!(seed_composed, reference);
+
+		// Same guarantee through the borrowing derivation helpers.
+		let key_composed =
+			crate::derive_key_from_mnemonic(mnemonic, Some(composed), "m/44'/189189'/0'/0'/0'")
+				.unwrap();
+		let key_decomposed =
+			crate::derive_key_from_mnemonic(mnemonic, Some(decomposed), "m/44'/189189'/0'/0'/0'")
+				.unwrap();
+		assert_eq!(key_composed.secret.to_bytes(), key_decomposed.secret.to_bytes());
+	}
+
+	#[test]
+	fn test_mnemonic_unicode_normalization() {
+		// NFKD also applies to the mnemonic itself: U+00A0 (no-break space) has a
+		// compatibility decomposition to a plain space, so a mnemonic pasted with
+		// non-breaking separators must parse and derive identically.
+		let ascii = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let nbsp = ascii.replace(' ', "\u{00a0}");
+		assert_ne!(ascii.as_bytes(), nbsp.as_bytes());
+
+		let seed_ascii = mnemonic_to_seed(ascii.to_string(), None).unwrap();
+		let seed_nbsp = mnemonic_to_seed(nbsp, None)
+			.expect("NFKD-equivalent mnemonic must parse after normalization");
+		assert_eq!(seed_ascii, seed_nbsp);
+	}
+
+	#[test]
 	fn test_derive_key_from_seed_different_paths() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
@@ -452,10 +501,10 @@ mod hdwallet_tests {
 			generate_wormhole_from_seed((&mut seed).into(), "m/44'/189189189'/0'").unwrap();
 
 		// Verify wormhole pair has expected structure
-		assert_eq!(wormhole.secret.len(), 32);
+		assert_eq!(wormhole.secret.as_bytes().len(), 32);
 		assert_eq!(wormhole.address.len(), 32);
 		assert_eq!(wormhole.first_hash.len(), 32);
-		assert_ne!(wormhole.secret, [0u8; 32]);
+		assert_ne!(wormhole.secret.as_bytes(), &[0u8; 32]);
 		assert_ne!(wormhole.address, [0u8; 32]);
 	}
 

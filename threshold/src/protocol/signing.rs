@@ -208,7 +208,11 @@ pub(crate) fn verify_commitment_hash(
 }
 
 /// Convert PrivateKeyShare to the SecretShare format used by recover_share.
-pub fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
+///
+/// This copies the raw secret `s1`/`s2` share material, so it must remain
+/// crate-internal: exposing it publicly would defeat the intentional opacity
+/// of `PrivateKeyShare`.
+pub(crate) fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
 	let mut shares: BTreeMap<u16, SecretShare> = BTreeMap::new();
 
 	for (subset_id, share_data) in share.shares() {
@@ -503,6 +507,9 @@ pub(crate) fn process_round2(
 	context: &[u8],
 	other_party_ids: &[ParticipantId],
 ) -> ThresholdResult<Round2Data> {
+	// Enforce the ML-DSA size bounds before hashing/cloning attacker-controlled
+	// input: oversized messages can never yield a verifiable signature.
+	crate::error::validate_message(message)?;
 	crate::error::validate_context(context)?;
 
 	let k = config.k_iterations() as usize;
@@ -612,7 +619,7 @@ pub(crate) fn generate_round3_response(
 		// Note: SSID is NOT included in the challenge to maintain compatibility
 		// with standard ML-DSA verification. Cross-session replay protection is
 		// provided by SSID binding in commitment hashes and message validation.
-		let mut w1_packed = vec![0u8; K * POLYW1_PACKEDBYTES];
+		let mut w1_packed = [0u8; K * POLYW1_PACKEDBYTES];
 		polyvec::k_pack_w1(&mut w1_packed, &w1);
 
 		let mut challenge_bytes = [0u8; C_DASH_BYTES];
@@ -701,13 +708,13 @@ pub(crate) fn pack_responses(responses: &[polyvec::Polyvecl]) -> Vec<u8> {
 				}
 			}
 		}
-		// Pack each polynomial
-		for j in 0..L {
-			let poly_offset = offset + j * POLYZ_PACKEDBYTES;
-			poly::z_pack(
-				&mut buf[poly_offset..poly_offset + POLYZ_PACKEDBYTES],
-				&z_centered.vec[j],
-			);
+		// Pack each polynomial. `as_chunks_mut` yields exact-size
+		// `&mut [u8; POLYZ_PACKEDBYTES]` arrays, matching `z_pack`'s signature
+		// without any fallible slice conversion.
+		let (chunks, _) =
+			buf[offset..offset + single_response_size].as_chunks_mut::<POLYZ_PACKEDBYTES>();
+		for (chunk, zj) in chunks.iter_mut().zip(z_centered.vec.iter()).take(L) {
+			poly::z_pack(chunk, zj);
 		}
 	}
 
@@ -742,11 +749,12 @@ pub(crate) fn unpack_responses(
 	for i in 0..k {
 		let start = i * single_response_size;
 		let mut z = polyvec::Polyvecl::default();
-		for j in 0..L {
-			let poly_start = start + j * 640;
-			let poly_end = poly_start + 640;
-			// Size already validated, so this slice is guaranteed to be valid
-			poly::z_unpack(&mut z.vec[j], &data[poly_start..poly_end]);
+		// Size already validated above; `as_chunks` splits the per-response region
+		// into exact-size `&[u8; POLYZ_PACKEDBYTES]` arrays for `z_unpack`.
+		let (chunks, _) =
+			data[start..start + single_response_size].as_chunks::<POLYZ_PACKEDBYTES>();
+		for (chunk, zj) in chunks.iter().zip(z.vec.iter_mut()).take(L) {
+			poly::z_unpack(zj, chunk);
 		}
 		responses.push(z);
 	}
@@ -800,6 +808,8 @@ pub(crate) fn combine_signature(
 	w_aggregated: &[polyvec::Polyveck],
 	all_responses: &[Vec<polyvec::Polyvecl>],
 ) -> ThresholdResult<Vec<u8>> {
+	// Enforce the ML-DSA size bounds before hashing the message into μ.
+	crate::error::validate_message(message)?;
 	crate::error::validate_context(context)?;
 
 	let k_iterations = config.k_iterations() as usize;
@@ -901,7 +911,7 @@ pub(crate) fn combine_signature(
 		// Note: SSID is NOT included in the challenge to maintain compatibility
 		// with standard ML-DSA verification. Cross-session replay protection is
 		// provided by SSID binding in commitment hashes and message validation.
-		let mut w1_packed = vec![0u8; K * POLYW1_PACKEDBYTES];
+		let mut w1_packed = [0u8; K * POLYW1_PACKEDBYTES];
 		polyvec::k_pack_w1(&mut w1_packed, &w1);
 
 		let mut challenge_bytes = [0u8; C_DASH_BYTES];
