@@ -2292,8 +2292,13 @@ mod tests {
 
 		/// Signer that wraps a Dilithium secret key.
 		/// Clone is implemented manually to explicitly copy the secret key bytes.
+		///
+		/// `Zeroize`/`ZeroizeOnDrop` are derived (not marker-implemented) so the
+		/// secret key is provably wiped on drop; the public key is skipped.
+		#[derive(zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 		struct DilithiumSigner {
 			sk: SecretKey,
+			#[zeroize(skip)]
 			pk: PublicKey,
 		}
 
@@ -2313,11 +2318,6 @@ mod tests {
 					.finish()
 			}
 		}
-
-		// `sk` is a dilithium `SecretKey`, which is itself `ZeroizeOnDrop`, so the
-		// secret-key bytes are wiped when this signer is dropped. `pk` is public.
-		// The marker impl satisfies the `TranscriptSigner: ZeroizeOnDrop` bound.
-		impl zeroize::ZeroizeOnDrop for DilithiumSigner {}
 
 		impl TranscriptSigner for DilithiumSigner {
 			type Signature = Vec<u8>;

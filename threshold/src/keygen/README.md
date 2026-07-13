@@ -149,7 +149,7 @@ loop {
 The DKG requires a `TranscriptSigner` implementation for signing transcripts:
 
 ```rust
-pub trait TranscriptSigner {
+pub trait TranscriptSigner: Zeroize + ZeroizeOnDrop {
     type Signature: Clone + AsRef<[u8]>;
     type PublicKey: Clone + PartialEq;
 
@@ -161,6 +161,22 @@ pub trait TranscriptSigner {
 ```
 
 For NEAR MPC, this would typically be Ed25519 or ML-DSA-87 for long-term keys.
+
+Implementors hold the party's long-term signing key, so the trait requires
+`Zeroize + ZeroizeOnDrop`: the DKG state machine erases the signer (and thus
+the key) when the protocol completes or aborts. Prefer deriving both:
+
+```rust
+#[derive(Zeroize, ZeroizeOnDrop)]
+struct MySigner {
+    sk: MySecretKey,      // must implement Zeroize
+    #[zeroize(skip)]
+    pk: MyPublicKey,      // non-secret fields can be skipped
+}
+```
+
+Avoid a bare `impl ZeroizeOnDrop for MySigner {}`: it is only a marker and
+wipes nothing unless every secret field already zeroizes itself on drop.
 
 ### NEAR MPC Compatibility
 

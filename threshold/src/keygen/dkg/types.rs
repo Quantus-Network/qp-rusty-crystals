@@ -50,16 +50,25 @@ use qp_rusty_crystals_dilithium::fips202;
 ///
 /// # Zeroization
 ///
-/// `TranscriptSigner` requires [`ZeroizeOnDrop`] because implementors hold a
-/// long-term signing key (`my_signer` in [`DkgConfig`]). The DKG/resharing
-/// state machines own the signer for the whole protocol lifetime and rely on
-/// dropping the configuration to erase that key at their zeroization boundary.
-/// Making the guarantee part of the trait — rather than an unenforced integrator
-/// convention — ensures a signer holding raw secret-key bytes cannot leave them
-/// in freed process memory after the protocol completes or aborts. Implementors
-/// that wrap already-zeroizing key types (e.g. dilithium's `SecretKey`) can
-/// satisfy this with `#[derive(Zeroize, ZeroizeOnDrop)]` or a marker impl.
-pub trait TranscriptSigner: ZeroizeOnDrop {
+/// `TranscriptSigner` requires [`Zeroize`] + [`ZeroizeOnDrop`] because
+/// implementors hold a long-term signing key (`my_signer` in [`DkgConfig`]).
+/// The DKG/resharing state machines own the signer for the whole protocol
+/// lifetime and rely on dropping the configuration to erase that key at their
+/// zeroization boundary.
+///
+/// **Implement this with `#[derive(Zeroize, ZeroizeOnDrop)]`** (using
+/// `#[zeroize(skip)]` on non-secret fields such as public keys). The derive
+/// requires every non-skipped field to implement `Zeroize` and generates a
+/// real wipe on drop.
+///
+/// Note that `ZeroizeOnDrop` alone is only a marker trait: an empty
+/// `impl ZeroizeOnDrop for MySigner {}` compiles without wiping anything.
+/// Requiring `Zeroize` as well means a hand-written impl must spell out a
+/// `zeroize()` body, making a no-op erasure visible at review time rather than
+/// implied by a bare marker. If you write the impls by hand, `zeroize()` must
+/// overwrite every field that holds secret key material, and your `Drop` must
+/// call it (or each secret field must itself be `ZeroizeOnDrop`).
+pub trait TranscriptSigner: Zeroize + ZeroizeOnDrop {
 	/// The signature type produced by this signer.
 	type Signature: Clone + AsRef<[u8]>;
 

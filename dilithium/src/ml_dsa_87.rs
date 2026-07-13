@@ -158,7 +158,10 @@ impl fmt::Debug for Keypair {
 /// `Clone` is intentionally not derived because the underlying bytes are sensitive.
 /// To explicitly copy a secret key, use `SecretKey::from_bytes(&sk.to_bytes())?`,
 /// which makes the duplication of secret material visible at every call site.
-#[derive(ZeroizeOnDrop)]
+///
+/// `Zeroize` is derived (in addition to `ZeroizeOnDrop`) so wrapper types that
+/// embed a `SecretKey` can themselves `#[derive(Zeroize, ZeroizeOnDrop)]`.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretKey {
 	bytes: [u8; SECRETKEYBYTES],
 }

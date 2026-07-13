@@ -282,10 +282,10 @@ impl<S: TranscriptSigner> Zeroize for DkgState<S> {
 		self.my_contributions = None;
 
 		// Drop the config, which owns the transcript signer (this party's
-		// long-term authentication key). The `TranscriptSigner: ZeroizeOnDrop`
-		// bound guarantees that dropping the signer erases any secret-key bytes
-		// it holds, so the authentication key does not survive past this
-		// zeroization boundary in freed memory.
+		// long-term authentication key). The `TranscriptSigner: Zeroize +
+		// ZeroizeOnDrop` bound guarantees that dropping the signer erases any
+		// secret-key bytes it holds, so the authentication key does not survive
+		// past this zeroization boundary in freed memory.
 		self.config = None;
 
 		// Clear non-sensitive data
@@ -476,7 +476,8 @@ mod tests {
 
 	/// A transcript signer that holds "secret" key bytes and records, via a
 	/// shared flag, whether its key material was zeroized. Because
-	/// `TranscriptSigner: ZeroizeOnDrop`, dropping the signer must scrub the key.
+	/// `TranscriptSigner: Zeroize + ZeroizeOnDrop`, dropping the signer must
+	/// scrub the key.
 	struct SpySigner {
 		id: u32,
 		secret: Vec<u8>,
@@ -556,8 +557,8 @@ mod tests {
 		assert!(!zeroized.get(), "signer should not be zeroized before teardown");
 
 		// The documented zeroization boundary: dropping the config must scrub the
-		// signer's key material, which the `TranscriptSigner: ZeroizeOnDrop` bound
-		// now guarantees.
+		// signer's key material, which the `TranscriptSigner: Zeroize +
+		// ZeroizeOnDrop` bound now guarantees.
 		state.zeroize();
 		assert!(
 			zeroized.get(),
