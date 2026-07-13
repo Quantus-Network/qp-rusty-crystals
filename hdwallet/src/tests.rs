@@ -662,6 +662,44 @@ mod hdwallet_tests {
 		}
 	}
 
+	/// Mnemonic and passphrase inputs must be size-capped before Unicode
+	/// normalization and seed derivation, mirroring the derivation-path caps.
+	/// Without bounds, a caller-controlled huge passphrase (or a huge
+	/// non-normalized mnemonic) drives unbounded allocation, normalization
+	/// scans, and PBKDF2 work before any rejection.
+	#[test]
+	fn test_rejects_oversized_mnemonic_and_passphrase() {
+		use crate::{derive_key_from_mnemonic, MAX_MNEMONIC_BYTES, MAX_PASSPHRASE_BYTES};
+
+		let valid = "rocket primary way job input cactus submit menu zoo burger rent impose";
+
+		// A valid mnemonic paired with an oversized passphrase must be rejected
+		// up front instead of deriving a seed over attacker-sized input.
+		let huge_passphrase = "p".repeat(MAX_PASSPHRASE_BYTES + 1);
+		let err = mnemonic_to_seed(valid.to_string(), Some(&huge_passphrase))
+			.expect_err("oversized passphrase must be rejected");
+		assert!(matches!(err, HDLatticeError::PassphraseTooLong(_)), "got {err:?}");
+
+		// An oversized mnemonic must be rejected before normalization/parsing.
+		// Use a non-NFKD char so the pre-fix code path would also allocate a
+		// normalized copy of the whole input.
+		let huge_mnemonic = "\u{00e9} ".repeat(MAX_MNEMONIC_BYTES / 2 + 1);
+		let err = mnemonic_to_seed(huge_mnemonic, None)
+			.expect_err("oversized mnemonic must be rejected");
+		assert!(matches!(err, HDLatticeError::MnemonicTooLong(_)), "got {err:?}");
+
+		// The borrowed-mnemonic helpers share the same parser and must enforce
+		// the same caps.
+		let err = derive_key_from_mnemonic(valid, Some(&huge_passphrase), "m/44'/189189'/0'")
+			.expect_err("oversized passphrase must be rejected in derive_key_from_mnemonic");
+		assert!(matches!(err, HDLatticeError::PassphraseTooLong(_)), "got {err:?}");
+
+		// Inputs at exactly the caps must still be accepted.
+		let max_passphrase = "p".repeat(MAX_PASSPHRASE_BYTES);
+		mnemonic_to_seed(valid.to_string(), Some(&max_passphrase))
+			.expect("passphrase at exactly MAX_PASSPHRASE_BYTES must be accepted");
+	}
+
 	#[test]
 	fn test_mnemonic_to_seed_zeroizes_on_parse_failure() {
 		let bogus = "not a valid bip39 mnemonic phrase at all".to_string();

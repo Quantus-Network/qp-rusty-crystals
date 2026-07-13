@@ -48,6 +48,10 @@ pub enum HDLatticeError {
 	PathTooLong(usize),
 	#[error("Derivation path too deep: {0} segments")]
 	PathTooDeep(usize),
+	#[error("Mnemonic too long: {0} bytes")]
+	MnemonicTooLong(usize),
+	#[error("Passphrase too long: {0} bytes")]
+	PassphraseTooLong(usize),
 	#[error("hderive error: {0:?}")]
 	GenericError(hderive::Error),
 }
@@ -65,6 +69,18 @@ pub const MAX_DERIVATION_DEPTH: usize = 16;
 /// Maximum raw byte length of an accepted derivation path string.
 /// Sized for 16 segments of up to ~14 chars plus the `m/` prefix.
 pub const MAX_DERIVATION_PATH_BYTES: usize = 256;
+
+/// Maximum raw byte length of an accepted mnemonic string.
+/// The longest valid BIP39 English phrase (24 words of 8 chars plus separators)
+/// is ~215 bytes; 1 KiB leaves ample headroom (e.g. exotic whitespace, decomposed
+/// Unicode) while bounding the normalization and parsing work an attacker can force.
+pub const MAX_MNEMONIC_BYTES: usize = 1024;
+
+/// Maximum raw byte length of an accepted passphrase string.
+/// BIP39 places no limit on passphrases, but normalization allocates a full
+/// copy and PBKDF2 absorbs the passphrase into its salt, so an unbounded
+/// passphrase is a CPU/memory DoS vector. 1 KiB far exceeds any realistic use.
+pub const MAX_PASSPHRASE_BYTES: usize = 1024;
 
 /// Convert a BIP39 mnemonic phrase to a seed
 ///
@@ -120,10 +136,23 @@ fn nfkd_owned(s: &str) -> Option<Zeroizing<String>> {
 /// assume the *caller* already normalized their inputs, so we normalize here. Without
 /// this, canonically equivalent inputs (e.g. a composed "é" vs a decomposed "e"+combining
 /// accent in a passphrase) would silently derive different seeds and thus different keys.
+///
+/// Both inputs are size-capped ([`MAX_MNEMONIC_BYTES`], [`MAX_PASSPHRASE_BYTES`])
+/// *before* normalization, so attacker-controlled text cannot drive unbounded
+/// allocation, normalization scans, or PBKDF2 work prior to rejection.
 fn parse_mnemonic_to_seed(
 	mnemonic: &str,
 	passphrase: Option<&str>,
 ) -> Result<[u8; 64], HDLatticeError> {
+	if mnemonic.len() > MAX_MNEMONIC_BYTES {
+		return Err(HDLatticeError::MnemonicTooLong(mnemonic.len()));
+	}
+	if let Some(p) = passphrase {
+		if p.len() > MAX_PASSPHRASE_BYTES {
+			return Err(HDLatticeError::PassphraseTooLong(p.len()));
+		}
+	}
+
 	let normalized_mnemonic = nfkd_owned(mnemonic);
 	let mnemonic = normalized_mnemonic.as_ref().map_or(mnemonic, |m| m.as_str());
 
