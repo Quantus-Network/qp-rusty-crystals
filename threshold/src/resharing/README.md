@@ -83,14 +83,16 @@ Round 6: Signed Transcript Acceptance (Certificate)
 │   SHAKE256("resharing-transcript-v1" || ssid || Act || session_seed ||
 │   Round 3 broadcasts (Act, sorted) || Round 5 broadcasts (Act ∪ new, sorted)).
 ├── Each new committee member signs
-│   SHAKE256("resharing-accept-v1" || ssid || transcript_hash) with its
-│   long-term key (TranscriptSigner) and broadcasts the signature.
+│   SHAKE256("resharing-accept-v3" || ssid || transcript_hash || Act ||
+│   new committee) with its long-term key (TranscriptSigner) and broadcasts
+│   the signature.
 ├── Every party verifies every acceptance against its *own* transcript hash.
 │   A dealer that equivocated (sent different broadcasts to different parties)
 │   causes verification to fail on at least one honest party, which aborts.
-└── The output includes a ResharingCertificate (ssid, Act, transcript hash,
-    acceptance signatures) verifiable by any third party holding the new
-    committee's verifying keys.
+└── The output includes a ResharingCertificate (ssid, Act, new committee,
+    transcript hash, acceptance signatures) verifiable by any third party
+    holding exactly the new committee's verifying keys; the required signer
+    set comes from the certificate's own signed new-committee field.
 ```
 
 Because `Σ_J s_J^new = Σ_J Σ_I r_{I→J} = Σ_I s_I^old = s`, the secret — and hence the public key `t = A·s1 + s2` — is preserved.

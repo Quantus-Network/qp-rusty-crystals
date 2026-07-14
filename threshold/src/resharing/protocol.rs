@@ -1608,7 +1608,11 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 				"AcceptGenerate reached without an agreed active set".to_string(),
 			)
 		})?;
-		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash, &active_set);
+		// ParticipantList iterates in sorted order, giving the canonical
+		// (strictly ascending) committee encoding the acceptance hash binds.
+		let new_committee: Vec<ParticipantId> = self.config.new_participants().iter().collect();
+		let accept_hash =
+			compute_accept_hash(&self.ssid, &transcript_hash, &active_set, &new_committee);
 		let signature = self.signer_config.my_signer.sign(&accept_hash);
 		let my_id = self.config.my_party_id();
 		self.accepts.insert(my_id, signature.as_ref().to_vec());
@@ -1645,7 +1649,8 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		// Verify every signature against *our own* transcript hash. A signer
 		// that observed a different transcript (dealer equivocation, tampered
 		// broadcast) produces a signature that fails here, and we abort.
-		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash, &active_set);
+		let accept_hash =
+			compute_accept_hash(&self.ssid, &transcript_hash, &active_set, &new_participants);
 		for p in &new_participants {
 			let pk = self.signer_config.verifying_keys.get(p).ok_or_else(|| {
 				ResharingProtocolError::InternalError(format!(
@@ -1668,6 +1673,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		let certificate = ResharingCertificate {
 			ssid: self.ssid,
 			active_set,
+			new_committee: new_participants,
 			transcript_hash,
 			accepts: self.accepts.clone(),
 		};

@@ -319,8 +319,9 @@ fn run_resharing_protocol_full(
 	// Collect outputs from every online party (new members carry shares;
 	// old-only observers carry just the certificate).
 	let mut new_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	// Certificate verification requires exactly the new committee's keys.
 	let verifying_keys: std::collections::BTreeMap<u32, u32> =
-		all_parties.iter().map(|&p| (p, p)).collect();
+		new_participants.iter().map(|&p| (p, p)).collect();
 	let mut reference_transcript_hash: Option<[u8; 32]> = None;
 
 	for &party_id in &all_parties {
@@ -340,8 +341,16 @@ fn run_resharing_protocol_full(
 
 		// Every party must emit a valid certificate over the same transcript.
 		let cert = &output.certificate;
-		if !cert.verify::<TestSigner>(&new_participants, &verifying_keys) {
+		if !cert.verify::<TestSigner>(&verifying_keys) {
 			return Err(format!("Party {}'s certificate does not verify", party_id));
+		}
+		let mut expected_committee: Vec<u32> = new_participants.clone();
+		expected_committee.sort_unstable();
+		if cert.new_committee != expected_committee {
+			return Err(format!(
+				"Party {}'s certificate names committee {:?}, expected {:?}",
+				party_id, cert.new_committee, expected_committee
+			));
 		}
 		match reference_transcript_hash {
 			None => reference_transcript_hash = Some(cert.transcript_hash),
@@ -4194,32 +4203,152 @@ fn test_certificate_verification_rejects_missing_or_wrong_accepts() {
 	let ssid = [7u8; 32];
 	let transcript_hash = [9u8; 32];
 	let active_set = vec![0u32, 1u32];
-	let accept_hash = compute_accept_hash(&ssid, &transcript_hash, &active_set);
-	let new_participants = vec![0u32, 1u32];
-	let keys: BTreeMap<u32, u32> = new_participants.iter().map(|&p| (p, p)).collect();
+	let new_committee = vec![0u32, 1u32];
+	let accept_hash = compute_accept_hash(&ssid, &transcript_hash, &active_set, &new_committee);
+	let keys: BTreeMap<u32, u32> = new_committee.iter().map(|&p| (p, p)).collect();
 
 	let mut accepts: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
 	accepts.insert(0, Signer { id: 0 }.sign(&accept_hash));
 	accepts.insert(1, Signer { id: 1 }.sign(&accept_hash));
 
-	let cert = ResharingCertificate { ssid, active_set, transcript_hash, accepts: accepts.clone() };
-	assert!(cert.verify::<Signer>(&new_participants, &keys), "valid certificate must verify");
+	let cert = ResharingCertificate {
+		ssid,
+		active_set,
+		new_committee,
+		transcript_hash,
+		accepts: accepts.clone(),
+	};
+	assert!(cert.verify::<Signer>(&keys), "valid certificate must verify");
 
 	// Missing an acceptance.
 	let mut missing = cert.clone();
 	missing.accepts.remove(&1);
-	assert!(!missing.verify::<Signer>(&new_participants, &keys));
+	assert!(!missing.verify::<Signer>(&keys));
 
 	// Acceptance over a different transcript hash.
-	let other_hash = compute_accept_hash(&ssid, &[10u8; 32], &cert.active_set);
+	let other_hash = compute_accept_hash(&ssid, &[10u8; 32], &cert.active_set, &cert.new_committee);
 	let mut wrong = cert.clone();
 	wrong.accepts.insert(1, Signer { id: 1 }.sign(&other_hash));
-	assert!(!wrong.verify::<Signer>(&new_participants, &keys));
+	assert!(!wrong.verify::<Signer>(&keys));
 
 	// Signature by the wrong party.
 	let mut forged = cert;
 	forged.accepts.insert(1, Signer { id: 0 }.sign(&accept_hash));
-	assert!(!forged.verify::<Signer>(&new_participants, &keys));
+	assert!(!forged.verify::<Signer>(&keys));
+}
+
+/// `ResharingCertificate::verify` iterates the committee with `.all(...)`,
+/// which is vacuously true for an empty iterator. An unsigned certificate
+/// claiming an empty committee must NOT verify — otherwise a forged handoff
+/// certificate is accepted without checking a single acceptance signature.
+#[test]
+fn test_certificate_rejects_empty_committee() {
+	use common::TestSigner as Signer;
+	use qp_rusty_crystals_threshold::resharing::ResharingCertificate;
+	use std::collections::BTreeMap;
+
+	// A completely unsigned certificate: empty committee, no signatures.
+	let cert = ResharingCertificate {
+		ssid: [7u8; 32],
+		active_set: vec![0u32, 1u32],
+		new_committee: vec![],
+		transcript_hash: [9u8; 32],
+		accepts: BTreeMap::new(),
+	};
+
+	let keys: BTreeMap<u32, u32> = BTreeMap::new();
+	assert!(
+		!cert.verify::<Signer>(&keys),
+		"certificate claiming an empty new committee must not verify"
+	);
+}
+
+/// The certificate's `new_committee` is bound into the acceptance hash and
+/// must match the verifier's key map exactly. Rewriting the committee list,
+/// truncating the key map, or verifying against a superset registry must all
+/// fail — otherwise a subset of key holders could mint a certificate naming
+/// only themselves and have it verify.
+#[test]
+fn test_certificate_rejects_committee_mismatch() {
+	use common::TestSigner as Signer;
+	use qp_rusty_crystals_threshold::resharing::{
+		compute_accept_hash, ResharingCertificate, TranscriptSigner as _,
+	};
+	use std::collections::BTreeMap;
+
+	let ssid = [7u8; 32];
+	let transcript_hash = [9u8; 32];
+	let active_set = vec![0u32, 1u32, 2u32];
+	let new_committee = vec![0u32, 1u32];
+	let accept_hash = compute_accept_hash(&ssid, &transcript_hash, &active_set, &new_committee);
+	let keys: BTreeMap<u32, u32> = new_committee.iter().map(|&p| (p, p)).collect();
+
+	let mut accepts: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+	accepts.insert(0, Signer { id: 0 }.sign(&accept_hash));
+	accepts.insert(1, Signer { id: 1 }.sign(&accept_hash));
+
+	let cert = ResharingCertificate { ssid, active_set, new_committee, transcript_hash, accepts };
+	assert!(cert.verify::<Signer>(&keys), "honest certificate must verify");
+
+	// Insider forgery: party 0 rewrites the committee to just itself and
+	// re-signs. The certificate is internally consistent, but the verifier's
+	// trusted key map (the real committee) no longer matches exactly.
+	let mut solo = cert.clone();
+	solo.new_committee = vec![0u32];
+	let solo_hash =
+		compute_accept_hash(&ssid, &solo.transcript_hash, &solo.active_set, &solo.new_committee);
+	solo.accepts = BTreeMap::from([(0u32, Signer { id: 0 }.sign(&solo_hash))]);
+	assert!(
+		!solo.verify::<Signer>(&keys),
+		"certificate naming a sub-committee must not verify against the real committee's keys"
+	);
+
+	// Rewriting the stored committee without re-signing breaks the signatures.
+	let mut rewritten = cert.clone();
+	rewritten.new_committee = vec![0u32, 1u32, 2u32];
+	let three_keys: BTreeMap<u32, u32> = (0..3u32).map(|p| (p, p)).collect();
+	assert!(
+		!rewritten.verify::<Signer>(&three_keys),
+		"certificate with a rewritten committee must not verify"
+	);
+
+	// A superset key map (e.g., an all-parties registry) is rejected.
+	assert!(
+		!cert.verify::<Signer>(&three_keys),
+		"verification against a superset key map must fail"
+	);
+
+	// A truncated key map is rejected.
+	let one_key: BTreeMap<u32, u32> = BTreeMap::from([(0u32, 0u32)]);
+	assert!(!cert.verify::<Signer>(&one_key), "verification with missing keys must fail");
+
+	// A non-canonical (unsorted or duplicated) committee is rejected even if
+	// internally signed consistently.
+	let mut unsorted = cert.clone();
+	unsorted.new_committee = vec![1u32, 0u32];
+	let unsorted_hash = compute_accept_hash(
+		&ssid,
+		&unsorted.transcript_hash,
+		&unsorted.active_set,
+		&unsorted.new_committee,
+	);
+	unsorted.accepts = BTreeMap::from([
+		(0u32, Signer { id: 0 }.sign(&unsorted_hash)),
+		(1u32, Signer { id: 1 }.sign(&unsorted_hash)),
+	]);
+	assert!(!unsorted.verify::<Signer>(&keys), "non-canonical committee order must be rejected");
+
+	let mut duplicated = cert;
+	duplicated.new_committee = vec![0u32, 0u32];
+	let dup_hash = compute_accept_hash(
+		&ssid,
+		&duplicated.transcript_hash,
+		&duplicated.active_set,
+		&duplicated.new_committee,
+	);
+	duplicated.accepts = BTreeMap::from([(0u32, Signer { id: 0 }.sign(&dup_hash))]);
+	let dup_keys: BTreeMap<u32, u32> = BTreeMap::from([(0u32, 0u32), (1u32, 1u32)]);
+	assert!(!duplicated.verify::<Signer>(&dup_keys), "duplicated committee must be rejected");
 }
 
 /// A certificate's `active_set` must be authenticated by the acceptance
@@ -4239,17 +4368,24 @@ fn test_certificate_rejects_forged_active_set() {
 	let transcript_hash = [9u8; 32];
 	// The active set the new committee actually attested to.
 	let real_active_set = vec![0u32, 1u32, 2u32];
-	let accept_hash = compute_accept_hash(&ssid, &transcript_hash, &real_active_set);
+	let new_committee = vec![0u32, 1u32];
+	let accept_hash =
+		compute_accept_hash(&ssid, &transcript_hash, &real_active_set, &new_committee);
 
-	let new_participants = vec![0u32, 1u32];
-	let keys: BTreeMap<u32, u32> = new_participants.iter().map(|&p| (p, p)).collect();
+	let keys: BTreeMap<u32, u32> = new_committee.iter().map(|&p| (p, p)).collect();
 
 	let mut accepts: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
 	accepts.insert(0, Signer { id: 0 }.sign(&accept_hash));
 	accepts.insert(1, Signer { id: 1 }.sign(&accept_hash));
 
-	let cert = ResharingCertificate { ssid, active_set: real_active_set, transcript_hash, accepts };
-	assert!(cert.verify::<Signer>(&new_participants, &keys), "honest certificate must verify");
+	let cert = ResharingCertificate {
+		ssid,
+		active_set: real_active_set,
+		new_committee,
+		transcript_hash,
+		accepts,
+	};
+	assert!(cert.verify::<Signer>(&keys), "honest certificate must verify");
 
 	// Attacker rewrites active_set (drops party 2 / claims a different handoff
 	// set) but keeps ssid, transcript_hash, and the collected signatures. With
@@ -4257,7 +4393,7 @@ fn test_certificate_rejects_forged_active_set() {
 	let mut forged = cert.clone();
 	forged.active_set = vec![0u32, 1u32];
 	assert!(
-		!forged.verify::<Signer>(&new_participants, &keys),
+		!forged.verify::<Signer>(&keys),
 		"certificate with a forged active_set must not verify"
 	);
 
@@ -4265,7 +4401,7 @@ fn test_certificate_rejects_forged_active_set() {
 	let mut reordered = cert;
 	reordered.active_set = vec![2u32, 1u32, 0u32];
 	assert!(
-		!reordered.verify::<Signer>(&new_participants, &keys),
+		!reordered.verify::<Signer>(&keys),
 		"certificate with a reordered active_set must not verify"
 	);
 }
