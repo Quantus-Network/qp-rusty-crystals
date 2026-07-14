@@ -725,8 +725,8 @@ mod hdwallet_tests {
 		// Use a non-NFKD char so the pre-fix code path would also allocate a
 		// normalized copy of the whole input.
 		let huge_mnemonic = "\u{00e9} ".repeat(MAX_MNEMONIC_BYTES / 2 + 1);
-		let err = mnemonic_to_seed(huge_mnemonic, None)
-			.expect_err("oversized mnemonic must be rejected");
+		let err =
+			mnemonic_to_seed(huge_mnemonic, None).expect_err("oversized mnemonic must be rejected");
 		assert!(matches!(err, HDLatticeError::MnemonicTooLong(_)), "got {err:?}");
 
 		// The borrowed-mnemonic helpers share the same parser and must enforce

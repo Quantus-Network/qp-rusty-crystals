@@ -585,8 +585,8 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// requirements.
 	///
 	/// # Arguments
-	/// * `from` - The party ID of the sender. MUST come from transport-level sender
-	///   authentication, never from attacker-controllable packet contents.
+	/// * `from` - The party ID of the sender. MUST come from transport-level sender authentication,
+	///   never from attacker-controllable packet contents.
 	/// * `data` - The serialized message bytes
 	///
 	/// # Errors
