@@ -795,12 +795,12 @@ pub fn derive_subset_contribution(combined_seed: &[u8; SUBSET_SEED_SIZE]) -> Sub
 
 	for i in 0..L {
 		poly::uniform_eta(&mut temp_poly, combined_seed, i as u16);
-		contribution.s1[i].copy_from_slice(&temp_poly.coeffs);
+		contribution.s1[i].copy_from_slice(temp_poly.coeffs());
 	}
 
 	for i in 0..K {
 		poly::uniform_eta(&mut temp_poly, combined_seed, (L + i) as u16);
-		contribution.s2[i].copy_from_slice(&temp_poly.coeffs);
+		contribution.s2[i].copy_from_slice(temp_poly.coeffs());
 	}
 
 	contribution

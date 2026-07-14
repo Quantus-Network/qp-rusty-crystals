@@ -87,13 +87,13 @@ pub fn mul_hat(p: &mut Poly, a: &Poly, b: &Poly) {
 	let mut a_u32 = [0u32; N];
 	let mut b_u32 = [0u32; N];
 
-	for (i, (a_coeff, b_coeff)) in a.coeffs.iter().zip(b.coeffs.iter()).enumerate() {
+	for (i, (a_coeff, b_coeff)) in a.coeffs().iter().zip(b.coeffs().iter()).enumerate() {
 		a_u32[i] = if *a_coeff < 0 { (*a_coeff + Q as i32) as u32 } else { *a_coeff as u32 };
 		b_u32[i] = if *b_coeff < 0 { (*b_coeff + Q as i32) as u32 } else { *b_coeff as u32 };
 	}
 
 	// Pointwise Montgomery multiplication
-	for (p_coeff, (a_val, b_val)) in p.coeffs.iter_mut().zip(a_u32.iter().zip(b_u32.iter())) {
+	for (p_coeff, (a_val, b_val)) in p.coeffs_mut().iter_mut().zip(a_u32.iter().zip(b_u32.iter())) {
 		let result = mont_reduce_le2q(*a_val as u64 * *b_val as u64);
 		*p_coeff = result as i32;
 	}
@@ -107,7 +107,7 @@ pub fn mul_hat(p: &mut Poly, a: &Poly, b: &Poly) {
 ///
 /// Matches the reference implementation for compatibility.
 pub fn ntt(p: &mut Poly) {
-	let coeffs = &mut p.coeffs;
+	let coeffs = p.coeffs_mut();
 
 	// Convert i32 coefficients to u32 for NTT computation
 	let mut coeffs_u32 = [0u32; N];
@@ -153,7 +153,7 @@ pub fn ntt(p: &mut Poly) {
 ///
 /// Matches the reference implementation for compatibility.
 pub fn inv_ntt(p: &mut Poly) {
-	let coeffs = &mut p.coeffs;
+	let coeffs = p.coeffs_mut();
 
 	// Convert i32 coefficients to u32 for NTT computation
 	let mut coeffs_u32 = [0u32; N];
@@ -206,9 +206,9 @@ mod tests {
 	fn test_ntt_basic() {
 		let mut p = Poly::default();
 		// Set up a simple test polynomial
-		p.coeffs[0] = 1;
-		p.coeffs[1] = 2;
-		p.coeffs[2] = 3;
+		p.coeffs_mut()[0] = 1;
+		p.coeffs_mut()[1] = 2;
+		p.coeffs_mut()[2] = 3;
 
 		ntt(&mut p);
 		inv_ntt(&mut p);
@@ -226,14 +226,14 @@ mod tests {
 
 		// Set up simple test values
 		for i in 0..5 {
-			a.coeffs[i] = (i + 1) as i32;
-			b.coeffs[i] = (i + 2) as i32;
+			a.coeffs_mut()[i] = (i + 1) as i32;
+			b.coeffs_mut()[i] = (i + 2) as i32;
 		}
 
 		mul_hat(&mut result, &a, &b);
 
 		// Basic sanity check - results should be non-zero
-		assert_ne!(result.coeffs[0], 0);
+		assert_ne!(result.coeffs()[0], 0);
 	}
 
 	#[test]
@@ -274,18 +274,18 @@ mod tests {
 			8380417, 8380417, 8380416, 8380415,
 		];
 
-		for (dst, src) in p.coeffs.iter_mut().zip(go_coeffs.iter()) {
+		for (dst, src) in p.coeffs_mut().iter_mut().zip(go_coeffs.iter()) {
 			*dst = *src;
 		}
 
 		ntt(&mut p);
 
 		// Expected output from Go: [34915453 37803751 41654889 51878135 44099773]
-		assert_eq!(p.coeffs[0], 34915453, "coeff[0] mismatch");
-		assert_eq!(p.coeffs[1], 37803751, "coeff[1] mismatch");
-		assert_eq!(p.coeffs[2], 41654889, "coeff[2] mismatch");
-		assert_eq!(p.coeffs[3], 51878135, "coeff[3] mismatch");
-		assert_eq!(p.coeffs[4], 44099773, "coeff[4] mismatch");
+		assert_eq!(p.coeffs()[0], 34915453, "coeff[0] mismatch");
+		assert_eq!(p.coeffs()[1], 37803751, "coeff[1] mismatch");
+		assert_eq!(p.coeffs()[2], 41654889, "coeff[2] mismatch");
+		assert_eq!(p.coeffs()[3], 51878135, "coeff[3] mismatch");
+		assert_eq!(p.coeffs()[4], 44099773, "coeff[4] mismatch");
 	}
 
 	#[test]
@@ -293,11 +293,11 @@ mod tests {
 		// Test NTT of a simple challenge polynomial with just one non-zero coefficient
 		// This test creates a polynomial with c[4] = Q-1 (representing -1)
 		let mut p = Poly::default();
-		p.coeffs[4] = 8380416; // Q-1, representing -1
+		p.coeffs_mut()[4] = 8380416; // Q-1, representing -1
 
 		ntt(&mut p);
 
 		// Verify the NTT produces consistent output
-		assert_ne!(p.coeffs[0], 0, "NTT should produce non-zero coefficients");
+		assert_ne!(p.coeffs()[0], 0, "NTT should produce non-zero coefficients");
 	}
 }

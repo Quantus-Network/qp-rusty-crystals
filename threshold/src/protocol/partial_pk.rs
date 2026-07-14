@@ -30,12 +30,12 @@ pub fn compute_partial_pk_t(
 
 	let mut s1_pv = polyvec::Polyvecl::default();
 	for (i, poly_coeffs) in s1.iter().enumerate() {
-		s1_pv.vec[i].coeffs.copy_from_slice(poly_coeffs);
+		s1_pv.vec[i].coeffs_mut().copy_from_slice(poly_coeffs);
 	}
 
 	let mut s2_pv = polyvec::Polyveck::default();
 	for (i, poly_coeffs) in s2.iter().enumerate() {
-		s2_pv.vec[i].coeffs.copy_from_slice(poly_coeffs);
+		s2_pv.vec[i].coeffs_mut().copy_from_slice(poly_coeffs);
 	}
 
 	let mut s1_hat = s1_pv.clone();
@@ -43,6 +43,10 @@ pub fn compute_partial_pk_t(
 
 	let mut t = polyvec::Polyveck::default();
 	polyvec::matrix_pointwise_montgomery(&mut t, &mat, &s1_hat);
+	// The accumulated dot products can reach L*Q in absolute value; the
+	// inverse NTT requires coefficients below Q (same as the keygen flow in
+	// dilithium's sign.rs).
+	polyvec::k_reduce(&mut t);
 	polyvec::k_invntt_tomont(&mut t);
 	polyvec::k_add(&mut t, &s2_pv);
 	polyvec::k_reduce(&mut t);
@@ -50,7 +54,7 @@ pub fn compute_partial_pk_t(
 
 	let mut t_coeffs = [[0i32; N as usize]; K];
 	for (i, poly) in t.vec.iter().enumerate() {
-		t_coeffs[i].copy_from_slice(&poly.coeffs);
+		t_coeffs[i].copy_from_slice(poly.coeffs());
 	}
 	t_coeffs
 }
@@ -99,7 +103,7 @@ where
 				if !(0..Q).contains(&coeff) {
 					return Err(PackCombinedPkError::CoefficientOutOfRange);
 				}
-				t.vec[i].coeffs[j] = (t.vec[i].coeffs[j] + coeff) % Q;
+				t.vec[i].coeffs_mut()[j] = (t.vec[i].coeffs()[j] + coeff) % Q;
 			}
 		}
 	}

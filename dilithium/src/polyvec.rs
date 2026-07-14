@@ -530,6 +530,9 @@ mod tests {
 
 		let original = polyvecl.clone();
 		l_ntt(&mut polyvecl);
+		// Forward-NTT output can reach 8*Q; the inverse transform requires
+		// coefficients below Q in absolute value.
+		l_reduce(&mut polyvecl);
 		l_invntt_tomont(&mut polyvecl);
 
 		// After NTT and inverse NTT, values should be close to original
@@ -561,6 +564,9 @@ mod tests {
 
 		let original = polyveck.clone();
 		k_ntt(&mut polyveck);
+		// Forward-NTT output can reach 8*Q; the inverse transform requires
+		// coefficients below Q in absolute value.
+		k_reduce(&mut polyveck);
 		k_invntt_tomont(&mut polyveck);
 
 		// After NTT and inverse NTT, values should be close to original
