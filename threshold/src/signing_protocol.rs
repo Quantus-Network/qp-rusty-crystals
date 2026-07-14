@@ -96,7 +96,8 @@
 //! use qp_rusty_crystals_threshold::signing_protocol::{DilithiumSignProtocol, Action};
 //! use qp_rusty_crystals_threshold::{ThresholdSigner, ThresholdConfig};
 //!
-//! // Create the protocol instance
+//! // Create the protocol instance. This party's identity is the share's
+//! // party_id — it must be one of the participating parties.
 //! let signer = ThresholdSigner::new(my_share, public_key, config)?;
 //! let round1_seed: [u8; 32] = get_random_seed(); // Must be cryptographically random
 //! let mut protocol = DilithiumSignProtocol::new(
@@ -104,7 +105,6 @@
 //!     message.to_vec(),
 //!     context.to_vec(),
 //!     vec![0, 1, 2],  // participating parties
-//!     my_party_id,
 //!     leader_id,
 //!     round1_seed,
 //! );
@@ -465,11 +465,10 @@ impl SignMessageBuffer {
 /// ```ignore
 /// let round1_seed: [u8; 32] = get_random_seed(); // Must be cryptographically random
 /// let mut protocol = DilithiumSignProtocol::new(
-///     signer,
+///     signer, // this party's identity is signer.party_id()
 ///     b"message to sign".to_vec(),
 ///     b"context".to_vec(),
 ///     vec![0, 1, 2],
-///     1,  // my party id
 ///     0,  // leader id
 ///     round1_seed,
 /// );
@@ -540,17 +539,22 @@ impl DilithiumSignProtocol {
 	/// * `message` - The message to sign
 	/// * `context` - The context string (can be empty, max 255 bytes)
 	/// * `participants` - All participant IDs in this signing session (can be arbitrary u32 values)
-	/// * `my_participant_id` - This party's identifier
 	/// * `leader_id` - The leader's identifier (responsible for combine/retry decisions)
 	/// * `round1_seed` - A 32-byte cryptographically random seed for Round 1
 	/// * `attempt_nonce` - A 32-byte nonce unique to this signing attempt (must be agreed upon by
 	///   all participants, e.g., derived from the transport layer's session/channel ID)
 	///
+	/// This party's protocol identity is the signer share's `party_id()`. There is deliberately
+	/// no separate "my id" parameter: broadcast payloads, the local broadcast maps, and the RSS
+	/// share position used by `combine` all key on the share's id, so a caller-supplied envelope
+	/// identity could silently diverge and stall the session (peers drop messages whose payload
+	/// `party_id` differs from the envelope sender).
+	///
 	/// # Errors
 	///
 	/// Returns `Err(SignProtocolError::InvalidConfig)` if:
 	/// - `participants` contains duplicates
-	/// - `my_participant_id` is not in `participants`
+	/// - the signer share's `party_id()` is not in `participants`
 	/// - `leader_id` is not in `participants`
 	/// - Any participant is not in the original DKG participant set
 	///
@@ -565,19 +569,24 @@ impl DilithiumSignProtocol {
 		message: Vec<u8>,
 		context: Vec<u8>,
 		participants: Vec<ParticipantId>,
-		my_participant_id: ParticipantId,
 		leader_id: ParticipantId,
 		round1_seed: [u8; 32],
 		attempt_nonce: [u8; 32],
 	) -> Result<Self, SignProtocolError> {
+		// This party's protocol identity IS the share's party_id, by
+		// construction: the state machine keys self-broadcasts, stamps
+		// payloads, and recovers RSS shares all under the same identifier.
+		let my_participant_id = signer.party_id();
+
 		let participant_list = ParticipantList::new(&participants).ok_or_else(|| {
 			SignProtocolError::InvalidConfig("participants contains duplicates".to_string())
 		})?;
 
 		if !participant_list.contains(my_participant_id) {
-			return Err(SignProtocolError::InvalidConfig(
-				"my_participant_id is not in participants".to_string(),
-			));
+			return Err(SignProtocolError::InvalidConfig(format!(
+				"this signer's party_id ({}) is not in participants",
+				my_participant_id
+			)));
 		}
 
 		if !participant_list.contains(leader_id) {
@@ -1335,14 +1344,12 @@ pub fn run_local_signing(
 	let mut protocols: Vec<DilithiumSignProtocol> = signers
 		.into_iter()
 		.map(|signer| {
-			let my_id = signer.party_id();
-			let round1_seed = derive_party_seed(session_seed, my_id);
+			let round1_seed = derive_party_seed(session_seed, signer.party_id());
 			DilithiumSignProtocol::new(
 				signer,
 				message.to_vec(),
 				context.to_vec(),
 				participants.clone(),
-				my_id,
 				leader_id,
 				round1_seed,
 				attempt_nonce,
@@ -1416,7 +1423,6 @@ mod tests {
 			b"test message".to_vec(),
 			b"context".to_vec(),
 			vec![0, 1], // exactly threshold participants
-			0,
 			0,          // leader_id
 			[0xAA; 32], // round1_seed
 			[0xBB; 32], // attempt_nonce
@@ -1441,7 +1447,6 @@ mod tests {
 			b"ctx".to_vec(),
 			vec![0, 1, 1], // duplicate!
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		);
@@ -1449,24 +1454,34 @@ mod tests {
 		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
 	}
 
+	/// This party's identity is the signer share's `party_id()` (there is no
+	/// separate "my id" parameter, so envelope identity and share position can
+	/// never diverge — see the security review on id/share mismatches). A
+	/// share whose id is outside the agreed signing set must be rejected.
 	#[test]
-	fn test_protocol_rejects_missing_my_participant() {
+	fn test_protocol_rejects_signer_outside_participants() {
 		let config = ThresholdConfig::new(2, 3).unwrap();
 		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
 
-		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		// Share belongs to party 2; the signing set is {0, 1}. Every other
+		// check passes: no duplicates, leader in set, both participants in
+		// the DKG set, exactly threshold participants.
+		let signer = ThresholdSigner::new(shares[2].clone(), pk, config).unwrap();
+		assert_eq!(signer.party_id(), 2);
 		let result = DilithiumSignProtocol::new(
 			signer,
 			b"test".to_vec(),
 			b"ctx".to_vec(),
-			vec![0, 1, 2],
-			99, // not in participants!
+			vec![0, 1],
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		);
 
-		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
+		assert!(
+			matches!(result, Err(SignProtocolError::InvalidConfig(_))),
+			"a signer share outside the signing participant set must be rejected"
+		);
 	}
 
 	#[test]
@@ -1480,7 +1495,6 @@ mod tests {
 			b"test".to_vec(),
 			b"ctx".to_vec(),
 			vec![0, 1, 2],
-			0,
 			99, // leader not in participants!
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -1501,7 +1515,6 @@ mod tests {
 			b"ctx".to_vec(),
 			vec![0, 1, 99], // 99 was not in DKG!
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		);
@@ -1520,7 +1533,6 @@ mod tests {
 			b"test".to_vec(),
 			b"ctx".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -1552,7 +1564,6 @@ mod tests {
 			b"test".to_vec(),
 			b"ctx".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -1654,7 +1665,6 @@ mod tests {
 			b"ctx".to_vec(),
 			vec![0, 1],
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		)
@@ -1685,7 +1695,6 @@ mod tests {
 			b"ctx".to_vec(),
 			vec![0, 1],
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		)
@@ -1715,7 +1724,6 @@ mod tests {
 			b"test".to_vec(),
 			b"ctx".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -1811,8 +1819,7 @@ mod tests {
 			b"test message".to_vec(),
 			b"context".to_vec(),
 			vec![0, 1], // exactly threshold participants
-			0,
-			0, // leader_id
+			0,          // leader_id
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		)
@@ -1849,8 +1856,7 @@ mod tests {
 			b"test message".to_vec(),
 			b"context".to_vec(),
 			vec![0, 1], // exactly threshold participants
-			0,
-			0, // leader_id
+			0,          // leader_id
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		)
@@ -1915,7 +1921,6 @@ mod tests {
 			message.clone(),
 			context.clone(),
 			vec![0, 1],
-			1, // follower
 			0, // leader is party 0
 			[0xDD; 32],
 			[0xEE; 32], // attempt_nonce
@@ -1980,8 +1985,7 @@ mod tests {
 			b"test message".to_vec(),
 			b"context".to_vec(),
 			vec![0, 1], // exactly threshold participants
-			0,
-			0, // leader_id
+			0,          // leader_id
 			[0xAA; 32],
 			[0xCC; 32], // attempt_nonce
 		)
@@ -1994,7 +1998,6 @@ mod tests {
 			b"test message".to_vec(),
 			b"context".to_vec(),
 			vec![0, 1], // exactly threshold participants
-			1,
 			0,          // leader_id
 			[0xBB; 32], // Different seed for party 1
 			[0xCC; 32], // Same attempt_nonce for both parties
@@ -2055,7 +2058,6 @@ mod tests {
 			b"test message".to_vec(),
 			b"context".to_vec(),
 			vec![0, 1], // exactly threshold participants
-			1,          // follower
 			0,          // leader is party 0
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -2127,7 +2129,6 @@ mod tests {
 			message.clone(),
 			context.clone(),
 			vec![0, 1], // exactly threshold participants
-			1,          // follower
 			0,          // leader is party 0
 			[0xCC; 32],
 			[0xDD; 32], // attempt_nonce
@@ -2165,7 +2166,6 @@ mod tests {
 			b"test".to_vec(),
 			b"ctx".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -2209,7 +2209,6 @@ mod tests {
 			b"test".to_vec(),
 			b"ctx".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -2256,7 +2255,6 @@ mod tests {
 			b"ctx".to_vec(),
 			vec![0, 1],
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		)
@@ -2298,7 +2296,6 @@ mod tests {
 			b"ctx".to_vec(),
 			vec![0, 1],
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		)
@@ -2336,7 +2333,6 @@ mod tests {
 			b"ctx".to_vec(),
 			vec![0, 1],
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32],
 		);
@@ -2364,7 +2360,6 @@ mod tests {
 			oversized_context,
 			vec![0, 1],
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32],
 		);
@@ -2391,7 +2386,6 @@ mod tests {
 			b"test".to_vec(),
 			max_context,
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32],

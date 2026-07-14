@@ -990,7 +990,6 @@ fn test_signing_rejects_more_than_threshold_parties() {
 		b"test message".to_vec(),
 		b"".to_vec(),
 		signing_parties,
-		0, // my_participant_id
 		0, // leader_id
 		[0u8; 32],
 		[0u8; 32], // attempt_nonce
