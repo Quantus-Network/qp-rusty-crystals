@@ -13,7 +13,7 @@ use qp_rusty_crystals_threshold::{
 
 use qp_rusty_crystals_threshold::resharing::{
 	resharing_norm_enlargement, Action, NewShareData, ResharingConfig, ResharingMessage,
-	ResharingProtocol, ResharingState,
+	ResharingProtocol, ResharingRound5Broadcast, ResharingState,
 };
 
 mod common;
@@ -4129,6 +4129,83 @@ fn test_slow_old_only_member_observes_and_completes() {
 		vec![new_shares.get(&1).unwrap().clone(), new_shares.get(&3).unwrap().clone()];
 	let is_valid =
 		run_signing_and_verify(&signing_shares, &public_key, new_config, b"oldonly observer", b"");
+	assert!(is_valid, "Signature with reshared shares should verify");
+}
+
+/// Regression test (security review): an old committee member that is excluded
+/// from the active set must not be able to abort the session with a forged
+/// Round 5 failure report.
+///
+/// The malicious party (2, OldOnly, leaving the committee) withholds its Round
+/// 1 Ready signal and instead sends a syntactically valid Round 5 broadcast
+/// with `success = false`. Every other party buffers that broadcast long before
+/// Combining (Round 5 messages are accepted in any state). The leader's ready
+/// window then closes without party 2, so `Act = {0, 1}` — the session is
+/// explicitly promised to proceed without party 2. Before the fix, the
+/// Combining failure scan honored the excluded member's stored failure report
+/// and every honest party aborted; the scan must instead be restricted to the
+/// required Round 5 senders (`Act ∪ new committee`), the same set that gates
+/// completion and the transcript hash.
+#[test]
+fn test_excluded_old_member_cannot_abort_with_forged_round5_failure() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in &shares {
+		old_shares.insert(share.party_id(), share.clone());
+	}
+
+	// Party 2: swallow the Round 1 Ready signal (so the ready-window timeout
+	// excludes party 2 from Act) and send a forged Round 5 failure instead.
+	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
+		if sender != 2 {
+			return data;
+		}
+		let msg: ResharingMessage = match borsh::from_slice(&data) {
+			Ok(m) => m,
+			Err(_) => return data,
+		};
+		if matches!(msg, ResharingMessage::Round1(_)) {
+			let forged = ResharingMessage::Round5(ResharingRound5Broadcast {
+				ssid: *msg.ssid(),
+				party_id: 2,
+				share_commitments: std::collections::BTreeMap::new(),
+				partial_pks: std::collections::BTreeMap::new(),
+				success: false,
+				error_message: Some("forged failure from excluded member".to_string()),
+			});
+			borsh::to_vec(&forged).expect("serialize forged Round 5")
+		} else {
+			data
+		}
+	});
+
+	let result = run_resharing_protocol_full(
+		2,
+		vec![0, 1, 2],
+		2,
+		vec![0, 1, 3],
+		&old_shares,
+		&public_key,
+		Some(tamper),
+		&[],
+		&[],
+		None,
+	);
+
+	let new_shares =
+		result.expect("an excluded old member's forged Round 5 failure must not abort the session");
+	assert_eq!(new_shares.len(), 3);
+	assert!(!new_shares.contains_key(&2), "OldOnly member must not receive a share");
+
+	// The reshared key material must be genuine.
+	let new_config = ThresholdConfig::new(2, 3).expect("valid config");
+	let signing_shares =
+		vec![new_shares.get(&0).unwrap().clone(), new_shares.get(&3).unwrap().clone()];
+	let is_valid =
+		run_signing_and_verify(&signing_shares, &public_key, new_config, b"forged round5", b"");
 	assert!(is_valid, "Signature with reshared shares should verify");
 }
 
