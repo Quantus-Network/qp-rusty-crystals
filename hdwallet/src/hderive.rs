@@ -37,10 +37,6 @@ impl ChildNumber {
 	pub fn to_bytes(&self) -> [u8; 4] {
 		self.0.to_be_bytes()
 	}
-
-	pub fn hardened_from_u32(index: u32) -> Self {
-		ChildNumber(index | HARDENED_BIT)
-	}
 }
 
 impl FromStr for ChildNumber {
@@ -259,5 +255,32 @@ mod tests {
 			"m/44'/189189189'/+0'".parse::<DerivationPath>().unwrap_err(),
 			Error::InvalidChildNumber
 		);
+	}
+
+	// Every ChildNumber construction path must enforce `index < 2^31` before
+	// setting the hardened bit. An index with the bit already set (e.g.
+	// 2147483648) would encode to the same four bytes as its low alias (0'),
+	// and since only those bytes feed the HMAC derivation, two distinct
+	// advertised indexes would silently derive the same wallet key. The
+	// string parser is the only remaining public constructor (the unchecked
+	// numeric constructor `hardened_from_u32` was removed for exactly this
+	// aliasing risk), so pin the parser's rejection here.
+	#[test]
+	fn child_indexes_with_hardened_bit_set_rejected() {
+		// The largest valid index and its would-be aliases.
+		assert_eq!("2147483647'".parse::<ChildNumber>().unwrap(), ChildNumber(u32::MAX));
+		for (aliased, canonical) in [("2147483648'", "0'"), ("2147483692'", "44'")] {
+			assert!(
+				canonical.parse::<ChildNumber>().is_ok(),
+				"canonical child number {canonical:?} must parse"
+			);
+			assert_eq!(
+				aliased.parse::<ChildNumber>().unwrap_err(),
+				Error::InvalidChildNumber,
+				"{aliased:?} must be rejected, not alias {canonical:?}"
+			);
+		}
+		// Beyond u32 entirely.
+		assert_eq!("4294967296'".parse::<ChildNumber>().unwrap_err(), Error::InvalidChildNumber);
 	}
 }
