@@ -697,8 +697,9 @@ mod hdwallet_tests {
 		// syntactically valid but uses the Dilithium chain ID, not the wormhole one.
 		match derive_wormhole_from_mnemonic(bogus_mnemonic, None, "m/44'/189189'/0'") {
 			Err(HDLatticeError::InvalidWormholePath(_)) => {},
-			Err(other) =>
-				panic!("wrong chain ID must be rejected before seed stretching, got {other:?}"),
+			Err(other) => {
+				panic!("wrong chain ID must be rejected before seed stretching, got {other:?}")
+			},
 			Ok(_) => panic!("expected InvalidWormholePath, got Ok"),
 		}
 	}
