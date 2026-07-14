@@ -2238,6 +2238,46 @@ mod tests {
 		}
 	}
 
+	/// The DKG output public key is intentionally NOT a pure function of the
+	/// parties' seeds: each party's Round 1 randomness is bound to the session
+	/// SSID (which incorporates `session_nonce`), and the final key is
+	/// computed from `rho = h_seed(global_randomness)`. Re-running the DKG
+	/// with identical seeds but a fresh nonce therefore yields a different
+	/// key — that is the security property that stops an adversary who saw a
+	/// failed attempt's Round 2 reveals from predicting honest randomness and
+	/// grinding `global_randomness` on retry (see `derive_round1_randomness`).
+	///
+	/// This test pins that behavior so documentation like `derivation.rs`
+	/// ("one canonical stored key per (master_key, tweak)", not "recomputable
+	/// from (master_key, tweak)") stays honest: derived keys must be stored,
+	/// never recovered by re-running the DKG.
+	#[test]
+	fn test_dkg_public_key_depends_on_session_nonce() {
+		let seed = [42u8; 32];
+		let run = |nonce: &[u8; 32]| {
+			let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+			let public_keys: Vec<u32> = (0..3).collect();
+			run_local_dkg(2, 3, signers, public_keys, seed, nonce).unwrap()
+		};
+
+		let nonce_a = [0xA1u8; 32];
+		let nonce_b = [0xB2u8; 32];
+
+		let pk_a = run(&nonce_a)[0].public_key.clone();
+		let pk_b = run(&nonce_b)[0].public_key.clone();
+		assert_ne!(
+			pk_a.as_bytes(),
+			pk_b.as_bytes(),
+			"identical seeds with a fresh session nonce must produce a different public key; \
+			 if this ever fails, Round 1 randomness lost its SSID binding (grinding risk)"
+		);
+
+		// Within one session (same nonce), the protocol is deterministic for
+		// fixed seeds — honest parties agree and reruns reproduce the key.
+		let pk_a2 = run(&nonce_a)[0].public_key.clone();
+		assert_eq!(pk_a.as_bytes(), pk_a2.as_bytes());
+	}
+
 	/// Mismatched input vector lengths must return a `DkgError`, not panic.
 	/// `run_local_dkg` is public, so untrusted setup parameters reaching a
 	/// `.unwrap()` or `dkgs[party_id]` index would be an availability DoS.
