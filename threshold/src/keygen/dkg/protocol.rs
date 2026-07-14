@@ -163,7 +163,7 @@ impl fmt::Display for DkgError {
 ///
 /// The caller should handle each action appropriately:
 /// - `Wait`: No action needed, call `poke()` again after receiving messages
-/// - `SendMany`: Broadcast the data to all other participants
+/// - `SendMany`: Broadcast the data to all other participants via authenticated channel
 /// - `SendPrivate`: Send the data to a specific participant via secure channel
 /// - `Return`: The DKG is complete, the output contains the keys
 ///
@@ -180,6 +180,25 @@ pub enum DkgAction {
 	/// Wait for more messages before proceeding.
 	Wait,
 	/// Broadcast data to all other participants.
+	///
+	/// **IMPORTANT: This message MUST be sent over an authenticated channel
+	/// (integrity + sender authentication).**
+	///
+	/// The caller is responsible for ensuring:
+	/// - **Authenticity**: Receivers can verify the broadcast came from us — the `from` argument
+	///   that peers pass to [`Dkg::message`] is trusted and must be derived from transport-level
+	///   sender authentication, not from attacker-controllable packet contents
+	/// - **Integrity**: The message cannot be modified in transit
+	///
+	/// Confidentiality is not required; broadcast payloads are public.
+	///
+	/// Without sender authentication, an attacker who can inject packets can
+	/// spoof a participant's broadcast before the genuine one arrives. Round
+	/// buffers keep the first message per sender (first-message-wins, a
+	/// memory-exhaustion defense), so the forged packet occupies that
+	/// participant's slot and the honest broadcast is ignored. The poisoned
+	/// data is then caught by commitment or transcript verification, but only
+	/// as a late abort: the attacker can deny completion of every session.
 	SendMany(Vec<u8>),
 	/// Send data privately to a specific participant.
 	///
@@ -553,8 +572,21 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// before processing. This prevents quorum inflation attacks where an attacker
 	/// injects messages with fake sender IDs to satisfy broadcast quorum checks.
 	///
+	/// **The `from` value is a trust boundary.** This function performs no
+	/// cryptographic authentication of the sender; it only checks that `from`
+	/// is a participant and matches the party ID embedded in the message. The
+	/// transport layer MUST authenticate the sender of every message (private
+	/// *and* broadcast) and pass the authenticated identity as `from`. If
+	/// `from` can be spoofed, a forged broadcast can occupy a participant's
+	/// first-message-wins slot in the round buffers, causing the honest
+	/// party's broadcast to be ignored and the session to stall or abort
+	/// during commitment/transcript verification (denial of service). See
+	/// [`DkgAction::SendMany`] and [`DkgAction::SendPrivate`] for the channel
+	/// requirements.
+	///
 	/// # Arguments
-	/// * `from` - The party ID of the sender (from the transport layer)
+	/// * `from` - The party ID of the sender. MUST come from transport-level sender
+	///   authentication, never from attacker-controllable packet contents.
 	/// * `data` - The serialized message bytes
 	///
 	/// # Errors
