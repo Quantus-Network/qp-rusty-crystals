@@ -3545,7 +3545,7 @@ mod tests {
 	/// check).
 	#[test]
 	fn test_combining_ignores_failure_from_excluded_old_member() {
-		let mut protocol = combining_protocol_with_round5_failure_from(2);
+		let mut protocol = combining_protocol_with_round5_failure_from(Some(2));
 
 		let err = protocol.poke().expect_err("bare combining state cannot fully verify");
 		assert!(
@@ -3572,7 +3572,7 @@ mod tests {
 	/// sender (here an active old member) must still abort.
 	#[test]
 	fn test_combining_aborts_on_failure_from_required_party() {
-		let mut protocol = combining_protocol_with_round5_failure_from(1);
+		let mut protocol = combining_protocol_with_round5_failure_from(Some(1));
 
 		let err = protocol.poke().expect_err("failure from required party must abort");
 		assert!(
@@ -3582,13 +3582,44 @@ mod tests {
 		);
 	}
 
+	/// Security review follow-up: the excluded member reports `success = true`
+	/// and its only anomaly is a partial PK keyed by a non-canonical mask.
+	/// With no failure bit in play, the only way that broadcast could
+	/// influence Combining is through a consumer scanning the full
+	/// `round5_broadcasts` map — the property under test is that no such
+	/// consumer exists. Combining must sail past both the failure scan and
+	/// the share-data checks without tripping the non-canonical hard reject.
+	#[test]
+	fn test_combining_ignores_poisoned_mask_from_excluded_old_member() {
+		let mut protocol = combining_protocol_with_round5_failure_from(None);
+
+		let err = protocol.poke().expect_err("bare combining state cannot fully verify");
+		assert!(
+			!matches!(err, ResharingProtocolError::ProtocolAborted(_)),
+			"nothing reported failure, so nothing may abort, got: {}",
+			err
+		);
+		assert!(
+			!err.to_string().contains("non-canonical"),
+			"excluded old member's poisoned partial PK mask must be ignored, got: {}",
+			err
+		);
+		// The only remaining error on this bare setup is the ordinary lack of
+		// genuine partial PK data.
+		assert!(
+			err.to_string().contains("missing partial PK contribution"),
+			"unexpected error: {}",
+			err
+		);
+	}
+
 	/// Build a protocol poised at Combining with active set {0, 1} out of old
-	/// committee {0, 1, 2} and new committee {0, 1, 3}. All required Round 5
-	/// senders report success; `failure_from` reports failure. The excluded
-	/// old member (2) additionally smuggles a partial PK keyed by a
+	/// committee {0, 1, 2} and new committee {0, 1, 3}. All Round 5 senders
+	/// report success except `failure_from` (if any). The excluded old
+	/// member (2) additionally smuggles a partial PK keyed by a
 	/// non-canonical mask, which must be ignored, not hard-rejected.
 	fn combining_protocol_with_round5_failure_from(
-		failure_from: ParticipantId,
+		failure_from: Option<ParticipantId>,
 	) -> ResharingProtocol<TestSigner> {
 		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
 		let (public_key, shares) =
@@ -3614,11 +3645,11 @@ mod tests {
 		// Old member 2 is excluded from the active set.
 		protocol.active_set = Some(vec![0, 1]);
 
-		// Round 5 broadcasts: required senders (act {0,1} ∪ new {0,1,3}) all
-		// report success; `failure_from` reports failure. The excluded old
-		// member (2) also carries a poisoned non-canonical partial PK mask.
+		// Round 5 broadcasts: everyone reports success except `failure_from`
+		// (if any). The excluded old member (2) also carries a poisoned
+		// non-canonical partial PK mask.
 		for party in [0u32, 1, 2, 3] {
-			let success = party != failure_from;
+			let success = failure_from != Some(party);
 			let mut partial_pks: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
 			if party == 2 {
 				let full_mask: SubsetMask = 0b111;

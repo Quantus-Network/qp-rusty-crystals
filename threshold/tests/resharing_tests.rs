@@ -4132,26 +4132,19 @@ fn test_slow_old_only_member_observes_and_completes() {
 	assert!(is_valid, "Signature with reshared shares should verify");
 }
 
-/// Regression test (security review): an old committee member that is excluded
-/// from the active set must not be able to abort the session with a forged
-/// Round 5 failure report.
-///
-/// The malicious party (2, OldOnly, leaving the committee) withholds its Round
-/// 1 Ready signal and instead sends a syntactically valid Round 5 broadcast
-/// with `success = false` AND a partial PK keyed by a non-canonical subset
-/// mask. Every other party buffers that broadcast long before Combining
-/// (Round 5 messages are accepted in any state). The leader's ready window
-/// then closes without party 2, so `Act = {0, 1}` — the session is explicitly
-/// promised to proceed without party 2.
-///
-/// Both payloads were independent abort vectors before their respective
-/// fixes: the Combining failure scan honored the excluded member's stored
-/// failure report, and `verify_public_key_preservation` hard-rejected the
-/// non-canonical mask before checking that the sender is a new committee
-/// member. Combining must instead restrict every Round 5 consumer to the
-/// required sender set (and share-data checks to the new committee).
-#[test]
-fn test_excluded_old_member_cannot_abort_with_forged_round5_failure() {
+/// Shared scenario for the excluded-member Round 5 forgery tests: party 2
+/// (OldOnly, leaving the committee) withholds its Round 1 Ready signal and
+/// instead sends a forged Round 5 broadcast. Every other party buffers that
+/// broadcast long before Combining (Round 5 messages are accepted in any
+/// state). The leader's ready window then closes without party 2, so
+/// `Act = {0, 1}` — the session is explicitly promised to proceed without
+/// party 2. The property under test: nothing in a non-required sender's
+/// stored Round 5 broadcast may influence the outcome. The session must
+/// complete and the reshared shares must produce a valid signature.
+fn assert_resharing_survives_forged_round5_from_excluded(
+	forged_success: bool,
+	signing_context: &'static [u8],
+) {
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
 	let seed = [42u8; 32];
 	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
@@ -4162,7 +4155,7 @@ fn test_excluded_old_member_cannot_abort_with_forged_round5_failure() {
 	}
 
 	// Party 2: swallow the Round 1 Ready signal (so the ready-window timeout
-	// excludes party 2 from Act) and send a forged Round 5 failure instead.
+	// excludes party 2 from Act) and send the forged Round 5 instead.
 	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
 		if sender != 2 {
 			return data;
@@ -4183,8 +4176,9 @@ fn test_excluded_old_member_cannot_abort_with_forged_round5_failure() {
 				party_id: 2,
 				share_commitments: std::collections::BTreeMap::new(),
 				partial_pks: poisoned_partial_pks,
-				success: false,
-				error_message: Some("forged failure from excluded member".to_string()),
+				success: forged_success,
+				error_message: (!forged_success)
+					.then(|| "forged failure from excluded member".to_string()),
 			});
 			borsh::to_vec(&forged).expect("serialize forged Round 5")
 		} else {
@@ -4206,7 +4200,7 @@ fn test_excluded_old_member_cannot_abort_with_forged_round5_failure() {
 	);
 
 	let new_shares =
-		result.expect("an excluded old member's forged Round 5 failure must not abort the session");
+		result.expect("an excluded old member's forged Round 5 must not abort the session");
 	assert_eq!(new_shares.len(), 3);
 	assert!(!new_shares.contains_key(&2), "OldOnly member must not receive a share");
 
@@ -4215,8 +4209,35 @@ fn test_excluded_old_member_cannot_abort_with_forged_round5_failure() {
 	let signing_shares =
 		vec![new_shares.get(&0).unwrap().clone(), new_shares.get(&3).unwrap().clone()];
 	let is_valid =
-		run_signing_and_verify(&signing_shares, &public_key, new_config, b"forged round5", b"");
+		run_signing_and_verify(&signing_shares, &public_key, new_config, signing_context, b"");
 	assert!(is_valid, "Signature with reshared shares should verify");
+}
+
+/// Regression test (security review): an old committee member that is excluded
+/// from the active set must not be able to abort the session with a forged
+/// Round 5 failure report.
+///
+/// The forged broadcast carries `success = false` AND a poisoned partial PK.
+/// Both payloads were independent abort vectors before their respective
+/// fixes: the Combining failure scan honored the excluded member's stored
+/// failure report, and `verify_public_key_preservation` hard-rejected the
+/// non-canonical mask before checking that the sender is a new committee
+/// member.
+#[test]
+fn test_excluded_old_member_cannot_abort_with_forged_round5_failure() {
+	assert_resharing_survives_forged_round5_from_excluded(false, b"forged round5");
+}
+
+/// Regression test (security review follow-up): same scenario, but the forged
+/// broadcast reports `success = true` and carries ONLY the poisoned
+/// non-canonical partial PK mask. This isolates the share-data path: with no
+/// failure bit set, the only way the excluded sender could influence the
+/// outcome is through a Combining consumer scanning its stored share data —
+/// exactly the residual vector the sender filter in
+/// `verify_public_key_preservation` closes.
+#[test]
+fn test_excluded_old_member_cannot_abort_with_poisoned_partial_pk_mask() {
+	assert_resharing_survives_forged_round5_from_excluded(true, b"poisoned mask round5");
 }
 
 // ============================================================================
