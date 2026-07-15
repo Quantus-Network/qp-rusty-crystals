@@ -288,6 +288,90 @@ mod tests {
 		assert_eq!(p.coeffs()[4], 44099773, "coeff[4] mismatch");
 	}
 
+	/// TEMPORARY scaffolding for the NTT unification: prove that the circl
+	/// pipeline (ntt → mul_hat → inv_ntt) and the dilithium pipeline
+	/// (poly::ntt → poly::pointwise_montgomery → poly::invntt_tomont) agree
+	/// mod Q on the same inputs, i.e. their Montgomery factor accounting is
+	/// identical and only the coefficient representatives differ.
+	#[test]
+	fn test_circl_and_dilithium_pipelines_agree_mod_q() {
+		use qp_rusty_crystals_dilithium::poly;
+
+		let q = Q as i64;
+		let canon = |c: i32| -> i64 { (((c as i64) % q) + q) % q };
+
+		// Deterministic pseudo-random standard-domain inputs in [0, Q).
+		let mut a = Poly::default();
+		let mut b = Poly::default();
+		let mut state: u64 = 0x1234_5678_9abc_def0;
+		for i in 0..N {
+			state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+			a.coeffs_mut()[i] = (state % Q as u64) as i32;
+			state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+			b.coeffs_mut()[i] = (state % Q as u64) as i32;
+		}
+
+		// Forward NTT alone must agree mod Q.
+		let mut a_circl = a.clone();
+		let mut a_dilithium = a.clone();
+		ntt(&mut a_circl);
+		poly::ntt(&mut a_dilithium);
+		for i in 0..N {
+			assert_eq!(
+				canon(a_circl.coeffs()[i]),
+				canon(a_dilithium.coeffs()[i]),
+				"forward NTT diverges mod Q at coeff {}",
+				i
+			);
+		}
+
+		// Full multiply pipeline must agree mod Q.
+		let mut b_circl = b.clone();
+		let mut b_dilithium = b.clone();
+		ntt(&mut b_circl);
+		poly::ntt(&mut b_dilithium);
+
+		let mut prod_circl = Poly::default();
+		mul_hat(&mut prod_circl, &a_circl, &b_circl);
+		inv_ntt(&mut prod_circl);
+
+		let mut prod_dilithium = Poly::default();
+		poly::pointwise_montgomery(&mut prod_dilithium, &a_dilithium, &b_dilithium);
+		poly::invntt_tomont(&mut prod_dilithium);
+
+		for i in 0..N {
+			assert_eq!(
+				canon(prod_circl.coeffs()[i]),
+				canon(prod_dilithium.coeffs()[i]),
+				"ntt/mul/invntt pipeline diverges mod Q at coeff {}",
+				i
+			);
+		}
+
+		// Bare inverse NTT (no pointwise multiply) must also agree mod Q:
+		// circl inv_ntt and dilithium invntt_tomont both scale by R. Each
+		// side must first be reduced per its own contract (circl inv_ntt
+		// assumes inputs <= 2Q — forward output reaches 18Q and overflows
+		// u32 inside the inverse butterflies otherwise; dilithium
+		// invntt_tomont requires |c| < Q).
+		let mut inv_circl = a_circl.clone();
+		for c in inv_circl.coeffs_mut().iter_mut() {
+			*c = crate::protocol::primitives::reduce_le2q(*c as u32) as i32;
+		}
+		inv_ntt(&mut inv_circl);
+		let mut inv_dilithium = a_dilithium.clone();
+		poly::reduce(&mut inv_dilithium);
+		poly::invntt_tomont(&mut inv_dilithium);
+		for i in 0..N {
+			assert_eq!(
+				canon(inv_circl.coeffs()[i]),
+				canon(inv_dilithium.coeffs()[i]),
+				"bare inverse NTT diverges mod Q at coeff {}",
+				i
+			);
+		}
+	}
+
 	#[test]
 	fn test_ntt_challenge_poly_simple() {
 		// Test NTT of a simple challenge polynomial with just one non-zero coefficient
