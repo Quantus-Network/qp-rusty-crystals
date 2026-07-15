@@ -16,7 +16,7 @@ use alloc::{
 
 use qp_rusty_crystals_dilithium::{
 	params::{K, L},
-	polyvec,
+	poly, polyvec,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -293,10 +293,10 @@ pub fn recover_share(
 		let mut s2_ntt = share.s2_share.clone();
 
 		for s1_poly in s1_ntt.vec.iter_mut().take(L) {
-			crate::circl_ntt::ntt(s1_poly);
+			poly::ntt(s1_poly);
 		}
 		for s2_poly in s2_ntt.vec.iter_mut().take(K) {
-			crate::circl_ntt::ntt(s2_poly);
+			poly::ntt(s2_poly);
 		}
 
 		// Accumulate in u64 to avoid overflow

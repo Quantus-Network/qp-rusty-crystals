@@ -24,7 +24,7 @@ use crate::{
 	protocol::{
 		primitives::{
 			compute_dilithium_hint, compute_ntt_dot_product, decompose_polyveck, mod_q,
-			normalize_assuming_le2q, pack_signature, poly_pack_w, reduce_le2q, unpack_polyveck_w,
+			normalize_assuming_le2q, pack_signature, poly_pack_w, unpack_polyveck_w,
 			HyperballSampleVector,
 		},
 		secret_sharing::{recover_share, SecretShare},
@@ -346,33 +346,24 @@ pub(crate) fn generate_round1(
 		let mut w_k = polyvec::Polyveck::default();
 		let mut y_k_ntt = y_k.clone();
 		for y_poly in y_k_ntt.vec.iter_mut().take(L) {
-			crate::circl_ntt::ntt(y_poly);
+			poly::ntt(y_poly);
 		}
 
 		for (i, a_row) in a_matrix.iter().enumerate().take(K) {
 			compute_ntt_dot_product(&mut w_k.vec[i], a_row, &y_k_ntt);
 
-			// Apply ReduceLe2Q in NTT domain BEFORE InvNTT
-			for j in 0..N as usize {
-				let coeff = w_k.vec[i].coeffs()[j];
-				let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
-				w_k.vec[i].coeffs_mut()[j] = reduce_le2q(coeff_u32) as i32;
-			}
+			// Dot-product sums are bounded by L*Q; bring them within the
+			// inverse NTT's |c| < Q input contract.
+			poly::reduce(&mut w_k.vec[i]);
+			poly::invntt_tomont(&mut w_k.vec[i]);
 
-			crate::circl_ntt::inv_ntt(&mut w_k.vec[i]);
-
-			// Add error term e_k for threshold scheme
+			// Add error term e_k for threshold scheme. |c| stays < 2Q
+			// (inverse NTT output is < Q, e_k is hyperball-bounded), which
+			// normalize_assuming_le2q below accepts.
 			poly::add_ip(&mut w_k.vec[i], &e_k.vec[i]);
-
-			// Apply ReduceLe2Q after Add
-			for j in 0..N as usize {
-				let coeff = w_k.vec[i].coeffs()[j];
-				let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
-				w_k.vec[i].coeffs_mut()[j] = reduce_le2q(coeff_u32) as i32;
-			}
 		}
 
-		// Apply NormalizeAssumingLe2Q
+		// Normalize to the canonical [0, Q) range for packing/hashing.
 		for i in 0..K {
 			normalize_assuming_le2q(&mut w_k.vec[i]);
 		}
@@ -632,13 +623,15 @@ pub(crate) fn generate_round3_response(
 		// Derive challenge polynomial and convert to NTT domain
 		let mut challenge_ntt = poly::Poly::default();
 		poly::challenge(&mut challenge_ntt, &challenge_bytes);
-		crate::circl_ntt::ntt(&mut challenge_ntt);
+		poly::ntt(&mut challenge_ntt);
 
-		// Compute z = c·s1 (challenge times secret share)
+		// Compute z = c·s1 (challenge times secret share). Montgomery
+		// pointwise products are bounded by Q in absolute value, satisfying
+		// the inverse NTT's input contract directly.
 		let mut z = polyvec::Polyvecl::default();
 		for j in 0..L {
-			crate::circl_ntt::mul_hat(&mut z.vec[j], &challenge_ntt, &s1_ntt.vec[j]);
-			crate::circl_ntt::inv_ntt(&mut z.vec[j]);
+			poly::pointwise_montgomery(&mut z.vec[j], &challenge_ntt, &s1_ntt.vec[j]);
+			poly::invntt_tomont(&mut z.vec[j]);
 		}
 		// Normalize z
 		for j in 0..L {
@@ -652,8 +645,8 @@ pub(crate) fn generate_round3_response(
 		// Compute c·s2
 		let mut cs2 = polyvec::Polyveck::default();
 		for j in 0..K {
-			crate::circl_ntt::mul_hat(&mut cs2.vec[j], &challenge_ntt, &s2_ntt.vec[j]);
-			crate::circl_ntt::inv_ntt(&mut cs2.vec[j]);
+			poly::pointwise_montgomery(&mut cs2.vec[j], &challenge_ntt, &s2_ntt.vec[j]);
+			poly::invntt_tomont(&mut cs2.vec[j]);
 		}
 		// Normalize cs2
 		for j in 0..K {
@@ -899,7 +892,7 @@ pub(crate) fn combine_signature(
 					*coeff -= Q;
 				}
 			}
-			crate::circl_ntt::ntt(zh_poly);
+			poly::ntt(zh_poly);
 		}
 
 		let mut az = polyvec::Polyveck::default();
@@ -924,7 +917,7 @@ pub(crate) fn combine_signature(
 		// Derive challenge polynomial and convert to NTT domain
 		let mut challenge_ntt = poly::Poly::default();
 		poly::challenge(&mut challenge_ntt, &challenge_bytes);
-		crate::circl_ntt::ntt(&mut challenge_ntt);
+		poly::ntt(&mut challenge_ntt);
 
 		// Compute 2^d * c * t1 (scaled challenge times public key component)
 		let mut scaled_challenge_t1 = polyvec::Polyveck::default();
@@ -935,9 +928,9 @@ pub(crate) fn combine_signature(
 			{
 				*scaled_coeff = *t1_coeff << D;
 			}
-			crate::circl_ntt::ntt(scaled_poly);
+			poly::ntt(scaled_poly);
 			let tmp = scaled_poly.clone();
-			crate::circl_ntt::mul_hat(scaled_poly, &tmp, &challenge_ntt);
+			poly::pointwise_montgomery(scaled_poly, &tmp, &challenge_ntt);
 		}
 
 		// Compute Az - 2^d * c * t1
@@ -949,7 +942,7 @@ pub(crate) fn combine_signature(
 				*scaled_coeff = *az_coeff - *scaled_coeff;
 			}
 			poly::reduce(scaled_poly);
-			crate::circl_ntt::inv_ntt(scaled_poly);
+			poly::invntt_tomont(scaled_poly);
 			normalize_assuming_le2q(scaled_poly);
 		}
 

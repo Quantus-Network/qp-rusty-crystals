@@ -73,13 +73,18 @@ pub(crate) fn mod_q(x: u32) -> u32 {
 	le2q_mod_q(reduce_le2q(x))
 }
 
-/// Normalize polynomial coefficients assuming they are ≤ 2Q.
-/// Converts to [0, Q) range. Matches reference implementation behavior.
+/// Normalize polynomial coefficients to the canonical [0, Q) range.
+///
+/// Accepts coefficients anywhere in (-2Q, 2Q): non-negative values ≤ 2Q
+/// (the historical circl convention) and signed values with |c| < 2Q (the
+/// dilithium NTT convention, whose inverse NTT outputs |c| < Q).
 pub(crate) fn normalize_assuming_le2q(poly: &mut poly::Poly) {
 	for coeff in poly.coeffs_mut().iter_mut() {
-		// First ensure value is positive and in reasonable range
-		let coeff_u32 = if *coeff < 0 { (*coeff + Q) as u32 } else { *coeff as u32 };
-		// Apply le2q_mod_q to get into [0, Q) range
+		debug_assert!(
+			(*coeff as i64).abs() < 2 * Q as i64,
+			"normalize_assuming_le2q precondition violated: |coefficient| >= 2Q"
+		);
+		let coeff_u32 = if *coeff < 0 { (*coeff + 2 * Q) as u32 } else { *coeff as u32 };
 		*coeff = le2q_mod_q(coeff_u32) as i32;
 	}
 }
@@ -93,10 +98,11 @@ const N_COEFFS: usize = N as usize;
 
 /// Accumulator for summing NTT-domain polynomials without overflow.
 ///
-/// After NTT, coefficients are bounded by 18*Q ≈ 150M. When summing many
-/// polynomials (e.g., C(n,k) subsets for large configurations), the sum can
-/// exceed `i32::MAX` (~2.1B). This accumulator uses `u64` internally and
-/// reduces mod Q on finalization.
+/// The forward NTT leaves coefficients as non-canonical representatives
+/// (up to ~8Q in absolute value for the dilithium NTT). When summing many
+/// polynomials (e.g., C(n,k) subsets for large configurations), a plain
+/// `i32` sum can overflow. This accumulator canonicalizes each coefficient
+/// to [0, Q) and sums in `u64`, reducing mod Q on finalization.
 ///
 /// # Example
 ///
@@ -120,15 +126,16 @@ impl<const VECS: usize> NttAccumulator<VECS> {
 
 	/// Add a polynomial's coefficients to the accumulator.
 	///
-	/// The polynomial is assumed to be in NTT domain with non-negative
-	/// coefficients (or signed coefficients that should be normalized).
+	/// Accepts any signed NTT-domain representative (the dilithium forward
+	/// NTT outputs coefficients up to ~8Q in absolute value); each
+	/// coefficient is canonicalized to [0, Q) before accumulating.
 	#[inline]
 	pub fn add_poly(&mut self, vec_idx: usize, poly: &poly::Poly) {
 		debug_assert!(vec_idx < VECS);
+		let q = Q as i64;
 		for (j, &coeff) in poly.coeffs().iter().enumerate() {
-			// NTT output should be non-negative, but handle signed just in case
-			let coeff_u64 = if coeff < 0 { (coeff as i64 + Q as i64) as u64 } else { coeff as u64 };
-			self.coeffs[vec_idx][j] += coeff_u64;
+			let canonical = (((coeff as i64) % q) + q) % q;
+			self.coeffs[vec_idx][j] += canonical as u64;
 		}
 	}
 
@@ -257,7 +264,12 @@ pub(crate) fn decompose_polyveck(
 /// Compute dot product of polynomial vectors in NTT domain.
 ///
 /// Computes result = Σ(a[i] * b[i]) for all polynomials in the vectors,
-/// using Montgomery multiplication. Compatible with the reference implementation.
+/// using Montgomery multiplication (each product carries a factor of R⁻¹,
+/// cancelled later by [`poly::invntt_tomont`]'s factor of R).
+///
+/// Each Montgomery product coefficient is bounded by Q in absolute value,
+/// so the sum over L = 7 polynomials is bounded by 7Q ≈ 5.9e7 — far inside
+/// `i32` range and inside [`poly::reduce`]'s input contract.
 pub(crate) fn compute_ntt_dot_product(
 	result: &mut poly::Poly,
 	a: &polyvec::Polyvecl,
@@ -269,7 +281,7 @@ pub(crate) fn compute_ntt_dot_product(
 	// Compute dot product
 	for i in 0..L {
 		let mut tmp = poly::Poly::default();
-		crate::circl_ntt::mul_hat(&mut tmp, &a.vec[i], &b.vec[i]);
+		poly::pointwise_montgomery(&mut tmp, &a.vec[i], &b.vec[i]);
 		for (r, &t) in result.coeffs_mut().iter_mut().zip(tmp.coeffs().iter()) {
 			*r += t;
 		}
