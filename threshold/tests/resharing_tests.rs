@@ -4138,14 +4138,18 @@ fn test_slow_old_only_member_observes_and_completes() {
 ///
 /// The malicious party (2, OldOnly, leaving the committee) withholds its Round
 /// 1 Ready signal and instead sends a syntactically valid Round 5 broadcast
-/// with `success = false`. Every other party buffers that broadcast long before
-/// Combining (Round 5 messages are accepted in any state). The leader's ready
-/// window then closes without party 2, so `Act = {0, 1}` — the session is
-/// explicitly promised to proceed without party 2. Before the fix, the
-/// Combining failure scan honored the excluded member's stored failure report
-/// and every honest party aborted; the scan must instead be restricted to the
-/// required Round 5 senders (`Act ∪ new committee`), the same set that gates
-/// completion and the transcript hash.
+/// with `success = false` AND a partial PK keyed by a non-canonical subset
+/// mask. Every other party buffers that broadcast long before Combining
+/// (Round 5 messages are accepted in any state). The leader's ready window
+/// then closes without party 2, so `Act = {0, 1}` — the session is explicitly
+/// promised to proceed without party 2.
+///
+/// Both payloads were independent abort vectors before their respective
+/// fixes: the Combining failure scan honored the excluded member's stored
+/// failure report, and `verify_public_key_preservation` hard-rejected the
+/// non-canonical mask before checking that the sender is a new committee
+/// member. Combining must instead restrict every Round 5 consumer to the
+/// required sender set (and share-data checks to the new committee).
 #[test]
 fn test_excluded_old_member_cannot_abort_with_forged_round5_failure() {
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
@@ -4168,11 +4172,17 @@ fn test_excluded_old_member_cannot_abort_with_forged_round5_failure() {
 			Err(_) => return data,
 		};
 		if matches!(msg, ResharingMessage::Round1(_)) {
+			use qp_rusty_crystals_dilithium::params::{K, N};
+			// A partial PK keyed by the (non-canonical) full-committee mask:
+			// before the sender filter, this hard-failed pk preservation on
+			// every party that received it.
+			let mut poisoned_partial_pks = std::collections::BTreeMap::new();
+			poisoned_partial_pks.insert(0b111u16, [[7i32; N as usize]; K]);
 			let forged = ResharingMessage::Round5(ResharingRound5Broadcast {
 				ssid: *msg.ssid(),
 				party_id: 2,
 				share_commitments: std::collections::BTreeMap::new(),
-				partial_pks: std::collections::BTreeMap::new(),
+				partial_pks: poisoned_partial_pks,
 				success: false,
 				error_message: Some("forged failure from excluded member".to_string()),
 			});
