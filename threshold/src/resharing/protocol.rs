@@ -1464,17 +1464,19 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// members (status) plus new committee members (new-share commitments +
 	/// partial PKs). `None` until the active set is agreed.
 	///
-	/// This is the outer trust boundary for Round 5 consumption. Completion
-	/// ([`Self::have_all_round5`]), the failure-abort scan in Combining, and
-	/// the transcript hash use exactly this set; the Combining share-data
-	/// checks ([`Self::verify_new_share_consistency`],
+	/// This is the outer trust boundary for Round 5 consumption. Every
+	/// consumer of `round5_broadcasts` filters senders through it:
+	/// completion ([`Self::have_all_round5`]), the failure-abort scan in
+	/// Combining, and the transcript hash use exactly this set, while the
+	/// Combining share-data checks ([`Self::verify_new_share_consistency`],
 	/// [`Self::verify_public_key_preservation`]) restrict further to new
 	/// committee members, a subset of this set. Together these ensure a
 	/// broadcast from an old member excluded from `Act` never influences the
 	/// outcome — the protocol's liveness promise is that it proceeds without
 	/// such members, and honoring their failure reports (or hard-failing on
 	/// their poisoned share data) would let a single excluded (e.g.
-	/// compromised, being-rotated-out) member abort every session.
+	/// compromised, being-rotated-out) member abort every session. Any new
+	/// consumer of `round5_broadcasts` must apply the same filtering.
 	fn required_round5_senders(&self) -> Option<alloc::collections::BTreeSet<ParticipantId>> {
 		let act = self.active_set.as_ref()?;
 		Some(act.iter().copied().chain(self.config.new_participants().iter()).collect())
@@ -1482,8 +1484,12 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 
 	fn have_all_round5(&self) -> bool {
 		// Old members outside the active set may be offline, so they are not
-		// required; their Round 5 broadcasts (if any) are ignored outright —
-		// see `required_round5_senders`.
+		// required for completion. Their buffered broadcasts (if any) are
+		// also not honored by the Combining failure scan, not included in
+		// the transcript hash, and not read by the Combining share-data
+		// checks (which restrict further, to new committee members). Any new
+		// consumer of `round5_broadcasts` must apply one of those filters —
+		// see `required_round5_senders` for the enumeration and rationale.
 		let Some(required) = self.required_round5_senders() else { return false };
 		required.iter().all(|p| self.round5_broadcasts.contains_key(p))
 	}
