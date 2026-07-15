@@ -168,7 +168,7 @@ pub fn generate_with_dealer(
 	// Normalize t
 	for t_poly in t.vec.iter_mut().take(K) {
 		poly::reduce(t_poly);
-		for coeff in t_poly.coeffs.iter_mut() {
+		for coeff in t_poly.coeffs_mut().iter_mut() {
 			let normalized = ((*coeff % Q) + Q) % Q;
 			*coeff = normalized;
 		}
@@ -204,12 +204,12 @@ pub fn generate_with_dealer(
 		for (subset_id, share) in party_shares_map {
 			let mut s1_data = [[0i32; 256]; L];
 			for (i, s1_item) in s1_data.iter_mut().enumerate() {
-				s1_item.copy_from_slice(&share.s1_share.vec[i].coeffs);
+				s1_item.copy_from_slice(share.s1_share.vec[i].coeffs());
 			}
 
 			let mut s2_data = [[0i32; 256]; K];
 			for (i, s2_item) in s2_data.iter_mut().enumerate() {
-				s2_item.copy_from_slice(&share.s2_share.vec[i].coeffs);
+				s2_item.copy_from_slice(share.s2_share.vec[i].coeffs());
 			}
 
 			shares_data.insert(subset_id, SecretShareData { s1: s1_data, s2: s2_data });
@@ -341,7 +341,7 @@ fn generate_threshold_shares(
 		// the sum is bounded by ±12870, well within i32 range.
 		for (total_poly, share_poly) in s1_total.vec.iter_mut().zip(s1_share.vec.iter()).take(L) {
 			for (total_coeff, share_coeff) in
-				total_poly.coeffs.iter_mut().zip(share_poly.coeffs.iter())
+				total_poly.coeffs_mut().iter_mut().zip(share_poly.coeffs().iter())
 			{
 				*total_coeff += *share_coeff;
 			}
@@ -349,7 +349,7 @@ fn generate_threshold_shares(
 
 		for (total_poly, share_poly) in s2_total.vec.iter_mut().zip(s2_share.vec.iter()).take(K) {
 			for (total_coeff, share_coeff) in
-				total_poly.coeffs.iter_mut().zip(share_poly.coeffs.iter())
+				total_poly.coeffs_mut().iter_mut().zip(share_poly.coeffs().iter())
 			{
 				*total_coeff += *share_coeff;
 			}
@@ -366,7 +366,7 @@ fn generate_threshold_shares(
 
 	// Normalize s1_total (η-bounded sums)
 	for total_poly in s1_total.vec.iter_mut().take(L) {
-		for total_coeff in total_poly.coeffs.iter_mut() {
+		for total_coeff in total_poly.coeffs_mut().iter_mut() {
 			let coeff_u32 =
 				if *total_coeff < 0 { (*total_coeff + Q) as u32 } else { *total_coeff as u32 };
 			*total_coeff = mod_q(coeff_u32) as i32;
@@ -375,7 +375,7 @@ fn generate_threshold_shares(
 
 	// Normalize s2_total (η-bounded sums)
 	for total_poly in s2_total.vec.iter_mut().take(K) {
-		for total_coeff in total_poly.coeffs.iter_mut() {
+		for total_coeff in total_poly.coeffs_mut().iter_mut() {
 			let coeff_u32 =
 				if *total_coeff < 0 { (*total_coeff + Q) as u32 } else { *total_coeff as u32 };
 			*total_coeff = mod_q(coeff_u32) as i32;

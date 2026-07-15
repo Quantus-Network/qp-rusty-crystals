@@ -302,7 +302,6 @@ mod party_management_tests {
 			b"test message".to_vec(),
 			b"context".to_vec(),
 			vec![0, 1], // exactly threshold participants
-			0,          // my_id
 			0,          // leader_id
 			[0xAA; 32], // round1_seed
 			[0xBB; 32], // attempt_nonce

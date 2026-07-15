@@ -76,12 +76,11 @@ pub(crate) fn mod_q(x: u32) -> u32 {
 /// Normalize polynomial coefficients assuming they are ≤ 2Q.
 /// Converts to [0, Q) range. Matches reference implementation behavior.
 pub(crate) fn normalize_assuming_le2q(poly: &mut poly::Poly) {
-	for j in 0..N as usize {
-		let coeff = poly.coeffs[j];
+	for coeff in poly.coeffs_mut().iter_mut() {
 		// First ensure value is positive and in reasonable range
-		let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
+		let coeff_u32 = if *coeff < 0 { (*coeff + Q) as u32 } else { *coeff as u32 };
 		// Apply le2q_mod_q to get into [0, Q) range
-		poly.coeffs[j] = le2q_mod_q(coeff_u32) as i32;
+		*coeff = le2q_mod_q(coeff_u32) as i32;
 	}
 }
 
@@ -126,7 +125,7 @@ impl<const VECS: usize> NttAccumulator<VECS> {
 	#[inline]
 	pub fn add_poly(&mut self, vec_idx: usize, poly: &poly::Poly) {
 		debug_assert!(vec_idx < VECS);
-		for (j, &coeff) in poly.coeffs.iter().enumerate() {
+		for (j, &coeff) in poly.coeffs().iter().enumerate() {
 			// NTT output should be non-negative, but handle signed just in case
 			let coeff_u64 = if coeff < 0 { (coeff as i64 + Q as i64) as u64 } else { coeff as u64 };
 			self.coeffs[vec_idx][j] += coeff_u64;
@@ -140,7 +139,7 @@ impl<const VECS: usize> NttAccumulator<VECS> {
 		core::array::from_fn(|i| {
 			let mut poly = poly::Poly::default();
 			for (j, &acc) in self.coeffs[i].iter().enumerate() {
-				poly.coeffs[j] = (acc % (Q as u64)) as i32;
+				poly.coeffs_mut()[j] = (acc % (Q as u64)) as i32;
 			}
 			poly
 		})
@@ -243,10 +242,10 @@ pub(crate) fn decompose_polyveck(
 ) {
 	for i in 0..K {
 		for j in 0..N as usize {
-			let a = input.vec[i].coeffs[j] as u32;
+			let a = input.vec[i].coeffs()[j] as u32;
 			let (a0, a1) = decompose_coefficient(a);
-			w0.vec[i].coeffs[j] = a0 as i32;
-			w1.vec[i].coeffs[j] = a1 as i32;
+			w0.vec[i].coeffs_mut()[j] = a0 as i32;
+			w1.vec[i].coeffs_mut()[j] = a1 as i32;
 		}
 	}
 }
@@ -265,16 +264,14 @@ pub(crate) fn compute_ntt_dot_product(
 	b: &polyvec::Polyvecl,
 ) {
 	// Zero out result
-	for i in 0..N as usize {
-		result.coeffs[i] = 0;
-	}
+	result.coeffs_mut().fill(0);
 
 	// Compute dot product
 	for i in 0..L {
 		let mut tmp = poly::Poly::default();
 		crate::circl_ntt::mul_hat(&mut tmp, &a.vec[i], &b.vec[i]);
-		for j in 0..N as usize {
-			result.coeffs[j] += tmp.coeffs[j];
+		for (r, &t) in result.coeffs_mut().iter_mut().zip(tmp.coeffs().iter()) {
+			*r += t;
 		}
 	}
 }
@@ -388,7 +385,7 @@ impl HyperballSampleVector {
 				} else if reduced < -(Q / 2) {
 					reduced += Q;
 				}
-				z.vec[i].coeffs[j] = reduced;
+				z.vec[i].coeffs_mut()[j] = reduced;
 			}
 		}
 	}
@@ -408,7 +405,7 @@ impl HyperballSampleVector {
 				} else if reduced < -(Q / 2) {
 					reduced += Q;
 				}
-				s1.vec[i].coeffs[j] = reduced;
+				s1.vec[i].coeffs_mut()[j] = reduced;
 			}
 		}
 
@@ -424,7 +421,7 @@ impl HyperballSampleVector {
 				} else if reduced < -(Q / 2) {
 					reduced += Q;
 				}
-				s2.vec[i].coeffs[j] = reduced;
+				s2.vec[i].coeffs_mut()[j] = reduced;
 			}
 		}
 	}
@@ -474,7 +471,7 @@ impl HyperballSampleVector {
 		// Copy s1 polynomials (first L polynomials)
 		for i in 0..L {
 			for j in 0..N as usize {
-				let mut u = s1.vec[i].coeffs[j];
+				let mut u = s1.vec[i].coeffs()[j];
 				// Center modulo Q
 				u += Q / 2;
 				let t = u - Q;
@@ -488,7 +485,7 @@ impl HyperballSampleVector {
 		// Copy s2 polynomials (next K polynomials)
 		for i in 0..K {
 			for j in 0..N as usize {
-				let mut u = s2.vec[i].coeffs[j];
+				let mut u = s2.vec[i].coeffs()[j];
 				// Center modulo Q
 				u += Q / 2;
 				let t = u - Q;
@@ -517,8 +514,8 @@ pub(crate) fn compute_dilithium_hint(
 	let mut pop = 0;
 	for i in 0..K {
 		for j in 0..N as usize {
-			let h = make_hint_single(w0pf.vec[i].coeffs[j], w1.vec[i].coeffs[j]);
-			hint.vec[i].coeffs[j] = h;
+			let h = make_hint_single(w0pf.vec[i].coeffs()[j], w1.vec[i].coeffs()[j]);
+			hint.vec[i].coeffs_mut()[j] = h;
 			pop += h as usize;
 		}
 	}
@@ -558,7 +555,7 @@ pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8]) {
 
 	let mut bit_pos = 0usize;
 	for i in 0..N as usize {
-		let coeff = p.coeffs[i] as u32;
+		let coeff = p.coeffs()[i] as u32;
 
 		// Write 23 bits starting at bit_pos
 		let byte_pos = bit_pos / 8;
@@ -628,7 +625,7 @@ pub(crate) fn poly_unpack_w(buf: &[u8]) -> Result<poly::Poly, &'static str> {
 			return Err("coefficient out of range (>= Q)");
 		}
 
-		p.coeffs[i] = val as i32;
+		p.coeffs_mut()[i] = val as i32;
 		bit_pos += 23;
 	}
 
@@ -732,7 +729,7 @@ mod tests {
 	fn test_poly_pack_unpack_w() {
 		let mut p = poly::Poly::default();
 		for i in 0..N as usize {
-			p.coeffs[i] = (i * 12345) as i32 % Q;
+			p.coeffs_mut()[i] = (i * 12345) as i32 % Q;
 		}
 
 		let mut buf = vec![0u8; 736];
@@ -741,7 +738,7 @@ mod tests {
 		let p2 = poly_unpack_w(&buf).expect("valid coefficients should unpack");
 
 		for i in 0..N as usize {
-			assert_eq!(p.coeffs[i], p2.coeffs[i], "Mismatch at index {}", i);
+			assert_eq!(p.coeffs()[i], p2.coeffs()[i], "Mismatch at index {}", i);
 		}
 	}
 

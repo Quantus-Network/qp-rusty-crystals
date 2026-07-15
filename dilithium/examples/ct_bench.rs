@@ -88,7 +88,7 @@ fn random_class(rng: &mut BenchRng) -> (bool, Class) {
 
 /// Fill a Poly with uniform coefficients in [-bound, bound].
 fn fill_poly(p: &mut Poly, bound: i32, rng: &mut BenchRng) {
-	for c in p.coeffs.iter_mut() {
+	for c in p.coeffs_mut().iter_mut() {
 		*c = rng.random_range(-bound..=bound);
 	}
 }
@@ -110,14 +110,14 @@ fn fill_polyveck(v: &mut Polyveck, bound: i32, rng: &mut BenchRng) {
 /// Plain coefficient copy (no allocation, no zeroize-on-drop of the destination).
 fn copy_polyvecl(dst: &mut Polyvecl, src: &Polyvecl) {
 	for (d, s) in dst.vec.iter_mut().zip(src.vec.iter()) {
-		d.coeffs = s.coeffs;
+		*d.coeffs_mut() = *s.coeffs();
 	}
 }
 
 /// Plain coefficient copy (no allocation, no zeroize-on-drop of the destination).
 fn copy_polyveck(dst: &mut Polyveck, src: &Polyveck) {
 	for (d, s) in dst.vec.iter_mut().zip(src.vec.iter()) {
-		d.coeffs = s.coeffs;
+		*d.coeffs_mut() = *s.coeffs();
 	}
 }
 
@@ -288,7 +288,7 @@ fn sign_make_hint(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 	let fill_w1 = |v: &mut Polyveck, rng: &mut BenchRng| {
 		for p in v.vec.iter_mut() {
-			for c in p.coeffs.iter_mut() {
+			for c in p.coeffs_mut().iter_mut() {
 				*c = rng.random_range(0..16);
 			}
 		}
@@ -346,11 +346,11 @@ fn ntt_pointwise(runner: &mut CtRunner, rng: &mut BenchRng) {
 		fill_poly(&mut scratch_a, Q - 1, rng);
 		fill_poly(&mut scratch_b, Q - 1, rng);
 		if is_left {
-			a.coeffs = fixed_a.coeffs;
-			b.coeffs = fixed_b.coeffs;
+			*a.coeffs_mut() = *fixed_a.coeffs();
+			*b.coeffs_mut() = *fixed_b.coeffs();
 		} else {
-			a.coeffs = scratch_a.coeffs;
-			b.coeffs = scratch_b.coeffs;
+			*a.coeffs_mut() = *scratch_a.coeffs();
+			*b.coeffs_mut() = *scratch_b.coeffs();
 		}
 		runner.run_one(class, || {
 			for _ in 0..BATCH {

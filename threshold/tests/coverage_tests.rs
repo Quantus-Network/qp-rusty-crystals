@@ -38,7 +38,6 @@ mod participant_count_validation {
 			b"".to_vec(),
 			vec![0, 1], // Only 2 participants, need 3
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		);
@@ -70,7 +69,6 @@ mod participant_count_validation {
 			b"".to_vec(),
 			vec![0, 1, 2], // Exactly threshold
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		);
@@ -96,7 +94,6 @@ mod malformed_message_handling {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -125,7 +122,6 @@ mod malformed_message_handling {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -161,7 +157,6 @@ mod malformed_message_handling {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -305,7 +300,6 @@ mod edge_cases {
 			b"".to_vec(),
 			vec![0, 1], // Missing party 2
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		);
@@ -328,7 +322,6 @@ mod edge_cases {
 			b"test".to_vec(),
 			max_context,
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -353,7 +346,6 @@ mod edge_cases {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -395,7 +387,6 @@ mod message_buffering {
 			b"".to_vec(),
 			vec![0, 1],
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		)
@@ -432,7 +423,6 @@ mod sender_validation {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1],
-			0, // my_id is 0
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -466,7 +456,6 @@ mod sender_validation {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1], // Only parties 0 and 1
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -502,7 +491,6 @@ mod sender_validation {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1], // Exactly threshold participants
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce

@@ -1,13 +1,45 @@
+//! Low-level polynomial arithmetic for ML-DSA-87.
+//!
+//! # Coefficient-bound contract
+//!
+//! The routines in this module are ports of the reference ML-DSA
+//! implementation. For performance and constant-time behaviour they do **not**
+//! re-validate their inputs; instead each function documents the coefficient
+//! bounds it requires and the bounds its output satisfies. Violating a
+//! precondition can overflow `i32` arithmetic — a panic in builds with
+//! overflow checks, silent wraparound (and a corrupt polynomial) in release
+//! builds.
+//!
+//! To keep those preconditions from being violated by *external* callers,
+//! [`Poly`] seals its coefficient array:
+//!
+//! - [`Poly::from_coeffs`] is the validated entry point for untrusted data; it only accepts
+//!   coefficients in `(-Q, Q)`, which satisfies every precondition in this module.
+//! - The unpack functions (`z_unpack`, `eta_unpack`, …) produce bounded coefficients by
+//!   construction.
+//! - [`Poly::coeffs_mut`] grants raw mutable access and shifts responsibility for the documented
+//!   bounds to the caller. It exists for advanced integrations (e.g. threshold signing) that
+//!   maintain the invariants themselves.
+//!
+//! Preconditions are additionally checked with `debug_assert!` so misuse fails
+//! loudly in tests without costing anything in release builds.
+
 use crate::{fips202, ntt, params, reduce, rounding};
+use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 const N: usize = params::N as usize;
 const UNIFORM_NBLOCKS: usize = (767 + fips202::SHAKE128_RATE) / fips202::SHAKE128_RATE;
 const D_SHL: i32 = 1 << (params::D - 1);
 
 /// Represents a polynomial
+///
+/// The coefficient array is not public: it can only be filled through
+/// validated constructors ([`Poly::from_coeffs`], the unpack functions, the
+/// samplers) or explicitly through [`Poly::coeffs_mut`], which documents the
+/// bounds the caller must uphold. See the module docs for the full contract.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct Poly {
-	pub coeffs: [i32; N],
+	pub(crate) coeffs: [i32; N],
 }
 
 /// For some reason can't simply derive the Default trait
@@ -17,8 +49,72 @@ impl Default for Poly {
 	}
 }
 
+/// Error returned by [`Poly::from_coeffs`] when a coefficient lies outside
+/// `(-Q, Q)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoefficientOutOfRange {
+	/// Index of the first offending coefficient.
+	pub index: usize,
+	/// The offending value.
+	pub value: i32,
+}
+
+impl fmt::Display for CoefficientOutOfRange {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "coefficient {} at index {} is outside (-Q, Q)", self.value, self.index)
+	}
+}
+
+impl Poly {
+	/// Construct a polynomial from raw coefficients, validating that every
+	/// coefficient lies in `(-Q, Q)`.
+	///
+	/// This is the entry point for coefficients that cross a trust boundary
+	/// (deserialized, received from a peer, …). The accepted range covers both
+	/// standard representatives `[0, Q)` and signed representatives, and is
+	/// well inside the domain of every routine in this module, so a `Poly`
+	/// built here can be passed to any of them without overflow.
+	pub fn from_coeffs(coeffs: [i32; N]) -> Result<Poly, CoefficientOutOfRange> {
+		for (index, &value) in coeffs.iter().enumerate() {
+			if value <= -params::Q || value >= params::Q {
+				return Err(CoefficientOutOfRange { index, value });
+			}
+		}
+		Ok(Poly { coeffs })
+	}
+
+	/// Read-only access to the coefficient array.
+	pub fn coeffs(&self) -> &[i32; N] {
+		&self.coeffs
+	}
+
+	/// Raw mutable access to the coefficient array.
+	///
+	/// **Low-level contract:** writing through this reference bypasses the
+	/// validation performed by [`Poly::from_coeffs`]. The caller becomes
+	/// responsible for upholding the coefficient bounds documented on each
+	/// function in this module before passing the polynomial to it (e.g.
+	/// [`reduce`] requires `c <= 2^31 - 2^22 - 1`, [`invntt_tomont`] requires
+	/// `|c| < Q`). Never write attacker-controlled values here without
+	/// validating them first.
+	pub fn coeffs_mut(&mut self) -> &mut [i32; N] {
+		&mut self.coeffs
+	}
+}
+
 /// Inplace reduction of all coefficients of polynomial to representative in [-6283008,6283008].
+///
+/// # Preconditions
+///
+/// Every coefficient must be at most `2^31 - 2^22 - 1` (there is no lower
+/// limit). Larger values overflow the underlying `reduce32` shift trick:
+/// panic in builds with overflow checks, silent wraparound in release builds.
+/// Checked with `debug_assert!`.
 pub fn reduce(a: &mut Poly) {
+	debug_assert!(
+		a.coeffs.iter().all(|&c| c <= i32::MAX - (1 << 22)),
+		"poly::reduce precondition violated: coefficient > 2^31 - 2^22 - 1"
+	);
 	for coeff in a.coeffs.iter_mut() {
 		*coeff = reduce::reduce32(*coeff);
 	}
@@ -61,22 +157,55 @@ pub fn sub_ip(a: &mut Poly, b: &Poly) {
 }
 
 /// Multiply polynomial by 2^D without modular reduction.
-/// Assumes input coefficients to be less than 2^{31-D} in absolute value.
+///
+/// # Preconditions
+///
+/// Input coefficients must be less than `2^{31-D}` in absolute value,
+/// otherwise the shift overflows. Checked with `debug_assert!`.
 pub fn shiftl(a: &mut Poly) {
+	debug_assert!(
+		a.coeffs.iter().all(|&c| c.unsigned_abs() < 1 << (31 - params::D)),
+		"poly::shiftl precondition violated: |coefficient| >= 2^(31-D)"
+	);
 	for coeff in a.coeffs.iter_mut() {
 		*coeff <<= params::D;
 	}
 }
 
 /// Inplace forward NTT. Coefficients can grow by 8*Q in absolute value.
+///
+/// # Preconditions
+///
+/// Input coefficients must be at most `2^31 - 1 - 8*Q` in absolute value:
+/// each of the 8 butterfly layers can add up to Q to a coefficient's
+/// magnitude, and the additions are performed without modular reduction.
+/// Larger inputs overflow: panic in builds with overflow checks, silent
+/// wraparound in release builds. Checked with `debug_assert!`.
 pub fn ntt(a: &mut Poly) {
+	debug_assert!(
+		a.coeffs.iter().all(|&c| c.unsigned_abs() <= (i32::MAX - 8 * params::Q) as u32),
+		"poly::ntt precondition violated: |coefficient| > 2^31 - 1 - 8*Q"
+	);
 	ntt::ntt(&mut a.coeffs);
 }
 
 /// Inplace inverse NTT and multiplication by 2^{32}.
 /// Input coefficients need to be less than Q in absolute value and output coefficients are again
 /// bounded by Q.
+///
+/// # Preconditions
+///
+/// Input coefficients must be less than Q in absolute value. The inverse
+/// butterflies sum coefficients without modular reduction, and magnitudes can
+/// double at each of the 8 layers (`256 * Q` just fits in `i32`); larger
+/// inputs can overflow. Checked with `debug_assert!`. Forward-NTT output
+/// (which can reach 8*Q) must be brought back into range with
+/// [`reduce`] before being passed here.
 pub fn invntt_tomont(a: &mut Poly) {
+	debug_assert!(
+		a.coeffs.iter().all(|&c| c.unsigned_abs() < params::Q as u32),
+		"poly::invntt_tomont precondition violated: |coefficient| >= Q"
+	);
 	ntt::invntt_tomont(&mut a.coeffs);
 }
 
@@ -110,7 +239,12 @@ pub fn power2round(a1: &mut Poly, a0: &mut Poly) {
 }
 
 /// Check infinity norm of polynomial against given bound.
-/// Assumes input coefficients were reduced by reduce32().
+///
+/// Total for all `i32` coefficient values: the absolute value is computed in
+/// `i64`, so no input can overflow the arithmetic or wrap into a wrong result.
+/// (The classic 32-bit shift trick `c - (mask & 2*c)` overflows `2*c` for
+/// |c| > i32::MAX/2 and mis-handles i32::MIN; out-of-range coefficients would
+/// then *pass* the norm check instead of failing it.)
 ///
 /// # Arguments
 ///
@@ -129,11 +263,14 @@ pub fn check_norm(a: &Poly, b: i32) -> bool {
 	// Always process all coefficients: an early exit would leak the index of the first
 	// out-of-bound coefficient of secret-derived data (e.g. z = y + c*s1).
 	for i in 0..N {
-		let mut t = a.coeffs[i] >> 31;
-		t = a.coeffs[i] - (t & 2 * a.coeffs[i]);
+		// Branchless |c| in i64: sign-mask fold instead of a data-dependent
+		// branch or `abs()` call, correct for every i32 including i32::MIN.
+		let c = a.coeffs[i] as i64;
+		let mask = c >> 63;
+		let t = (c ^ mask) - mask;
 
 		// Bitwise OR accumulation instead of a data-dependent branch
-		result |= t >= b;
+		result |= t >= b as i64;
 	}
 	result
 }
@@ -697,6 +834,9 @@ mod tests {
 
 		let original = poly.clone();
 		ntt(&mut poly);
+		// Forward-NTT output can reach 8*Q; bring it back below Q before the
+		// inverse transform, as its input contract requires.
+		reduce(&mut poly);
 		invntt_tomont(&mut poly);
 
 		// After NTT and inverse NTT, we should get back the original (possibly with Montgomery
@@ -739,6 +879,48 @@ mod tests {
 		let poly = Poly::default(); // All coefficients are 0
 		assert!(!check_norm(&poly, 1)); // Should be within any positive bound
 		assert!(!check_norm(&poly, 1000));
+	}
+
+	#[test]
+	fn test_from_coeffs_validates_range() {
+		// In-range coefficients (signed and standard representatives) are accepted.
+		let mut coeffs = [0i32; N];
+		coeffs[0] = params::Q - 1;
+		coeffs[1] = -(params::Q - 1);
+		let poly = Poly::from_coeffs(coeffs).expect("in-range coefficients must be accepted");
+		assert_eq!(poly.coeffs()[0], params::Q - 1);
+		assert_eq!(poly.coeffs()[1], -(params::Q - 1));
+
+		// Out-of-range coefficients are rejected with the offending position.
+		// (`Poly` has no `Debug` impl by design, so match instead of expect_err.)
+		for bad in [params::Q, -params::Q, i32::MAX, i32::MIN] {
+			let mut coeffs = [0i32; N];
+			coeffs[7] = bad;
+			match Poly::from_coeffs(coeffs) {
+				Ok(_) => panic!("out-of-range coefficient {} must be rejected", bad),
+				Err(err) => assert_eq!(err, CoefficientOutOfRange { index: 7, value: bad }),
+			}
+		}
+	}
+
+	#[test]
+	fn test_chknorm_total_for_all_i32() {
+		// `check_norm` must be correct for every possible i32 coefficient, not
+		// just protocol-bounded ones. The old shift-trick absolute value
+		// (`c - (mask & 2*c)`) overflowed `2*c` for |c| > i32::MAX/2 (panic in
+		// checked builds) and produced a wrong, negative "absolute value" for
+		// i32::MIN in release builds, silently accepting a coefficient that
+		// must be rejected.
+		for extreme in [i32::MIN, i32::MIN + 1, -(params::Q * 2), i32::MAX / 2 + 1, i32::MAX] {
+			let mut poly = Poly::default();
+			poly.coeffs[0] = extreme;
+			assert!(check_norm(&poly, 100), "coefficient {} must exceed bound 100", extreme);
+			assert!(
+				check_norm(&poly, (params::Q - 1) / 8),
+				"coefficient {} must exceed the maximum bound",
+				extreme
+			);
+		}
 	}
 
 	#[test]

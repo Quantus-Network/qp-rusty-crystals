@@ -53,8 +53,9 @@ use qp_rusty_crystals_dilithium::fips202;
 /// `TranscriptSigner` requires [`Zeroize`] + [`ZeroizeOnDrop`] because
 /// implementors hold a long-term signing key (`my_signer` in [`DkgConfig`]).
 /// The DKG/resharing state machines own the signer for the whole protocol
-/// lifetime and rely on dropping the configuration to erase that key at their
-/// zeroization boundary.
+/// lifetime and call its `zeroize()` method directly at their zeroization
+/// boundary, so key erasure does not depend on the implementor's `Drop`
+/// behavior.
 ///
 /// **Implement this with `#[derive(Zeroize, ZeroizeOnDrop)]`** (using
 /// `#[zeroize(skip)]` on non-secret fields such as public keys). The derive
@@ -794,12 +795,12 @@ pub fn derive_subset_contribution(combined_seed: &[u8; SUBSET_SEED_SIZE]) -> Sub
 
 	for i in 0..L {
 		poly::uniform_eta(&mut temp_poly, combined_seed, i as u16);
-		contribution.s1[i].copy_from_slice(&temp_poly.coeffs);
+		contribution.s1[i].copy_from_slice(temp_poly.coeffs());
 	}
 
 	for i in 0..K {
 		poly::uniform_eta(&mut temp_poly, combined_seed, (L + i) as u16);
-		contribution.s2[i].copy_from_slice(&temp_poly.coeffs);
+		contribution.s2[i].copy_from_slice(temp_poly.coeffs());
 	}
 
 	contribution

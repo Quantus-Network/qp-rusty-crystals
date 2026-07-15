@@ -411,6 +411,14 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		self.pending_round4.clear();
 		self.round4_messages.clear();
 		self.config.zeroize_existing_share();
+		// Explicitly zeroize the transcript signer (this party's long-term
+		// authentication key). `ZeroizeOnDrop` is only a marker trait, so
+		// relying on the signer's own Drop would leave erasure to downstream
+		// implementer discipline; calling `zeroize()` makes it an invariant.
+		// Safe here: the signer is only used for the Round 6 acceptance
+		// signature, which has already been produced by the time this runs
+		// (successful completion or drop).
+		self.signer_config.my_signer.zeroize();
 	}
 
 	/// Whether the old committee share has been erased from the config.
@@ -1452,14 +1460,31 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		self.round5_broadcasts.insert(from, broadcast);
 	}
 
+	/// The Round 5 senders this session actually depends on: active old
+	/// members (status) plus new committee members (new-share commitments +
+	/// partial PKs). `None` until the active set is agreed.
+	///
+	/// This is the outer trust boundary for Round 5 consumption. Completion
+	/// ([`Self::have_all_round5`]), the failure-abort scan in Combining, and
+	/// the transcript hash use exactly this set; the Combining share-data
+	/// checks ([`Self::verify_new_share_consistency`],
+	/// [`Self::verify_public_key_preservation`]) restrict further to new
+	/// committee members, a subset of this set. Together these ensure a
+	/// broadcast from an old member excluded from `Act` never influences the
+	/// outcome — the protocol's liveness promise is that it proceeds without
+	/// such members, and honoring their failure reports (or hard-failing on
+	/// their poisoned share data) would let a single excluded (e.g.
+	/// compromised, being-rotated-out) member abort every session.
+	fn required_round5_senders(&self) -> Option<alloc::collections::BTreeSet<ParticipantId>> {
+		let act = self.active_set.as_ref()?;
+		Some(act.iter().copied().chain(self.config.new_participants().iter()).collect())
+	}
+
 	fn have_all_round5(&self) -> bool {
-		// Round 5 has contributions from active old members (status) and new
-		// committee members (new-share commitments + partial PKs). Old members
-		// outside the active set may be offline, so they are not required —
-		// though if an online one reports failure, Combining still honors it.
-		let Some(act) = &self.active_set else { return false };
-		let required: alloc::collections::BTreeSet<ParticipantId> =
-			act.iter().copied().chain(self.config.new_participants().iter()).collect();
+		// Old members outside the active set may be offline, so they are not
+		// required; their Round 5 broadcasts (if any) are ignored outright —
+		// see `required_round5_senders`.
+		let Some(required) = self.required_round5_senders() else { return false };
 		required.iter().all(|p| self.round5_broadcasts.contains_key(p))
 	}
 
@@ -1468,11 +1493,22 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	// ========================================================================
 
 	fn handle_combining(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// Check if any party reported failure - abort without attribution
+		// Check if any *required* party reported failure - abort without
+		// attribution. The scan is restricted to the same sender set that
+		// gates Round 5 completion and the transcript hash: an old member
+		// excluded from the active set is exactly the party the session must
+		// be able to proceed without, so its failure report must not be able
+		// to abort the session (and other parties may not even have received
+		// it, so honoring it would also make parties diverge).
+		let required = self.required_round5_senders().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"Combining reached before active set is agreed".to_string(),
+			)
+		})?;
 		let failed_parties: Vec<ParticipantId> = self
 			.round5_broadcasts
 			.iter()
-			.filter(|(_, b)| !b.success)
+			.filter(|(id, b)| required.contains(id) && !b.success)
 			.map(|(id, _)| *id)
 			.collect();
 
@@ -1553,9 +1589,13 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		}
 
 		// Required Round 5 broadcasts: active old members + new committee, in
-		// sorted order (matches `have_all_round5`).
-		let required: alloc::collections::BTreeSet<ParticipantId> =
-			act.iter().copied().chain(self.config.new_participants().iter()).collect();
+		// sorted order (the same set that gates `have_all_round5` and the
+		// Combining failure scan).
+		let required = self.required_round5_senders().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"Computing transcript hash before active set is agreed".to_string(),
+			)
+		})?;
 		for p in required {
 			let broadcast = self.round5_broadcasts.get(&p).ok_or_else(|| {
 				ResharingProtocolError::InternalError(format!(
@@ -1600,7 +1640,11 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 				"AcceptGenerate reached without an agreed active set".to_string(),
 			)
 		})?;
-		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash, &active_set);
+		// ParticipantList iterates in sorted order, giving the canonical
+		// (strictly ascending) committee encoding the acceptance hash binds.
+		let new_committee: Vec<ParticipantId> = self.config.new_participants().iter().collect();
+		let accept_hash =
+			compute_accept_hash(&self.ssid, &transcript_hash, &active_set, &new_committee);
 		let signature = self.signer_config.my_signer.sign(&accept_hash);
 		let my_id = self.config.my_party_id();
 		self.accepts.insert(my_id, signature.as_ref().to_vec());
@@ -1637,7 +1681,8 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		// Verify every signature against *our own* transcript hash. A signer
 		// that observed a different transcript (dealer equivocation, tampered
 		// broadcast) produces a signature that fails here, and we abort.
-		let accept_hash = compute_accept_hash(&self.ssid, &transcript_hash, &active_set);
+		let accept_hash =
+			compute_accept_hash(&self.ssid, &transcript_hash, &active_set, &new_participants);
 		for p in &new_participants {
 			let pk = self.signer_config.verifying_keys.get(p).ok_or_else(|| {
 				ResharingProtocolError::InternalError(format!(
@@ -1660,6 +1705,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		let certificate = ResharingCertificate {
 			ssid: self.ssid,
 			active_set,
+			new_committee: new_participants,
 			transcript_hash,
 			accepts: self.accepts.clone(),
 		};
@@ -2075,11 +2121,21 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// All members of new subset J must produce identical `s_J^new` (and thus identical
 	/// commitments). Cross-verify that.
 	///
-	/// Only accepts share commitments from parties that are actually in the new subset.
+	/// Only considers broadcasts from new committee members (the only honest
+	/// producers of share commitments), and within those, only commitments
+	/// for subsets the sender belongs to.
 	fn verify_new_share_consistency(&self) -> Result<(), ResharingProtocolError> {
 		let mut by_subset: BTreeMap<SubsetMask, Vec<(ParticipantId, [u8; COMMITMENT_HASH_SIZE])>> =
 			BTreeMap::new();
 		for (party, broadcast) in &self.round5_broadcasts {
+			// Round 5 broadcasts are buffered from any participant (an
+			// observer catching up may store them before Act is known), but
+			// only new committee members contribute share commitments. Skip
+			// everyone else before any content check, so a non-required
+			// sender's broadcast cannot influence the outcome.
+			if !self.config.new_participants().contains(*party) {
+				continue;
+			}
 			for (j_mask, commit) in &broadcast.share_commitments {
 				// Only accept commitments from parties that are in this new subset
 				if self.config.new_participants().is_in_mask(*party, *j_mask) {
@@ -2139,7 +2195,9 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// Cross-check the broadcast partial PKs and sum them to confirm the
 	/// resharing reconstructs the original public key.
 	///
-	/// Only accepts partial PK contributions from parties that are actually in the new subset.
+	/// Only considers broadcasts from new committee members (the only honest
+	/// producers of partial PKs), and within those, only contributions for
+	/// subsets the sender belongs to.
 	fn verify_public_key_preservation(&self) -> Result<(), ResharingProtocolError> {
 		// The public key is the sum of exactly one partial PK per canonical new subset
 		// (`new_subset_order`). Any other `j_mask` is not part of that sum, so we must
@@ -2152,6 +2210,22 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 
 		let mut canonical: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
 		for (party, broadcast) in &self.round5_broadcasts {
+			// Skip broadcasts from senders outside the new committee BEFORE
+			// the non-canonical-mask hard reject below. Round 5 broadcasts
+			// are buffered from any participant, so without this filter an
+			// old member excluded from the active set — whose broadcast the
+			// session must be able to proceed without — could abort every
+			// session by sending success=true with a single poisoned mask,
+			// and only on the parties that happened to receive it.
+			if !self.config.new_participants().contains(*party) {
+				if !broadcast.partial_pks.is_empty() {
+					log::warn!(
+						"Ignoring partial PKs from party {}: not a new committee member",
+						party
+					);
+				}
+				continue;
+			}
 			for (j_mask, t_partial) in &broadcast.partial_pks {
 				// Reject partial PKs keyed by any mask that is not a canonical new subset.
 				// An honest party never broadcasts one; a malicious party could use it to
@@ -3382,6 +3456,187 @@ mod tests {
 			.verify_public_key_preservation()
 			.expect_err("non-canonical partial PK mask must be rejected");
 		assert!(err.to_string().contains("non-canonical subset"), "unexpected error: {}", err);
+	}
+
+	/// Companion to the test above (security review follow-up): the
+	/// non-canonical-mask hard reject only applies to new committee members.
+	/// A sender outside the new committee (e.g. an old member excluded from
+	/// the active set) never contributes partial PKs honestly, so its
+	/// broadcast must be skipped entirely — otherwise a poisoned mask from a
+	/// party the session is promised to proceed without would abort every
+	/// session, and only on the parties that happened to receive it.
+	#[test]
+	fn test_public_key_preservation_ignores_poisoned_mask_from_non_member() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[13u8; 32], config).expect("keygen");
+		// Old committee {0,1,2}, new committee {0,1,3}: party 2 is OldOnly.
+		let resharing_config = ResharingConfig::new(
+			Some(shares[0].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 3],
+			0,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(0, &[0, 1, 2, 3]),
+			[1u8; 32],
+			&[2u8; 32],
+			0,
+		);
+
+		let full_mask: SubsetMask = 0b111;
+		assert!(!protocol.new_subset_order.contains(&full_mask));
+
+		let mut partial_pks: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
+		partial_pks.insert(full_mask, [[7i32; N as usize]; K]);
+		protocol.round5_broadcasts.insert(
+			2, // not a new committee member
+			ResharingRound5Broadcast {
+				ssid: protocol.ssid,
+				party_id: 2,
+				share_commitments: BTreeMap::new(),
+				partial_pks,
+				success: true,
+				error_message: None,
+			},
+		);
+
+		// The poisoned broadcast must be skipped: verification then fails
+		// only because this bare setup has no partial PK data at all — not
+		// with the non-canonical hard reject.
+		let err = protocol
+			.verify_public_key_preservation()
+			.expect_err("bare setup has no partial PK contributions");
+		assert!(
+			!err.to_string().contains("non-canonical"),
+			"poisoned mask from a non-member must be ignored, got: {}",
+			err
+		);
+		assert!(
+			err.to_string().contains("missing partial PK contribution"),
+			"unexpected error: {}",
+			err
+		);
+	}
+
+	/// Regression test (security review): a Round 5 failure report from an old
+	/// member that was excluded from the active set must not abort the
+	/// session. Liveness is defined over `Act ∪ new_participants`
+	/// (`have_all_round5`, transcript hash), so the failure-abort scan in
+	/// Combining must use the same sender set — otherwise a single excluded
+	/// (offline-then-recovered, leaving, or compromised) old member could
+	/// deny completion of every resharing session.
+	///
+	/// The excluded member's broadcast also carries a partial PK keyed by a
+	/// non-canonical mask: before the sender filter in
+	/// `verify_public_key_preservation`, that was a second independent abort
+	/// vector (the non-canonical hard reject ran before any membership
+	/// check).
+	#[test]
+	fn test_combining_ignores_failure_from_excluded_old_member() {
+		let mut protocol = combining_protocol_with_round5_failure_from(2);
+
+		let err = protocol.poke().expect_err("bare combining state cannot fully verify");
+		assert!(
+			!matches!(err, ResharingProtocolError::ProtocolAborted(_)),
+			"excluded old member's failure report must not abort the session, got: {}",
+			err
+		);
+		assert!(
+			!err.to_string().contains("non-canonical"),
+			"excluded old member's poisoned partial PK mask must be ignored, got: {}",
+			err
+		);
+		// With the excluded member's broadcast ignored, Combining proceeds to
+		// share verification, which fails on this bare test setup for lack of
+		// partial PK data — proving neither abort path was taken.
+		assert!(
+			matches!(err, ResharingProtocolError::ShareVerificationFailed(_)),
+			"unexpected error: {}",
+			err
+		);
+	}
+
+	/// Companion to the test above: a failure report from a *required* Round 5
+	/// sender (here an active old member) must still abort.
+	#[test]
+	fn test_combining_aborts_on_failure_from_required_party() {
+		let mut protocol = combining_protocol_with_round5_failure_from(1);
+
+		let err = protocol.poke().expect_err("failure from required party must abort");
+		assert!(
+			matches!(err, ResharingProtocolError::ProtocolAborted(_)),
+			"active member's failure report must abort the session, got: {}",
+			err
+		);
+	}
+
+	/// Build a protocol poised at Combining with active set {0, 1} out of old
+	/// committee {0, 1, 2} and new committee {0, 1, 3}. All required Round 5
+	/// senders report success; `failure_from` reports failure. The excluded
+	/// old member (2) additionally smuggles a partial PK keyed by a
+	/// non-canonical mask, which must be ignored, not hard-rejected.
+	fn combining_protocol_with_round5_failure_from(
+		failure_from: ParticipantId,
+	) -> ResharingProtocol<TestSigner> {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[21u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[0].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 3],
+			0,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(0, &[0, 1, 2, 3]),
+			[1u8; 32],
+			&[2u8; 32],
+			0,
+		);
+
+		// Old member 2 is excluded from the active set.
+		protocol.active_set = Some(vec![0, 1]);
+
+		// Round 5 broadcasts: required senders (act {0,1} ∪ new {0,1,3}) all
+		// report success; `failure_from` reports failure. The excluded old
+		// member (2) also carries a poisoned non-canonical partial PK mask.
+		for party in [0u32, 1, 2, 3] {
+			let success = party != failure_from;
+			let mut partial_pks: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
+			if party == 2 {
+				let full_mask: SubsetMask = 0b111;
+				assert!(
+					!protocol.new_subset_order.contains(&full_mask),
+					"full-committee mask must not be a canonical subset"
+				);
+				partial_pks.insert(full_mask, [[7i32; N as usize]; K]);
+			}
+			protocol.round5_broadcasts.insert(
+				party,
+				ResharingRound5Broadcast {
+					ssid: protocol.ssid,
+					party_id: party,
+					share_commitments: BTreeMap::new(),
+					partial_pks,
+					success,
+					error_message: (!success).then(|| "forged failure".to_string()),
+				},
+			);
+		}
+
+		protocol.state = ResharingState::Combining;
+		protocol
 	}
 
 	#[test]

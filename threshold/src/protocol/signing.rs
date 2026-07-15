@@ -220,11 +220,11 @@ pub(crate) fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretSha
 		let mut s2_share = polyvec::Polyveck::default();
 
 		for i in 0..L {
-			s1_share.vec[i].coeffs.copy_from_slice(&share_data.s1[i]);
+			s1_share.vec[i].coeffs_mut().copy_from_slice(&share_data.s1[i]);
 		}
 
 		for i in 0..K {
-			s2_share.vec[i].coeffs.copy_from_slice(&share_data.s2[i]);
+			s2_share.vec[i].coeffs_mut().copy_from_slice(&share_data.s2[i]);
 		}
 
 		shares.insert(*subset_id, SecretShare { s1_share, s2_share });
@@ -354,9 +354,9 @@ pub(crate) fn generate_round1(
 
 			// Apply ReduceLe2Q in NTT domain BEFORE InvNTT
 			for j in 0..N as usize {
-				let coeff = w_k.vec[i].coeffs[j];
+				let coeff = w_k.vec[i].coeffs()[j];
 				let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
-				w_k.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
+				w_k.vec[i].coeffs_mut()[j] = reduce_le2q(coeff_u32) as i32;
 			}
 
 			crate::circl_ntt::inv_ntt(&mut w_k.vec[i]);
@@ -366,9 +366,9 @@ pub(crate) fn generate_round1(
 
 			// Apply ReduceLe2Q after Add
 			for j in 0..N as usize {
-				let coeff = w_k.vec[i].coeffs[j];
+				let coeff = w_k.vec[i].coeffs()[j];
 				let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
-				w_k.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
+				w_k.vec[i].coeffs_mut()[j] = reduce_le2q(coeff_u32) as i32;
 			}
 		}
 
@@ -642,7 +642,7 @@ pub(crate) fn generate_round3_response(
 		}
 		// Normalize z
 		for j in 0..L {
-			for coeff in z.vec[j].coeffs.iter_mut() {
+			for coeff in z.vec[j].coeffs_mut().iter_mut() {
 				let c = *coeff;
 				let c_u32 = if c < 0 { (c + Q) as u32 } else { c as u32 };
 				*coeff = mod_q(c_u32) as i32;
@@ -657,7 +657,7 @@ pub(crate) fn generate_round3_response(
 		}
 		// Normalize cs2
 		for j in 0..K {
-			for coeff in cs2.vec[j].coeffs.iter_mut() {
+			for coeff in cs2.vec[j].coeffs_mut().iter_mut() {
 				let c = *coeff;
 				let c_u32 = if c < 0 { (c + Q) as u32 } else { c as u32 };
 				*coeff = mod_q(c_u32) as i32;
@@ -679,7 +679,7 @@ pub(crate) fn generate_round3_response(
 
 		// Convert from centered format to [0, Q) format
 		for j in 0..L {
-			for coeff in z_out.vec[j].coeffs.iter_mut() {
+			for coeff in z_out.vec[j].coeffs_mut().iter_mut() {
 				if *coeff < 0 {
 					*coeff += Q;
 				}
@@ -702,7 +702,7 @@ pub(crate) fn pack_responses(responses: &[polyvec::Polyvecl]) -> Vec<u8> {
 		// Convert to centered format for packing
 		let mut z_centered = z.clone();
 		for j in 0..L {
-			for coeff in z_centered.vec[j].coeffs.iter_mut() {
+			for coeff in z_centered.vec[j].coeffs_mut().iter_mut() {
 				if *coeff > Q / 2 {
 					*coeff -= Q;
 				}
@@ -773,7 +773,7 @@ pub(crate) fn unpack_responses(
 /// valid threshold contributions (they pass norm checks) but don't actually contain
 /// valid cryptographic data, breaking threshold linearity.
 fn is_zero_response(z_i: &polyvec::Polyvecl) -> bool {
-	z_i.vec.iter().take(L).all(|poly| poly.coeffs.iter().all(|&c| c == 0))
+	z_i.vec.iter().take(L).all(|poly| poly.coeffs().iter().all(|&c| c == 0))
 }
 
 /// Check if a single party's z response for one iteration satisfies the norm bound.
@@ -782,7 +782,7 @@ fn is_zero_response(z_i: &polyvec::Polyvecl) -> bool {
 /// Checks the norm bound on a party's response vector.
 fn check_party_z_norm(z_i: &polyvec::Polyvecl, gamma1_minus_beta: i32) -> bool {
 	for z_poly in z_i.vec.iter().take(L) {
-		for coeff in z_poly.coeffs.iter() {
+		for coeff in z_poly.coeffs().iter() {
 			let centered = if *coeff > Q / 2 { *coeff - Q } else { *coeff };
 			if centered.abs() >= gamma1_minus_beta {
 				return false;
@@ -855,7 +855,7 @@ pub(crate) fn combine_signature(
 						z_aggregated.vec.iter_mut().zip(z_i.vec.iter()).take(L)
 					{
 						for (agg_coeff, party_coeff) in
-							agg_poly.coeffs.iter_mut().zip(party_poly.coeffs.iter())
+							agg_poly.coeffs_mut().iter_mut().zip(party_poly.coeffs().iter())
 						{
 							*agg_coeff = (*agg_coeff + *party_coeff) % Q;
 						}
@@ -879,7 +879,7 @@ pub(crate) fn combine_signature(
 		// Check aggregated z-norm (may still exceed due to sum of valid parties)
 		let mut z_exceeds = false;
 		'z_check: for z_poly in z_aggregated.vec.iter().take(L) {
-			for coeff in z_poly.coeffs.iter() {
+			for coeff in z_poly.coeffs().iter() {
 				let centered = if *coeff > Q / 2 { *coeff - Q } else { *coeff };
 				if centered.abs() >= gamma1_minus_beta {
 					z_exceeds = true;
@@ -894,7 +894,7 @@ pub(crate) fn combine_signature(
 		// Compute Az (z in NTT domain)
 		let mut zh = z_aggregated.clone();
 		for zh_poly in zh.vec.iter_mut().take(L) {
-			for coeff in zh_poly.coeffs.iter_mut() {
+			for coeff in zh_poly.coeffs_mut().iter_mut() {
 				if *coeff > Q / 2 {
 					*coeff -= Q;
 				}
@@ -930,7 +930,8 @@ pub(crate) fn combine_signature(
 		let mut scaled_challenge_t1 = polyvec::Polyveck::default();
 		for (scaled_poly, t1_poly) in scaled_challenge_t1.vec.iter_mut().zip(t1.vec.iter()).take(K)
 		{
-			for (scaled_coeff, t1_coeff) in scaled_poly.coeffs.iter_mut().zip(t1_poly.coeffs.iter())
+			for (scaled_coeff, t1_coeff) in
+				scaled_poly.coeffs_mut().iter_mut().zip(t1_poly.coeffs().iter())
 			{
 				*scaled_coeff = *t1_coeff << D;
 			}
@@ -942,7 +943,8 @@ pub(crate) fn combine_signature(
 		// Compute Az - 2^d * c * t1
 		for (scaled_poly, az_poly) in scaled_challenge_t1.vec.iter_mut().zip(az.vec.iter()).take(K)
 		{
-			for (scaled_coeff, az_coeff) in scaled_poly.coeffs.iter_mut().zip(az_poly.coeffs.iter())
+			for (scaled_coeff, az_coeff) in
+				scaled_poly.coeffs_mut().iter_mut().zip(az_poly.coeffs().iter())
 			{
 				*scaled_coeff = *az_coeff - *scaled_coeff;
 			}
@@ -960,14 +962,14 @@ pub(crate) fn combine_signature(
 			.take(K)
 		{
 			for (diff_coeff, (scaled_coeff, w_coeff)) in diff_poly
-				.coeffs
+				.coeffs_mut()
 				.iter_mut()
-				.zip(scaled_poly.coeffs.iter().zip(w_poly.coeffs.iter()))
+				.zip(scaled_poly.coeffs().iter().zip(w_poly.coeffs().iter()))
 			{
 				*diff_coeff = *scaled_coeff - *w_coeff;
 			}
 			// Normalize coefficients to [0, Q)
-			for coeff in diff_poly.coeffs.iter_mut() {
+			for coeff in diff_poly.coeffs_mut().iter_mut() {
 				let coeff_u32 = if *coeff < 0 { (*coeff + Q) as u32 } else { *coeff as u32 };
 				*coeff = mod_q(coeff_u32) as i32;
 			}
@@ -977,7 +979,7 @@ pub(crate) fn combine_signature(
 		let gamma2 = GAMMA2 as i32;
 		let mut difference_exceeds = false;
 		'diff_check: for diff_poly in difference.vec.iter().take(K) {
-			for coeff in diff_poly.coeffs.iter() {
+			for coeff in diff_poly.coeffs().iter() {
 				let centered = if *coeff > Q / 2 { *coeff - Q } else { *coeff };
 				if centered.abs() >= gamma2 {
 					difference_exceeds = true;
@@ -998,14 +1000,14 @@ pub(crate) fn combine_signature(
 			.take(K)
 		{
 			for (w0pd_coeff, (w0_coeff, diff_coeff)) in w0pd_poly
-				.coeffs
+				.coeffs_mut()
 				.iter_mut()
-				.zip(w0_poly.coeffs.iter().zip(diff_poly.coeffs.iter()))
+				.zip(w0_poly.coeffs().iter().zip(diff_poly.coeffs().iter()))
 			{
 				*w0pd_coeff = *w0_coeff + *diff_coeff;
 			}
 			// Normalize coefficients to [0, Q)
-			for coeff in w0pd_poly.coeffs.iter_mut() {
+			for coeff in w0pd_poly.coeffs_mut().iter_mut() {
 				let coeff_u32 = if *coeff < 0 { (*coeff + Q) as u32 } else { *coeff as u32 };
 				*coeff = mod_q(coeff_u32) as i32;
 			}
@@ -1019,7 +1021,7 @@ pub(crate) fn combine_signature(
 			// Convert z to centered form for packing
 			let mut z_centered = z_aggregated.clone();
 			for z_poly in z_centered.vec.iter_mut().take(L) {
-				for coeff in z_poly.coeffs.iter_mut() {
+				for coeff in z_poly.coeffs_mut().iter_mut() {
 					if *coeff > Q / 2 {
 						*coeff -= Q;
 					}
@@ -1066,10 +1068,11 @@ fn unpack_t1(pk_bytes: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
 			let b3 = t1_bytes[byte_idx + 3] as i32;
 			let b4 = t1_bytes[byte_idx + 4] as i32;
 
-			t1.vec[poly_idx].coeffs[i] = b0 | ((b1 & 0x03) << 8);
-			t1.vec[poly_idx].coeffs[i + 1] = (b1 >> 2) | ((b2 & 0x0F) << 6);
-			t1.vec[poly_idx].coeffs[i + 2] = (b2 >> 4) | ((b3 & 0x3F) << 4);
-			t1.vec[poly_idx].coeffs[i + 3] = (b3 >> 6) | (b4 << 2);
+			let t1_coeffs = t1.vec[poly_idx].coeffs_mut();
+			t1_coeffs[i] = b0 | ((b1 & 0x03) << 8);
+			t1_coeffs[i + 1] = (b1 >> 2) | ((b2 & 0x0F) << 6);
+			t1_coeffs[i + 2] = (b2 >> 4) | ((b3 & 0x3F) << 4);
+			t1_coeffs[i + 3] = (b3 >> 6) | (b4 << 2);
 		}
 	}
 
@@ -1093,7 +1096,7 @@ mod tests {
 	fn test_is_zero_response_allows_nonzero() {
 		// Response with a single non-zero coefficient should not be zero
 		let mut nonzero_response = polyvec::Polyvecl::default();
-		nonzero_response.vec[0].coeffs[0] = 1;
+		nonzero_response.vec[0].coeffs_mut()[0] = 1;
 		assert!(
 			!is_zero_response(&nonzero_response),
 			"Non-zero response should not be detected as zero"
@@ -1101,7 +1104,7 @@ mod tests {
 
 		// Response with non-zero in last position
 		let mut nonzero_response2 = polyvec::Polyvecl::default();
-		nonzero_response2.vec[L - 1].coeffs[N as usize - 1] = 42;
+		nonzero_response2.vec[L - 1].coeffs_mut()[N as usize - 1] = 42;
 		assert!(
 			!is_zero_response(&nonzero_response2),
 			"Response with non-zero in last position should not be detected as zero"
@@ -1188,7 +1191,7 @@ mod tests {
 		// Scenario 2: Only 1 party has a non-zero response, below threshold
 		// Even though 3 parties "responded", only 1 is valid
 		let mut one_nonzero = polyvec::Polyvecl::default();
-		one_nonzero.vec[0].coeffs[0] = 1; // Small value within norm bounds
+		one_nonzero.vec[0].coeffs_mut()[0] = 1; // Small value within norm bounds
 
 		let mixed_responses: Vec<Vec<polyvec::Polyvecl>> = vec![
 			vec![one_nonzero.clone(); k_iterations], // Party 1: valid

@@ -163,7 +163,7 @@ impl fmt::Display for DkgError {
 ///
 /// The caller should handle each action appropriately:
 /// - `Wait`: No action needed, call `poke()` again after receiving messages
-/// - `SendMany`: Broadcast the data to all other participants
+/// - `SendMany`: Broadcast the data to all other participants via authenticated channel
 /// - `SendPrivate`: Send the data to a specific participant via secure channel
 /// - `Return`: The DKG is complete, the output contains the keys
 ///
@@ -180,6 +180,25 @@ pub enum DkgAction {
 	/// Wait for more messages before proceeding.
 	Wait,
 	/// Broadcast data to all other participants.
+	///
+	/// **IMPORTANT: This message MUST be sent over an authenticated channel
+	/// (integrity + sender authentication).**
+	///
+	/// The caller is responsible for ensuring:
+	/// - **Authenticity**: Receivers can verify the broadcast came from us — the `from` argument
+	///   that peers pass to [`Dkg::message`] is trusted and must be derived from transport-level
+	///   sender authentication, not from attacker-controllable packet contents
+	/// - **Integrity**: The message cannot be modified in transit
+	///
+	/// Confidentiality is not required; broadcast payloads are public.
+	///
+	/// Without sender authentication, an attacker who can inject packets can
+	/// spoof a participant's broadcast before the genuine one arrives. Round
+	/// buffers keep the first message per sender (first-message-wins, a
+	/// memory-exhaustion defense), so the forged packet occupies that
+	/// participant's slot and the honest broadcast is ignored. The poisoned
+	/// data is then caught by commitment or transcript verification, but only
+	/// as a late abort: the attacker can deny completion of every session.
 	SendMany(Vec<u8>),
 	/// Send data privately to a specific participant.
 	///
@@ -553,8 +572,21 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// before processing. This prevents quorum inflation attacks where an attacker
 	/// injects messages with fake sender IDs to satisfy broadcast quorum checks.
 	///
+	/// **The `from` value is a trust boundary.** This function performs no
+	/// cryptographic authentication of the sender; it only checks that `from`
+	/// is a participant and matches the party ID embedded in the message. The
+	/// transport layer MUST authenticate the sender of every message (private
+	/// *and* broadcast) and pass the authenticated identity as `from`. If
+	/// `from` can be spoofed, a forged broadcast can occupy a participant's
+	/// first-message-wins slot in the round buffers, causing the honest
+	/// party's broadcast to be ignored and the session to stall or abort
+	/// during commitment/transcript verification (denial of service). See
+	/// [`DkgAction::SendMany`] and [`DkgAction::SendPrivate`] for the channel
+	/// requirements.
+	///
 	/// # Arguments
-	/// * `from` - The party ID of the sender (from the transport layer)
+	/// * `from` - The party ID of the sender. MUST come from transport-level sender authentication,
+	///   never from attacker-controllable packet contents.
 	/// * `data` - The serialized message bytes
 	///
 	/// # Errors
@@ -2204,6 +2236,46 @@ mod tests {
 				panic!("DKG failed: {:?}", e);
 			},
 		}
+	}
+
+	/// The DKG output public key is intentionally NOT a pure function of the
+	/// parties' seeds: each party's Round 1 randomness is bound to the session
+	/// SSID (which incorporates `session_nonce`), and the final key is
+	/// computed from `rho = h_seed(global_randomness)`. Re-running the DKG
+	/// with identical seeds but a fresh nonce therefore yields a different
+	/// key — that is the security property that stops an adversary who saw a
+	/// failed attempt's Round 2 reveals from predicting honest randomness and
+	/// grinding `global_randomness` on retry (see `derive_round1_randomness`).
+	///
+	/// This test pins that behavior so documentation like `derivation.rs`
+	/// ("one canonical stored key per (master_key, tweak)", not "recomputable
+	/// from (master_key, tweak)") stays honest: derived keys must be stored,
+	/// never recovered by re-running the DKG.
+	#[test]
+	fn test_dkg_public_key_depends_on_session_nonce() {
+		let seed = [42u8; 32];
+		let run = |nonce: &[u8; 32]| {
+			let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+			let public_keys: Vec<u32> = (0..3).collect();
+			run_local_dkg(2, 3, signers, public_keys, seed, nonce).unwrap()
+		};
+
+		let nonce_a = [0xA1u8; 32];
+		let nonce_b = [0xB2u8; 32];
+
+		let pk_a = run(&nonce_a)[0].public_key.clone();
+		let pk_b = run(&nonce_b)[0].public_key.clone();
+		assert_ne!(
+			pk_a.as_bytes(),
+			pk_b.as_bytes(),
+			"identical seeds with a fresh session nonce must produce a different public key; \
+			 if this ever fails, Round 1 randomness lost its SSID binding (grinding risk)"
+		);
+
+		// Within one session (same nonce), the protocol is deterministic for
+		// fixed seeds — honest parties agree and reruns reproduce the key.
+		let pk_a2 = run(&nonce_a)[0].public_key.clone();
+		assert_eq!(pk_a.as_bytes(), pk_a2.as_bytes());
 	}
 
 	/// Mismatched input vector lengths must return a `DkgError`, not panic.
