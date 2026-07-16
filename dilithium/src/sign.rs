@@ -56,12 +56,15 @@ pub fn keypair(
 	let mut seed_bytes = seed.into_bytes();
 	const SEEDBUF_LEN: usize = 2 * params::SEEDBYTES + params::CRHBYTES;
 	let mut seedbuf = [0u8; SEEDBUF_LEN];
-	// Build preimage = seed || K || L (accept any seed length when provided)
-	let mut preimage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-	preimage.extend_from_slice(&seed_bytes);
-
-	preimage.push(params::K as u8);
-	preimage.push(params::L as u8);
+	// Build preimage = seed || K || L in a fixed stack buffer. A growable
+	// Vec would reallocate while holding the seed (Vec::new +
+	// extend_from_slice sizes capacity exactly, so the pushes force a
+	// realloc), freeing a seed-bearing heap block that zeroize() can no
+	// longer reach.
+	let mut preimage = [0u8; params::SEEDBYTES + 2];
+	preimage[..params::SEEDBYTES].copy_from_slice(&seed_bytes);
+	preimage[params::SEEDBYTES] = params::K as u8;
+	preimage[params::SEEDBYTES + 1] = params::L as u8;
 	fips202::shake256(&mut seedbuf, &preimage);
 
 	let mut rho = [0u8; params::SEEDBYTES];
