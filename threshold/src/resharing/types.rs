@@ -189,6 +189,21 @@ impl ResharingConfig {
 				return Err(ResharingConfigError::SharePartyNotInOldCommittee { party_id });
 			}
 
+			// The share's stored subset masks are defined relative to its
+			// embedded DKG participant list, but the protocol maps mask bits
+			// to parties through `old_participants` (dealer assignment,
+			// subset enumeration, share lookup). The two lists must be
+			// identical, or this party would deal sub-share material derived
+			// from its real share under a different identity mapping than
+			// the one the shares were created with. The party-count check
+			// additionally rejects shares whose stored `total_parties` is
+			// inconsistent with their own participant list.
+			if share.dkg_participants() != &old_participant_list ||
+				share.total_parties() as usize != old_participant_list.len()
+			{
+				return Err(ResharingConfigError::OldCommitteeMismatch);
+			}
+
 			// Validate share's threshold matches old_threshold parameter
 			if threshold != old_threshold {
 				return Err(ResharingConfigError::ThresholdMismatch {
@@ -371,6 +386,11 @@ pub enum ResharingConfigError {
 	OldMemberMustProvideShare { party_id: ParticipantId },
 	/// Share's party_id is not in the old committee.
 	SharePartyNotInOldCommittee { party_id: ParticipantId },
+	/// Old committee does not exactly match the share's embedded DKG
+	/// participant list, so the share's subset masks would be interpreted
+	/// under a different identity mapping than the one they were created
+	/// with.
+	OldCommitteeMismatch,
 	/// Share's public key (TR) doesn't match the provided public key.
 	PublicKeyMismatch,
 	/// Share's threshold doesn't match the old_threshold parameter.
@@ -416,6 +436,9 @@ impl fmt::Display for ResharingConfigError {
 					"Share's party_id ({}) is not in the old committee participant list",
 					party_id
 				)
+			},
+			ResharingConfigError::OldCommitteeMismatch => {
+				write!(f, "Old committee does not match the share's embedded DKG participant list")
 			},
 			ResharingConfigError::PublicKeyMismatch => {
 				write!(f, "Share's public key hash (TR) does not match the provided public key")
@@ -1560,6 +1583,68 @@ mod tests {
 		assert_eq!(resharing_config.role, ResharingRole::Both);
 		assert!(resharing_config.role.is_old_committee());
 		assert!(resharing_config.role.is_new_committee());
+	}
+
+	/// Security review: the caller-supplied old committee must exactly match
+	/// the share's embedded DKG participant list. The share's subset masks
+	/// are defined relative to that embedded list, but the protocol maps
+	/// mask bits to parties through `config.old_participants()` (dealer
+	/// assignment, subset enumeration, share lookup). If the two lists
+	/// differ, an old member deals Round 4 sub-share material derived from
+	/// its real share under the wrong identity mapping before any later
+	/// consistency check can fire.
+	#[test]
+	fn test_config_rejects_old_committee_not_matching_share_dkg_list() {
+		use crate::{generate_with_dealer, ThresholdConfig};
+
+		let config = ThresholdConfig::new(2, 3).expect("valid config");
+		let seed = [42u8; 32];
+		// Dealer keygen embeds dkg_participants = [0, 1, 2] in every share.
+		let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+		// Same size, victim's ID present, threshold and TR match — but two
+		// committee members are swapped for attacker-chosen IDs.
+		let result = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![1, 5, 6],
+			2,
+			vec![1, 5, 6],
+			1,
+			public_key.clone(),
+		);
+		assert!(
+			matches!(result, Err(ResharingConfigError::OldCommitteeMismatch)),
+			"old committee differing from the share's DKG list must be rejected, got {:?}",
+			result.map(|_| ())
+		);
+
+		// A superset also shifts the mask-bit-to-party mapping.
+		let result = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2, 3],
+			2,
+			vec![0, 1, 2, 3],
+			1,
+			public_key.clone(),
+		);
+		assert!(
+			matches!(result, Err(ResharingConfigError::OldCommitteeMismatch)),
+			"old committee superset of the share's DKG list must be rejected"
+		);
+
+		// The exact DKG committee still works.
+		let result = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key.clone(),
+		);
+		assert!(result.is_ok(), "matching old committee must be accepted");
 	}
 
 	#[test]
