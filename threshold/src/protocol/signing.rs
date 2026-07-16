@@ -59,6 +59,17 @@ pub(crate) struct Round2Data {
 	/// Stores the actual participant IDs (which can be arbitrary u32 values).
 	/// The ParticipantList provides index mapping for internal bitmask operations.
 	pub(crate) active_participants: ParticipantList,
+	/// Round 1 commitment hashes captured from the peers' Round 1 broadcasts,
+	/// keyed by party ID, frozen at the moment this party revealed its own
+	/// Round 2 commitment.
+	///
+	/// Round 3 verifies every peer's Round 2 reveal against *this* map rather
+	/// than a caller-supplied Round 1 set. That preserves the commit-reveal
+	/// anti-rushing property: a peer cannot swap in a Round 1 hash chosen
+	/// after observing honest reveals. These hashes are public broadcast
+	/// material, so they are excluded from zeroization.
+	#[zeroize(skip)]
+	pub(crate) round1_commitments: BTreeMap<ParticipantId, [u8; 32]>,
 }
 
 // ============================================================================
@@ -526,7 +537,9 @@ pub(crate) fn process_round2(
 	tr.copy_from_slice(public_key.tr());
 	let mu = compute_mu(&tr, message, context);
 
-	Ok(Round2Data { mu, w_aggregated, active_participants })
+	// The caller (ThresholdSigner::round2_reveal) fills in the frozen Round 1
+	// commitment hashes; process_round2 only sees the participant IDs.
+	Ok(Round2Data { mu, w_aggregated, active_participants, round1_commitments: BTreeMap::new() })
 }
 
 // ============================================================================
