@@ -140,9 +140,6 @@ pub mod derivation;
 // Signing protocol adapter for NEAR MPC integration
 pub mod signing_protocol;
 
-// circl_ntt is public for cross-language NTT testing with Go reference
-pub mod circl_ntt;
-
 // ============================================================================
 // Public API
 // ============================================================================

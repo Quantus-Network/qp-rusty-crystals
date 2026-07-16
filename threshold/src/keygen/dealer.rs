@@ -320,7 +320,7 @@ fn generate_threshold_shares(
 		// Compute NTT of s1 share and accumulate
 		let mut s1h_share = s1_share.clone();
 		for s1h_poly in s1h_share.vec.iter_mut().take(L) {
-			crate::circl_ntt::ntt(s1h_poly);
+			poly::ntt(s1h_poly);
 		}
 		s1h_acc.add_polyvecl(&s1h_share);
 

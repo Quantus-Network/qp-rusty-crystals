@@ -1464,17 +1464,19 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// members (status) plus new committee members (new-share commitments +
 	/// partial PKs). `None` until the active set is agreed.
 	///
-	/// This is the outer trust boundary for Round 5 consumption. Completion
-	/// ([`Self::have_all_round5`]), the failure-abort scan in Combining, and
-	/// the transcript hash use exactly this set; the Combining share-data
-	/// checks ([`Self::verify_new_share_consistency`],
+	/// This is the outer trust boundary for Round 5 consumption. Every
+	/// consumer of `round5_broadcasts` filters senders through it:
+	/// completion ([`Self::have_all_round5`]), the failure-abort scan in
+	/// Combining, and the transcript hash use exactly this set, while the
+	/// Combining share-data checks ([`Self::verify_new_share_consistency`],
 	/// [`Self::verify_public_key_preservation`]) restrict further to new
 	/// committee members, a subset of this set. Together these ensure a
 	/// broadcast from an old member excluded from `Act` never influences the
 	/// outcome — the protocol's liveness promise is that it proceeds without
 	/// such members, and honoring their failure reports (or hard-failing on
 	/// their poisoned share data) would let a single excluded (e.g.
-	/// compromised, being-rotated-out) member abort every session.
+	/// compromised, being-rotated-out) member abort every session. Any new
+	/// consumer of `round5_broadcasts` must apply the same filtering.
 	fn required_round5_senders(&self) -> Option<alloc::collections::BTreeSet<ParticipantId>> {
 		let act = self.active_set.as_ref()?;
 		Some(act.iter().copied().chain(self.config.new_participants().iter()).collect())
@@ -1482,8 +1484,12 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 
 	fn have_all_round5(&self) -> bool {
 		// Old members outside the active set may be offline, so they are not
-		// required; their Round 5 broadcasts (if any) are ignored outright —
-		// see `required_round5_senders`.
+		// required for completion. Their buffered broadcasts (if any) are
+		// also not honored by the Combining failure scan, not included in
+		// the transcript hash, and not read by the Combining share-data
+		// checks (which restrict further, to new committee members). Any new
+		// consumer of `round5_broadcasts` must apply one of those filters —
+		// see `required_round5_senders` for the enumeration and rationale.
 		let Some(required) = self.required_round5_senders() else { return false };
 		required.iter().all(|p| self.round5_broadcasts.contains_key(p))
 	}
@@ -3539,7 +3545,7 @@ mod tests {
 	/// check).
 	#[test]
 	fn test_combining_ignores_failure_from_excluded_old_member() {
-		let mut protocol = combining_protocol_with_round5_failure_from(2);
+		let mut protocol = combining_protocol_with_round5_failure_from(Some(2));
 
 		let err = protocol.poke().expect_err("bare combining state cannot fully verify");
 		assert!(
@@ -3566,7 +3572,7 @@ mod tests {
 	/// sender (here an active old member) must still abort.
 	#[test]
 	fn test_combining_aborts_on_failure_from_required_party() {
-		let mut protocol = combining_protocol_with_round5_failure_from(1);
+		let mut protocol = combining_protocol_with_round5_failure_from(Some(1));
 
 		let err = protocol.poke().expect_err("failure from required party must abort");
 		assert!(
@@ -3576,13 +3582,44 @@ mod tests {
 		);
 	}
 
+	/// Security review follow-up: the excluded member reports `success = true`
+	/// and its only anomaly is a partial PK keyed by a non-canonical mask.
+	/// With no failure bit in play, the only way that broadcast could
+	/// influence Combining is through a consumer scanning the full
+	/// `round5_broadcasts` map — the property under test is that no such
+	/// consumer exists. Combining must sail past both the failure scan and
+	/// the share-data checks without tripping the non-canonical hard reject.
+	#[test]
+	fn test_combining_ignores_poisoned_mask_from_excluded_old_member() {
+		let mut protocol = combining_protocol_with_round5_failure_from(None);
+
+		let err = protocol.poke().expect_err("bare combining state cannot fully verify");
+		assert!(
+			!matches!(err, ResharingProtocolError::ProtocolAborted(_)),
+			"nothing reported failure, so nothing may abort, got: {}",
+			err
+		);
+		assert!(
+			!err.to_string().contains("non-canonical"),
+			"excluded old member's poisoned partial PK mask must be ignored, got: {}",
+			err
+		);
+		// The only remaining error on this bare setup is the ordinary lack of
+		// genuine partial PK data.
+		assert!(
+			err.to_string().contains("missing partial PK contribution"),
+			"unexpected error: {}",
+			err
+		);
+	}
+
 	/// Build a protocol poised at Combining with active set {0, 1} out of old
-	/// committee {0, 1, 2} and new committee {0, 1, 3}. All required Round 5
-	/// senders report success; `failure_from` reports failure. The excluded
-	/// old member (2) additionally smuggles a partial PK keyed by a
+	/// committee {0, 1, 2} and new committee {0, 1, 3}. All Round 5 senders
+	/// report success except `failure_from` (if any). The excluded old
+	/// member (2) additionally smuggles a partial PK keyed by a
 	/// non-canonical mask, which must be ignored, not hard-rejected.
 	fn combining_protocol_with_round5_failure_from(
-		failure_from: ParticipantId,
+		failure_from: Option<ParticipantId>,
 	) -> ResharingProtocol<TestSigner> {
 		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
 		let (public_key, shares) =
@@ -3608,11 +3645,11 @@ mod tests {
 		// Old member 2 is excluded from the active set.
 		protocol.active_set = Some(vec![0, 1]);
 
-		// Round 5 broadcasts: required senders (act {0,1} ∪ new {0,1,3}) all
-		// report success; `failure_from` reports failure. The excluded old
-		// member (2) also carries a poisoned non-canonical partial PK mask.
+		// Round 5 broadcasts: everyone reports success except `failure_from`
+		// (if any). The excluded old member (2) also carries a poisoned
+		// non-canonical partial PK mask.
 		for party in [0u32, 1, 2, 3] {
-			let success = party != failure_from;
+			let success = failure_from != Some(party);
 			let mut partial_pks: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
 			if party == 2 {
 				let full_mask: SubsetMask = 0b111;
