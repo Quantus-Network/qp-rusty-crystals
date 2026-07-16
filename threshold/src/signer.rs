@@ -385,7 +385,17 @@ impl ThresholdSigner {
 		context: &[u8],
 		other_round1: &[Round1Broadcast],
 	) -> ThresholdResult<Round2Broadcast> {
-		// Validate inputs first (before state check to give better errors)
+		// Validate inputs first (before state check to give better errors).
+		//
+		// The ML-DSA message/context bounds must be enforced *before*
+		// `pack_round1_commitment` below: packing allocates and serializes
+		// k_iterations * SINGLE_COMMITMENT_SIZE bytes (~9.4 MB for 4-of-6),
+		// and a request that can never yield a verifiable signature must not
+		// be able to force that work. `process_round2` re-checks these bounds
+		// as defense in depth.
+		crate::error::validate_message(message)?;
+		crate::error::validate_context(context)?;
+
 		// The scheme requires EXACTLY threshold parties (not more, not fewer).
 		// See signing_protocol.rs documentation for details.
 		let total_parties = other_round1.len() + 1; // +1 for ourselves
