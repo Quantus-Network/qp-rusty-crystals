@@ -1173,6 +1173,17 @@ impl Default for NewShareData {
 // Round 5: Verification
 // ============================================================================
 
+/// Maximum accepted `error_message` length in bytes (bounds deserialization).
+///
+/// Genuine Round 5 error messages are short, locally generated
+/// `Display`-formatted protocol errors; 1 KiB is generous headroom. Without a
+/// bound, the `Option<String>` field is the one variable-length resharing
+/// field whose length prefix an attacker controls without limit: a ~90-byte
+/// broadcast claiming a huge length forces every recipient to allocate up to
+/// borsh's internal 1 MiB first chunk before detecting truncation, and a
+/// fully-delivered payload of up to 4 GiB would be accepted and retained.
+pub const MAX_ERROR_MESSAGE_LEN: usize = 1024;
+
 /// Round 5 broadcast.
 ///
 /// Round 5 has three purposes:
@@ -1242,7 +1253,42 @@ impl BorshDeserialize for ResharingRound5Broadcast {
 		}
 
 		let success = bool::deserialize_reader(reader)?;
-		let error_message = Option::<String>::deserialize_reader(reader)?;
+
+		// Read error_message with a bound check. Borsh's default Option<String>
+		// path would trust the attacker-controlled u32 length prefix (allocating
+		// up to its internal 1 MiB chunk on a truncated payload, or accepting a
+		// fully-delivered string of up to 4 GiB), so mirror the Option flag
+		// encoding manually and bound the length before reading, using the
+		// chunked read_length_prefixed path like every other variable-length
+		// resharing field.
+		let error_message = match u8::deserialize_reader(reader)? {
+			0 => None,
+			1 => {
+				let msg_len = u32::deserialize_reader(reader)? as usize;
+				if msg_len > MAX_ERROR_MESSAGE_LEN {
+					return Err(borsh::io::Error::new(
+						borsh::io::ErrorKind::InvalidData,
+						"ResharingRound5Broadcast.error_message exceeds MAX_ERROR_MESSAGE_LEN",
+					));
+				}
+				let bytes = crate::broadcast::read_length_prefixed(reader, msg_len)?;
+				Some(String::from_utf8(bytes).map_err(|_| {
+					borsh::io::Error::new(
+						borsh::io::ErrorKind::InvalidData,
+						"ResharingRound5Broadcast.error_message is not valid UTF-8",
+					)
+				})?)
+			},
+			flag => {
+				return Err(borsh::io::Error::new(
+					borsh::io::ErrorKind::InvalidData,
+					alloc::format!(
+						"Invalid Option representation: {}. The first byte must be 0 or 1",
+						flag
+					),
+				))
+			},
+		};
 
 		Ok(Self { ssid, party_id, share_commitments, partial_pks, success, error_message })
 	}
