@@ -871,11 +871,12 @@ mod tests {
 		);
 
 		// Create a public key - from_bytes computes TR = SHAKE256(bytes),
-		// which will NOT match our private key's TR (0x42 repeated)
-		let pk_bytes = [0u8; PUBLIC_KEY_SIZE];
+		// which will NOT match our private key's TR (0x42 repeated). The
+		// bytes must have a nonzero t1 region to pass import validation.
+		let pk_bytes = [0x37u8; PUBLIC_KEY_SIZE];
 		let public_key = PublicKey::from_bytes(&pk_bytes).unwrap();
 
-		// The public key's TR is SHAKE256([0u8; PUBLIC_KEY_SIZE]), not [0x42; TR_SIZE]
+		// The public key's TR is SHAKE256(pk_bytes), not [0x42; TR_SIZE]
 		assert_ne!(public_key.tr(), &private_tr);
 
 		// ThresholdSigner::new should reject this mismatched key pair

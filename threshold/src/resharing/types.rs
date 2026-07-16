@@ -1367,8 +1367,9 @@ mod tests {
 	const TEST_SSID: [u8; RESHARING_SSID_SIZE] = [0xABu8; RESHARING_SSID_SIZE];
 
 	fn make_test_public_key() -> PublicKey {
-		// Create a dummy public key for testing
-		let bytes = [0u8; 2592];
+		// Dummy public key for testing. Must have a nonzero t1 region:
+		// import paths reject the degenerate all-zero t1 key.
+		let bytes = [0x42u8; 2592];
 		PublicKey::from_bytes(&bytes).unwrap()
 	}
 

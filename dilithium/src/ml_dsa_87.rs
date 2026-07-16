@@ -497,6 +497,41 @@ mod tests {
 		);
 	}
 
+	// The standalone SecretKey import path must reject a secret key whose
+	// derived public key has all-zero t1, matching PublicKey::from_bytes and
+	// sign::verify. Such a blob (s1 = s2 = 0, hence t1 = t0 = 0) passes the
+	// tr/t0 consistency checks by construction, so without an explicit t1
+	// check it imports cleanly and then produces signatures that can never
+	// verify — while the degenerate public key it corresponds to is exactly
+	// the malicious-key forgery class the verifier rejects.
+	#[test]
+	fn secret_key_from_bytes_rejects_zero_t1() {
+		use super::{KeyParsingError, SecretKey, SECRETKEYBYTES};
+		use crate::{packing, params, polyvec};
+
+		// Craft a fully self-consistent secret key with s1 = s2 = 0:
+		// t = A·0 + 0 = 0, so t1 = 0 and t0 = 0, and tr = SHAKE256(pk).
+		let rho = [0x42u8; params::SEEDBYTES];
+		let key = [0x17u8; params::SEEDBYTES];
+		let s1 = polyvec::Polyvecl::default();
+		let s2 = polyvec::Polyveck::default();
+		let t0 = polyvec::Polyveck::default();
+		let t1 = polyvec::Polyveck::default();
+
+		let mut pk = [0u8; super::PUBLICKEYBYTES];
+		packing::pack_pk(&mut pk, &rho, &t1);
+		let mut tr = [0u8; params::TR_BYTES];
+		crate::fips202::shake256(&mut tr, &pk);
+
+		let mut sk = [0u8; SECRETKEYBYTES];
+		packing::pack_sk(&mut sk, &rho, &tr, &key, &t0, &s1, &s2);
+
+		assert!(
+			matches!(SecretKey::from_bytes(&sk), Err(KeyParsingError::BadSecretKey)),
+			"secret key deriving an all-zero t1 public key must be rejected"
+		);
+	}
+
 	// Malicious-key forgery defense: a public key with an all-zero t1 makes verification
 	// independent of the challenge, enabling signature forgery without a secret key.
 	// `from_bytes` must reject such a key so it can never be constructed or stored.

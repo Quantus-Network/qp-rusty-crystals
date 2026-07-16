@@ -32,6 +32,20 @@ fn compute_tr(bytes: &[u8; PUBLIC_KEY_SIZE]) -> [u8; TR_SIZE] {
 	tr
 }
 
+/// Validate public key bytes through the canonical ML-DSA parser.
+///
+/// Every import boundary (`from_bytes`, Borsh deserialization) must apply
+/// the same key-validity rules as `ml_dsa_87::PublicKey::from_bytes` and the
+/// verifier — in particular the rejection of the degenerate all-zero t1 key,
+/// which removes challenge binding and makes signatures forgeable. Accepting
+/// such bytes here would hand downstream code a trusted-looking `PublicKey`
+/// that the core implementation itself treats as invalid.
+fn validate_pk_bytes(bytes: &[u8; PUBLIC_KEY_SIZE]) -> Result<(), &'static str> {
+	qp_rusty_crystals_dilithium::ml_dsa_87::PublicKey::from_bytes(bytes)
+		.map(|_| ())
+		.map_err(|_| "invalid ML-DSA public key")
+}
+
 /// Public key for threshold ML-DSA-87.
 ///
 /// This key is shared among all parties and is used for signature verification.
@@ -63,6 +77,8 @@ impl BorshSerialize for PublicKey {
 impl BorshDeserialize for PublicKey {
 	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
 		let bytes = <[u8; PUBLIC_KEY_SIZE]>::deserialize_reader(reader)?;
+		validate_pk_bytes(&bytes)
+			.map_err(|e| borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, e))?;
 		let tr = compute_tr(&bytes);
 		Ok(Self { bytes, tr })
 	}
@@ -92,7 +108,9 @@ impl PublicKey {
 
 	/// Create a public key from bytes.
 	///
-	/// This computes the TR hash from the public key bytes.
+	/// The bytes are validated through the canonical ML-DSA parser (rejecting
+	/// e.g. the forgeable all-zero t1 key), and the TR hash is computed from
+	/// them.
 	pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
 		if bytes.len() != PUBLIC_KEY_SIZE {
 			return Err("invalid public key length");
@@ -100,6 +118,7 @@ impl PublicKey {
 
 		let mut pk_bytes = [0u8; PUBLIC_KEY_SIZE];
 		pk_bytes.copy_from_slice(bytes);
+		validate_pk_bytes(&pk_bytes)?;
 
 		let tr = compute_tr(&pk_bytes);
 		Ok(Self { bytes: pk_bytes, tr })
@@ -297,6 +316,34 @@ mod tests {
 	fn test_public_key_invalid_length() {
 		let bytes = [0u8; 100];
 		assert!(PublicKey::from_bytes(&bytes).is_err());
+	}
+
+	/// Security review: the threshold public key import paths must apply the
+	/// same degenerate-key check as the canonical ML-DSA parser
+	/// (`ml_dsa_87::PublicKey::from_bytes`) and the verifier, both of which
+	/// reject an all-zero t1 because it removes challenge binding and makes
+	/// signatures forgeable for that key. Accepting it here would let
+	/// downstream code trust a forgeable PublicKey object (or its
+	/// `as_bytes()` output) without ever re-parsing through the safe wrapper.
+	#[test]
+	fn test_public_key_from_bytes_rejects_zero_t1() {
+		// rho nonzero, t1 region all zero — the forgeable class.
+		let mut bytes = [0u8; PUBLIC_KEY_SIZE];
+		bytes[..32].copy_from_slice(&[0x42u8; 32]);
+		assert!(
+			PublicKey::from_bytes(&bytes).is_err(),
+			"all-zero t1 public key must be rejected by from_bytes"
+		);
+	}
+
+	/// Borsh deserialization is an import boundary too (broadcast messages,
+	/// stored state) and must enforce the same check as `from_bytes`.
+	#[test]
+	fn test_public_key_borsh_rejects_zero_t1() {
+		let mut bytes = [0u8; PUBLIC_KEY_SIZE];
+		bytes[..32].copy_from_slice(&[0x42u8; 32]);
+		let result: Result<PublicKey, _> = borsh::from_slice(&bytes);
+		assert!(result.is_err(), "all-zero t1 public key must be rejected by Borsh deserialize");
 	}
 
 	#[test]
