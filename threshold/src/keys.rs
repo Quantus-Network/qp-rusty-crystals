@@ -200,12 +200,38 @@ impl BorshDeserialize for PrivateKeyShare {
 ///
 /// Uses fixed-size arrays to guarantee exact dimensions at compile time,
 /// preventing malformed deserialized data from causing issues downstream.
-#[derive(Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, PartialEq, Eq, BorshSerialize, Zeroize, ZeroizeOnDrop)]
 pub(crate) struct SecretShareData {
 	/// Share of s1 polynomial vector (exactly L polynomials of 256 coefficients).
 	pub(crate) s1: [[i32; 256]; L],
 	/// Share of s2 polynomial vector (exactly K polynomials of 256 coefficients).
 	pub(crate) s2: [[i32; 256]; K],
+}
+
+impl BorshDeserialize for SecretShareData {
+	/// Deserialize with coefficient-range validation.
+	///
+	/// Every producer of share data emits coefficients in (-Q, Q): the
+	/// dealer's shares are η-bounded, and DKG/resharing shares are reduced
+	/// mod Q before storage. Signing copies these raw arrays into `Poly`
+	/// values and runs `poly::ntt` on them, whose coefficient bound is a
+	/// caller-enforced contract — so a malformed blob with out-of-range
+	/// coefficients must be rejected at import, not discovered as a panic
+	/// (overflow checks on) or silent wraparound (release) mid-signing.
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		const Q: i32 = qp_rusty_crystals_dilithium::params::Q;
+		let s1 = <[[i32; 256]; L]>::deserialize_reader(reader)?;
+		let s2 = <[[i32; 256]; K]>::deserialize_reader(reader)?;
+		let in_range =
+			|polys: &[[i32; 256]]| polys.iter().all(|poly| poly.iter().all(|&c| c > -Q && c < Q));
+		if !in_range(&s1) || !in_range(&s2) {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"SecretShareData coefficient outside (-Q, Q)",
+			));
+		}
+		Ok(Self { s1, s2 })
+	}
 }
 
 impl PrivateKeyShare {
@@ -381,6 +407,64 @@ mod tests {
 		assert_eq!(pk_share.key, [0u8; 32]);
 		assert_eq!(pk_share.rho, [0u8; 32]);
 		assert_eq!(pk_share.tr, [0u8; TR_SIZE]);
+	}
+
+	/// Security review: PrivateKeyShare deserialization must validate share
+	/// coefficient ranges, not just the share-map length. Signing copies the
+	/// raw arrays into Poly values and runs poly::ntt on them, whose
+	/// coefficient-bound contract is caller-enforced — a malformed blob would
+	/// import cleanly and only blow up (panic with overflow checks, silent
+	/// wrap in release) once the signer tries to use it.
+	#[test]
+	fn test_private_key_share_borsh_rejects_out_of_range_coefficients() {
+		use qp_rusty_crystals_dilithium::params::Q;
+
+		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
+		let mut shares = BTreeMap::new();
+		let mut bad = SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] };
+		bad.s1[0][0] = i32::MAX;
+		shares.insert(0b011u16, bad);
+
+		let share = PrivateKeyShare::new(
+			0,
+			3,
+			2,
+			[0x11u8; 32],
+			[0x22u8; 32],
+			[0x33u8; TR_SIZE],
+			shares,
+			dkg_participants.clone(),
+		);
+		let bytes = borsh::to_vec(&share).unwrap();
+		let result: Result<PrivateKeyShare, _> = borsh::from_slice(&bytes);
+		assert!(result.is_err(), "share coefficient outside (-Q, Q) must be rejected at import");
+
+		// Boundary: exactly Q and -Q are invalid, Q-1 and -(Q-1) are valid.
+		for (value, valid) in [(Q, false), (-Q, false), (Q - 1, true), (-(Q - 1), true)] {
+			let mut shares = BTreeMap::new();
+			let mut data = SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] };
+			data.s2[K - 1][255] = value;
+			shares.insert(0b011u16, data);
+			let share = PrivateKeyShare::new(
+				0,
+				3,
+				2,
+				[0x11u8; 32],
+				[0x22u8; 32],
+				[0x33u8; TR_SIZE],
+				shares,
+				dkg_participants.clone(),
+			);
+			let bytes = borsh::to_vec(&share).unwrap();
+			let result: Result<PrivateKeyShare, _> = borsh::from_slice(&bytes);
+			assert_eq!(
+				result.is_ok(),
+				valid,
+				"coefficient {} should be {}",
+				value,
+				if valid { "accepted" } else { "rejected" }
+			);
+		}
 	}
 
 	#[test]
