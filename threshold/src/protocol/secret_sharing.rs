@@ -274,8 +274,8 @@ pub fn recover_share(
 			.map_err(ThresholdError::InvalidConfiguration)?;
 
 	// Use NTT accumulators to avoid i32 overflow for large configurations.
-	// After NTT, coefficients are bounded by 18*Q. For large subset counts,
-	// the sum can exceed i32::MAX.
+	// The forward NTT emits signed coefficients up to ~8Q in magnitude; for
+	// large subset counts, a plain i32 sum could exceed i32::MAX.
 	let mut s1_acc = NttAccumulatorL::new();
 	let mut s2_acc = NttAccumulatorK::new();
 
