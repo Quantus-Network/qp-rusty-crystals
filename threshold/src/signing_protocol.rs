@@ -991,9 +991,13 @@ impl DilithiumSignProtocol {
 						// Combination failed (most commonly: ML-DSA rejection sampling
 						// did not produce a valid signature this attempt). Terminate
 						// this instance; the caller will retry with a fresh one.
+						// ProtocolFailed is the documented retry signal (see the module
+						// docs and trust model): callers dispatch fresh-instance retries
+						// on this variant, and every subsequent poke of this dead
+						// instance reports ProtocolFailed already.
 						let msg = format!("Signature combination failed: {}", e);
 						self.state = SignProtocolState::Failed(msg.clone());
-						Err(SignProtocolError::SigningError(msg))
+						Err(SignProtocolError::ProtocolFailed(msg))
 					},
 				}
 			},
@@ -1342,7 +1346,7 @@ fn derive_attempt_nonce(session_seed: &[u8; 32]) -> [u8; 32] {
 /// # Returns
 ///
 /// The produced signature on success. If the underlying ML-DSA rejection sampling
-/// happens to abort on this attempt, returns `Err(SignProtocolError::SigningError)`
+/// happens to abort on this attempt, returns `Err(SignProtocolError::ProtocolFailed)`
 /// — callers should retry with a different `session_seed`.
 pub fn run_local_signing(
 	signers: Vec<ThresholdSigner>,
@@ -2343,6 +2347,43 @@ mod tests {
 		// Subsequent pokes must continue to fail (the instance is dead).
 		let again = protocol.poke();
 		assert!(matches!(again, Err(SignProtocolError::ProtocolFailed(_))));
+	}
+
+	/// Audit regression: the module docs promise that a Round 4 combination
+	/// failure (normal under ML-DSA rejection sampling) ends the instance
+	/// with `SignProtocolError::ProtocolFailed`, the variant callers use to
+	/// dispatch a retry with a fresh instance. Returning any other variant
+	/// makes an integration that implements the documented recovery policy
+	/// treat routine rejection-sampling failures as permanent, and is also
+	/// self-inconsistent: the same dead instance already reports
+	/// `ProtocolFailed` on every subsequent poke.
+	#[test]
+	fn test_combination_failure_returns_protocol_failed() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
+		)
+		.unwrap();
+
+		// Force the protocol into Round4Deciding with empty broadcasts so that
+		// combination cannot succeed.
+		protocol.state = SignProtocolState::Round4Deciding;
+
+		let result = protocol.poke();
+		assert!(
+			matches!(result, Err(SignProtocolError::ProtocolFailed(_))),
+			"combination failure must surface as the documented ProtocolFailed variant \
+			 (the caller's retry signal), got: {result:?}"
+		);
 	}
 
 	#[test]
