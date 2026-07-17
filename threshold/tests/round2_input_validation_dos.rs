@@ -90,8 +90,7 @@ fn round2_reveal_rejects_bad_inputs_before_commitment_packing() {
 	);
 
 	// Same for an oversized message.
-	let oversized_message =
-		vec![0u8; qp_rusty_crystals_dilithium::ml_dsa_87::MAX_MESSAGE_SIZE + 1];
+	let oversized_message = vec![0u8; qp_rusty_crystals_dilithium::ml_dsa_87::MAX_MESSAGE_SIZE + 1];
 	let (result, max_alloc) =
 		max_alloc_during(|| s0.round2_reveal(&ssid, &oversized_message, b"", others));
 	assert!(

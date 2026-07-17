@@ -6,15 +6,13 @@
 //! default path with an attacker-controlled, unbounded u32 length prefix.
 //! Two consequences, both checked here:
 //!
-//! 1. A ~90-byte truncated broadcast claiming a near-`u32::MAX` length forces
-//!    every recipient to allocate borsh's internal 1 MiB first chunk before
-//!    the truncation is detected — a >10,000x memory amplification per
-//!    message. (borsh 1.6.1 caps the eager allocation at 1 MiB, so the
-//!    original audit's 4 GiB-per-message OOM does not reproduce at this
-//!    version, but the amplification and the missing bound are real.)
-//! 2. A fully-delivered oversized `error_message` (up to 4 GiB) would be
-//!    accepted and retained, unlike every other variable-length resharing
-//!    field, which is explicitly bounded.
+//! 1. A ~90-byte truncated broadcast claiming a near-`u32::MAX` length forces every recipient to
+//!    allocate borsh's internal 1 MiB first chunk before the truncation is detected — a >10,000x
+//!    memory amplification per message. (borsh 1.6.1 caps the eager allocation at 1 MiB, so the
+//!    original audit's 4 GiB-per-message OOM does not reproduce at this version, but the
+//!    amplification and the missing bound are real.)
+//! 2. A fully-delivered oversized `error_message` (up to 4 GiB) would be accepted and retained,
+//!    unlike every other variable-length resharing field, which is explicitly bounded.
 //!
 //! This test lives in its own integration-test binary because it installs a
 //! tracking global allocator; sharing the binary with unrelated tests would

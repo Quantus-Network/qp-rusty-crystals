@@ -1279,15 +1279,14 @@ impl BorshDeserialize for ResharingRound5Broadcast {
 					)
 				})?)
 			},
-			flag => {
+			flag =>
 				return Err(borsh::io::Error::new(
 					borsh::io::ErrorKind::InvalidData,
 					alloc::format!(
 						"Invalid Option representation: {}. The first byte must be 0 or 1",
 						flag
 					),
-				))
-			},
+				)),
 		};
 
 		Ok(Self { ssid, party_id, share_commitments, partial_pks, success, error_message })
