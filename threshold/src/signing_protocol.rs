@@ -384,14 +384,21 @@ pub enum SignProtocolState {
 ///
 /// # Security
 ///
-/// The buffer uses `BTreeMap` keyed by party_id to:
-/// 1. **Deduplicate**: Only one message per party is stored (later messages ignored)
-/// 2. **Bound memory**: At most MAX_PARTIES entries per round
+/// The buffer enforces its memory bound itself, rather than relying on the
+/// caller to pre-filter senders:
+/// 1. **Membership**: Messages whose `party_id` is not in the session's participant list are
+///    dropped. This is what actually bounds memory — legitimate Round 2/3 payloads are megabytes,
+///    so without it a peer could force unbounded storage by varying `party_id`.
+/// 2. **Deduplicate**: Only one message per party is stored (later messages ignored)
+/// 3. **Bound memory**: At most the participant count (≤ MAX_PARTIES) entries per round
 ///
 /// Round4Complete is buffered separately since only the leader sends it and followers
 /// may receive it before transitioning to `WaitingForLeaderDecision` state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SignMessageBuffer {
+	/// Participants of this signing session; messages from any other
+	/// party_id are dropped instead of buffered.
+	participants: ParticipantList,
 	/// Buffered Round 2 messages, keyed by party_id.
 	round2: BTreeMap<ParticipantId, Round2Broadcast>,
 	/// Buffered Round 3 messages, keyed by party_id.
@@ -402,20 +409,36 @@ pub struct SignMessageBuffer {
 }
 
 impl SignMessageBuffer {
-	/// Create a new empty message buffer.
-	pub fn new() -> Self {
-		Self { round2: BTreeMap::new(), round3: BTreeMap::new(), round4_complete: None }
+	/// Create a new empty message buffer for a signing session.
+	///
+	/// Only messages from parties in `participants` will be buffered; this is
+	/// what enforces the documented memory bound at the buffer boundary.
+	pub fn new(participants: ParticipantList) -> Self {
+		Self {
+			participants,
+			round2: BTreeMap::new(),
+			round3: BTreeMap::new(),
+			round4_complete: None,
+		}
 	}
 
 	/// Buffer a Round 2 message for later processing.
-	/// Only the first message from each party is stored; duplicates are ignored.
+	/// Messages from parties outside the session's participant list are dropped;
+	/// only the first message from each participant is stored (duplicates ignored).
 	pub fn buffer_round2(&mut self, msg: Round2Broadcast) {
+		if !self.participants.contains(msg.party_id) {
+			return;
+		}
 		self.round2.entry(msg.party_id).or_insert(msg);
 	}
 
 	/// Buffer a Round 3 message for later processing.
-	/// Only the first message from each party is stored; duplicates are ignored.
+	/// Messages from parties outside the session's participant list are dropped;
+	/// only the first message from each participant is stored (duplicates ignored).
 	pub fn buffer_round3(&mut self, msg: Round3Broadcast) {
+		if !self.participants.contains(msg.party_id) {
+			return;
+		}
 		self.round3.entry(msg.party_id).or_insert(msg);
 	}
 
@@ -654,6 +677,7 @@ impl DilithiumSignProtocol {
 		Ok(Self {
 			signer,
 			state: SignProtocolState::Round1Generate,
+			message_buffer: SignMessageBuffer::new(participant_list.clone()),
 			participants: participant_list,
 			my_participant_id,
 			leader_id,
@@ -667,7 +691,6 @@ impl DilithiumSignProtocol {
 			my_r1: None,
 			my_r2: None,
 			my_r3: None,
-			message_buffer: SignMessageBuffer::new(),
 			received_signature: None,
 		})
 	}
@@ -1745,15 +1768,20 @@ mod tests {
 		assert_eq!(protocol.r1_broadcasts.len(), initial_count);
 	}
 
+	/// Participant list used by the standalone buffer tests.
+	fn test_participants() -> ParticipantList {
+		ParticipantList::new(&[0, 1, 2]).unwrap()
+	}
+
 	#[test]
 	fn test_message_buffer_creation() {
-		let buffer = SignMessageBuffer::new();
+		let buffer = SignMessageBuffer::new(test_participants());
 		assert!(buffer.is_empty());
 	}
 
 	#[test]
 	fn test_message_buffer_round2() {
-		let mut buffer = SignMessageBuffer::new();
+		let mut buffer = SignMessageBuffer::new(test_participants());
 		assert!(buffer.is_empty());
 
 		let ssid = [0xCC; SSID_SIZE];
@@ -1770,7 +1798,7 @@ mod tests {
 
 	#[test]
 	fn test_message_buffer_deduplication() {
-		let mut buffer = SignMessageBuffer::new();
+		let mut buffer = SignMessageBuffer::new(test_participants());
 		let ssid = [0xCC; SSID_SIZE];
 
 		// Buffer first message from party 1
@@ -1794,7 +1822,7 @@ mod tests {
 
 	#[test]
 	fn test_message_buffer_round3() {
-		let mut buffer = SignMessageBuffer::new();
+		let mut buffer = SignMessageBuffer::new(test_participants());
 		let ssid = [0xCC; SSID_SIZE];
 
 		let msg = Round3Broadcast::new(ssid, 2, vec![5, 6, 7, 8]);
