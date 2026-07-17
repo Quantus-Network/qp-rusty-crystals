@@ -408,12 +408,16 @@ fn keccak_absorb_once(s: &mut [u64; 25], r: usize, input: &[u8], p: u8) {
 	s[(r - 1) / 8] ^= 1u64 << 63;
 }
 
-/// Squeeze step of Keccak. Squeezes full blocks of r bytes each.
+/// Squeeze step of Keccak. Squeezes one full rate-sized block per entry of `out`.
 /// Modifies the state. Can be called multiple times to keep squeezing, i.e., is incremental.
 /// Assumes zero bytes of current block have already been squeezed.
-fn keccak_squeezeblocks(out: &mut [u8], nblocks: usize, s: &mut [u64; 25], r: usize) {
-	// Process exactly nblocks blocks using chunks_exact_mut for safe iteration
-	for block in out.chunks_exact_mut(r).take(nblocks) {
+///
+/// The output is typed as whole blocks (`[[u8; R]]`) rather than a flat slice
+/// plus a separate block count, so a count/capacity mismatch — which would
+/// silently underfill the buffer and desynchronize the state — is
+/// unrepresentable at the type level.
+fn keccak_squeezeblocks<const R: usize>(out: &mut [[u8; R]], s: &mut [u64; 25]) {
+	for block in out.iter_mut() {
 		keccakf1600_statepermute(s);
 		for (i, chunk) in block.chunks_exact_mut(8).enumerate() {
 			// chunks_exact_mut(8) guarantees exactly 8 bytes
@@ -434,11 +438,17 @@ pub fn shake128_finalize(state: &mut KeccakState) {
 	state.pos = SHAKE128_RATE;
 }
 
-/// Squeeze step of SHAKE128 XOF. Squeezes full blocks of SHAKE128_RATE bytes each.
+/// Squeeze step of SHAKE128 XOF. Squeezes one full block of SHAKE128_RATE bytes
+/// per entry of `output`.
 /// Can be called multiple times to keep squeezing.
 /// Assumes new block has not yet been started (state->pos = SHAKE128_RATE).
-pub fn shake128_squeezeblocks(output: &mut [u8], nblocks: usize, s: &mut KeccakState) {
-	keccak_squeezeblocks(output, nblocks, &mut s.s, SHAKE128_RATE);
+///
+/// Taking whole blocks (`[[u8; SHAKE128_RATE]]`) instead of a flat slice plus a
+/// block count makes an inconsistent count/capacity pair unrepresentable: the
+/// old shape silently underfilled a short slice, leaving stale bytes that the
+/// caller would treat as XOF output.
+pub fn shake128_squeezeblocks(output: &mut [[u8; SHAKE128_RATE]], s: &mut KeccakState) {
+	keccak_squeezeblocks(output, &mut s.s);
 }
 
 /// Absorb step of the SHAKE256 XOF; incremental.
@@ -464,23 +474,32 @@ pub fn shake256_absorb_once(state: &mut KeccakState, input: &[u8]) {
 	state.pos = SHAKE256_RATE;
 }
 
-/// Squeeze step of SHAKE256 XOF. Squeezes full blocks of SHAKE256_RATE bytes each.
+/// Squeeze step of SHAKE256 XOF. Squeezes one full block of SHAKE256_RATE bytes
+/// per entry of `out`.
 /// Can be called multiple times to keep squeezing.
 /// Assumes next block has not yet been started (state.pos = SHAKE256_RATE).
-pub fn shake256_squeezeblocks(out: &mut [u8], nblocks: usize, state: &mut KeccakState) {
-	keccak_squeezeblocks(out, nblocks, &mut state.s, SHAKE256_RATE);
+///
+/// Taking whole blocks (`[[u8; SHAKE256_RATE]]`) instead of a flat slice plus a
+/// block count makes an inconsistent count/capacity pair unrepresentable: the
+/// old shape silently underfilled a short slice, leaving stale bytes that the
+/// caller would treat as XOF output.
+pub fn shake256_squeezeblocks(out: &mut [[u8; SHAKE256_RATE]], state: &mut KeccakState) {
+	keccak_squeezeblocks(out, &mut state.s);
 }
 
 /// SHAKE256 XOF with non-incremental API
 pub fn shake256(output: &mut [u8], input: &[u8]) {
 	let mut state = KeccakState::default();
-	let outlen = output.len();
 
 	shake256_absorb_once(&mut state, input);
-	let nblocks = outlen / SHAKE256_RATE;
-	shake256_squeezeblocks(output, nblocks, &mut state);
-	let idx = nblocks * SHAKE256_RATE;
-	shake256_squeeze(&mut output[idx..], &mut state);
+	// Squeeze whole blocks first, then the sub-block tail.
+	let mut blocks = output.chunks_exact_mut(SHAKE256_RATE);
+	for block in blocks.by_ref() {
+		let block: &mut [u8; SHAKE256_RATE] =
+			block.try_into().expect("chunks_exact yields full blocks");
+		shake256_squeezeblocks(core::slice::from_mut(block), &mut state);
+	}
+	shake256_squeeze(blocks.into_remainder(), &mut state);
 }
 
 /// Initialize SHAKE128 stream with a fixed-size seed and nonce.
@@ -626,6 +645,46 @@ mod tests {
 		let mut out = [0u8; 64];
 		shake256_squeeze(&mut out, &mut state);
 		assert!(state.pos <= SHAKE256_RATE, "state position must be back in range");
+	}
+
+	#[test]
+	fn squeezeblocks_matches_incremental_squeeze() {
+		// Audit regression companion: the old API took a flat `&mut [u8]` plus
+		// a separate `nblocks`, and a short slice was silently underfilled
+		// (stale tail bytes treated as XOF output, Keccak state permuted fewer
+		// times than requested). The API now takes whole blocks
+		// (`&mut [[u8; RATE]]`), so that mismatch cannot be expressed at all —
+		// this test pins down that the block-squeeze still produces exactly
+		// the same stream as the byte-wise squeeze.
+		let mut block_state = KeccakState::default();
+		shake256_absorb(&mut block_state, b"equivalence");
+		shake256_finalize(&mut block_state);
+		let mut blocks = [[0u8; SHAKE256_RATE]; 2];
+		shake256_squeezeblocks(&mut blocks, &mut block_state);
+
+		let mut byte_state = KeccakState::default();
+		shake256_absorb(&mut byte_state, b"equivalence");
+		shake256_finalize(&mut byte_state);
+		let mut bytes = [0u8; 2 * SHAKE256_RATE];
+		shake256_squeeze(&mut bytes, &mut byte_state);
+
+		assert_eq!(blocks.as_flattened(), bytes);
+
+		// Same equivalence for SHAKE128.
+		let mut block_state = KeccakState::default();
+		shake128_absorb(&mut block_state, b"equivalence");
+		shake128_finalize(&mut block_state);
+		let mut blocks128 = [[0u8; SHAKE128_RATE]; 2];
+		shake128_squeezeblocks(&mut blocks128, &mut block_state);
+
+		let mut byte_state = KeccakState::default();
+		shake128_absorb(&mut byte_state, b"equivalence");
+		shake128_finalize(&mut byte_state);
+		let mut bytes128 = [0u8; 2 * SHAKE128_RATE];
+		let pos = keccak_squeeze(&mut bytes128, &mut byte_state.s, SHAKE128_RATE, SHAKE128_RATE);
+		assert!(pos <= SHAKE128_RATE);
+
+		assert_eq!(blocks128.as_flattened(), bytes128);
 	}
 
 	#[test]
