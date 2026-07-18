@@ -35,13 +35,22 @@ pub fn decompose(a: i32) -> (i32, i32) {
 /// Compute hint bit indicating whether the low bits of the input element overflow into the high
 /// bits.
 ///
-/// Returns 1 if overflow.
+/// Branchless via sign-bit arithmetic: the inputs are derived from secret data
+/// (w0 - c*s2 + c*t0) and this runs on rejected signing attempts whose hints are never
+/// published, so a data-dependent branch here could leak.
+///
+/// Returns 1 if overflow, i.e. if a0 > GAMMA2, or a0 < -GAMMA2, or (a0 == -GAMMA2 && a1 != 0).
 pub fn make_hint(a0: i32, a1: i32) -> i32 {
-	if !(-GAMMA2..=GAMMA2).contains(&a0) || (a0 == -GAMMA2 && a1 != 0) {
-		1
-	} else {
-		0
-	}
+	// -1 iff a0 > GAMMA2
+	let gt = (GAMMA2 - a0) >> 31;
+	// -1 iff a0 < -GAMMA2; t == 0 iff a0 == -GAMMA2
+	let t = a0 + GAMMA2;
+	let lt = t >> 31;
+	// -1 iff t == 0 (i.e. a0 == -GAMMA2)
+	let eq = !((t | t.wrapping_neg()) >> 31);
+	// -1 iff a1 != 0
+	let a1_nonzero = (a1 | a1.wrapping_neg()) >> 31;
+	(gt | lt | (eq & a1_nonzero)) & 1
 }
 
 /// Correct high bits according to hint.

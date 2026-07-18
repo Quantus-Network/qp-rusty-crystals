@@ -47,7 +47,29 @@ use qp_rusty_crystals_dilithium::fips202;
 ///
 /// This allows the DKG protocol to be agnostic to the signature scheme used.
 /// Implementors can use Ed25519, ML-DSA, or any other scheme.
-pub trait TranscriptSigner {
+///
+/// # Zeroization
+///
+/// `TranscriptSigner` requires [`Zeroize`] + [`ZeroizeOnDrop`] because
+/// implementors hold a long-term signing key (`my_signer` in [`DkgConfig`]).
+/// The DKG/resharing state machines own the signer for the whole protocol
+/// lifetime and call its `zeroize()` method directly at their zeroization
+/// boundary, so key erasure does not depend on the implementor's `Drop`
+/// behavior.
+///
+/// **Implement this with `#[derive(Zeroize, ZeroizeOnDrop)]`** (using
+/// `#[zeroize(skip)]` on non-secret fields such as public keys). The derive
+/// requires every non-skipped field to implement `Zeroize` and generates a
+/// real wipe on drop.
+///
+/// Note that `ZeroizeOnDrop` alone is only a marker trait: an empty
+/// `impl ZeroizeOnDrop for MySigner {}` compiles without wiping anything.
+/// Requiring `Zeroize` as well means a hand-written impl must spell out a
+/// `zeroize()` body, making a no-op erasure visible at review time rather than
+/// implied by a bare marker. If you write the impls by hand, `zeroize()` must
+/// overwrite every field that holds secret key material, and your `Drop` must
+/// call it (or each secret field must itself be `ZeroizeOnDrop`).
+pub trait TranscriptSigner: Zeroize + ZeroizeOnDrop {
 	/// The signature type produced by this signer.
 	type Signature: Clone + AsRef<[u8]>;
 
@@ -385,7 +407,10 @@ pub struct Round1Broadcast {
 }
 
 /// Round 1 private: Shared secret K_S (leader to subset members).
-#[derive(Clone, BorshSerialize, BorshDeserialize)]
+///
+/// Carries the secret `shared_secret` (K_S), so it is zeroized on drop. Queued
+/// copies awaiting delivery therefore never leave K_S in freed heap memory.
+#[derive(Clone, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
 pub struct Round1Private {
 	/// Session identifier binding this message to a specific DKG session.
 	pub ssid: [u8; DKG_SSID_SIZE],
@@ -770,12 +795,12 @@ pub fn derive_subset_contribution(combined_seed: &[u8; SUBSET_SEED_SIZE]) -> Sub
 
 	for i in 0..L {
 		poly::uniform_eta(&mut temp_poly, combined_seed, i as u16);
-		contribution.s1[i].copy_from_slice(&temp_poly.coeffs);
+		contribution.s1[i].copy_from_slice(temp_poly.coeffs());
 	}
 
 	for i in 0..K {
 		poly::uniform_eta(&mut temp_poly, combined_seed, (L + i) as u16);
-		contribution.s2[i].copy_from_slice(&temp_poly.coeffs);
+		contribution.s2[i].copy_from_slice(temp_poly.coeffs());
 	}
 
 	contribution
@@ -788,7 +813,7 @@ mod tests {
 	/// Test SSID for DKG type tests.
 	const TEST_SSID: [u8; DKG_SSID_SIZE] = [0xDD; DKG_SSID_SIZE];
 
-	#[derive(Clone, Debug)]
+	#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 	struct TestSigner {
 		id: u32,
 	}

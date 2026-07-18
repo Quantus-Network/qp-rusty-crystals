@@ -12,6 +12,8 @@ use qp_rusty_crystals_dilithium::{
 	poly, polyvec,
 };
 
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
 use crate::{
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
@@ -19,6 +21,9 @@ use crate::{
 	participants::{ParticipantId, ParticipantList},
 	protocol::primitives::{mod_q, NttAccumulatorL},
 };
+
+/// Domain separator for per-subset dealer share-seed derivation.
+const DEALER_SUBSHARE_DOMAIN: &[u8] = b"threshold-dealer-subshare-v1";
 
 /// Generate threshold keys using a trusted dealer.
 ///
@@ -107,6 +112,18 @@ pub fn generate_with_dealer(
 	// NIST mode: absorb K and L
 	let kl = [K as u8, L as u8];
 	fips202::shake256_absorb(&mut h, &kl);
+
+	// Bind the threshold policy (t, n) into the dealer's randomness. RSS
+	// enumerates `C(n, n-t+1)` subsets, and `C(n, n-t+1) == C(n, t-1)`, so
+	// distinct policies over the same `n` (e.g. 2-of-3 vs 3-of-3, or 3-of-5 vs
+	// 4-of-5) enumerate the *same number* of subsets. Without this binding they
+	// would consume an identical XOF stream (rho, party keys, subset seeds) and
+	// sum to the same secret, producing an identical public key — letting an old
+	// weaker coalition sign under a key that was "strengthened" by re-running
+	// keygen with the same seed. Absorbing (t, n) makes rho and every downstream
+	// value policy-specific, so the public keys can no longer collide.
+	fips202::shake256_absorb(&mut h, &threshold.to_le_bytes());
+	fips202::shake256_absorb(&mut h, &parties.to_le_bytes());
 	fips202::shake256_finalize(&mut h);
 
 	// 1. Squeeze rho (seed for matrix A)
@@ -151,7 +168,7 @@ pub fn generate_with_dealer(
 	// Normalize t
 	for t_poly in t.vec.iter_mut().take(K) {
 		poly::reduce(t_poly);
-		for coeff in t_poly.coeffs.iter_mut() {
+		for coeff in t_poly.coeffs_mut().iter_mut() {
 			let normalized = ((*coeff % Q) + Q) % Q;
 			*coeff = normalized;
 		}
@@ -187,12 +204,12 @@ pub fn generate_with_dealer(
 		for (subset_id, share) in party_shares_map {
 			let mut s1_data = [[0i32; 256]; L];
 			for (i, s1_item) in s1_data.iter_mut().enumerate() {
-				s1_item.copy_from_slice(&share.s1_share.vec[i].coeffs);
+				s1_item.copy_from_slice(share.s1_share.vec[i].coeffs());
 			}
 
 			let mut s2_data = [[0i32; 256]; K];
 			for (i, s2_item) in s2_data.iter_mut().enumerate() {
-				s2_item.copy_from_slice(&share.s2_share.vec[i].coeffs);
+				s2_item.copy_from_slice(share.s2_share.vec[i].coeffs());
 			}
 
 			shares_data.insert(subset_id, SecretShareData { s1: s1_data, s2: s2_data });
@@ -220,7 +237,7 @@ pub fn generate_with_dealer(
 }
 
 /// Internal secret share structure used during key generation.
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 struct SecretShare {
 	s1_share: polyvec::Polyvecl,
 	s2_share: polyvec::Polyveck,
@@ -263,9 +280,26 @@ fn generate_threshold_shares(
 	let max_combinations: u16 = 1u16 << parties;
 
 	while honest_signers < max_combinations {
-		// Generate random seed for this share
+		// Derive this subset's seed with explicit domain separation by subset
+		// mask (and threshold config), rather than assigning raw XOF output to
+		// masks purely by enumeration order. This binds each secret share to the
+		// subset it belongs to, so the derivation cannot be reinterpreted for a
+		// different subset/policy that happens to squeeze the stream in the same
+		// order. `raw` keys the derivation; `honest_signers` is the subset mask.
+		let mut raw = [0u8; 64];
+		fips202::shake256_squeeze(&mut raw, state);
+
+		let mut sh = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut sh, DEALER_SUBSHARE_DOMAIN);
+		fips202::shake256_absorb(&mut sh, &raw);
+		fips202::shake256_absorb(&mut sh, &threshold.to_le_bytes());
+		fips202::shake256_absorb(&mut sh, &parties.to_le_bytes());
+		fips202::shake256_absorb(&mut sh, &honest_signers.to_le_bytes());
+		fips202::shake256_finalize(&mut sh);
+
 		let mut share_seed = [0u8; 64];
-		fips202::shake256_squeeze(&mut share_seed, state);
+		fips202::shake256_squeeze(&mut share_seed, &mut sh);
+		raw.zeroize();
 
 		// Create η-bounded shares for s1
 		let mut s1_share = polyvec::Polyvecl::default();
@@ -279,10 +313,14 @@ fn generate_threshold_shares(
 			poly::uniform_eta(s2_poly, &share_seed, (L + j) as u16);
 		}
 
+		// The plaintext seed is no longer needed; wipe it rather than leaving it
+		// on the stack until the next iteration overwrites (or drops) it.
+		share_seed.zeroize();
+
 		// Compute NTT of s1 share and accumulate
 		let mut s1h_share = s1_share.clone();
 		for s1h_poly in s1h_share.vec.iter_mut().take(L) {
-			crate::circl_ntt::ntt(s1h_poly);
+			poly::ntt(s1h_poly);
 		}
 		s1h_acc.add_polyvecl(&s1h_share);
 
@@ -303,7 +341,7 @@ fn generate_threshold_shares(
 		// the sum is bounded by ±12870, well within i32 range.
 		for (total_poly, share_poly) in s1_total.vec.iter_mut().zip(s1_share.vec.iter()).take(L) {
 			for (total_coeff, share_coeff) in
-				total_poly.coeffs.iter_mut().zip(share_poly.coeffs.iter())
+				total_poly.coeffs_mut().iter_mut().zip(share_poly.coeffs().iter())
 			{
 				*total_coeff += *share_coeff;
 			}
@@ -311,7 +349,7 @@ fn generate_threshold_shares(
 
 		for (total_poly, share_poly) in s2_total.vec.iter_mut().zip(s2_share.vec.iter()).take(K) {
 			for (total_coeff, share_coeff) in
-				total_poly.coeffs.iter_mut().zip(share_poly.coeffs.iter())
+				total_poly.coeffs_mut().iter_mut().zip(share_poly.coeffs().iter())
 			{
 				*total_coeff += *share_coeff;
 			}
@@ -328,7 +366,7 @@ fn generate_threshold_shares(
 
 	// Normalize s1_total (η-bounded sums)
 	for total_poly in s1_total.vec.iter_mut().take(L) {
-		for total_coeff in total_poly.coeffs.iter_mut() {
+		for total_coeff in total_poly.coeffs_mut().iter_mut() {
 			let coeff_u32 =
 				if *total_coeff < 0 { (*total_coeff + Q) as u32 } else { *total_coeff as u32 };
 			*total_coeff = mod_q(coeff_u32) as i32;
@@ -337,7 +375,7 @@ fn generate_threshold_shares(
 
 	// Normalize s2_total (η-bounded sums)
 	for total_poly in s2_total.vec.iter_mut().take(K) {
-		for total_coeff in total_poly.coeffs.iter_mut() {
+		for total_coeff in total_poly.coeffs_mut().iter_mut() {
 			let coeff_u32 =
 				if *total_coeff < 0 { (*total_coeff + Q) as u32 } else { *total_coeff as u32 };
 			*total_coeff = mod_q(coeff_u32) as i32;
@@ -399,6 +437,39 @@ mod tests {
 
 		// Different seeds should produce different keys
 		assert_ne!(pk1.as_bytes(), pk2.as_bytes());
+	}
+
+	/// Distinct threshold policies over the same `n` that enumerate the *same
+	/// number* of RSS subsets must not collide on the public key when generated
+	/// from the same seed. `C(n, n-t+1) == C(n, t-1)`, so 2-of-3 and 3-of-3 both
+	/// enumerate 3 subsets, and 3-of-5 and 4-of-5 both enumerate 10. Before the
+	/// (t, n) binding fix these produced byte-identical public keys, letting an
+	/// old weaker coalition sign under a "strengthened" key.
+	#[test]
+	fn test_distinct_policies_same_subset_count_differ() {
+		let seed = [0x5Au8; 32];
+
+		// Same n=3, equal subset counts (C(3,2)=C(3,1)=3).
+		let (pk_2of3, _) =
+			generate_with_dealer(&seed, ThresholdConfig::new(2, 3).unwrap()).unwrap();
+		let (pk_3of3, _) =
+			generate_with_dealer(&seed, ThresholdConfig::new(3, 3).unwrap()).unwrap();
+		assert_ne!(
+			pk_2of3.as_bytes(),
+			pk_3of3.as_bytes(),
+			"2-of-3 and 3-of-3 must not share a public key for the same seed"
+		);
+
+		// Same n=5, equal subset counts (C(5,3)=C(5,2)=10).
+		let (pk_3of5, _) =
+			generate_with_dealer(&seed, ThresholdConfig::new(3, 5).unwrap()).unwrap();
+		let (pk_4of5, _) =
+			generate_with_dealer(&seed, ThresholdConfig::new(4, 5).unwrap()).unwrap();
+		assert_ne!(
+			pk_3of5.as_bytes(),
+			pk_4of5.as_bytes(),
+			"3-of-5 and 4-of-5 must not share a public key for the same seed"
+		);
 	}
 
 	#[test]

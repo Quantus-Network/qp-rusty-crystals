@@ -140,9 +140,6 @@ pub mod derivation;
 // Signing protocol adapter for NEAR MPC integration
 pub mod signing_protocol;
 
-// circl_ntt is public for cross-language NTT testing with Go reference
-pub mod circl_ntt;
-
 // ============================================================================
 // Public API
 // ============================================================================
@@ -178,13 +175,10 @@ pub use derivation::{derive_dkg_contribution, DerivedKeyId};
 pub use verification::verify_signature;
 
 // SSID computation (for tests and advanced use cases)
-pub use protocol::signing::{compute_ssid, convert_shares};
+pub use protocol::signing::compute_ssid;
 
 // Hyperball parameters (for analysis and testing)
 pub use protocol::signing::get_hyperball_params;
-
-// Secret sharing utilities (for analysis and testing)
-pub use protocol::secret_sharing::generate_subsets_of_size;
 
 /// Signature verification.
 mod verification {

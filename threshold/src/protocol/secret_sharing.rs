@@ -9,14 +9,14 @@
 use alloc::{
 	collections::{BTreeMap, BTreeSet},
 	format,
-	string::ToString,
+	string::String,
 	vec,
 	vec::Vec,
 };
 
 use qp_rusty_crystals_dilithium::{
 	params::{K, L},
-	polyvec,
+	poly, polyvec,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -27,12 +27,16 @@ use crate::{
 };
 
 /// Secret share for a single party.
+///
+/// Contains raw secret `s1`/`s2` share material and must never leave the
+/// crate; `PrivateKeyShare` is the only share-bearing type in the public API
+/// and it is intentionally opaque.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SecretShare {
 	/// Share of the s1 polynomial vector.
-	pub s1_share: polyvec::Polyvecl,
+	pub(crate) s1_share: polyvec::Polyvecl,
 	/// Share of the s2 polynomial vector.
-	pub s2_share: polyvec::Polyveck,
+	pub(crate) s2_share: polyvec::Polyveck,
 }
 
 /// Compute sharing patterns for a (threshold, parties) configuration.
@@ -95,29 +99,123 @@ pub(crate) fn compute_sharing_patterns(
 	Ok(patterns)
 }
 
-/// Generate all subsets of exactly `size` elements from `n` elements.
-/// Uses Gosper's hack to efficiently enumerate subsets.
-pub fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
-	if size > n || size == 0 {
+/// Generate all subsets of exactly `size` elements from `n` elements, encoded as
+/// `u16` bitmasks. Uses Gosper's hack to efficiently enumerate subsets.
+///
+/// # Domain
+///
+/// Subset masks are `u16`, so at most 16 elements (`n <= 16`) are representable.
+/// Out-of-domain inputs (`n > 16`, `size == 0`, or `size > n`) return an empty
+/// vector rather than overflowing the mask arithmetic. This matters because, done
+/// naively in `u16`, `n == 16` makes the loop sentinel `1 << 16` and `size == 16`
+/// makes the initial mask `(1 << 16) - 1` — both overflow `u16` (a panic under
+/// overflow checks, or a silent wrap that also corrupts the Gosper iteration and
+/// yields truncated/empty enumeration). Iteration is therefore performed in `u32`
+/// and narrowed to the `u16` mask domain, which the bounds above make lossless.
+pub(crate) fn generate_subsets_of_size(n: usize, size: usize) -> Vec<u16> {
+	// A u16 mask cannot represent more than 16 elements.
+	if size == 0 || size > n || n > 16 {
 		return Vec::new();
 	}
 
 	let mut subsets = Vec::new();
-	let max_val: u16 = 1 << n;
+	// Sentinel one past the largest n-bit mask; computed in u32 so that n == 16
+	// (sentinel == 65536) does not overflow.
+	let max_val: u32 = 1u32 << n;
 
-	// Start with the smallest subset of the given size
-	let mut subset: u16 = (1 << size) - 1;
+	// Start with the smallest subset of the given size (low `size` bits set).
+	let mut subset: u32 = (1u32 << size) - 1;
 
 	while subset < max_val {
-		subsets.push(subset);
+		// `subset < max_val <= 1 << 16` and `subset` is a valid n-bit mask, so it
+		// always fits in u16 here.
+		subsets.push(subset as u16);
 
-		// Gosper's hack to get next subset of same size
-		let c = subset & (!subset + 1); // lowest set bit
-		let r = subset + c; // next higher number with same bits, except one moved left
+		// Gosper's hack to get the next subset of the same size. Computed in u32
+		// to avoid overflow at the top of the range; `subset >= 1` in the loop, so
+		// the lowest-set-bit divisor `c` is never zero.
+		let c = subset & subset.wrapping_neg(); // lowest set bit
+		let r = subset + c; // next higher number with same popcount
 		subset = (((r ^ subset) >> 2) / c) | r;
 	}
 
 	subsets
+}
+
+/// Build the share-recovery permutation for a signing set and translate the
+/// recovering party's share patterns into subset masks over real participant
+/// indices.
+///
+/// `signing_mask` is the signing set as a bitmask over participant indices
+/// `0..parties` (exactly `threshold` bits set), and `my_index` is the recovering
+/// party's own index. The returned masks are the subset shares that party sums to
+/// reconstruct its recovered partial for this signing set.
+///
+/// This is the single source of truth for the permutation build + pattern
+/// translation shared by [`recover_share`] (signing-time recovery) and the
+/// resharing recovered-partial norm guard. Keeping one implementation guarantees
+/// the guard checks the exact same share combination signing will use; two copies
+/// could drift and silently defeat the guard's purpose.
+///
+/// `sharing_patterns` is the output of [`compute_sharing_patterns`] for this
+/// `(threshold, parties)` config; callers pass it in so it can be computed once
+/// and reused across many signing sets (the norm guard sweeps every signing set).
+pub(crate) fn translated_subset_masks(
+	sharing_patterns: &[Vec<u16>],
+	signing_mask: u16,
+	my_index: usize,
+	threshold: u32,
+	parties: u32,
+) -> Result<Vec<u16>, String> {
+	let parties = parties as usize;
+
+	// Active (signing-set) indices in ascending order.
+	let active_indices: Vec<usize> =
+		(0..parties).filter(|idx| (signing_mask & (1 << idx)) != 0).collect();
+
+	let current_i = active_indices.iter().position(|&idx| idx == my_index).ok_or_else(|| {
+		format!("party index {} is not in signing set {:b}", my_index, signing_mask)
+	})?;
+
+	if current_i >= sharing_patterns.len() {
+		return Err(format!(
+			"party slot {} exceeds sharing pattern count {}",
+			current_i,
+			sharing_patterns.len()
+		));
+	}
+
+	// Permutation: active (signing-set) indices fill the first `threshold` slots in
+	// ascending order, remaining indices fill the rest. Patterns are defined over
+	// these permuted slots, so mapping a pattern bit `pos` to `perm[pos]` recovers
+	// the real subset mask.
+	let mut perm = vec![0usize; parties];
+	let mut active_pos = 0usize;
+	let mut inactive_pos = threshold as usize;
+	for idx in 0..parties {
+		if active_indices.contains(&idx) {
+			perm[active_pos] = idx;
+			active_pos += 1;
+		} else {
+			perm[inactive_pos] = idx;
+			inactive_pos += 1;
+		}
+	}
+
+	let translated = sharing_patterns[current_i]
+		.iter()
+		.map(|&pattern_u| {
+			let mut mask = 0u16;
+			for (pos, &mapped_idx) in perm.iter().enumerate().take(parties) {
+				if (pattern_u & (1 << pos)) != 0 {
+					mask |= 1 << mapped_idx;
+				}
+			}
+			mask
+		})
+		.collect();
+
+	Ok(translated)
 }
 
 /// Recover share using computed sharing patterns instead of Lagrange interpolation.
@@ -145,10 +243,6 @@ pub fn recover_share(
 	parties: u32,
 	dkg_participants: &ParticipantList,
 ) -> ThresholdResult<(polyvec::Polyvecl, polyvec::Polyveck)> {
-	// Compute the sharing patterns dynamically
-	let sharing_patterns = compute_sharing_patterns(threshold, parties)
-		.map_err(|e| ThresholdError::InvalidConfiguration(e.to_string()))?;
-
 	// Get the DKG index for my party_id
 	let my_dkg_index = dkg_participants.index_of(party_id).ok_or_else(|| {
 		ThresholdError::InvalidConfiguration(format!(
@@ -170,62 +264,27 @@ pub fn recover_share(
 		})
 		.collect::<ThresholdResult<Vec<usize>>>()?;
 
-	// Create permutation to cover the signing set (using DKG indices)
-	let mut perm = vec![0usize; parties as usize];
-	let mut i1 = 0;
-	let mut i2 = threshold as usize;
-
-	// Find the position of my_dkg_index within active_indices (sorted)
-	let mut sorted_active_indices = active_indices.clone();
-	sorted_active_indices.sort();
-	let current_i =
-		sorted_active_indices
-			.iter()
-			.position(|&idx| idx == my_dkg_index)
-			.ok_or_else(|| {
-				ThresholdError::InvalidConfiguration(format!(
-					"Party {} (index {}) is not in active parties list",
-					party_id, my_dkg_index
-				))
-			})?;
-
-	for j in 0..parties as usize {
-		if sorted_active_indices.contains(&j) {
-			perm[i1] = j;
-			i1 += 1;
-		} else {
-			perm[i2] = j;
-			i2 += 1;
-		}
-	}
-
-	if current_i >= sharing_patterns.len() {
-		return Err(ThresholdError::InvalidConfiguration(
-			"Party index exceeds sharing pattern length".to_string(),
-		));
-	}
+	// Translate this party's share patterns into subset masks over DKG indices.
+	// Shared with the resharing norm guard so both recover the identical shares.
+	let sharing_patterns = compute_sharing_patterns(threshold, parties)
+		.map_err(|e| ThresholdError::InvalidConfiguration(String::from(e)))?;
+	let signing_mask: u16 = active_indices.iter().fold(0u16, |mask, &idx| mask | (1 << idx));
+	let translated_masks =
+		translated_subset_masks(&sharing_patterns, signing_mask, my_dkg_index, threshold, parties)
+			.map_err(ThresholdError::InvalidConfiguration)?;
 
 	// Use NTT accumulators to avoid i32 overflow for large configurations.
-	// After NTT, coefficients are bounded by 18*Q. For large subset counts,
-	// the sum can exceed i32::MAX.
+	// The forward NTT emits signed coefficients up to ~8Q in magnitude; for
+	// large subset counts, a plain i32 sum could exceed i32::MAX.
 	let mut s1_acc = NttAccumulatorL::new();
 	let mut s2_acc = NttAccumulatorK::new();
 
-	for &pattern_u in &sharing_patterns[current_i] {
-		// Translate the share index u to the share index u_ by applying the permutation
-		// The permutation maps positions to DKG indices
-		let mut u_translated = 0u16;
-		for (i, &perm_val) in perm.iter().enumerate().take(parties as usize) {
-			if pattern_u & (1 << i) != 0 {
-				u_translated |= 1 << (perm_val as u16);
-			}
-		}
-
+	for &u_translated in &translated_masks {
 		// Find the corresponding share - MUST exist for correct recovery
 		let share = shares.get(&u_translated).ok_or_else(|| {
 			ThresholdError::InvalidConfiguration(format!(
-				"Missing required share for subset mask 0x{:04x} (pattern 0x{:04x})",
-				u_translated, pattern_u
+				"Missing required share for subset mask 0x{:04x}",
+				u_translated
 			))
 		})?;
 
@@ -234,10 +293,10 @@ pub fn recover_share(
 		let mut s2_ntt = share.s2_share.clone();
 
 		for s1_poly in s1_ntt.vec.iter_mut().take(L) {
-			crate::circl_ntt::ntt(s1_poly);
+			poly::ntt(s1_poly);
 		}
 		for s2_poly in s2_ntt.vec.iter_mut().take(K) {
-			crate::circl_ntt::ntt(s2_poly);
+			poly::ntt(s2_poly);
 		}
 
 		// Accumulate in u64 to avoid overflow
@@ -254,6 +313,8 @@ pub fn recover_share(
 
 #[cfg(test)]
 mod tests {
+	use alloc::string::ToString;
+
 	use super::*;
 
 	#[test]
@@ -270,6 +331,46 @@ mod tests {
 		// C(5, 3) = 10 subsets of size 3
 		let subsets = generate_subsets_of_size(5, 3);
 		assert_eq!(subsets.len(), 10);
+	}
+
+	/// The full 16-bit mask domain (n == 16, size == 16) must enumerate correctly
+	/// rather than overflow the mask arithmetic. Before the u32-based rewrite,
+	/// `n == 16` computed the sentinel as `1u16 << 16` and `size == 16` the initial
+	/// mask as `(1u16 << 16) - 1`, panicking under overflow checks.
+	#[test]
+	fn test_generate_subsets_of_size_full_u16_domain() {
+		// n = 16 previously panicked on `1u16 << 16`.
+		for size in 1..=16 {
+			let subsets = generate_subsets_of_size(16, size);
+			assert_eq!(
+				subsets.len(),
+				binomial(16, size),
+				"n=16, size={} should yield C(16, {}) masks",
+				size,
+				size
+			);
+			for &mask in &subsets {
+				assert_eq!(
+					mask.count_ones() as usize,
+					size,
+					"each mask must have exactly `size` bits set"
+				);
+			}
+		}
+
+		// size == 16 selects the single full mask.
+		let full = generate_subsets_of_size(16, 16);
+		assert_eq!(full, alloc::vec![0xFFFFu16]);
+	}
+
+	/// Inputs outside the representable 16-bit domain return an empty vector
+	/// instead of panicking or wrapping into corrupt state.
+	#[test]
+	fn test_generate_subsets_of_size_rejects_out_of_domain() {
+		assert!(generate_subsets_of_size(17, 1).is_empty(), "n > 16 is not representable");
+		assert!(generate_subsets_of_size(20, 10).is_empty(), "n > 16 is not representable");
+		assert!(generate_subsets_of_size(4, 0).is_empty(), "size == 0 yields no subsets");
+		assert!(generate_subsets_of_size(3, 5).is_empty(), "size > n yields no subsets");
 	}
 
 	#[test]

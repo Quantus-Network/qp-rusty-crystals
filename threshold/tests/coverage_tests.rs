@@ -11,7 +11,9 @@ use qp_rusty_crystals_threshold::{
 	Round3Broadcast, ThresholdConfig, ThresholdSigner,
 };
 
-use qp_rusty_crystals_threshold::resharing::{ResharingConfig, ResharingProtocol};
+use qp_rusty_crystals_threshold::resharing::ResharingConfig;
+
+mod common;
 
 // ============================================================================
 // HIGH PRIORITY: Security Tests
@@ -35,7 +37,6 @@ mod participant_count_validation {
 			b"test message".to_vec(),
 			b"".to_vec(),
 			vec![0, 1], // Only 2 participants, need 3
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -68,7 +69,6 @@ mod participant_count_validation {
 			b"".to_vec(),
 			vec![0, 1, 2], // Exactly threshold
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		);
@@ -94,7 +94,6 @@ mod malformed_message_handling {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -123,7 +122,6 @@ mod malformed_message_handling {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -159,7 +157,6 @@ mod malformed_message_handling {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -303,7 +300,6 @@ mod edge_cases {
 			b"".to_vec(),
 			vec![0, 1], // Missing party 2
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		);
@@ -326,7 +322,6 @@ mod edge_cases {
 			b"test".to_vec(),
 			max_context,
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -351,7 +346,6 @@ mod edge_cases {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1],
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -393,7 +387,6 @@ mod message_buffering {
 			b"".to_vec(),
 			vec![0, 1],
 			0,
-			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
 		)
@@ -430,7 +423,6 @@ mod sender_validation {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1],
-			0, // my_id is 0
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -464,7 +456,6 @@ mod sender_validation {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1], // Only parties 0 and 1
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -500,7 +491,6 @@ mod sender_validation {
 			b"test".to_vec(),
 			b"".to_vec(),
 			vec![0, 1], // Exactly threshold participants
-			0,
 			0,
 			[0xAA; 32],
 			[0xBB; 32], // attempt_nonce
@@ -588,7 +578,8 @@ mod resharing_edge_cases {
 
 		let protocol_seed = [42u8; 32];
 		let session_nonce = [0x77u8; 32];
-		let mut protocol = ResharingProtocol::new(resharing_config, protocol_seed, &session_nonce);
+		let mut protocol =
+			crate::common::new_test_protocol(resharing_config, protocol_seed, &session_nonce);
 
 		// Before completion, take_output should return None
 		let output1 = protocol.take_output();
@@ -722,6 +713,7 @@ mod error_display {
 			},
 			ThresholdError::InvalidPartyId { party_id: 5, max_id: 3 },
 			ThresholdError::WrongPartyCount { provided: 2, required: 3 },
+			ThresholdError::RevealSetMismatch { provided: 1, expected: 2 },
 			ThresholdError::InvalidSignatureShare { party_id: 1, reason: "bounds check failed" },
 			ThresholdError::ContextTooLong { length: 300 },
 			ThresholdError::CombinationFailed,

@@ -6,11 +6,19 @@
 //! See `resharing/mod.rs` for a full description of the cryptographic protocol.
 //! In short:
 //!
-//! - **Round 1 (Entropy commitment)**: Old committee members commit to fresh entropy.
-//! - **Round 2 (Entropy reveal)**: Old committee members reveal entropy. All parties compute the
-//!   public session seed from these reveals after checking the commitments.
-//! - **Round 3 (Sub-share commitments)**: Each designated dealer broadcasts hash commitments to
-//!   deterministic sub-shares `r_{I→J}` derived from `s_I^old` and the public session seed.
+//! - **Round 1 (Entropy commitment / Ready)**: Old committee members commit to fresh entropy. The
+//!   commitment doubles as a *Ready* signal for active-set selection.
+//! - **Act proposal**: The session leader (lowest-ID new committee member) proposes the active set
+//!   `Act` of old members that will participate: all old members once everyone has committed (fast
+//!   path), or the committed subset after the caller closes the ready window
+//!   ([`ResharingProtocol::close_ready_window`]). Every party checks `Act` is a subset of the old
+//!   committee with `|Act| >= t_old`, which guarantees every old RSS subset intersects `Act`.
+//! - **Round 2 (Entropy reveal)**: Active old committee members reveal entropy. All parties compute
+//!   the public session seed from the active members' reveals after checking the commitments.
+//! - **Round 3 (Sub-share commitments)**: Each designated dealer (lowest-ID member of `I ∩ Act`)
+//!   broadcasts hash commitments to deterministic sub-shares `r_{I→J}` derived from `s_I^old` and
+//!   the public session seed. Other active members of the same subset recompute and verify those
+//!   commitments before Round 4.
 //! - **Round 4 (Private delivery)**: Dealers privately deliver `r_{I→J}` to new committee members.
 //! - **Round 5 (Verification)**: New committee members verify received sub-shares, sum them into
 //!   new shares `s_J^new`, and broadcast commitments so each new subset can cross-verify.
@@ -26,9 +34,12 @@
 //! Round1Generate -> Round1Waiting -> Round2Generate -> Round2Waiting
 //!     -> Round3Generate -> Round3Waiting -> Combining -> Done
 //! ```
+//!
+//! The Act proposal is emitted and consumed within `Round1Waiting` / `Round2Waiting`; parties
+//! do not advance past those states until they know `Act`.
 
 use alloc::{
-	collections::BTreeMap,
+	collections::{BTreeMap, BTreeSet},
 	format,
 	string::{String, ToString},
 	vec::Vec,
@@ -37,7 +48,7 @@ use core::fmt;
 
 use qp_rusty_crystals_dilithium::{
 	fips202,
-	params::{ETA, K, L, N, Q},
+	params::{ETA, K, L, N, Q, TAU},
 };
 use zeroize::Zeroize;
 
@@ -47,17 +58,51 @@ use crate::{
 };
 
 use super::types::{
-	compute_resharing_ssid, NewShareData, ResharingConfig, ResharingMessage, ResharingOutput,
+	compute_accept_hash, compute_resharing_ssid, NewShareData, ResharingAccept,
+	ResharingActProposal, ResharingCertificate, ResharingConfig, ResharingMessage, ResharingOutput,
 	ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal, ResharingRound3Broadcast,
-	ResharingRound4Message, ResharingRound5Broadcast, SubsetMask, SubsetPair, COMMITMENT_HASH_SIZE,
-	ENTROPY_SIZE, RESHARING_SSID_SIZE, SUBSHARE_COEFF_BOUND,
+	ResharingRound4Message, ResharingRound5Broadcast, ResharingSignerConfig, SubsetMask,
+	SubsetPair, COMMITMENT_HASH_SIZE, ENTROPY_SIZE, RESHARING_PROTOCOL_VERSION,
+	RESHARING_SSID_SIZE, RESHARING_SUITE_ML_DSA_87, SUBSHARE_COEFF_BOUND,
 };
+use crate::keygen::dkg::TranscriptSigner;
 
 /// Domain separator for the per-subset PRF seed (includes public session seed for randomization).
 const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
 
 /// Domain separator for bounded conditional splitting noise.
-const BOUNDED_SPLIT_DOMAIN: &[u8] = b"resharing-bounded-split-v1";
+/// v5: "coset" hiding noise — per dealer, per coefficient, sample `m` i.i.d.
+/// sparse-ternary deltas (intensity `≈ 0.49 / S_old`) and subtract the *balanced
+/// split of their sum* (`add_mean_subtracted_noise`). This integer zero-sum noise
+/// has the uniform negative correlation `Cov(N_j,N_k) = −σ²/m` of the a-posteriori
+/// coset Gaussian, so recovered-partial variance tracks keygen for *every* recovery
+/// pattern.
+/// v4 used an O(m) telescoping cycle (`δ_i − δ_{i−1}`): only *banded* correlation,
+/// so non-contiguous recovery patterns failed to cancel and the partial norm
+/// overshot (4-of-6 ~1.29× vs ~1.16× here).
+/// v3 used fixed centered-binomial deltas (over-injected noise, growing the
+/// recovered-partial norm linearly in the old-committee size).
+const BOUNDED_SPLIT_DOMAIN: &[u8] = b"resharing-bounded-split-v5";
+
+/// Per-coefficient probability scale for the sparse-ternary split noise, as a
+/// 256-denominator numerator: a single dealer draws `±1` with probability
+/// `≈ 0.49 / S_old` each (and `0` otherwise) for each of the `m` deltas, before
+/// the balanced mean subtraction in `add_mean_subtracted_noise`.
+///
+/// # Why `1/S_old`
+///
+/// Each new subset share is `s_J^new = Σ_{I} r_{I→J}`, a sum over all `S_old`
+/// old RSS subsets. With per-dealer noise variance `≈ σ²_keygen / S_old`, the
+/// aggregated noise variance over the `S_old` dealers is `≈ σ²_keygen`: the new
+/// shares are distributed like a *fresh* keygen short secret sharing (Mithril
+/// "Efficient Threshold ML-DSA", §3.3 *a posteriori* sharing — a discrete
+/// Gaussian over the sum-`s` coset). This keeps the recovered-partial norm under
+/// the keygen envelope `B` while preserving keygen-level key hiding.
+///
+/// The `0.49` constant (= `(0.7)²`, i.e. `σ_split = 0.7·σ_keygen/√S_old`) is
+/// tuned by Monte-Carlo (`scripts/compute_hyperball_params.py`) so the
+/// aggregated hiding σ stays ≈ `σ_keygen = √2` across supported committees.
+const SPLIT_NOISE_NUM_X256: u32 = 125; // round(0.49 * 256)
 
 const COMMIT_DOMAIN: &[u8] = b"resharing-commit-v3";
 
@@ -65,6 +110,9 @@ const NEW_SHARE_COMMIT_DOMAIN: &[u8] = b"resharing-new-share-commit-v3";
 
 /// Domain separator for entropy commitment.
 const ENTROPY_COMMIT_DOMAIN: &[u8] = b"resharing-entropy-commit-v1";
+
+/// Domain separator for the session transcript hash (Round 6 acceptance).
+const TRANSCRIPT_DOMAIN: &[u8] = b"resharing-transcript-v1";
 
 /// Domain separator for session seed derivation.
 const SESSION_SEED_DOMAIN: &[u8] = b"resharing-session-seed-v1";
@@ -191,22 +239,24 @@ impl fmt::Display for ResharingProtocolError {
 
 /// Current state of the resharing protocol.
 ///
-/// # Protocol Rounds (5-round session-randomized protocol)
+/// # Protocol Rounds (session-randomized protocol with active-set liveness)
 ///
-/// - **Round 1**: Entropy commitment (old committee broadcasts `H(entropy)`)
-/// - **Round 2**: Entropy reveal (old committee reveals entropy, session seed computed)
+/// - **Round 1**: Entropy commitment / Ready (old committee broadcasts `H(entropy)`)
+/// - **Act proposal**: Leader proposes the active set of ready old members (within the Round 1/2
+///   waiting states)
+/// - **Round 2**: Entropy reveal (active members reveal entropy, session seed computed)
 /// - **Round 3**: Sub-share commitments (designated dealers broadcast `H(r_{I→J})`)
 /// - **Round 4**: Private delivery (dealers send `r_{I→J}` to new committee)
 /// - **Round 5**: Verification (share commitments, partial PKs)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResharingState {
-	/// Generating Round 1 message (entropy commitment).
+	/// Generating Round 1 message (entropy commitment / Ready).
 	Round1Generate,
-	/// Waiting for Round 1 messages from old committee members.
+	/// Waiting for the active-set proposal (and, as leader, for Ready signals).
 	Round1Waiting,
-	/// Generating Round 2 message (entropy reveal).
+	/// Generating Round 2 message (entropy reveal, active members only).
 	Round2Generate,
-	/// Waiting for Round 2 messages from old committee members.
+	/// Waiting for Round 2 messages from active old committee members.
 	Round2Waiting,
 	/// Generating Round 3 message (commitments to per-subset sub-shares).
 	Round3Generate,
@@ -222,6 +272,10 @@ pub enum ResharingState {
 	Round5Waiting,
 	/// Combining shares and finalizing.
 	Combining,
+	/// Generating the Round 6 acceptance signature (new committee members).
+	AcceptGenerate,
+	/// Waiting for Round 6 acceptance signatures from all new committee members.
+	AcceptWaiting,
 	/// Protocol completed successfully.
 	Done,
 	/// Protocol failed.
@@ -233,14 +287,21 @@ pub enum ResharingState {
 // ============================================================================
 
 /// The main resharing protocol state machine.
-pub struct ResharingProtocol {
+///
+/// Generic over `S`, the long-term-key signature scheme used for transcript
+/// acceptance (Round 6). See [`TranscriptSigner`] and [`ResharingSignerConfig`].
+pub struct ResharingProtocol<S: TranscriptSigner> {
 	config: ResharingConfig,
+	signer_config: ResharingSignerConfig<S>,
 	state: ResharingState,
 
 	/// Session identifier (SSID) for this resharing session.
 	/// Computed from old/new committee configs + public key + session nonce.
 	/// Included in all messages to prevent cross-session replay attacks.
 	ssid: [u8; RESHARING_SSID_SIZE],
+
+	/// Monotonic handoff counter for this public key (included in the SSID).
+	epoch: u64,
 
 	/// Seed for entropy generation (provided by caller).
 	seed: [u8; 32],
@@ -258,11 +319,30 @@ pub struct ResharingProtocol {
 	/// This party's generated entropy (old committee members only).
 	my_entropy: Option<[u8; ENTROPY_SIZE]>,
 	/// Round 1 entropy commitments received from old committee members.
+	/// A commitment doubles as that member's *Ready* signal.
 	round1_entropy_commits: BTreeMap<ParticipantId, [u8; COMMITMENT_HASH_SIZE]>,
-	/// Round 2 entropy reveals received from old committee members.
+	/// Round 2 entropy reveals received from active old committee members.
 	round2_entropy_reveals: BTreeMap<ParticipantId, [u8; ENTROPY_SIZE]>,
-	/// Session seed computed from all entropy contributions (computed after Round 2).
+	/// Session seed computed from the active set's entropy contributions
+	/// (computed after Round 2).
 	session_seed: Option<[u8; 32]>,
+
+	// ========================================================================
+	// Active-set selection (Ready-round liveness)
+	// ========================================================================
+	/// The agreed active set `Act`: old committee members that contribute
+	/// entropy and deal sub-shares. Sorted. Set by the leader when proposing,
+	/// or by receiving a valid `ActProposal`.
+	active_set: Option<Vec<ParticipantId>>,
+	/// Set by [`Self::close_ready_window`] on the leader: propose `Act` from
+	/// the Ready signals received so far instead of waiting for the full old
+	/// committee.
+	ready_window_closed: bool,
+	/// Set by [`Self::set_expected_active_set`]: the old committee members the
+	/// transport layer expects to be reachable. When set, the leader proposes
+	/// `Act` as soon as every expected member has committed, without waiting
+	/// for the full old committee or a `close_ready_window` timeout.
+	expected_active_set: Option<Vec<ParticipantId>>,
 
 	// ========================================================================
 	// Round 3-4: Sub-share commitment and delivery
@@ -293,31 +373,61 @@ pub struct ResharingProtocol {
 	new_shares: BTreeMap<SubsetMask, NewShareData>,
 	/// Final output (cached so `take_output` can return it after Combining).
 	completed_output: Option<ResharingOutput>,
+
+	// ========================================================================
+	// Round 6: Signed transcript acceptance
+	// ========================================================================
+	/// Transcript hash computed after all Combining checks pass.
+	transcript_hash: Option<[u8; COMMITMENT_HASH_SIZE]>,
+	/// Acceptance signatures received (and our own), keyed by sender. Raw
+	/// bytes; verified against our own transcript hash in `AcceptWaiting`.
+	accepts: BTreeMap<ParticipantId, Vec<u8>>,
 }
 
-impl Drop for ResharingProtocol {
+impl<S: TranscriptSigner> Drop for ResharingProtocol<S> {
 	fn drop(&mut self) {
-		// Zeroize all secret-bearing fields
+		self.zeroize_session_secrets();
+	}
+}
+
+impl<S: TranscriptSigner> ResharingProtocol<S> {
+	/// Securely erase all session secrets and intermediate share material.
+	///
+	/// Called automatically on successful completion and again on drop. The
+	/// completed output (if any) is preserved until [`Self::take_output`].
+	fn zeroize_session_secrets(&mut self) {
 		self.seed.zeroize();
 		if let Some(ref mut entropy) = self.my_entropy {
 			entropy.zeroize();
 		}
+		self.my_entropy = None;
 		if let Some(ref mut seed) = self.session_seed {
 			seed.zeroize();
 		}
-		// NewShareData implements ZeroizeOnDrop, but we explicitly clear the maps
-		// to ensure all values are dropped and zeroized
+		self.session_seed = None;
+		// NewShareData implements ZeroizeOnDrop; clearing the maps drops values.
 		self.my_subshares.clear();
 		self.new_shares.clear();
-		// Also clear Round 4 messages which contain NewShareData contributions
 		self.pending_round4.clear();
 		self.round4_messages.clear();
-		// Note: ResharingConfig contains existing_share which has ZeroizeOnDrop,
-		// so it will be zeroized when config is dropped
+		self.config.zeroize_existing_share();
+		// Explicitly zeroize the transcript signer (this party's long-term
+		// authentication key). `ZeroizeOnDrop` is only a marker trait, so
+		// relying on the signer's own Drop would leave erasure to downstream
+		// implementer discipline; calling `zeroize()` makes it an invariant.
+		// Safe here: the signer is only used for the Round 6 acceptance
+		// signature, which has already been produced by the time this runs
+		// (successful completion or drop).
+		self.signer_config.my_signer.zeroize();
 	}
-}
 
-impl ResharingProtocol {
+	/// Whether the old committee share has been erased from the config.
+	///
+	/// After a successful handoff, old committee members should have `true`.
+	pub fn old_share_erased(&self) -> bool {
+		self.config.existing_share().is_none()
+	}
+
 	/// Create a new resharing protocol instance.
 	///
 	/// The config must be created using `ResharingConfig::new_for_old_member` (for old committee
@@ -327,12 +437,25 @@ impl ResharingProtocol {
 	/// # Arguments
 	///
 	/// * `config` - The resharing configuration (includes existing_share for old members)
+	/// * `signer_config` - This party's long-term-key signer plus the new committee's verifying
+	///   keys, used for Round 6 transcript acceptance
 	/// * `seed` - 32 bytes of cryptographic randomness for this party's entropy contribution
 	/// * `session_nonce` - Unique nonce for SSID computation (prevents cross-session replay)
-	pub fn new(config: ResharingConfig, seed: [u8; 32], session_nonce: &[u8; 32]) -> Self {
+	/// * `epoch` - Monotonic handoff counter for this public key (0 for the first resharing after
+	///   keygen; the transport layer should increment for each subsequent handoff)
+	pub fn new(
+		config: ResharingConfig,
+		signer_config: ResharingSignerConfig<S>,
+		seed: [u8; 32],
+		session_nonce: &[u8; 32],
+		epoch: u64,
+	) -> Self {
 		let old_participants: Vec<_> = config.old_participants().iter().collect();
 		let new_participants: Vec<_> = config.new_participants().iter().collect();
 		let ssid = compute_resharing_ssid(
+			RESHARING_PROTOCOL_VERSION,
+			RESHARING_SUITE_ML_DSA_87,
+			epoch,
 			config.old_threshold(),
 			config.old_participants().len() as u32,
 			&old_participants,
@@ -346,8 +469,10 @@ impl ResharingProtocol {
 		let new_subset_order = compute_new_subset_order(&config);
 		Self {
 			config,
+			signer_config,
 			state: ResharingState::Round1Generate,
 			ssid,
+			epoch,
 			seed,
 			old_subset_order,
 			new_subset_order,
@@ -355,6 +480,9 @@ impl ResharingProtocol {
 			round1_entropy_commits: BTreeMap::new(),
 			round2_entropy_reveals: BTreeMap::new(),
 			session_seed: None,
+			active_set: None,
+			ready_window_closed: false,
+			expected_active_set: None,
 			my_subshares: BTreeMap::new(),
 			my_round3: None,
 			round3_broadcasts: BTreeMap::new(),
@@ -364,6 +492,8 @@ impl ResharingProtocol {
 			round5_broadcasts: BTreeMap::new(),
 			new_shares: BTreeMap::new(),
 			completed_output: None,
+			transcript_hash: None,
+			accepts: BTreeMap::new(),
 		}
 	}
 
@@ -373,6 +503,11 @@ impl ResharingProtocol {
 	/// to prevent cross-session replay attacks.
 	pub fn ssid(&self) -> &[u8; RESHARING_SSID_SIZE] {
 		&self.ssid
+	}
+
+	/// The handoff epoch baked into the SSID for this session.
+	pub fn epoch(&self) -> u64 {
+		self.epoch
 	}
 
 	/// Get the current protocol state.
@@ -409,6 +544,159 @@ impl ResharingProtocol {
 		matches!(self.state, ResharingState::Failed(_))
 	}
 
+	/// The session leader: the lowest-ID new committee member.
+	///
+	/// The leader proposes the active set `Act`. New committee members must all
+	/// be online for resharing to succeed (they receive the new shares), so the
+	/// leader is always reachable in a viable session.
+	pub fn leader(&self) -> ParticipantId {
+		self.config
+			.new_participants()
+			.get(0)
+			.expect("new committee is non-empty (validated)")
+	}
+
+	/// The agreed active set `Act`, once known.
+	///
+	/// `None` until the leader's proposal is made (leader) or received
+	/// (everyone else). Sorted.
+	pub fn active_set(&self) -> Option<&[ParticipantId]> {
+		self.active_set.as_deref()
+	}
+
+	/// Close the Ready window (leader only): propose the active set from the
+	/// Ready signals (Round 1 entropy commitments) received so far, instead of
+	/// waiting for the full old committee.
+	///
+	/// Call this on the leader after a transport-level timeout when some old
+	/// committee members appear offline. The next `poke()` broadcasts the
+	/// proposal if at least `t_old` old members are ready, and aborts with
+	/// [`ResharingProtocolError::InsufficientParties`] otherwise.
+	///
+	/// Idempotent; a no-op if the active set has already been proposed.
+	pub fn close_ready_window(&mut self) -> Result<(), ResharingProtocolError> {
+		if self.config.my_party_id() != self.leader() {
+			return Err(ResharingProtocolError::InvalidState(format!(
+				"only the session leader ({}) can close the ready window",
+				self.leader()
+			)));
+		}
+		if self.active_set.is_some() {
+			return Ok(());
+		}
+		if !matches!(
+			self.state,
+			ResharingState::Round1Generate |
+				ResharingState::Round1Waiting |
+				ResharingState::Round2Generate |
+				ResharingState::Round2Waiting
+		) {
+			return Err(ResharingProtocolError::InvalidState(format!(
+				"cannot close ready window in state {:?}",
+				self.state
+			)));
+		}
+		self.ready_window_closed = true;
+		Ok(())
+	}
+
+	/// Declare which old committee members the transport layer expects to be
+	/// reachable (leader only). The leader then proposes the active set as
+	/// soon as every expected member has sent its Round 1 commitment, instead
+	/// of waiting for the full old committee or a `close_ready_window`
+	/// timeout.
+	///
+	/// Use this when the transport topology makes some old members
+	/// *structurally* unreachable — e.g. NEAR MPC's resharing mesh spans only
+	/// the new participant set, so old-only members can never connect and the
+	/// fast path (all old members ready) would stall forever.
+	///
+	/// This is deterministic where `close_ready_window` is timing-dependent:
+	/// commitments from members outside the expected set are still accepted
+	/// (and included in `Act`) if they arrive before the proposal, so this
+	/// never excludes a live member, and safety is unaffected — every party
+	/// still validates the proposed `Act` and reveals only after holding all
+	/// of `Act`'s commitments.
+	///
+	/// Call before or during Rounds 1-2, on the leader. Requires
+	/// `expected ⊆ old committee` and `|expected| ≥ t_old`.
+	pub fn set_expected_active_set(
+		&mut self,
+		expected: &[ParticipantId],
+	) -> Result<(), ResharingProtocolError> {
+		if self.config.my_party_id() != self.leader() {
+			return Err(ResharingProtocolError::InvalidState(format!(
+				"only the session leader ({}) can set the expected active set",
+				self.leader()
+			)));
+		}
+		if self.active_set.is_some() {
+			return Ok(());
+		}
+		let mut expected: Vec<ParticipantId> = expected.to_vec();
+		expected.sort_unstable();
+		expected.dedup();
+		if !expected.iter().all(|p| self.config.old_participants().contains(*p)) {
+			return Err(ResharingProtocolError::InvalidState(
+				"expected active set must be a subset of the old committee".to_string(),
+			));
+		}
+		if expected.len() < self.config.old_threshold() as usize {
+			return Err(ResharingProtocolError::InsufficientParties {
+				required: self.config.old_threshold() as usize,
+				received: expected.len(),
+			});
+		}
+		self.expected_active_set = Some(expected);
+		Ok(())
+	}
+
+	/// Whether `party` is in the agreed active set. `false` until `Act` is known.
+	fn is_active(&self, party: ParticipantId) -> bool {
+		self.active_set.as_ref().is_some_and(|act| act.binary_search(&party).is_ok())
+	}
+
+	/// Leader-side active-set proposal.
+	///
+	/// Returns `Some(SendMany(..))` when this party is the leader and the
+	/// proposal is due: every old committee member has sent its Round 1
+	/// commitment (fast path), every *expected* member has committed (when
+	/// [`Self::set_expected_active_set`] was called), or the caller closed
+	/// the ready window. Aborts with `InsufficientParties` if the window was
+	/// closed with fewer than `t_old` ready members.
+	fn maybe_propose_act(
+		&mut self,
+	) -> Result<Option<Action<ResharingOutput>>, ResharingProtocolError> {
+		if self.active_set.is_some() || self.config.my_party_id() != self.leader() {
+			return Ok(None);
+		}
+		let have_all = self.round1_entropy_commits.len() >= self.config.old_participants().len();
+		let have_expected = self.expected_active_set.as_ref().is_some_and(|expected| {
+			expected.iter().all(|p| self.round1_entropy_commits.contains_key(p))
+		});
+		if !have_all && !have_expected && !self.ready_window_closed {
+			return Ok(None);
+		}
+
+		// BTreeMap keys iterate in sorted order, so `act` is sorted.
+		let act: Vec<ParticipantId> = self.round1_entropy_commits.keys().copied().collect();
+		let required = self.config.old_threshold() as usize;
+		if act.len() < required {
+			let err = ResharingProtocolError::InsufficientParties { required, received: act.len() };
+			self.state = ResharingState::Failed(err.to_string());
+			return Err(err);
+		}
+
+		let proposal = ResharingActProposal {
+			ssid: self.ssid,
+			party_id: self.config.my_party_id(),
+			active_set: act.clone(),
+		};
+		self.active_set = Some(act);
+		let data = Self::serialize_message(&ResharingMessage::ActProposal(proposal))?;
+		Ok(Some(Action::SendMany(data)))
+	}
+
 	fn serialize_message(msg: &ResharingMessage) -> Result<Vec<u8>, ResharingProtocolError> {
 		borsh::to_vec(msg).map_err(|e| {
 			ResharingProtocolError::SerializationError(format!("Failed to serialize: {}", e))
@@ -442,6 +730,8 @@ impl ResharingProtocol {
 			ResharingState::Round5Generate => self.handle_round5_generate(),
 			ResharingState::Round5Waiting => self.handle_round5_waiting(),
 			ResharingState::Combining => self.handle_combining(),
+			ResharingState::AcceptGenerate => self.handle_accept_generate(),
+			ResharingState::AcceptWaiting => self.handle_accept_waiting(),
 			ResharingState::Done =>
 				Err(ResharingProtocolError::InvalidState("Protocol already completed".to_string())),
 			ResharingState::Failed(reason) =>
@@ -500,9 +790,63 @@ impl ResharingProtocol {
 			ResharingMessage::Round3(broadcast) => self.handle_round3_message(from, broadcast),
 			ResharingMessage::Round4(m) => self.handle_round4_message(from, m),
 			ResharingMessage::Round5(broadcast) => self.handle_round5_message(from, broadcast),
+			ResharingMessage::ActProposal(m) => self.handle_act_proposal(from, m),
+			ResharingMessage::Accept(m) => self.handle_accept_message(from, m),
 		}
 
 		Ok(())
+	}
+
+	// ========================================================================
+	// Active-set proposal handling
+	// ========================================================================
+
+	fn handle_act_proposal(&mut self, from: ParticipantId, msg: ResharingActProposal) {
+		// Parties beyond the Round 1-2 waiting states already know Act;
+		// anything arriving later is a stale duplicate.
+		if !matches!(
+			self.state,
+			ResharingState::Round1Generate |
+				ResharingState::Round1Waiting |
+				ResharingState::Round2Generate |
+				ResharingState::Round2Waiting
+		) {
+			return;
+		}
+		if from != self.leader() {
+			log::warn!("Resharing: ignoring Act proposal from non-leader {}", from);
+			return;
+		}
+
+		// Validate: strictly sorted (thus unique), subset of the old committee,
+		// at least t_old members. An invalid proposal from the genuine leader is
+		// unrecoverable (no valid session can proceed), so fail fast rather than
+		// stalling until a transport timeout.
+		let act = &msg.active_set;
+		let sorted_unique = act.windows(2).all(|w| w[0] < w[1]);
+		let all_old = act.iter().all(|p| self.config.old_participants().contains(*p));
+		let enough = act.len() >= self.config.old_threshold() as usize;
+		if act.is_empty() || !sorted_unique || !all_old || !enough {
+			self.state = ResharingState::Failed(format!(
+				"invalid Act proposal from leader {}: {:?} (t_old = {})",
+				from,
+				act,
+				self.config.old_threshold()
+			));
+			return;
+		}
+
+		match &self.active_set {
+			None => self.active_set = Some(msg.active_set),
+			Some(existing) if *existing == msg.active_set => {}, // duplicate, ignore
+			Some(_) => {
+				// Two different proposals from the leader: equivocation.
+				self.state = ResharingState::Failed(format!(
+					"leader {} equivocated on the Act proposal",
+					from
+				));
+			},
+		}
 	}
 
 	// ========================================================================
@@ -538,7 +882,19 @@ impl ResharingProtocol {
 	}
 
 	fn handle_round1_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		if self.have_all_round1_entropy_commits() {
+		// If we are the leader, propose the active set once it is due.
+		if let Some(action) = self.maybe_propose_act()? {
+			return Ok(action);
+		}
+		// Advance only once the active set is agreed AND we hold a Round 1
+		// commitment from every Act member. Our Round 2 reveal must not be
+		// broadcast while any Act member's entropy is still unfixed: a
+		// malicious leader could otherwise list a colluding member that
+		// commits only after observing honest reveals, choosing its entropy
+		// adaptively to bias the session seed. (An Act member that never
+		// commits stalls the session, like any active party going silent;
+		// abort on a transport timeout and restart without it.)
+		if self.have_act_commitments() {
 			self.state = ResharingState::Round2Generate;
 			self.poke()
 		} else {
@@ -572,9 +928,25 @@ impl ResharingProtocol {
 		self.round1_entropy_commits.insert(from, msg.commitment);
 	}
 
-	fn have_all_round1_entropy_commits(&self) -> bool {
-		// We need entropy commitments from all old committee members
-		self.round1_entropy_commits.len() >= self.config.old_participants().len()
+	/// Round 1 commitment present for every active-set member. `false` until
+	/// the active set is known.
+	fn have_act_commitments(&self) -> bool {
+		match &self.active_set {
+			Some(act) => act.iter().all(|p| self.round1_entropy_commits.contains_key(p)),
+			None => false,
+		}
+	}
+
+	/// Entropy data (Round 1 commitment + Round 2 reveal) present for every
+	/// active-set member. `false` until the active set is known.
+	fn have_act_entropy_data(&self) -> bool {
+		match &self.active_set {
+			Some(act) => act.iter().all(|p| {
+				self.round1_entropy_commits.contains_key(p) &&
+					self.round2_entropy_reveals.contains_key(p)
+			}),
+			None => false,
+		}
 	}
 
 	/// Generate this party's entropy contribution from the constructor seed.
@@ -596,9 +968,9 @@ impl ResharingProtocol {
 	fn handle_round2_generate(
 		&mut self,
 	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// Only old committee members participate in Round 2 (entropy reveal).
-		// New-only parties stay in Round 2 waiting.
-		if !self.config.role().is_old_committee() {
+		// Only *active* old committee members reveal entropy. New-only parties
+		// and old members outside the active set observe from Round 2 waiting.
+		if !self.is_active(self.config.my_party_id()) {
 			self.state = ResharingState::Round2Waiting;
 			return Ok(Action::Wait);
 		}
@@ -621,8 +993,14 @@ impl ResharingProtocol {
 	}
 
 	fn handle_round2_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		if self.have_all_round2_entropy_reveals() {
-			// Verify all reveals match their commitments and compute session seed
+		// A new-only leader collects Ready signals from this state; propose the
+		// active set once it is due.
+		if let Some(action) = self.maybe_propose_act()? {
+			return Ok(action);
+		}
+		if self.have_act_entropy_data() {
+			// Verify the active set's reveals match their commitments and
+			// compute the session seed.
 			self.verify_entropy_and_compute_session_seed()?;
 			self.state = ResharingState::Round3Generate;
 			self.poke()
@@ -632,10 +1010,18 @@ impl ResharingProtocol {
 	}
 
 	fn handle_round2_message(&mut self, from: ParticipantId, msg: ResharingRound2EntropyReveal) {
-		// Accept Round 2 messages during Round 1-3 (for late arrivals)
+		// Accept Round 2 messages from protocol start through Round 3. The
+		// window includes `Round1Generate`: a party that lags past the ready
+		// window (and is excluded from Act) drains its inbound backlog before
+		// its first poke, while still in the initial state. Reveals are only
+		// *used* after `have_act_entropy_data` confirms the matching Round 1
+		// commitment, so early acceptance cannot bypass the commit-reveal
+		// binding; Act membership already fixes every contributor's commitment
+		// before any honest reveal is sent.
 		if !matches!(
 			self.state,
-			ResharingState::Round1Waiting |
+			ResharingState::Round1Generate |
+				ResharingState::Round1Waiting |
 				ResharingState::Round2Generate |
 				ResharingState::Round2Waiting |
 				ResharingState::Round3Generate |
@@ -654,19 +1040,32 @@ impl ResharingProtocol {
 		self.round2_entropy_reveals.insert(from, msg.entropy);
 	}
 
-	fn have_all_round2_entropy_reveals(&self) -> bool {
-		// We need entropy reveals from all old committee members
-		self.round2_entropy_reveals.len() >= self.config.old_participants().len()
-	}
-
-	/// Verify all entropy reveals match their commitments and compute the session seed.
+	/// Verify the active set's entropy reveals match their commitments and
+	/// compute the session seed.
+	///
+	/// Only active-set members contribute: the set of contributors must be
+	/// agreed by every party (it determines the seed), and `Act` is exactly
+	/// the agreed set. Reveals from non-active members (e.g. a late Round 1
+	/// commitment excluded from `Act`) are ignored.
 	fn verify_entropy_and_compute_session_seed(&mut self) -> Result<(), ResharingProtocolError> {
-		// Verify each reveal matches its commitment
-		for (&party_id, &entropy) in &self.round2_entropy_reveals {
-			let expected_commit = commit_entropy(&entropy);
+		let act = self.active_set.clone().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"Computing session seed before active set is agreed".to_string(),
+			)
+		})?;
+
+		// Verify each active member's reveal matches its commitment.
+		for &party_id in &act {
+			let entropy = self.round2_entropy_reveals.get(&party_id).ok_or_else(|| {
+				ResharingProtocolError::InternalError(format!(
+					"Missing entropy reveal from active party {} during verification",
+					party_id
+				))
+			})?;
+			let expected_commit = commit_entropy(entropy);
 			let actual_commit = self.round1_entropy_commits.get(&party_id).ok_or_else(|| {
 				ResharingProtocolError::InternalError(format!(
-					"Missing entropy commitment from party {} during verification",
+					"Missing entropy commitment from active party {} during verification",
 					party_id
 				))
 			})?;
@@ -676,18 +1075,16 @@ impl ResharingProtocol {
 		}
 
 		// Compute session seed: SHAKE256("resharing-session-seed-v1" || ssid || party_id_1 ||
-		// entropy_1 || ...). The SSID is included so that even if parties reuse entropy seeds
-		// across different resharing sessions, the session_seed (and thus the sub-share
-		// derivation) will differ. Process parties in sorted order for determinism.
-		let mut sorted_parties: Vec<_> = self.round2_entropy_reveals.iter().collect();
-		sorted_parties.sort_by_key(|(party_id, _)| *party_id);
-
+		// entropy_1 || ...) over active members in sorted order (Act is sorted). The SSID is
+		// included so that even if parties reuse entropy seeds across different resharing
+		// sessions, the session_seed (and thus the sub-share derivation) will differ.
 		let mut state = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut state, SESSION_SEED_DOMAIN);
 		fips202::shake256_absorb(&mut state, &self.ssid);
-		for (&party_id, entropy) in &sorted_parties {
+		for &party_id in &act {
+			let entropy = self.round2_entropy_reveals.get(&party_id).expect("checked above");
 			fips202::shake256_absorb(&mut state, &party_id.to_le_bytes());
-			fips202::shake256_absorb(&mut state, *entropy);
+			fips202::shake256_absorb(&mut state, entropy);
 		}
 		fips202::shake256_finalize(&mut state);
 		let mut session_seed = [0u8; 32];
@@ -704,8 +1101,9 @@ impl ResharingProtocol {
 	fn handle_round3_generate(
 		&mut self,
 	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// Only old committee members participate in Round 3.
-		if !self.config.role().is_old_committee() {
+		// Only active old committee members deal in Round 3. New-only parties
+		// and old members outside the active set wait for Round 4 traffic.
+		if !self.is_active(self.config.my_party_id()) {
 			self.state = ResharingState::Round4Waiting;
 			return Ok(Action::Wait);
 		}
@@ -733,6 +1131,25 @@ impl ResharingProtocol {
 
 	fn handle_round3_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
 		if self.have_enough_round3() {
+			// Security halt: if a peer dealer's Round-3 commitment does not match the
+			// deterministic sub-shares we can recompute, abort *before* dealing our own
+			// Round-4 private shares — delivering them into a committee that contains a
+			// cheating dealer would leak share material.
+			//
+			// Unlike the Round-5 abort (which is broadcast to peers via `success =
+			// false`), this is a deliberate *silent* local halt: the safe response is
+			// simply to withhold our Round-4 messages, so we do not warn peers. We set
+			// `Failed` so the state is terminal and observable via `is_failed()`
+			// (matching the Round-5 abort), and rely on the transport/runner to surface
+			// the returned `Err` as a global abort. New-only members, now receiving no
+			// Round-4 shares, detect the stall via their own transport timeout.
+			// (Confirmed in near-mpc: the aborting node's `poke()` Err propagates out of
+			// `run_protocol`, while waiting nodes hit the 120s
+			// `perform_leader_centric_computation` timeout.)
+			if let Err(e) = self.verify_peer_dealer_commitments() {
+				self.state = ResharingState::Failed(e.to_string());
+				return Err(e);
+			}
 			self.state = ResharingState::Round4Generate;
 			self.poke()
 		} else {
@@ -741,10 +1158,18 @@ impl ResharingProtocol {
 	}
 
 	fn handle_round3_message(&mut self, from: ParticipantId, broadcast: ResharingRound3Broadcast) {
-		// Accept Round 3 messages during Round 2-4 states (for late arrivals and NewOnly parties)
+		// Accept Round 3 messages from protocol start through Round 4: a slow
+		// party excluded from Act can receive dealers' broadcasts while still
+		// in the Round 1-2 states (see `handle_round2_message`). The broadcasts
+		// are hash commitments, verified later against deterministic
+		// recomputation (old-subset peers) or delivered sub-shares (recipients),
+		// so early acceptance is harmless.
 		if !matches!(
 			self.state,
-			ResharingState::Round2Waiting |
+			ResharingState::Round1Generate |
+				ResharingState::Round1Waiting |
+				ResharingState::Round2Generate |
+				ResharingState::Round2Waiting |
 				ResharingState::Round3Generate |
 				ResharingState::Round3Waiting |
 				ResharingState::Round4Generate |
@@ -762,9 +1187,98 @@ impl ResharingProtocol {
 	}
 
 	fn have_enough_round3(&self) -> bool {
-		// We need a Round 3 broadcast from every party that is a designated dealer for at
-		// least one old subset. Conservative requirement: all old participants.
-		self.round3_broadcasts.len() >= self.config.old_participants().len()
+		// We need a Round 3 broadcast from every active member. Every designated
+		// dealer is active by construction (dealers are chosen from `I ∩ Act`),
+		// and active non-dealers broadcast an empty commitment map, so this is
+		// both sufficient and satisfiable with offline non-active members.
+		match &self.active_set {
+			Some(act) => act.iter().all(|p| self.round3_broadcasts.contains_key(p)),
+			None => false,
+		}
+	}
+
+	/// Old-subset peer verification for Round 3 dealer commitments.
+	///
+	/// Every member of an old RSS subset knows the same `s_I^old`. If the
+	/// designated dealer for `I` is another party, this party can recompute the
+	/// deterministic sub-shares and verify the dealer committed to exactly those
+	/// values before any Round 4 private delivery occurs.
+	/// Resolve the designated dealer for old subset `i_mask` and borrow its Round-3
+	/// commitment broadcast. Shared by `verify_peer_dealer_commitments` (Round-3 peer
+	/// check) and `verify_and_aggregate_new_shares` (Round-5 aggregation) so the
+	/// dealer lookup, the Round-3 broadcast lookup, and their error messages live in
+	/// one place.
+	fn dealer_round3_for(
+		&self,
+		i_mask: SubsetMask,
+	) -> Result<(ParticipantId, &ResharingRound3Broadcast), ResharingProtocolError> {
+		let dealer = self.designated_dealer_for(i_mask).ok_or_else(|| {
+			ResharingProtocolError::ShareVerificationFailed(format!(
+				"no designated dealer found for old subset {:b}",
+				i_mask
+			))
+		})?;
+		let dealer_r3 = self.round3_broadcasts.get(&dealer).ok_or_else(|| {
+			ResharingProtocolError::DealerDeliveryFailed {
+				dealer,
+				reason: format!("missing Round 3 commitment for subset {:b}", i_mask),
+			}
+		})?;
+		Ok((dealer, dealer_r3))
+	}
+
+	fn verify_peer_dealer_commitments(&self) -> Result<(), ResharingProtocolError> {
+		if !self.config.role().is_old_committee() {
+			return Ok(());
+		}
+
+		let existing = self.config.existing_share().ok_or_else(|| {
+			ResharingProtocolError::InternalError("Missing existing share".to_string())
+		})?;
+		let session_seed = self.session_seed.ok_or_else(|| {
+			ResharingProtocolError::InternalError("Missing session seed".to_string())
+		})?;
+
+		for (&i_mask, s_i) in existing.shares() {
+			// We never verify our own commitments, so skip before fetching the Round 3
+			// broadcast — a designated dealer that is us need not have recorded its own
+			// broadcast for this peer check (and a missing peer broadcast is a real
+			// error, handled by `dealer_round3_for`).
+			if self.designated_dealer_for(i_mask) == Some(self.config.my_party_id()) {
+				continue;
+			}
+			let (dealer, dealer_r3) = self.dealer_round3_for(i_mask)?;
+
+			let expected_subshares = derive_subshares_with_session_seed(
+				i_mask,
+				s_i,
+				&self.new_subset_order,
+				&session_seed,
+				self.old_subset_order.len(),
+			);
+
+			for (j_mask, expected_share) in
+				self.new_subset_order.iter().zip(expected_subshares.iter())
+			{
+				let expected_commit = commit_subshare(i_mask, *j_mask, expected_share);
+				let actual_commit =
+					dealer_r3.commitments.get(&(i_mask, *j_mask)).ok_or_else(|| {
+						ResharingProtocolError::DealerDeliveryFailed {
+							dealer,
+							reason: format!("did not commit to r_{{{:b}->{:b}}}", i_mask, j_mask),
+						}
+					})?;
+
+				if *actual_commit != expected_commit {
+					return Err(ResharingProtocolError::ShareVerificationFailed(format!(
+						"dealer {} commitment mismatch for r_{{{:b}->{:b}}}",
+						dealer, i_mask, j_mask
+					)));
+				}
+			}
+		}
+
+		Ok(())
 	}
 
 	// ========================================================================
@@ -878,7 +1392,19 @@ impl ResharingProtocol {
 		// broadcast commitments, sum them into new subset shares, and commit.
 		if self.config.role().is_new_committee() {
 			match self.verify_and_aggregate_new_shares() {
-				Ok(commits) => share_commitments = commits,
+				Ok(commits) => match self.verify_stored_new_share_norms() {
+					Ok(()) => match self.verify_recovered_partial_norms() {
+						Ok(()) => share_commitments = commits,
+						Err(e) => {
+							success = false;
+							error_message = Some(e.to_string());
+						},
+					},
+					Err(e) => {
+						success = false;
+						error_message = Some(e.to_string());
+					},
+				},
 				Err(e) => {
 					success = false;
 					error_message = Some(e.to_string());
@@ -934,12 +1460,38 @@ impl ResharingProtocol {
 		self.round5_broadcasts.insert(from, broadcast);
 	}
 
+	/// The Round 5 senders this session actually depends on: active old
+	/// members (status) plus new committee members (new-share commitments +
+	/// partial PKs). `None` until the active set is agreed.
+	///
+	/// This is the outer trust boundary for Round 5 consumption. Every
+	/// consumer of `round5_broadcasts` filters senders through it:
+	/// completion ([`Self::have_all_round5`]), the failure-abort scan in
+	/// Combining, and the transcript hash use exactly this set, while the
+	/// Combining share-data checks ([`Self::verify_new_share_consistency`],
+	/// [`Self::verify_public_key_preservation`]) restrict further to new
+	/// committee members, a subset of this set. Together these ensure a
+	/// broadcast from an old member excluded from `Act` never influences the
+	/// outcome — the protocol's liveness promise is that it proceeds without
+	/// such members, and honoring their failure reports (or hard-failing on
+	/// their poisoned share data) would let a single excluded (e.g.
+	/// compromised, being-rotated-out) member abort every session. Any new
+	/// consumer of `round5_broadcasts` must apply the same filtering.
+	fn required_round5_senders(&self) -> Option<alloc::collections::BTreeSet<ParticipantId>> {
+		let act = self.active_set.as_ref()?;
+		Some(act.iter().copied().chain(self.config.new_participants().iter()).collect())
+	}
+
 	fn have_all_round5(&self) -> bool {
-		// Round 5 has contributions from BOTH old and new committee members
-		// (old members broadcast status; new members commit to new shares),
-		// so we need broadcasts from every party that is in either committee.
-		let union = self.config.all_participants();
-		union.iter().all(|p| self.round5_broadcasts.contains_key(p))
+		// Old members outside the active set may be offline, so they are not
+		// required for completion. Their buffered broadcasts (if any) are
+		// also not honored by the Combining failure scan, not included in
+		// the transcript hash, and not read by the Combining share-data
+		// checks (which restrict further, to new committee members). Any new
+		// consumer of `round5_broadcasts` must apply one of those filters —
+		// see `required_round5_senders` for the enumeration and rationale.
+		let Some(required) = self.required_round5_senders() else { return false };
+		required.iter().all(|p| self.round5_broadcasts.contains_key(p))
 	}
 
 	// ========================================================================
@@ -947,11 +1499,22 @@ impl ResharingProtocol {
 	// ========================================================================
 
 	fn handle_combining(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
-		// Check if any party reported failure - abort without attribution
+		// Check if any *required* party reported failure - abort without
+		// attribution. The scan is restricted to the same sender set that
+		// gates Round 5 completion and the transcript hash: an old member
+		// excluded from the active set is exactly the party the session must
+		// be able to proceed without, so its failure report must not be able
+		// to abort the session (and other parties may not even have received
+		// it, so honoring it would also make parties diverge).
+		let required = self.required_round5_senders().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"Combining reached before active set is agreed".to_string(),
+			)
+		})?;
 		let failed_parties: Vec<ParticipantId> = self
 			.round5_broadcasts
 			.iter()
-			.filter(|(_, b)| !b.success)
+			.filter(|(id, b)| required.contains(id) && !b.success)
 			.map(|(id, _)| *id)
 			.collect();
 
@@ -969,10 +1532,213 @@ impl ResharingProtocol {
 		// a malicious dealer that lies about a residual `r_{I→J}`.
 		self.verify_public_key_preservation()?;
 
-		let output = self.build_output()?;
+		// All checks passed: fix the transcript hash and move to the signed
+		// acceptance round.
+		self.transcript_hash = Some(self.compute_transcript_hash()?);
+		self.state = ResharingState::AcceptGenerate;
+		self.poke()
+	}
+
+	// ========================================================================
+	// Round 6: Signed Transcript Acceptance
+	// ========================================================================
+
+	/// Hash of everything that determines the session outcome: the active set,
+	/// the session seed, every active member's Round 3 dealer commitments, and
+	/// every *required* Round 5 broadcast (active old members + new committee).
+	///
+	/// Broadcasts from parties outside the required sets (e.g. a non-active
+	/// old observer's Round 5 status) are deliberately excluded: not every
+	/// party is guaranteed to have received them, and including them would
+	/// make honest parties disagree on the hash.
+	fn compute_transcript_hash(
+		&self,
+	) -> Result<[u8; COMMITMENT_HASH_SIZE], ResharingProtocolError> {
+		let act = self.active_set.as_ref().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"Computing transcript hash before active set is agreed".to_string(),
+			)
+		})?;
+		let session_seed = self.session_seed.as_ref().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"Computing transcript hash before session seed".to_string(),
+			)
+		})?;
+
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, TRANSCRIPT_DOMAIN);
+		fips202::shake256_absorb(&mut state, &self.ssid);
+		fips202::shake256_absorb(&mut state, &(act.len() as u32).to_le_bytes());
+		for &p in act {
+			fips202::shake256_absorb(&mut state, &p.to_le_bytes());
+		}
+		fips202::shake256_absorb(&mut state, session_seed);
+
+		// Round 3 dealer commitments from active members, in Act (sorted) order.
+		// (`round3_broadcasts` includes our own broadcast.)
+		for &p in act {
+			let broadcast = self.round3_broadcasts.get(&p);
+			let broadcast = broadcast.ok_or_else(|| {
+				ResharingProtocolError::InternalError(format!(
+					"Missing Round 3 broadcast from active party {} for transcript",
+					p
+				))
+			})?;
+			let bytes = borsh::to_vec(broadcast).map_err(|e| {
+				ResharingProtocolError::SerializationError(format!(
+					"Failed to serialize Round 3 broadcast for transcript: {}",
+					e
+				))
+			})?;
+			fips202::shake256_absorb(&mut state, &(bytes.len() as u32).to_le_bytes());
+			fips202::shake256_absorb(&mut state, &bytes);
+		}
+
+		// Required Round 5 broadcasts: active old members + new committee, in
+		// sorted order (the same set that gates `have_all_round5` and the
+		// Combining failure scan).
+		let required = self.required_round5_senders().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"Computing transcript hash before active set is agreed".to_string(),
+			)
+		})?;
+		for p in required {
+			let broadcast = self.round5_broadcasts.get(&p).ok_or_else(|| {
+				ResharingProtocolError::InternalError(format!(
+					"Missing Round 5 broadcast from required party {} for transcript",
+					p
+				))
+			})?;
+			let bytes = borsh::to_vec(broadcast).map_err(|e| {
+				ResharingProtocolError::SerializationError(format!(
+					"Failed to serialize Round 5 broadcast for transcript: {}",
+					e
+				))
+			})?;
+			fips202::shake256_absorb(&mut state, &(bytes.len() as u32).to_le_bytes());
+			fips202::shake256_absorb(&mut state, &bytes);
+		}
+
+		fips202::shake256_finalize(&mut state);
+		let mut out = [0u8; COMMITMENT_HASH_SIZE];
+		fips202::shake256_squeeze(&mut out, &mut state);
+		Ok(out)
+	}
+
+	fn handle_accept_generate(
+		&mut self,
+	) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
+		let transcript_hash = self.transcript_hash.ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"AcceptGenerate reached without a transcript hash".to_string(),
+			)
+		})?;
+
+		// Only new committee members attest: they are the parties that verified
+		// and now hold the reshared key material. Old-only parties observe.
+		if !self.config.role().is_new_committee() {
+			self.state = ResharingState::AcceptWaiting;
+			return self.handle_accept_waiting();
+		}
+
+		let active_set = self.active_set.clone().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"AcceptGenerate reached without an agreed active set".to_string(),
+			)
+		})?;
+		// ParticipantList iterates in sorted order, giving the canonical
+		// (strictly ascending) committee encoding the acceptance hash binds.
+		let new_committee: Vec<ParticipantId> = self.config.new_participants().iter().collect();
+		let accept_hash =
+			compute_accept_hash(&self.ssid, &transcript_hash, &active_set, &new_committee);
+		let signature = self.signer_config.my_signer.sign(&accept_hash);
+		let my_id = self.config.my_party_id();
+		self.accepts.insert(my_id, signature.as_ref().to_vec());
+
+		let msg = ResharingAccept {
+			ssid: self.ssid,
+			party_id: my_id,
+			signature: signature.as_ref().to_vec(),
+		};
+		let data = Self::serialize_message(&ResharingMessage::Accept(msg))?;
+		self.state = ResharingState::AcceptWaiting;
+		Ok(Action::SendMany(data))
+	}
+
+	fn handle_accept_waiting(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
+		let transcript_hash = self.transcript_hash.ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"AcceptWaiting reached without a transcript hash".to_string(),
+			)
+		})?;
+
+		// Need an acceptance from every new committee member.
+		let new_participants: Vec<ParticipantId> = self.config.new_participants().iter().collect();
+		if !new_participants.iter().all(|p| self.accepts.contains_key(p)) {
+			return Ok(Action::Wait);
+		}
+
+		let active_set = self.active_set.clone().ok_or_else(|| {
+			ResharingProtocolError::InternalError(
+				"AcceptWaiting reached without an agreed active set".to_string(),
+			)
+		})?;
+
+		// Verify every signature against *our own* transcript hash. A signer
+		// that observed a different transcript (dealer equivocation, tampered
+		// broadcast) produces a signature that fails here, and we abort.
+		let accept_hash =
+			compute_accept_hash(&self.ssid, &transcript_hash, &active_set, &new_participants);
+		for p in &new_participants {
+			let pk = self.signer_config.verifying_keys.get(p).ok_or_else(|| {
+				ResharingProtocolError::InternalError(format!(
+					"Missing verifying key for new committee member {} (validated at config)",
+					p
+				))
+			})?;
+			let sig = self.accepts.get(p).expect("presence checked above");
+			if !S::verify_bytes(pk, &accept_hash, sig) {
+				let reason = format!(
+					"invalid transcript acceptance from party {} — transcript disagreement \
+					 or forged signature",
+					p
+				);
+				self.state = ResharingState::Failed(reason.clone());
+				return Err(ResharingProtocolError::ShareVerificationFailed(reason));
+			}
+		}
+
+		let certificate = ResharingCertificate {
+			ssid: self.ssid,
+			active_set,
+			new_committee: new_participants,
+			transcript_hash,
+			accepts: self.accepts.clone(),
+		};
+
+		let output = self.build_output(certificate)?;
+		self.zeroize_session_secrets();
 		self.completed_output = Some(output.clone());
 		self.state = ResharingState::Done;
 		Ok(Action::Return(output))
+	}
+
+	fn handle_accept_message(&mut self, from: ParticipantId, msg: ResharingAccept) {
+		if matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
+			return;
+		}
+		// Only new committee members attest.
+		if !self.config.new_participants().contains(from) {
+			return;
+		}
+		// First message wins; duplicates ignored (matches other rounds).
+		if self.accepts.contains_key(&from) {
+			return;
+		}
+		// Signature verification is deferred to `AcceptWaiting`, where our own
+		// transcript hash is known. Accepts can legitimately arrive earlier
+		// (e.g. while we are still draining Round 5 traffic).
+		self.accepts.insert(from, msg.signature);
 	}
 
 	// ========================================================================
@@ -1010,8 +1776,13 @@ impl ResharingProtocol {
 					i_mask
 				))
 			})?;
-			let subshares =
-				derive_subshares_with_session_seed(i_mask, s_i, &new_subsets, &session_seed);
+			let subshares = derive_subshares_with_session_seed(
+				i_mask,
+				s_i,
+				&new_subsets,
+				&session_seed,
+				self.old_subset_order.len(),
+			);
 			for (j_mask, subshare) in new_subsets.iter().zip(subshares.into_iter()) {
 				self.my_subshares.insert((i_mask, *j_mask), subshare);
 			}
@@ -1061,16 +1832,26 @@ impl ResharingProtocol {
 		}
 	}
 
-	/// Find the designated dealer for an old subset: the lowest-ID old
-	/// participant that is a member of the subset.
+	/// Find the designated dealer for an old subset: the lowest-ID *active*
+	/// old participant that is a member of the subset (`min(I ∩ Act)`).
 	///
 	/// Bit positions in `i_mask` correspond to indices in the (sorted)
-	/// `old_participants` list, so the dealer is the party at the lowest
-	/// set bit. Works for every party — in particular NewOnly parties that
-	/// don't hold an `existing_share`.
+	/// `old_participants` list. Works for every party — in particular NewOnly
+	/// parties that don't hold an `existing_share`.
+	///
+	/// The active-set rule `|Act| >= t_old` guarantees `I ∩ Act` is non-empty
+	/// for every old subset `I` (which has `n_old - t_old + 1` members), so
+	/// once `Act` is agreed this returns `Some` for every valid subset. All
+	/// members of `I` hold the same `s_I^old` and the sub-share derivation is
+	/// deterministic, so any of them produces identical sub-shares — dealer
+	/// identity affects only message routing, not the derived values.
+	///
+	/// Returns `None` before the active set is agreed; all call sites run
+	/// after Round 2 completes, which requires `Act`.
 	fn designated_dealer_for(&self, i_mask: SubsetMask) -> Option<ParticipantId> {
+		self.active_set.as_ref()?;
 		for (bit, party) in self.config.old_participants().iter().enumerate() {
-			if (i_mask & (1 << bit)) != 0 {
+			if (i_mask & (1 << bit)) != 0 && self.is_active(party) {
 				return Some(party);
 			}
 		}
@@ -1099,20 +1880,7 @@ impl ResharingProtocol {
 		}
 
 		for &i_mask in &self.old_subset_order {
-			let dealer = match self.designated_dealer_for(i_mask) {
-				Some(d) => d,
-				None =>
-					return Err(ResharingProtocolError::ShareVerificationFailed(format!(
-						"no designated dealer found for old subset {:b}",
-						i_mask
-					))),
-			};
-			let dealer_r3 = self.round3_broadcasts.get(&dealer).ok_or_else(|| {
-				ResharingProtocolError::DealerDeliveryFailed {
-					dealer,
-					reason: format!("missing Round 3 commitment for subset {:b}", i_mask),
-				}
-			})?;
+			let (dealer, dealer_r3) = self.dealer_round3_for(i_mask)?;
 			let dealer_r4 = self.round4_messages.get(&dealer).ok_or_else(|| {
 				ResharingProtocolError::DealerDeliveryFailed {
 					dealer,
@@ -1177,14 +1945,203 @@ impl ResharingProtocol {
 		Ok(commitments)
 	}
 
+	/// Check that every signing partial this new party may later recover stays
+	/// inside the partial-secret norm envelope assumed by the Threshold ML-DSA
+	/// signing proof for the new configuration.
+	///
+	/// The signing proof relies on the norm of the challenge-shifted partial
+	/// secret being small. A malicious dealer can preserve the aggregate public key
+	/// while adding bounded zero-sum noise across new RSS subsets, so Round 5 also
+	/// validates the recovered partials that would be used by signing.
+	///
+	/// # Which bound
+	///
+	/// The Threshold ML-DSA proof (Mithril, "Efficient Threshold ML-DSA", §3.2-3.4)
+	/// requires the challenge-shifted recovered partial `(c·u1/ν, c·u2)` to satisfy
+	/// `‖(c·u1/ν, c·u2)‖₂ ≤ B` with overwhelming probability over the challenge `c`,
+	/// where `B` is the partial-secret norm bound from §3.4:
+	///
+	/// ```text
+	/// B = 1.3 · √τ · √(n·(k + ℓ/ν²)) · √Var(U(−η,η)) · √⌈C(N, T−1)/T⌉
+	/// ```
+	///
+	/// This is the bound the hyperball radii `(r, r')` are derived from via
+	/// `r'² ≥ r² + B² + 2rB/φ` (Lemma 2.4 / §3.4); it is *not* `r'` itself. The
+	/// randomness radius `r' ≈ 6·10⁵` is roughly two to three orders of magnitude
+	/// larger than `B`, so comparing against `r'` does not enforce the proof's
+	/// condition. We therefore compare against `B` directly.
+	///
+	/// # Challenge factor
+	///
+	/// The shift to bound is `c·u`. For a `SampleInBall` challenge with `τ` nonzero
+	/// `±1` coefficients, `E_c[‖c·u‖₂²] = τ·‖u‖₂²`, so `‖c·u‖₂ ≈ √τ·‖u‖₂` (the
+	/// Gaussian heuristic used to define `B`; see Mithril footnote 3). We use the
+	/// `√τ` factor here rather than the worst-case `‖c‖₁ = τ` factor so that the
+	/// quantity compared and the bound `B` use the same convention.
+	fn verify_recovered_partial_norms(&self) -> Result<(), ResharingProtocolError> {
+		let my_idx =
+			self.config.new_participants().index_of(self.config.my_party_id()).ok_or_else(
+				|| ResharingProtocolError::InternalError("not in new committee".into()),
+			)?;
+
+		let threshold = self.config.new_threshold();
+		let parties = self.config.new_participants().len() as u32;
+		// `get_hyperball_params` also validates that the new configuration is
+		// supported; we use its `nu` for the weighted norm and ignore `(r, r')`.
+		let (_, _, nu) = crate::protocol::signing::get_hyperball_params(threshold, parties)
+			.ok_or_else(|| {
+				ResharingProtocolError::ShareVerificationFailed(format!(
+					"no hyperball parameters for new configuration ({}, {})",
+					threshold, parties
+				))
+			})?;
+
+		let bound = partial_secret_norm_bound(threshold, parties, nu);
+
+		// Sharing patterns depend only on `(threshold, parties)`, so compute them once
+		// and reuse across every signing set rather than re-deriving them per mask.
+		let sharing_patterns =
+			crate::protocol::secret_sharing::compute_sharing_patterns(threshold, parties)
+				.map_err(|e| ResharingProtocolError::ShareVerificationFailed(e.into()))?;
+
+		for signing_mask in generate_subset_masks(parties as usize, threshold as usize) {
+			if (signing_mask & (1 << my_idx)) == 0 {
+				continue;
+			}
+
+			let weighted_norm =
+				self.recovered_partial_weighted_norm(&sharing_patterns, signing_mask, my_idx, nu)?;
+			let challenge_bound = weighted_norm * (TAU as f64).sqrt();
+			if challenge_bound > bound {
+				let signing_set = self.config.new_participants().ids_from_mask(signing_mask);
+				return Err(ResharingProtocolError::ShareVerificationFailed(format!(
+					"recovered partial for signing set {:?} exceeds partial-secret norm \
+					 bound: sqrt(tau) * weighted_norm = {:.0}, B = {:.0}",
+					signing_set, challenge_bound, bound
+				)));
+			}
+		}
+
+		Ok(())
+	}
+
+	/// Per-subset stored-share norm guard (`B_G` analog).
+	///
+	/// Before checking recovered signing partials (which sum several stored
+	/// subset shares and where zero-sum inflation can partially cancel), verify
+	/// each individual aggregated new subset share `s_J^new` is within the
+	/// single-share norm envelope. Defense in depth against attacks that
+	/// inflate individual stored shares while arranging cancellation in the
+	/// specific combinations the recovered-partial check sums.
+	fn verify_stored_new_share_norms(&self) -> Result<(), ResharingProtocolError> {
+		let threshold = self.config.new_threshold();
+		let parties = self.config.new_participants().len() as u32;
+		let (_, _, nu) = crate::protocol::signing::get_hyperball_params(threshold, parties)
+			.ok_or_else(|| {
+				ResharingProtocolError::ShareVerificationFailed(format!(
+					"no hyperball parameters for new configuration ({}, {})",
+					threshold, parties
+				))
+			})?;
+
+		let bound = stored_subset_share_norm_bound(threshold, parties, nu);
+
+		for (&j_mask, share) in &self.new_shares {
+			let weighted_norm = single_share_weighted_norm(share, nu);
+			if weighted_norm > bound {
+				return Err(ResharingProtocolError::ShareVerificationFailed(format!(
+					"stored new subset share {:b} exceeds single-share norm bound: \
+					 weighted_norm = {:.0}, B_G = {:.0}",
+					j_mask, weighted_norm, bound
+				)));
+			}
+		}
+
+		Ok(())
+	}
+
+	fn recovered_partial_weighted_norm(
+		&self,
+		sharing_patterns: &[Vec<u16>],
+		signing_mask: SubsetMask,
+		my_idx: usize,
+		nu: f64,
+	) -> Result<f64, ResharingProtocolError> {
+		let threshold = self.config.new_threshold();
+		let parties = self.config.new_participants().len() as u32;
+
+		// Same perm build + pattern translation that signing-time recovery uses, so
+		// the guard provably checks the exact share combination RSSRecover will sum.
+		let translated_masks = crate::protocol::secret_sharing::translated_subset_masks(
+			sharing_patterns,
+			signing_mask,
+			my_idx,
+			threshold,
+			parties,
+		)
+		.map_err(ResharingProtocolError::ShareVerificationFailed)?;
+
+		let mut s1_acc = [[0i64; N as usize]; L];
+		let mut s2_acc = [[0i64; N as usize]; K];
+
+		for translated in translated_masks {
+			let share = self.new_shares.get(&translated).ok_or_else(|| {
+				ResharingProtocolError::ShareVerificationFailed(format!(
+					"missing new subset share {:b} while checking signing set {:b}",
+					translated, signing_mask
+				))
+			})?;
+
+			for (acc_poly, share_poly) in s1_acc.iter_mut().zip(share.s1.iter()) {
+				for (acc, &coeff) in acc_poly.iter_mut().zip(share_poly.iter()) {
+					*acc += center_mod_q(coeff) as i64;
+				}
+			}
+			for (acc_poly, share_poly) in s2_acc.iter_mut().zip(share.s2.iter()) {
+				for (acc, &coeff) in acc_poly.iter_mut().zip(share_poly.iter()) {
+					*acc += center_mod_q(coeff) as i64;
+				}
+			}
+		}
+
+		let s1_sq: f64 = s1_acc
+			.iter()
+			.flat_map(|poly| poly.iter())
+			.map(|&c| {
+				let x = c as f64;
+				x * x
+			})
+			.sum();
+		let s2_sq: f64 = s2_acc
+			.iter()
+			.flat_map(|poly| poly.iter())
+			.map(|&c| {
+				let x = c as f64;
+				x * x
+			})
+			.sum();
+
+		Ok((s1_sq / (nu * nu) + s2_sq).sqrt())
+	}
+
 	/// All members of new subset J must produce identical `s_J^new` (and thus identical
 	/// commitments). Cross-verify that.
 	///
-	/// Only accepts share commitments from parties that are actually in the new subset.
+	/// Only considers broadcasts from new committee members (the only honest
+	/// producers of share commitments), and within those, only commitments
+	/// for subsets the sender belongs to.
 	fn verify_new_share_consistency(&self) -> Result<(), ResharingProtocolError> {
 		let mut by_subset: BTreeMap<SubsetMask, Vec<(ParticipantId, [u8; COMMITMENT_HASH_SIZE])>> =
 			BTreeMap::new();
 		for (party, broadcast) in &self.round5_broadcasts {
+			// Round 5 broadcasts are buffered from any participant (an
+			// observer catching up may store them before Act is known), but
+			// only new committee members contribute share commitments. Skip
+			// everyone else before any content check, so a non-required
+			// sender's broadcast cannot influence the outcome.
+			if !self.config.new_participants().contains(*party) {
+				continue;
+			}
 			for (j_mask, commit) in &broadcast.share_commitments {
 				// Only accept commitments from parties that are in this new subset
 				if self.config.new_participants().is_in_mask(*party, *j_mask) {
@@ -1244,11 +2201,47 @@ impl ResharingProtocol {
 	/// Cross-check the broadcast partial PKs and sum them to confirm the
 	/// resharing reconstructs the original public key.
 	///
-	/// Only accepts partial PK contributions from parties that are actually in the new subset.
+	/// Only considers broadcasts from new committee members (the only honest
+	/// producers of partial PKs), and within those, only contributions for
+	/// subsets the sender belongs to.
 	fn verify_public_key_preservation(&self) -> Result<(), ResharingProtocolError> {
+		// The public key is the sum of exactly one partial PK per canonical new subset
+		// (`new_subset_order`). Any other `j_mask` is not part of that sum, so we must
+		// reject it outright rather than fold it in: otherwise a new committee member could
+		// inject an extra term keyed by a non-canonical superset mask that still contains
+		// its own index bit (e.g. the full-committee mask) with an attacker-chosen
+		// `t_partial`, and use it to cancel a public-key deviation introduced by corrupted
+		// residuals — making this invariant check pass on a broken reshare.
+		let allowed_masks: BTreeSet<SubsetMask> = self.new_subset_order.iter().copied().collect();
+
 		let mut canonical: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
 		for (party, broadcast) in &self.round5_broadcasts {
+			// Skip broadcasts from senders outside the new committee BEFORE
+			// the non-canonical-mask hard reject below. Round 5 broadcasts
+			// are buffered from any participant, so without this filter an
+			// old member excluded from the active set — whose broadcast the
+			// session must be able to proceed without — could abort every
+			// session by sending success=true with a single poisoned mask,
+			// and only on the parties that happened to receive it.
+			if !self.config.new_participants().contains(*party) {
+				if !broadcast.partial_pks.is_empty() {
+					log::warn!(
+						"Ignoring partial PKs from party {}: not a new committee member",
+						party
+					);
+				}
+				continue;
+			}
 			for (j_mask, t_partial) in &broadcast.partial_pks {
+				// Reject partial PKs keyed by any mask that is not a canonical new subset.
+				// An honest party never broadcasts one; a malicious party could use it to
+				// smuggle a compensating term into the public-key sum.
+				if !allowed_masks.contains(j_mask) {
+					return Err(ResharingProtocolError::ShareVerificationFailed(format!(
+						"party {} broadcast a partial PK for non-canonical subset {:b}",
+						party, j_mask
+					)));
+				}
 				// Only accept partial PKs from parties that are in this new subset
 				if !self.config.new_participants().is_in_mask(*party, *j_mask) {
 					log::warn!(
@@ -1282,7 +2275,15 @@ impl ResharingProtocol {
 			}
 		}
 		let rho = self.derive_rho();
-		let recovered = crate::protocol::partial_pk::pack_combined_pk(&rho, canonical.values());
+		// Reject partial PKs with non-canonical coefficients. An attacker-supplied
+		// coefficient near i32::MAX would otherwise overflow the i32 accumulation
+		// inside `pack_combined_pk` (panic in debug, silent wrap in release).
+		let recovered = crate::protocol::partial_pk::pack_combined_pk(&rho, canonical.values())
+			.map_err(|_| {
+				ResharingProtocolError::ShareVerificationFailed(
+					"a Round 5 partial public key contains out-of-range coefficients".to_string(),
+				)
+			})?;
 		if recovered.as_bytes() != self.config.public_key().as_bytes() {
 			return Err(ResharingProtocolError::ShareVerificationFailed(
 				"recovered public key does not match the original — a dealer corrupted at \
@@ -1293,12 +2294,16 @@ impl ResharingProtocol {
 		Ok(())
 	}
 
-	fn build_output(&self) -> Result<ResharingOutput, ResharingProtocolError> {
+	fn build_output(
+		&self,
+		certificate: ResharingCertificate,
+	) -> Result<ResharingOutput, ResharingProtocolError> {
 		if !self.config.role().is_new_committee() {
 			return Ok(ResharingOutput {
 				private_share: None,
 				public_key: self.config.public_key().clone(),
 				new_config: self.config.new_config(),
+				certificate,
 			});
 		}
 		let new_share = self.build_private_key_share()?;
@@ -1306,6 +2311,7 @@ impl ResharingProtocol {
 			private_share: Some(new_share),
 			public_key: self.config.public_key().clone(),
 			new_config: self.config.new_config(),
+			certificate,
 		})
 	}
 
@@ -1393,6 +2399,146 @@ fn compute_new_subset_order(config: &ResharingConfig) -> Vec<SubsetMask> {
 	generate_subset_masks(n, k)
 }
 
+/// Binomial coefficient `C(n, k)`. Inputs are tiny here (`n ≤ MAX_PARTIES`), so
+/// the naive multiplicative form cannot overflow `u64`.
+fn binomial(n: u32, k: u32) -> u64 {
+	if k > n {
+		return 0;
+	}
+	let k = core::cmp::min(k, n - k) as u64;
+	let mut result: u64 = 1;
+	for i in 0..k {
+		result = result * (n as u64 - i) / (i + 1);
+	}
+	result
+}
+
+/// Partial-secret norm bound `B` from the Threshold ML-DSA proof (Mithril §3.4).
+///
+/// ```text
+/// B = 1.3 · √τ · √(n·(k + ℓ/ν²)) · √Var(U(−η,η)) · √⌈C(N, T−1)/T⌉
+/// ```
+///
+/// `B` bounds the challenge-shifted recovered partial `‖(c·u1/ν, c·u2)‖₂` that
+/// the hyperball rejection-sampling analysis requires (and that the radii
+/// `(r, r')` are derived from). It is calibrated to a *fresh keygen* partial:
+/// a sum of `⌈C(N, T−1)/T⌉` base subset shares whose coefficients are
+/// `η`-bounded with per-coefficient variance `Var(U(−η,η)) = η(η+1)/3`.
+///
+/// `1.3` is the `≈13·σ` Gaussian tail factor on `‖c·u‖`, and `√τ` is the
+/// challenge amplification (`E_c[‖c·u‖₂²] = τ·‖u‖₂²`); both follow Mithril §3.4
+/// and footnote 3.
+fn partial_secret_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
+	let num_secrets = {
+		let c = binomial(parties, threshold - 1) as f64;
+		(c / threshold as f64).ceil()
+	};
+	partial_secret_norm_bound_with_num_secrets(threshold, parties, nu, num_secrets)
+}
+
+/// Norm bound for a single stored RSS subset share (`B_G` analog).
+///
+/// Uses the same Mithril §3.4 calibration as [`partial_secret_norm_bound`], but
+/// with `num_secrets = 1` because each stored subset share aggregates one base
+/// secret's worth of material rather than the `⌈C(N,T−1)/T⌉` shares summed at
+/// signing recovery time.
+fn stored_subset_share_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
+	partial_secret_norm_bound_with_num_secrets(threshold, parties, nu, 1.0)
+}
+
+fn partial_secret_norm_bound_with_num_secrets(
+	threshold: u32,
+	parties: u32,
+	nu: f64,
+	num_secrets: f64,
+) -> f64 {
+	let n = N as f64;
+	let dim = n * (K as f64 + L as f64 / (nu * nu));
+	let var_eta = ETA as f64 * (ETA as f64 + 1.0) / 3.0;
+	let base = 1.3 * (TAU as f64).sqrt() * (dim * var_eta * num_secrets).sqrt();
+	base * resharing_norm_enlargement(threshold, parties)
+}
+
+fn single_share_weighted_norm(share: &NewShareData, nu: f64) -> f64 {
+	let s1_sq: f64 = share
+		.s1
+		.iter()
+		.flat_map(|poly| poly.iter())
+		.map(|&c| {
+			let x = center_mod_q(c) as f64;
+			x * x
+		})
+		.sum();
+	let s2_sq: f64 = share
+		.s2
+		.iter()
+		.flat_map(|poly| poly.iter())
+		.map(|&c| {
+			let x = center_mod_q(c) as f64;
+			x * x
+		})
+		.sum();
+	(s1_sq / (nu * nu) + s2_sq).sqrt()
+}
+
+/// Per-config enlargement factor `κ` applied to the keygen-calibrated bound `B`.
+///
+/// Honest resharing inflates the recovered-partial norm past the keygen `B`. With
+/// the v5 mean-subtracted coset splitter (sparse-ternary deltas scaled `∝ 1/S_old`
+/// minus their balanced mean, see `derive_subshares_with_session_seed` /
+/// `add_mean_subtracted_noise`) the steady-state overshoot is ~0.78–1.16× across
+/// committees `2 ≤ T ≤ N ≤ 6`, instead of the `~√S_old` growth of the old fixed-CBD
+/// splitter (2-of-3: 1.22×, 3-of-5: 2.61×, 4-of-6: 4.50×).
+///
+/// To accept honest reshares we enlarge `B → κ·B` *and* the hyperball radii
+/// `(r, r') → (κ·r, κ·r')` together (see `get_hyperball_params`). Scaling all of
+/// `(B, r, r')` by a common `κ` is scale-invariant in the radius condition
+/// `r'² = r² + B² + 2rB/φ`, so the per-sample rejection leakage `ε` is unchanged.
+/// The signing-query budget `Q_s = 1/(K·ε)` is *not* preserved, though: the larger
+/// ball lowers per-iteration acceptance (the radius nears ML-DSA-87's fixed
+/// verification ceilings), so `K` grows — and with `ε` fixed, `Q_s` falls by that
+/// same `K` factor (e.g. `(3,5)` K 35→60 at κ=1.15). Configs whose overshoot is
+/// below 1 keep κ = 1 and pay nothing. See `config.rs` for `K` and SECURITY_PROOF.md
+/// ("Bound `B` … and `Q_s`") for the bit-loss table.
+///
+/// This is only possible while the enlarged radius stays under ML-DSA-87's fixed
+/// verification ceiling (`‖z₁‖∞ < γ1 − β`), which caps κ at ≈1.5×. The κ below were
+/// re-derived for the **v5 mean-subtracted ("coset") splitter** from the *measured*
+/// honest overshoot (Rust `test_recovered_partial_variance_*`, fixed point over all
+/// signing sets). v5's uniform negative correlation lowered every overshoot vs v4:
+///
+/// - `(2,2)`: overshoot 0.780× → κ = 1.00, K = 4.   (reshare within base `B`: a
+/// - `(2,3)`: overshoot 0.810× → κ = 1.00, K = 5.    reshared committee signs with exactly the same
+///   params as a fresh keygen committee — no enlargement, no `Q_s` cost.)
+/// - `(2,4)`: overshoot 0.961× → κ = 1.10, K = 10.
+/// - `(3,5)`: overshoot 1.012× → κ = 1.15, K = 60.  (was κ=1.30/K=227 under v4 — v5 recovers ~1.9
+///   bits of `Q_s`.)
+/// - `(4,6)`: overshoot 1.163× → κ = 1.25, K = 1600.  (Enabled by enlargement: this `K` taxes
+///   *every* `(4,6)` signature, ~15 MB/signature, Q_s ≈ 2^28.2 ≈ 300M queries. Required for the
+///   `near-mpc` 4-of-6 committee shape. Removing this tax (back to κ=1 / K=350) is future work:
+///   budget the per-reshare noise intensity down for a bounded reshare count, or draw a single
+///   collaborative coset-Gaussian sample (one extra MPC round) for keygen-level hiding at κ=1.)
+///
+/// The `(4,6)` overshoot 1.163× is extremely stable (1.153–1.163 across 8 seeds, the
+/// recovered-partial norm concentrates), so κ=1.25 carries a ~7.5% margin against a
+/// worst-case that barely moves.
+///
+/// Exposed (re-exported at `resharing::resharing_norm_enlargement`) for analysis and
+/// testing: the recovered-partial regression tests assert that the measured honest
+/// overshoot stays `≤ κ`, the exact margin this guard enlargement provides.
+pub fn resharing_norm_enlargement(threshold: u32, parties: u32) -> f64 {
+	match (threshold, parties) {
+		// Re-derived for the v5 mean-subtracted coset splitter: kappa = measured honest
+		// overshoot (+ ~7-15% margin where >1). Scaling (r,r') by the same kappa keeps
+		// per-sample leakage eps fixed (get_hyperball_params); K sets Q_s = 1/(K*eps).
+		(2, 4) => 1.10, // overshoot 0.961x
+		(3, 5) => 1.15, // overshoot 1.012x
+		(4, 6) => 1.25, // overshoot 1.163x (enabled for near-mpc; K = 1600)
+		// (2,2) 0.780x, (2,3) 0.810x: comfortably below base B, reshare at kappa = 1.
+		_ => 1.0,
+	}
+}
+
 /// Enumerate subset masks of size `k` over `n` bits in canonical (numerically
 /// ascending) order using Gosper's hack.
 fn generate_subset_masks(n: usize, k: usize) -> Vec<SubsetMask> {
@@ -1420,14 +2566,28 @@ fn generate_subset_masks(n: usize, k: usize) -> Vec<SubsetMask> {
 /// to leave the hyperball proof regime after repeated resharings.
 ///
 /// This splitter first distributes the centered coefficient of `s_I` as evenly
-/// as possible across all new subsets, then adds deterministic pairwise
-/// zero-sum η-bounded noise. The integer sum of the outputs is exactly the
-/// centered representative of `s_I`, hence the modular sum is `s_I`.
+/// as possible across all new subsets, then adds deterministic zero-sum noise via
+/// *balanced mean subtraction* (`add_mean_subtracted_noise`: sample `m` i.i.d.
+/// deltas, subtract the balanced split of their sum). The integer sum of the
+/// outputs is exactly the centered representative of `s_I`, hence the modular sum
+/// is `s_I`. (Older `v4` used an `O(m)` telescoping cycle `delta_i − delta_{i−1}`;
+/// its banded correlation overshot for non-contiguous recovery patterns.)
+///
+/// # Fresh re-sharing (noise intensity)
+///
+/// The deltas are sparse-ternary with intensity `≈ 0.49 / S_old` (see
+/// `split_noise_threshold`). Because each new share `s_J^new = Σ_I r_{I→J}` sums
+/// contributions from all `S_old = num_old_subsets` old subsets, scaling each
+/// dealer's noise as `1/S_old` makes the *aggregated* new-share noise land at the
+/// keygen level. The new shares are then distributed like a fresh keygen secret
+/// sharing (Mithril §3.3 *a posteriori* sharing), so recovered signing partials
+/// stay under the keygen norm envelope `B` instead of growing with the committee.
 fn derive_subshares_with_session_seed(
 	i_mask: SubsetMask,
 	s_i: &SecretShareData,
 	new_subsets: &[SubsetMask],
 	session_seed: &[u8; 32],
+	num_old_subsets: usize,
 ) -> Vec<NewShareData> {
 	debug_assert!(!new_subsets.is_empty());
 	let mut out: Vec<NewShareData> = (0..new_subsets.len()).map(|_| NewShareData::new()).collect();
@@ -1471,27 +2631,76 @@ fn derive_subshares_with_session_seed(
 		}
 	}
 
-	// Add pairwise zero-sum noise. Every unordered pair contributes +δ to one
-	// subset and -δ to the other, so the sum over all new subsets stays exact.
-	for a in 0..m {
-		for b in (a + 1)..m {
-			for poly_idx in 0..L {
-				for coeff_idx in 0..N as usize {
-					let delta = sample_eta_coeff(&mut state);
-					out[a].s1[poly_idx][coeff_idx] += delta;
-					out[b].s1[poly_idx][coeff_idx] -= delta;
-				}
+	// Add integer zero-sum hiding noise via *balanced mean subtraction*. For each
+	// coefficient we sample `m` i.i.d. sparse-ternary deltas and subtract the
+	// balanced split of their sum (`add_mean_subtracted_noise`), giving
+	// `N_j = δ_j − balanced(Σδ)_j` with `Σ_j N_j = 0`, so the exact integer secret
+	// identity is preserved.
+	//
+	// Unlike the v4 telescoping cycle, this yields the *uniform* negative
+	// correlation `Cov(N_j,N_k) = −σ²/m` of the a-posteriori coset Gaussian, so
+	// `Var(Σ_{J∈pattern} N_J) = σ²·|pattern|·(1 − |pattern|/m)` matches the keygen
+	// conditional partial variance for *every* recovery pattern — the overshoot no
+	// longer depends on the (arbitrary) subset ordering. Hiding holds because the
+	// noise is PRF-derived and keyed to `(session_seed, i_mask, s_i)`.
+	//
+	// The per-subset deltas are sparse-ternary with intensity `≈ 0.49/S_old`
+	// (`split_noise_threshold`): each dealer injects only `1/S_old` of the keygen
+	// noise, so the aggregated noise across the `S_old` dealers in
+	// `s_J^new = Σ_I r_{I→J}` reaches the keygen level.
+	let noise_t = split_noise_threshold(num_old_subsets);
+	let mut deltas = vec![0i32; m];
+	for poly_idx in 0..L {
+		for coeff_idx in 0..N as usize {
+			for d in deltas.iter_mut() {
+				*d = sample_split_noise_coeff(&mut state, noise_t);
 			}
-			for poly_idx in 0..K {
-				for coeff_idx in 0..N as usize {
-					let delta = sample_eta_coeff(&mut state);
-					out[a].s2[poly_idx][coeff_idx] += delta;
-					out[b].s2[poly_idx][coeff_idx] -= delta;
-				}
+			add_mean_subtracted_noise(&deltas, &mut out, true, poly_idx, coeff_idx, &mut state);
+		}
+	}
+	for poly_idx in 0..K {
+		for coeff_idx in 0..N as usize {
+			for d in deltas.iter_mut() {
+				*d = sample_split_noise_coeff(&mut state, noise_t);
 			}
+			add_mean_subtracted_noise(&deltas, &mut out, false, poly_idx, coeff_idx, &mut state);
 		}
 	}
 	out
+}
+
+/// Add integer zero-sum hiding noise to one coefficient across all `m` new subset
+/// shares, using *balanced mean subtraction*. Given i.i.d. deltas `δ_0..δ_{m-1}`,
+/// subtract the balanced split of their sum so `N_j = δ_j − balanced(Σδ)_j` sums to
+/// exactly zero. This reproduces the a-posteriori coset Gaussian's uniform negative
+/// correlation (`Cov(N_j,N_k) = −σ²/m`), unlike the old telescoping cycle's banded
+/// correlation. Consumes one PRF draw for the remainder offset, so it stays
+/// deterministic and identical across all members of the old subset.
+fn add_mean_subtracted_noise(
+	deltas: &[i32],
+	out: &mut [NewShareData],
+	is_s1: bool,
+	poly_idx: usize,
+	coeff_idx: usize,
+	state: &mut fips202::KeccakState,
+) {
+	let m = out.len();
+	let m_i32 = m as i32;
+	let total: i32 = deltas.iter().sum();
+	let base = total.div_euclid(m_i32);
+	let remainder = total.rem_euclid(m_i32) as usize;
+	let offset = sample_uniform_usize(state, m);
+
+	for (j_idx, share) in out.iter_mut().enumerate() {
+		let gets_remainder = ((j_idx + m - offset) % m) < remainder;
+		let sub = base + if gets_remainder { 1 } else { 0 };
+		let noise = deltas[j_idx] - sub;
+		if is_s1 {
+			share.s1[poly_idx][coeff_idx] += noise;
+		} else {
+			share.s2[poly_idx][coeff_idx] += noise;
+		}
+	}
 }
 
 fn balanced_split_coeff(
@@ -1530,17 +2739,34 @@ fn center_mod_q(coeff: i32) -> i32 {
 	}
 }
 
-fn sample_eta_coeff(state: &mut fips202::KeccakState) -> i32 {
-	let eta_i32 = ETA as i32;
-	let bound = 2 * eta_i32 + 1;
-	let cutoff = (256 / bound) * bound;
+/// Byte threshold `T` for the sparse-ternary split-noise sampler, given the
+/// number of old RSS subsets `S_old`. Each delta is `+1` for PRF byte `< T`,
+/// `-1` for `< 2T`, else `0`, so `P(±1) = T/256 ≈ 0.49 / S_old` each.
+///
+/// Computed with integer arithmetic (no float, `no_std`-friendly) as
+/// `round(SPLIT_NOISE_NUM_X256 / S_old)`, clamped to `[1, 127]` so the three
+/// bands always fit in a byte and noise never fully vanishes.
+fn split_noise_threshold(num_old_subsets: usize) -> u32 {
+	let s = num_old_subsets.max(1) as u32;
+	// round(125 / s) = (125 + s/2) / s
+	let t = (SPLIT_NOISE_NUM_X256 + s / 2) / s;
+	t.clamp(1, 127)
+}
+
+/// Sample one sparse-ternary split-noise delta in `{-1, 0, +1}` from the PRF
+/// stream, with `P(+1) = P(-1) = threshold / 256`. Consumes exactly one PRF byte
+/// per coefficient, so it is deterministic and stream-aligned across all parties
+/// (every member of an old subset derives identical sub-shares).
+fn sample_split_noise_coeff(state: &mut fips202::KeccakState, threshold: u32) -> i32 {
 	let mut buf = [0u8; 1];
-	loop {
-		fips202::shake256_squeeze(&mut buf, state);
-		let b = buf[0] as i32;
-		if b < cutoff {
-			return (b % bound) - eta_i32;
-		}
+	fips202::shake256_squeeze(&mut buf, state);
+	let b = buf[0] as u32;
+	if b < threshold {
+		1
+	} else if b < 2 * threshold {
+		-1
+	} else {
+		0
 	}
 }
 
@@ -1705,6 +2931,47 @@ mod tests {
 	/// Test SSID for use in unit tests.
 	const TEST_SSID: [u8; RESHARING_SSID_SIZE] = [0xABu8; RESHARING_SSID_SIZE];
 
+	/// Minimal transcript signer for unit tests: "signature" = party_id || hash.
+	#[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+	pub(crate) struct TestSigner {
+		pub id: u32,
+	}
+
+	impl TranscriptSigner for TestSigner {
+		type Signature = Vec<u8>;
+		type PublicKey = u32;
+
+		fn sign(&self, hash: &[u8; 32]) -> Self::Signature {
+			let mut sig = vec![0u8; 36];
+			sig[..4].copy_from_slice(&self.id.to_le_bytes());
+			sig[4..36].copy_from_slice(hash);
+			sig
+		}
+
+		fn verify(pk: &Self::PublicKey, hash: &[u8; 32], sig: &Self::Signature) -> bool {
+			Self::verify_bytes(pk, hash, sig)
+		}
+
+		fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
+			if sig.len() < 36 {
+				return false;
+			}
+			let sig_id = u32::from_le_bytes(sig[..4].try_into().unwrap());
+			sig_id == *pk && &sig[4..36] == hash
+		}
+
+		fn public_key(&self) -> Self::PublicKey {
+			self.id
+		}
+	}
+
+	/// Build a `ResharingSignerConfig<TestSigner>` covering `participants`.
+	fn test_signer_config(my_id: u32, participants: &[u32]) -> ResharingSignerConfig<TestSigner> {
+		let keys: BTreeMap<u32, u32> = participants.iter().map(|&p| (p, p)).collect();
+		ResharingSignerConfig::new(TestSigner { id: my_id }, keys, participants)
+			.expect("keys cover participants")
+	}
+
 	#[test]
 	fn test_generate_subset_masks() {
 		let s = generate_subset_masks(3, 2);
@@ -1747,7 +3014,13 @@ mod tests {
 		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let subshares = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let subshares = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 		let mut sum_s1: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; L];
 		let mut sum_s2: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; K];
 		for sub in &subshares {
@@ -1783,7 +3056,13 @@ mod tests {
 		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let subshares = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let subshares = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 		let max_expected = 1 + (new_subsets.len() as i32 - 1) * ETA as i32;
 
 		for sub in &subshares {
@@ -1815,7 +3094,13 @@ mod tests {
 		let s = SecretShareData { s1: [[Q - 1; N as usize]; L], s2: [[Q - 2; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let subshares = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let subshares = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 
 		let mut sum_s1: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; L];
 		let mut sum_s2: Vec<[i64; N as usize]> = vec![[0i64; N as usize]; K];
@@ -1850,8 +3135,20 @@ mod tests {
 		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let a = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
-		let b = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let a = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
+		let b = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 		for (x, y) in a.iter().zip(b.iter()) {
 			assert_eq!(x.s1, y.s1);
 			assert_eq!(x.s2, y.s2);
@@ -1926,8 +3223,20 @@ mod tests {
 		let s_b = SecretShareData { s1: [[3i32; N as usize]; L], s2: [[5i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let a = derive_subshares_with_session_seed(0b011, &s_a, &new_subsets, &session_seed);
-		let b = derive_subshares_with_session_seed(0b011, &s_b, &new_subsets, &session_seed);
+		let a = derive_subshares_with_session_seed(
+			0b011,
+			&s_a,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
+		let b = derive_subshares_with_session_seed(
+			0b011,
+			&s_b,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 		// The bounded split includes PRF-derived zero-sum noise keyed by `s_i`,
 		// so shares for different old secrets must differ.
 		assert_ne!(a[1].s1, b[1].s1);
@@ -1940,8 +3249,20 @@ mod tests {
 		let s = SecretShareData { s1: [[1i32; N as usize]; L], s2: [[2i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let a = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
-		let b = derive_subshares_with_session_seed(0b101, &s, &new_subsets, &session_seed);
+		let a = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
+		let b = derive_subshares_with_session_seed(
+			0b101,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 		// The bounded split includes PRF-derived zero-sum noise keyed on `i_mask`,
 		// so shares for different old subsets must differ.
 		assert_ne!(a[1].s1, b[1].s1);
@@ -1959,6 +3280,400 @@ mod tests {
 		// updated alongside the security review.
 		assert_eq!(r3.party_id, 7);
 		assert_eq!(r3.commitments.len(), 1);
+	}
+
+	#[test]
+	fn test_old_subset_peer_verifies_dealer_round3_commitments() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[8u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(1, &[0, 1, 2]),
+			[1u8; 32],
+			&[2u8; 32],
+			0,
+		);
+		let session_seed = [9u8; 32];
+		protocol.session_seed = Some(session_seed);
+		// Model the post-Act state: the full old committee is active.
+		protocol.active_set = Some(vec![0, 1, 2]);
+
+		let i_mask = 0b011u16;
+		let s_i = shares[0].shares().get(&i_mask).expect("old subset share");
+		let subshares = derive_subshares_with_session_seed(
+			i_mask,
+			s_i,
+			&protocol.new_subset_order,
+			&session_seed,
+			protocol.old_subset_order.len(),
+		);
+		let mut commitments = BTreeMap::new();
+		for (j_mask, subshare) in protocol.new_subset_order.iter().zip(subshares.iter()) {
+			commitments.insert((i_mask, *j_mask), commit_subshare(i_mask, *j_mask, subshare));
+		}
+
+		protocol.round3_broadcasts.insert(
+			0,
+			ResharingRound3Broadcast {
+				ssid: protocol.ssid,
+				party_id: 0,
+				commitments: commitments.clone(),
+			},
+		);
+		assert!(protocol.verify_peer_dealer_commitments().is_ok());
+
+		let target_j = protocol.new_subset_order[0];
+		let mut tampered = subshares[0].clone();
+		tampered.s2[0][0] += 1;
+		commitments.insert((i_mask, target_j), commit_subshare(i_mask, target_j, &tampered));
+		protocol
+			.round3_broadcasts
+			.insert(0, ResharingRound3Broadcast { ssid: protocol.ssid, party_id: 0, commitments });
+
+		let err = protocol
+			.verify_peer_dealer_commitments()
+			.expect_err("old subset peer must reject tampered commitment");
+		assert!(err.to_string().contains("commitment mismatch"), "unexpected error: {}", err);
+	}
+
+	#[test]
+	fn test_recovered_partial_norm_guard_rejects_pk_preserving_zero_sum_noise() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[7u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(1, &[0, 1, 2]),
+			[1u8; 32],
+			&[2u8; 32],
+			0,
+		);
+
+		// This models a bounded zero-sum reshaping attack: +delta on one new RSS
+		// subset and -delta on another preserves the aggregate public key, and each
+		// individual subset is still within SUBSHARE_COEFF_BOUND. It nevertheless
+		// makes some recovered signing partials too large for the existing hyperball
+		// proof envelope.
+		let mut plus = NewShareData::new();
+		let mut minus = NewShareData::new();
+		for poly in plus.s2.iter_mut() {
+			for coeff in poly.iter_mut() {
+				*coeff = 450;
+			}
+		}
+		for poly in minus.s2.iter_mut() {
+			for coeff in poly.iter_mut() {
+				*coeff = -450;
+			}
+		}
+		assert!(plus.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+		assert!(minus.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+
+		protocol.new_shares.insert(0b011, plus);
+		protocol.new_shares.insert(0b110, minus);
+
+		let err = protocol
+			.verify_recovered_partial_norms()
+			.expect_err("oversized recovered partial must be rejected");
+		assert!(
+			err.to_string().contains("exceeds partial-secret norm bound"),
+			"unexpected error: {}",
+			err
+		);
+	}
+
+	#[test]
+	fn test_public_key_preservation_rejects_non_canonical_mask() {
+		// Regression test (security review): `verify_public_key_preservation` must reject a
+		// Round 5 broadcast that carries a partial PK keyed by a mask outside the canonical
+		// `new_subset_order`. Otherwise a malicious new committee member could inject an
+		// extra term keyed by a superset mask that still contains its own index bit (e.g.
+		// the full-committee mask) with an attacker-chosen `t_partial`, and use it to cancel
+		// a public-key deviation introduced by corrupted residuals — passing the invariant
+		// check on a broken reshare.
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[13u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[0].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(0, &[0, 1, 2]),
+			[1u8; 32],
+			&[2u8; 32],
+			0,
+		);
+
+		// With new n = 3, threshold = 2, the canonical subsets are the size-2 masks
+		// {0b011, 0b101, 0b110}. The full-committee mask 0b111 is never canonical, yet it
+		// contains party 0's index bit, so the old `is_in_mask` gate would have accepted it.
+		let full_mask: SubsetMask = 0b111;
+		assert!(
+			!protocol.new_subset_order.contains(&full_mask),
+			"full-committee mask must not be a canonical subset"
+		);
+		assert!(protocol.config.new_participants().is_in_mask(0, full_mask));
+
+		let mut protocol = protocol;
+		let mut partial_pks: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
+		partial_pks.insert(full_mask, [[7i32; N as usize]; K]);
+		protocol.round5_broadcasts.insert(
+			0,
+			ResharingRound5Broadcast {
+				ssid: protocol.ssid,
+				party_id: 0,
+				share_commitments: BTreeMap::new(),
+				partial_pks,
+				success: true,
+				error_message: None,
+			},
+		);
+
+		let err = protocol
+			.verify_public_key_preservation()
+			.expect_err("non-canonical partial PK mask must be rejected");
+		assert!(err.to_string().contains("non-canonical subset"), "unexpected error: {}", err);
+	}
+
+	/// Companion to the test above (security review follow-up): the
+	/// non-canonical-mask hard reject only applies to new committee members.
+	/// A sender outside the new committee (e.g. an old member excluded from
+	/// the active set) never contributes partial PKs honestly, so its
+	/// broadcast must be skipped entirely — otherwise a poisoned mask from a
+	/// party the session is promised to proceed without would abort every
+	/// session, and only on the parties that happened to receive it.
+	#[test]
+	fn test_public_key_preservation_ignores_poisoned_mask_from_non_member() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[13u8; 32], config).expect("keygen");
+		// Old committee {0,1,2}, new committee {0,1,3}: party 2 is OldOnly.
+		let resharing_config = ResharingConfig::new(
+			Some(shares[0].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 3],
+			0,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(0, &[0, 1, 2, 3]),
+			[1u8; 32],
+			&[2u8; 32],
+			0,
+		);
+
+		let full_mask: SubsetMask = 0b111;
+		assert!(!protocol.new_subset_order.contains(&full_mask));
+
+		let mut partial_pks: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
+		partial_pks.insert(full_mask, [[7i32; N as usize]; K]);
+		protocol.round5_broadcasts.insert(
+			2, // not a new committee member
+			ResharingRound5Broadcast {
+				ssid: protocol.ssid,
+				party_id: 2,
+				share_commitments: BTreeMap::new(),
+				partial_pks,
+				success: true,
+				error_message: None,
+			},
+		);
+
+		// The poisoned broadcast must be skipped: verification then fails
+		// only because this bare setup has no partial PK data at all — not
+		// with the non-canonical hard reject.
+		let err = protocol
+			.verify_public_key_preservation()
+			.expect_err("bare setup has no partial PK contributions");
+		assert!(
+			!err.to_string().contains("non-canonical"),
+			"poisoned mask from a non-member must be ignored, got: {}",
+			err
+		);
+		assert!(
+			err.to_string().contains("missing partial PK contribution"),
+			"unexpected error: {}",
+			err
+		);
+	}
+
+	/// Regression test (security review): a Round 5 failure report from an old
+	/// member that was excluded from the active set must not abort the
+	/// session. Liveness is defined over `Act ∪ new_participants`
+	/// (`have_all_round5`, transcript hash), so the failure-abort scan in
+	/// Combining must use the same sender set — otherwise a single excluded
+	/// (offline-then-recovered, leaving, or compromised) old member could
+	/// deny completion of every resharing session.
+	///
+	/// The excluded member's broadcast also carries a partial PK keyed by a
+	/// non-canonical mask: before the sender filter in
+	/// `verify_public_key_preservation`, that was a second independent abort
+	/// vector (the non-canonical hard reject ran before any membership
+	/// check).
+	#[test]
+	fn test_combining_ignores_failure_from_excluded_old_member() {
+		let mut protocol = combining_protocol_with_round5_failure_from(Some(2));
+
+		let err = protocol.poke().expect_err("bare combining state cannot fully verify");
+		assert!(
+			!matches!(err, ResharingProtocolError::ProtocolAborted(_)),
+			"excluded old member's failure report must not abort the session, got: {}",
+			err
+		);
+		assert!(
+			!err.to_string().contains("non-canonical"),
+			"excluded old member's poisoned partial PK mask must be ignored, got: {}",
+			err
+		);
+		// With the excluded member's broadcast ignored, Combining proceeds to
+		// share verification, which fails on this bare test setup for lack of
+		// partial PK data — proving neither abort path was taken.
+		assert!(
+			matches!(err, ResharingProtocolError::ShareVerificationFailed(_)),
+			"unexpected error: {}",
+			err
+		);
+	}
+
+	/// Companion to the test above: a failure report from a *required* Round 5
+	/// sender (here an active old member) must still abort.
+	#[test]
+	fn test_combining_aborts_on_failure_from_required_party() {
+		let mut protocol = combining_protocol_with_round5_failure_from(Some(1));
+
+		let err = protocol.poke().expect_err("failure from required party must abort");
+		assert!(
+			matches!(err, ResharingProtocolError::ProtocolAborted(_)),
+			"active member's failure report must abort the session, got: {}",
+			err
+		);
+	}
+
+	/// Security review follow-up: the excluded member reports `success = true`
+	/// and its only anomaly is a partial PK keyed by a non-canonical mask.
+	/// With no failure bit in play, the only way that broadcast could
+	/// influence Combining is through a consumer scanning the full
+	/// `round5_broadcasts` map — the property under test is that no such
+	/// consumer exists. Combining must sail past both the failure scan and
+	/// the share-data checks without tripping the non-canonical hard reject.
+	#[test]
+	fn test_combining_ignores_poisoned_mask_from_excluded_old_member() {
+		let mut protocol = combining_protocol_with_round5_failure_from(None);
+
+		let err = protocol.poke().expect_err("bare combining state cannot fully verify");
+		assert!(
+			!matches!(err, ResharingProtocolError::ProtocolAborted(_)),
+			"nothing reported failure, so nothing may abort, got: {}",
+			err
+		);
+		assert!(
+			!err.to_string().contains("non-canonical"),
+			"excluded old member's poisoned partial PK mask must be ignored, got: {}",
+			err
+		);
+		// The only remaining error on this bare setup is the ordinary lack of
+		// genuine partial PK data.
+		assert!(
+			err.to_string().contains("missing partial PK contribution"),
+			"unexpected error: {}",
+			err
+		);
+	}
+
+	/// Build a protocol poised at Combining with active set {0, 1} out of old
+	/// committee {0, 1, 2} and new committee {0, 1, 3}. All Round 5 senders
+	/// report success except `failure_from` (if any). The excluded old
+	/// member (2) additionally smuggles a partial PK keyed by a
+	/// non-canonical mask, which must be ignored, not hard-rejected.
+	fn combining_protocol_with_round5_failure_from(
+		failure_from: Option<ParticipantId>,
+	) -> ResharingProtocol<TestSigner> {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[21u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[0].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 3],
+			0,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(0, &[0, 1, 2, 3]),
+			[1u8; 32],
+			&[2u8; 32],
+			0,
+		);
+
+		// Old member 2 is excluded from the active set.
+		protocol.active_set = Some(vec![0, 1]);
+
+		// Round 5 broadcasts: everyone reports success except `failure_from`
+		// (if any). The excluded old member (2) also carries a poisoned
+		// non-canonical partial PK mask.
+		for party in [0u32, 1, 2, 3] {
+			let success = failure_from != Some(party);
+			let mut partial_pks: BTreeMap<SubsetMask, [[i32; N as usize]; K]> = BTreeMap::new();
+			if party == 2 {
+				let full_mask: SubsetMask = 0b111;
+				assert!(
+					!protocol.new_subset_order.contains(&full_mask),
+					"full-committee mask must not be a canonical subset"
+				);
+				partial_pks.insert(full_mask, [[7i32; N as usize]; K]);
+			}
+			protocol.round5_broadcasts.insert(
+				party,
+				ResharingRound5Broadcast {
+					ssid: protocol.ssid,
+					party_id: party,
+					share_commitments: BTreeMap::new(),
+					partial_pks,
+					success,
+					error_message: (!success).then(|| "forged failure".to_string()),
+				},
+			);
+		}
+
+		protocol.state = ResharingState::Combining;
+		protocol
 	}
 
 	#[test]
@@ -2012,13 +3727,43 @@ mod tests {
 		assert_eq!(share.max_abs_coefficient(), 500);
 	}
 
+	/// A malicious dealer can set a coefficient to `i32::MIN`, whose magnitude
+	/// (2_147_483_648) is not representable as a positive `i32`. `i32::abs()`
+	/// would panic on it in overflow-checking builds and wrap back to
+	/// `i32::MIN` (still negative) in release builds, letting the oversized
+	/// coefficient pass the `> bound` check. The fixed helpers use
+	/// `unsigned_abs()` and must reject it in every build profile.
+	#[test]
+	fn test_coefficients_within_bound_rejects_i32_min() {
+		let mut share = NewShareData::new();
+		share.s1[0][0] = i32::MIN;
+		assert!(
+			!share.coefficients_within_bound(SUBSHARE_COEFF_BOUND),
+			"i32::MIN coefficient must be rejected, not silently accepted"
+		);
+		// The diagnostic must report the true magnitude without overflowing.
+		assert_eq!(share.max_abs_coefficient(), 2_147_483_648u32);
+
+		// The same edge case in s2.
+		let mut share = NewShareData::new();
+		share.s2[K - 1][N as usize - 1] = i32::MIN;
+		assert!(!share.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+		assert_eq!(share.max_abs_coefficient(), 2_147_483_648u32);
+	}
+
 	#[test]
 	fn test_honest_subshares_within_bound() {
 		// Verify that honestly-derived sub-shares are well within the coefficient bound
 		let s = SecretShareData { s1: [[100i32; N as usize]; L], s2: [[50i32; N as usize]; K] };
 		let new_subsets = generate_subset_masks(3, 2);
 		let session_seed = [42u8; 32];
-		let subshares = derive_subshares_with_session_seed(0b011, &s, &new_subsets, &session_seed);
+		let subshares = derive_subshares_with_session_seed(
+			0b011,
+			&s,
+			&new_subsets,
+			&session_seed,
+			new_subsets.len(),
+		);
 
 		for (i, share) in subshares.iter().enumerate() {
 			let max_coeff = share.max_abs_coefficient();

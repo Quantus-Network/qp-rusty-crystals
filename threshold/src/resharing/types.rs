@@ -28,6 +28,14 @@ pub const ENTROPY_SIZE: usize = 32;
 /// Size of session identifier (SSID) in bytes.
 pub const RESHARING_SSID_SIZE: usize = 32;
 
+/// Current resharing protocol version baked into the SSID.
+///
+/// Bump when the round structure or wire format changes incompatibly.
+pub const RESHARING_PROTOCOL_VERSION: u32 = 2;
+
+/// Cryptographic suite identifier for threshold ML-DSA-87 RSS resharing.
+pub const RESHARING_SUITE_ML_DSA_87: u32 = 1;
+
 /// Maximum absolute value for sub-share coefficients in resharing.
 ///
 /// This bound defends against malicious dealers who might inject arbitrarily large
@@ -45,8 +53,8 @@ pub const RESHARING_SSID_SIZE: usize = 32;
 /// attacks that could compromise hyperball security (e.g., injecting Q/2 ≈ 4.2M).
 pub const SUBSHARE_COEFF_BOUND: i32 = 500;
 
-/// Domain separator for SSID computation.
-const DOMAIN_RESHARING_SSID: &[u8] = b"RESHARING_SSID_V1";
+/// Domain separator for SSID computation (V2 includes version, suite, epoch).
+const DOMAIN_RESHARING_SSID: &[u8] = b"RESHARING_SSID_V2";
 
 /// Subset mask - a bitmask indicating which parties are in a subset.
 /// Uses u16 to support up to 16 parties.
@@ -181,6 +189,21 @@ impl ResharingConfig {
 				return Err(ResharingConfigError::SharePartyNotInOldCommittee { party_id });
 			}
 
+			// The share's stored subset masks are defined relative to its
+			// embedded DKG participant list, but the protocol maps mask bits
+			// to parties through `old_participants` (dealer assignment,
+			// subset enumeration, share lookup). The two lists must be
+			// identical, or this party would deal sub-share material derived
+			// from its real share under a different identity mapping than
+			// the one the shares were created with. The party-count check
+			// additionally rejects shares whose stored `total_parties` is
+			// inconsistent with their own participant list.
+			if share.dkg_participants() != &old_participant_list ||
+				share.total_parties() as usize != old_participant_list.len()
+			{
+				return Err(ResharingConfigError::OldCommitteeMismatch);
+			}
+
 			// Validate share's threshold matches old_threshold parameter
 			if threshold != old_threshold {
 				return Err(ResharingConfigError::ThresholdMismatch {
@@ -250,6 +273,17 @@ impl ResharingConfig {
 	/// Returns `Some` for OldOnly and Both roles, `None` for NewOnly.
 	pub fn existing_share(&self) -> Option<&PrivateKeyShare> {
 		self.existing_share.as_ref()
+	}
+
+	/// Securely erase the old committee share held in this config.
+	///
+	/// Called automatically when the protocol completes successfully. Integrators
+	/// should treat the returned new share as the only live key material after
+	/// a successful handoff.
+	pub fn zeroize_existing_share(&mut self) {
+		if let Some(mut share) = self.existing_share.take() {
+			share.zeroize();
+		}
 	}
 
 	/// Get old threshold config.
@@ -352,10 +386,17 @@ pub enum ResharingConfigError {
 	OldMemberMustProvideShare { party_id: ParticipantId },
 	/// Share's party_id is not in the old committee.
 	SharePartyNotInOldCommittee { party_id: ParticipantId },
+	/// Old committee does not exactly match the share's embedded DKG
+	/// participant list, so the share's subset masks would be interpreted
+	/// under a different identity mapping than the one they were created
+	/// with.
+	OldCommitteeMismatch,
 	/// Share's public key (TR) doesn't match the provided public key.
 	PublicKeyMismatch,
 	/// Share's threshold doesn't match the old_threshold parameter.
 	ThresholdMismatch { share_threshold: u32, config_threshold: u32 },
+	/// Signer configuration is missing the verifying key for a new committee member.
+	MissingVerifyingKey(ParticipantId),
 }
 
 impl fmt::Display for ResharingConfigError {
@@ -376,6 +417,9 @@ impl fmt::Display for ResharingConfigError {
 			ResharingConfigError::PartyNotInEitherCommittee { party_id } => {
 				write!(f, "Party {} is not in either old or new committee", party_id)
 			},
+			ResharingConfigError::MissingVerifyingKey(party_id) => {
+				write!(f, "Missing verifying key for new committee member {}", party_id)
+			},
 			ResharingConfigError::DuplicateParticipant => {
 				write!(f, "Duplicate participant ID in committee")
 			},
@@ -392,6 +436,9 @@ impl fmt::Display for ResharingConfigError {
 					"Share's party_id ({}) is not in the old committee participant list",
 					party_id
 				)
+			},
+			ResharingConfigError::OldCommitteeMismatch => {
+				write!(f, "Old committee does not match the share's embedded DKG participant list")
 			},
 			ResharingConfigError::PublicKeyMismatch => {
 				write!(f, "Share's public key hash (TR) does not match the provided public key")
@@ -416,25 +463,34 @@ impl fmt::Display for ResharingConfigError {
 /// This allows messages to be serialized/deserialized without knowing
 /// the specific round at deserialization time.
 ///
-/// # Protocol Rounds (5-round session-randomized protocol)
+/// # Protocol Rounds (session-randomized protocol with active-set liveness)
 ///
-/// - **Round 1**: Entropy commitment (old committee broadcasts `H(entropy)`)
-/// - **Round 2**: Entropy reveal (old committee reveals entropy, session seed computed)
+/// - **Round 1**: Entropy commitment / Ready (old committee broadcasts `H(entropy)`)
+/// - **Act proposal**: Leader proposes the active set `Act` of ready old members
+/// - **Round 2**: Entropy reveal (active members reveal entropy, session seed computed)
 /// - **Round 3**: Sub-share commitments (designated dealers broadcast `H(r_{I→J})`)
 /// - **Round 4**: Private delivery (dealers send `r_{I→J}` to new committee)
 /// - **Round 5**: Verification (share commitments, partial PKs)
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum ResharingMessage {
-	/// Round 1: Entropy commitment from old committee members.
+	/// Round 1: Entropy commitment from old committee members (doubles as Ready).
 	Round1(ResharingRound1EntropyCommitment),
-	/// Round 2: Entropy reveal from old committee members.
+	/// Round 2: Entropy reveal from active old committee members.
 	Round2(ResharingRound2EntropyReveal),
-	/// Round 3: Hash commitments to per-subset sub-shares from old committee.
+	/// Round 3: Hash commitments to per-subset sub-shares from active old committee.
 	Round3(ResharingRound3Broadcast),
 	/// Round 4: New share distributions to new committee.
 	Round4(ResharingRound4Message),
 	/// Round 5: Verification commitments from new committee.
 	Round5(ResharingRound5Broadcast),
+	/// Active-set proposal from the session leader (between Rounds 1 and 2).
+	///
+	/// Appended after the round variants to preserve Borsh variant indices of
+	/// the pre-existing wire format.
+	ActProposal(ResharingActProposal),
+	/// Round 6: Signed acceptance of the session transcript from new committee
+	/// members. Appended to preserve Borsh variant indices.
+	Accept(ResharingAccept),
 }
 
 impl ResharingMessage {
@@ -446,6 +502,8 @@ impl ResharingMessage {
 			ResharingMessage::Round3(msg) => &msg.ssid,
 			ResharingMessage::Round4(msg) => &msg.ssid,
 			ResharingMessage::Round5(msg) => &msg.ssid,
+			ResharingMessage::ActProposal(msg) => &msg.ssid,
+			ResharingMessage::Accept(msg) => &msg.ssid,
 		}
 	}
 
@@ -457,17 +515,24 @@ impl ResharingMessage {
 			ResharingMessage::Round3(msg) => msg.party_id,
 			ResharingMessage::Round4(msg) => msg.from_party_id,
 			ResharingMessage::Round5(msg) => msg.party_id,
+			ResharingMessage::ActProposal(msg) => msg.party_id,
+			ResharingMessage::Accept(msg) => msg.party_id,
 		}
 	}
 
 	/// Get the round number of this message.
+	///
+	/// The Act proposal sits between Rounds 1 and 2; it reports round 1
+	/// (it concludes the Ready phase that Round 1 commitments open).
 	pub fn round(&self) -> u8 {
 		match self {
 			ResharingMessage::Round1(_) => 1,
+			ResharingMessage::ActProposal(_) => 1,
 			ResharingMessage::Round2(_) => 2,
 			ResharingMessage::Round3(_) => 3,
 			ResharingMessage::Round4(_) => 4,
 			ResharingMessage::Round5(_) => 5,
+			ResharingMessage::Accept(_) => 6,
 		}
 	}
 }
@@ -497,6 +562,356 @@ pub struct ResharingRound1EntropyCommitment {
 	pub party_id: ParticipantId,
 	/// Hash commitment to the entropy: `SHAKE256("resharing-entropy-commit-v1" || entropy)`.
 	pub commitment: [u8; COMMITMENT_HASH_SIZE],
+}
+
+// ============================================================================
+// Active-Set Proposal (Ready-Round Liveness)
+// ============================================================================
+
+/// Active-set ("Act") proposal broadcast by the session leader.
+///
+/// Round 1 entropy commitments double as *Ready* signals: an old committee
+/// member that broadcasts its commitment is declaring itself online and
+/// willing to participate. The session leader (the lowest-ID new committee
+/// member) collects these and proposes the active set `Act` — the old
+/// committee members that will contribute entropy and deal sub-shares.
+///
+/// The leader proposes automatically once every old committee member has
+/// committed (fast path). If some old members are offline, the caller invokes
+/// [`ResharingProtocol::close_ready_window`](super::ResharingProtocol::close_ready_window)
+/// on the leader after a transport-level timeout, and the leader proposes
+/// `Act` = the members that committed so far.
+///
+/// # Validity
+///
+/// Every party independently verifies the proposal and aborts on violation:
+///
+/// - sender is the session leader,
+/// - `active_set` is strictly sorted, unique, and a subset of the old committee,
+/// - `|active_set| >= t_old`.
+///
+/// The threshold requirement guarantees every old RSS subset `I` (size
+/// `n_old - t_old + 1`) intersects `Act`, so a live dealer exists for every
+/// subset: dealers are reassigned to the lowest-ID member of `I ∩ Act`.
+///
+/// # Trust in the leader
+///
+/// The leader cannot break safety: it cannot forge Ready signals (parties
+/// only advance once they have seen the Round 1 commitment of every `Act`
+/// member), and the deterministic sub-share derivation means dealer *identity*
+/// does not affect the derived shares. A malicious leader can at most deny
+/// service (abort/stall) or select *which* committed members participate —
+/// the session seed remains unbiased because `|Act| >= t_old` guarantees at
+/// least one honest member whose entropy is unpredictable at proposal time
+/// (commitments hide entropy until Round 2). Equivocating proposals put the
+/// receiving parties in different sessions; their deterministic sub-share
+/// commitments then disagree and the protocol aborts.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct ResharingActProposal {
+	/// Session identifier binding this message to the resharing session.
+	pub ssid: [u8; RESHARING_SSID_SIZE],
+	/// Party ID of the sender (must be the session leader).
+	pub party_id: ParticipantId,
+	/// Proposed active set: old committee members that will contribute entropy
+	/// and deal sub-shares. Strictly sorted, unique, `|active_set| >= t_old`.
+	pub active_set: Vec<ParticipantId>,
+}
+
+// ============================================================================
+// Round 6: Signed Transcript Acceptance
+// ============================================================================
+
+/// Maximum accepted signature length in bytes (bounds deserialization).
+///
+/// Large enough for ML-DSA-87 signatures (4627 bytes) with headroom; small
+/// enough to bound memory on malformed input.
+pub const MAX_ACCEPT_SIGNATURE_LEN: usize = 8192;
+
+/// Round 6 broadcast: a new committee member's signed acceptance of the
+/// session transcript.
+///
+/// After completing all Round 5 verifications (sub-share commitment checks,
+/// new-share consistency, recovered-partial norm guard, and public-key
+/// preservation), each new committee member signs the session's transcript
+/// hash with its long-term key (see
+/// [`TranscriptSigner`](crate::keygen::dkg::TranscriptSigner)) and broadcasts
+/// the signature.
+///
+/// # What agreement on the transcript hash provides
+///
+/// The transcript hash covers the active set, the session seed, every active
+/// member's Round 3 dealer commitments, and every required Round 5 broadcast.
+/// Each party verifies every received acceptance against its *own* computed
+/// transcript hash, so a valid set of acceptances from the full new committee
+/// implies all of them observed identical protocol broadcasts. A dealer that
+/// equivocates (sends different Round 3/5 broadcasts to different parties)
+/// causes signature verification to fail on at least one honest party, which
+/// then aborts.
+///
+/// The signature is over `SHAKE256("resharing-accept-v3" || ssid ||
+/// transcript_hash || len(active_set) || active_set || len(new_committee) ||
+/// new_committee)` (see [`compute_accept_hash`]), domain-separating
+/// acceptances from any other use of the same long-term key and binding the
+/// certificate's `active_set` and `new_committee`.
+#[derive(Debug, Clone, BorshSerialize)]
+pub struct ResharingAccept {
+	/// Session identifier binding this message to the resharing session.
+	pub ssid: [u8; RESHARING_SSID_SIZE],
+	/// Party ID of the sender (must be a new committee member).
+	pub party_id: ParticipantId,
+	/// Signature over the acceptance hash (raw bytes, scheme-dependent).
+	pub signature: Vec<u8>,
+}
+
+impl BorshDeserialize for ResharingAccept {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; RESHARING_SSID_SIZE]>::deserialize_reader(reader)?;
+		let party_id = ParticipantId::deserialize_reader(reader)?;
+		let sig_len = u32::deserialize_reader(reader)? as usize;
+		if sig_len > MAX_ACCEPT_SIGNATURE_LEN {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingAccept.signature exceeds MAX_ACCEPT_SIGNATURE_LEN",
+			));
+		}
+		// Chunked read: don't allocate the claimed length up front, so a
+		// truncated body cannot force an allocation larger than what was
+		// actually delivered (same pattern as the certificate accepts).
+		let signature = crate::broadcast::read_length_prefixed(reader, sig_len)?;
+		Ok(Self { ssid, party_id, signature })
+	}
+}
+
+/// Long-term-key signing configuration for the resharing protocol.
+///
+/// Mirrors the DKG's signer configuration: this party's signer plus the
+/// verifying keys of (at least) every new committee member. Only new
+/// committee members produce acceptance signatures, but every participant
+/// verifies them, so every participant needs the new committee's keys.
+#[derive(Clone)]
+pub struct ResharingSignerConfig<S: crate::keygen::dkg::TranscriptSigner> {
+	/// This party's signer for transcript acceptance (used only if this party
+	/// is in the new committee).
+	pub my_signer: S,
+	/// Verifying keys, keyed by participant ID. Must cover every new
+	/// committee member; extra entries are ignored.
+	pub verifying_keys: BTreeMap<ParticipantId, S::PublicKey>,
+}
+
+impl<S: crate::keygen::dkg::TranscriptSigner> ResharingSignerConfig<S> {
+	/// Create a signer configuration, checking that `verifying_keys` covers
+	/// every new committee member.
+	pub fn new(
+		my_signer: S,
+		verifying_keys: BTreeMap<ParticipantId, S::PublicKey>,
+		new_participants: &[ParticipantId],
+	) -> Result<Self, ResharingConfigError> {
+		for p in new_participants {
+			if !verifying_keys.contains_key(p) {
+				return Err(ResharingConfigError::MissingVerifyingKey(*p));
+			}
+		}
+		Ok(Self { my_signer, verifying_keys })
+	}
+}
+
+/// Publicly verifiable certificate of a completed resharing session.
+///
+/// The no-ZK analog of a handoff certificate: it attests *process integrity*
+/// and *public-key preservation* — every new committee member verified its
+/// shares, observed the same transcript, and confirmed the reshared key still
+/// reconstructs the original public key. It does **not** prove statements
+/// about share distributions (that would require the deferred ZK machinery).
+///
+/// Verification requires only the new committee's verifying keys — no share
+/// material. A verifier that additionally holds the broadcast transcript can
+/// recompute `transcript_hash` and the `Σ_J t_J^new = T` public-key check
+/// independently.
+///
+/// The certificate is self-describing: `new_committee` names the complete set
+/// of required acceptors and is bound into the acceptance hash, so
+/// [`verify`](Self::verify) derives the required signer set from the signed
+/// certificate itself rather than trusting the caller to supply it.
+#[derive(Debug, Clone, BorshSerialize)]
+pub struct ResharingCertificate {
+	/// Session identifier of the completed session.
+	pub ssid: [u8; RESHARING_SSID_SIZE],
+	/// The active set of old committee members that dealt in this session.
+	pub active_set: Vec<ParticipantId>,
+	/// The new committee members, strictly sorted ascending. Every member
+	/// must contribute an acceptance signature. Bound into the acceptance
+	/// hash, so it cannot be rewritten without invalidating the signatures.
+	pub new_committee: Vec<ParticipantId>,
+	/// Hash of the session transcript (active set, session seed, Round 3
+	/// dealer commitments, Round 5 broadcasts).
+	pub transcript_hash: [u8; COMMITMENT_HASH_SIZE],
+	/// Acceptance signatures from every new committee member, keyed by
+	/// participant ID.
+	pub accepts: BTreeMap<ParticipantId, Vec<u8>>,
+}
+
+impl BorshDeserialize for ResharingCertificate {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; RESHARING_SSID_SIZE]>::deserialize_reader(reader)?;
+
+		// active_set is at most one entry per old committee member.
+		let active_len = u32::deserialize_reader(reader)? as usize;
+		if active_len > MAX_PARTIES as usize {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingCertificate.active_set exceeds MAX_PARTIES",
+			));
+		}
+		let mut active_set = Vec::with_capacity(active_len);
+		for _ in 0..active_len {
+			active_set.push(ParticipantId::deserialize_reader(reader)?);
+		}
+
+		// new_committee is at most one entry per new committee member.
+		let committee_len = u32::deserialize_reader(reader)? as usize;
+		if committee_len > MAX_PARTIES as usize {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingCertificate.new_committee exceeds MAX_PARTIES",
+			));
+		}
+		let mut new_committee = Vec::with_capacity(committee_len);
+		for _ in 0..committee_len {
+			new_committee.push(ParticipantId::deserialize_reader(reader)?);
+		}
+
+		let transcript_hash = <[u8; COMMITMENT_HASH_SIZE]>::deserialize_reader(reader)?;
+
+		// accepts holds at most one signature per new committee member.
+		let accepts_len = u32::deserialize_reader(reader)? as usize;
+		if accepts_len > MAX_PARTIES as usize {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingCertificate.accepts exceeds MAX_PARTIES",
+			));
+		}
+		let mut accepts = BTreeMap::new();
+		for _ in 0..accepts_len {
+			let party_id = ParticipantId::deserialize_reader(reader)?;
+			let sig_len = u32::deserialize_reader(reader)? as usize;
+			if sig_len > MAX_ACCEPT_SIGNATURE_LEN {
+				return Err(borsh::io::Error::new(
+					borsh::io::ErrorKind::InvalidData,
+					"ResharingCertificate accept signature exceeds MAX_ACCEPT_SIGNATURE_LEN",
+				));
+			}
+			// Read incrementally rather than pre-allocating the claimed length.
+			let signature = crate::broadcast::read_length_prefixed(reader, sig_len)?;
+			accepts.insert(party_id, signature);
+		}
+
+		Ok(Self { ssid, active_set, new_committee, transcript_hash, accepts })
+	}
+}
+
+impl ResharingCertificate {
+	/// Verify the certificate: every member of the certificate's own
+	/// `new_committee` has a valid acceptance signature over this
+	/// certificate's `ssid`, `transcript_hash`, `active_set`, and
+	/// `new_committee`.
+	///
+	/// The required signer set comes from the certificate itself (where it is
+	/// bound into the signed acceptance hash), not from a caller-supplied
+	/// list, so a caller cannot accidentally weaken verification by passing a
+	/// truncated or empty committee.
+	///
+	/// # Security
+	///
+	/// `verifying_keys` is the one remaining trusted input: it MUST be
+	/// exactly the authentic key map of the expected new committee, obtained
+	/// from a trusted source (e.g., the verifier's own configuration or key
+	/// registry for the handoff). Verification fails unless the key map's key
+	/// set equals `new_committee` exactly — a superset (e.g., an all-parties
+	/// registry) is rejected, because it would let any subset of key holders
+	/// mint a certificate naming only themselves. An empty or non-canonical
+	/// (unsorted/duplicated) committee is rejected outright.
+	pub fn verify<S: crate::keygen::dkg::TranscriptSigner>(
+		&self,
+		verifying_keys: &BTreeMap<ParticipantId, S::PublicKey>,
+	) -> bool {
+		// An empty committee would make the `.all(...)` below vacuously true;
+		// no signature would be checked, so an unsigned certificate would
+		// verify.
+		if self.new_committee.is_empty() {
+			return false;
+		}
+		// Canonical form: strictly ascending (also rejects duplicates), so a
+		// padded list cannot satisfy the length check below.
+		if !self.new_committee.windows(2).all(|w| w[0] < w[1]) {
+			return false;
+		}
+		// The caller's trusted key map must match the committee exactly:
+		// together with the membership check in the loop below, equal lengths
+		// mean equal sets.
+		if verifying_keys.len() != self.new_committee.len() {
+			return false;
+		}
+		let accept_hash = compute_accept_hash(
+			&self.ssid,
+			&self.transcript_hash,
+			&self.active_set,
+			&self.new_committee,
+		);
+		self.new_committee
+			.iter()
+			.all(|p| match (verifying_keys.get(p), self.accepts.get(p)) {
+				(Some(pk), Some(sig)) => S::verify_bytes(pk, &accept_hash, sig),
+				_ => false,
+			})
+	}
+}
+
+/// Domain separator for the acceptance hash.
+///
+/// Bumped to v2 when `active_set` was folded into the hash, and to v3 when
+/// `new_committee` was; a signature under an older domain can therefore never
+/// be reinterpreted as a newer acceptance.
+const ACCEPT_DOMAIN: &[u8] = b"resharing-accept-v3";
+
+/// Compute the 32-byte hash that new committee members sign to accept the
+/// session transcript:
+/// `SHAKE256("resharing-accept-v3" || ssid || transcript_hash || len(active_set) || active_set ||
+/// len(new_committee) || new_committee)`.
+///
+/// `active_set` and `new_committee` are bound directly (in addition to being
+/// committed inside `transcript_hash` and the SSID respectively) so that a
+/// party holding *only* the certificate — which cannot recompute
+/// `transcript_hash` or open the SSID — still authenticates the certificate's
+/// explicit fields. Without this, `active_set` or `new_committee` could be
+/// rewritten while `ssid`/`transcript_hash`/`accepts` stayed valid, and the
+/// tampered certificate would still verify.
+///
+/// Callers pass both lists in the same order stored in the certificate (the
+/// protocol keeps them strictly sorted), so honest signers and verifiers hash
+/// an identical byte string.
+pub fn compute_accept_hash(
+	ssid: &[u8; RESHARING_SSID_SIZE],
+	transcript_hash: &[u8; COMMITMENT_HASH_SIZE],
+	active_set: &[ParticipantId],
+	new_committee: &[ParticipantId],
+) -> [u8; 32] {
+	use qp_rusty_crystals_dilithium::fips202;
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, ACCEPT_DOMAIN);
+	fips202::shake256_absorb(&mut state, ssid);
+	fips202::shake256_absorb(&mut state, transcript_hash);
+	fips202::shake256_absorb(&mut state, &(active_set.len() as u32).to_le_bytes());
+	for &p in active_set {
+		fips202::shake256_absorb(&mut state, &p.to_le_bytes());
+	}
+	fips202::shake256_absorb(&mut state, &(new_committee.len() as u32).to_le_bytes());
+	for &p in new_committee {
+		fips202::shake256_absorb(&mut state, &p.to_le_bytes());
+	}
+	fips202::shake256_finalize(&mut state);
+	let mut out = [0u8; 32];
+	fips202::shake256_squeeze(&mut out, &mut state);
+	out
 }
 
 // ============================================================================
@@ -535,12 +950,13 @@ pub struct ResharingRound2EntropyReveal {
 
 /// Round 3 broadcast from old committee members.
 ///
-/// Each old committee member broadcasts hash commitments to the per-subset
-/// "sub-share" contributions they will privately deliver in Round 4. A party
-/// only commits to subsets where they are the *designated dealer* (the
-/// lowest-ID old participant in the subset). Other members of the same old
-/// subset independently recompute the same contributions and verify the
-/// commitment in Round 5.
+/// Each active old committee member broadcasts hash commitments to the
+/// per-subset "sub-share" contributions they will privately deliver in Round 4.
+/// A party only commits to subsets where they are the *designated dealer* (the
+/// lowest-ID *active* old participant in the subset, `min(I ∩ Act)`). Other
+/// active members of the same old subset independently recompute the same
+/// contributions and verify the commitments before Round 4 private delivery
+/// begins.
 ///
 /// # Security
 ///
@@ -701,17 +1117,24 @@ impl NewShareData {
 	///
 	/// Returns `true` if all coefficients satisfy `|coeff| <= bound`.
 	/// This is used to reject malicious sub-shares with excessively large coefficients.
+	///
+	/// The magnitude is computed with [`i32::unsigned_abs`], which returns a
+	/// `u32` and therefore handles `i32::MIN` correctly. Using `i32::abs` here
+	/// would panic on `i32::MIN` in overflow-checking builds and, worse, wrap
+	/// back to a negative value in release builds — letting a dealer's
+	/// `i32::MIN` coefficient slip past this trust-boundary check.
 	pub fn coefficients_within_bound(&self, bound: i32) -> bool {
+		let bound = bound.max(0) as u32;
 		for poly in &self.s1 {
 			for &coeff in poly {
-				if coeff.abs() > bound {
+				if coeff.unsigned_abs() > bound {
 					return false;
 				}
 			}
 		}
 		for poly in &self.s2 {
 			for &coeff in poly {
-				if coeff.abs() > bound {
+				if coeff.unsigned_abs() > bound {
 					return false;
 				}
 			}
@@ -721,17 +1144,19 @@ impl NewShareData {
 
 	/// Find the maximum absolute coefficient value.
 	///
-	/// Useful for debugging and diagnostics.
-	pub fn max_abs_coefficient(&self) -> i32 {
-		let mut max_abs = 0i32;
+	/// Useful for debugging and diagnostics. Returns a `u32` because the
+	/// magnitude of `i32::MIN` (2_147_483_648) does not fit in an `i32`; the
+	/// magnitude is computed with the non-overflowing [`i32::unsigned_abs`].
+	pub fn max_abs_coefficient(&self) -> u32 {
+		let mut max_abs = 0u32;
 		for poly in &self.s1 {
 			for &coeff in poly {
-				max_abs = max_abs.max(coeff.abs());
+				max_abs = max_abs.max(coeff.unsigned_abs());
 			}
 		}
 		for poly in &self.s2 {
 			for &coeff in poly {
-				max_abs = max_abs.max(coeff.abs());
+				max_abs = max_abs.max(coeff.unsigned_abs());
 			}
 		}
 		max_abs
@@ -747,6 +1172,17 @@ impl Default for NewShareData {
 // ============================================================================
 // Round 5: Verification
 // ============================================================================
+
+/// Maximum accepted `error_message` length in bytes (bounds deserialization).
+///
+/// Genuine Round 5 error messages are short, locally generated
+/// `Display`-formatted protocol errors; 1 KiB is generous headroom. Without a
+/// bound, the `Option<String>` field is the one variable-length resharing
+/// field whose length prefix an attacker controls without limit: a ~90-byte
+/// broadcast claiming a huge length forces every recipient to allocate up to
+/// borsh's internal 1 MiB first chunk before detecting truncation, and a
+/// fully-delivered payload of up to 4 GiB would be accepted and retained.
+pub const MAX_ERROR_MESSAGE_LEN: usize = 1024;
 
 /// Round 5 broadcast.
 ///
@@ -817,7 +1253,41 @@ impl BorshDeserialize for ResharingRound5Broadcast {
 		}
 
 		let success = bool::deserialize_reader(reader)?;
-		let error_message = Option::<String>::deserialize_reader(reader)?;
+
+		// Read error_message with a bound check. Borsh's default Option<String>
+		// path would trust the attacker-controlled u32 length prefix (allocating
+		// up to its internal 1 MiB chunk on a truncated payload, or accepting a
+		// fully-delivered string of up to 4 GiB), so mirror the Option flag
+		// encoding manually and bound the length before reading, using the
+		// chunked read_length_prefixed path like every other variable-length
+		// resharing field.
+		let error_message = match u8::deserialize_reader(reader)? {
+			0 => None,
+			1 => {
+				let msg_len = u32::deserialize_reader(reader)? as usize;
+				if msg_len > MAX_ERROR_MESSAGE_LEN {
+					return Err(borsh::io::Error::new(
+						borsh::io::ErrorKind::InvalidData,
+						"ResharingRound5Broadcast.error_message exceeds MAX_ERROR_MESSAGE_LEN",
+					));
+				}
+				let bytes = crate::broadcast::read_length_prefixed(reader, msg_len)?;
+				Some(String::from_utf8(bytes).map_err(|_| {
+					borsh::io::Error::new(
+						borsh::io::ErrorKind::InvalidData,
+						"ResharingRound5Broadcast.error_message is not valid UTF-8",
+					)
+				})?)
+			},
+			flag =>
+				return Err(borsh::io::Error::new(
+					borsh::io::ErrorKind::InvalidData,
+					alloc::format!(
+						"Invalid Option representation: {}. The first byte must be 0 or 1",
+						flag
+					),
+				)),
+		};
 
 		Ok(Self { ssid, party_id, share_commitments, partial_pks, success, error_message })
 	}
@@ -837,6 +1307,10 @@ pub struct ResharingOutput {
 	pub public_key: PublicKey,
 	/// The new threshold configuration.
 	pub new_config: ThresholdConfig,
+	/// Certificate of the completed session: acceptance signatures from every
+	/// new committee member over the agreed transcript hash. Verifiable by any
+	/// third party holding the new committee's verifying keys.
+	pub certificate: ResharingCertificate,
 }
 
 // ============================================================================
@@ -852,7 +1326,10 @@ pub struct ResharingOutput {
 ///
 /// ```text
 /// SSID = SHAKE256(
-///     "RESHARING_SSID_V1" ||
+///     "RESHARING_SSID_V2" ||
+///     protocol_version (u32 LE) ||
+///     suite_id (u32 LE) ||
+///     epoch (u64 LE) ||
 ///     old_threshold (u32 LE) ||
 ///     old_n (u32 LE) ||
 ///     old_num_participants (u32 LE) ||
@@ -868,6 +1345,10 @@ pub struct ResharingOutput {
 ///
 /// # Arguments
 ///
+/// * `protocol_version` - Wire/logic version ([`RESHARING_PROTOCOL_VERSION`])
+/// * `suite_id` - Cryptographic suite ([`RESHARING_SUITE_ML_DSA_87`])
+/// * `epoch` - Monotonic handoff counter for this public key (0 for the first resharing after
+///   keygen; increment for each subsequent handoff)
 /// * `old_threshold` - Threshold of the old committee
 /// * `old_n` - Total parties in the old committee
 /// * `old_participants` - Participant IDs in the old committee
@@ -876,7 +1357,11 @@ pub struct ResharingOutput {
 /// * `new_participants` - Participant IDs in the new committee
 /// * `public_key` - The public key being reshared
 /// * `session_nonce` - Unique nonce for this session (e.g., from transport layer)
+#[allow(clippy::too_many_arguments)] // flat list of independent hash inputs
 pub fn compute_resharing_ssid(
+	protocol_version: u32,
+	suite_id: u32,
+	epoch: u64,
 	old_threshold: u32,
 	old_n: u32,
 	old_participants: &[ParticipantId],
@@ -893,6 +1378,11 @@ pub fn compute_resharing_ssid(
 
 	// Domain separator
 	fips202::shake256_absorb(&mut state, DOMAIN_RESHARING_SSID);
+
+	// Protocol binding (version, suite, epoch)
+	fips202::shake256_absorb(&mut state, &protocol_version.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &suite_id.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &epoch.to_le_bytes());
 
 	// Old committee configuration
 	fips202::shake256_absorb(&mut state, &old_threshold.to_le_bytes());
@@ -945,8 +1435,9 @@ mod tests {
 	const TEST_SSID: [u8; RESHARING_SSID_SIZE] = [0xABu8; RESHARING_SSID_SIZE];
 
 	fn make_test_public_key() -> PublicKey {
-		// Create a dummy public key for testing
-		let bytes = [0u8; 2592];
+		// Dummy public key for testing. Must have a nonzero t1 region:
+		// import paths reject the degenerate all-zero t1 key.
+		let bytes = [0x42u8; 2592];
 		PublicKey::from_bytes(&bytes).unwrap()
 	}
 
@@ -1137,6 +1628,68 @@ mod tests {
 		assert_eq!(resharing_config.role, ResharingRole::Both);
 		assert!(resharing_config.role.is_old_committee());
 		assert!(resharing_config.role.is_new_committee());
+	}
+
+	/// Security review: the caller-supplied old committee must exactly match
+	/// the share's embedded DKG participant list. The share's subset masks
+	/// are defined relative to that embedded list, but the protocol maps
+	/// mask bits to parties through `config.old_participants()` (dealer
+	/// assignment, subset enumeration, share lookup). If the two lists
+	/// differ, an old member deals Round 4 sub-share material derived from
+	/// its real share under the wrong identity mapping before any later
+	/// consistency check can fire.
+	#[test]
+	fn test_config_rejects_old_committee_not_matching_share_dkg_list() {
+		use crate::{generate_with_dealer, ThresholdConfig};
+
+		let config = ThresholdConfig::new(2, 3).expect("valid config");
+		let seed = [42u8; 32];
+		// Dealer keygen embeds dkg_participants = [0, 1, 2] in every share.
+		let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+		// Same size, victim's ID present, threshold and TR match — but two
+		// committee members are swapped for attacker-chosen IDs.
+		let result = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![1, 5, 6],
+			2,
+			vec![1, 5, 6],
+			1,
+			public_key.clone(),
+		);
+		assert!(
+			matches!(result, Err(ResharingConfigError::OldCommitteeMismatch)),
+			"old committee differing from the share's DKG list must be rejected, got {:?}",
+			result.map(|_| ())
+		);
+
+		// A superset also shifts the mask-bit-to-party mapping.
+		let result = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2, 3],
+			2,
+			vec![0, 1, 2, 3],
+			1,
+			public_key.clone(),
+		);
+		assert!(
+			matches!(result, Err(ResharingConfigError::OldCommitteeMismatch)),
+			"old committee superset of the share's DKG list must be rejected"
+		);
+
+		// The exact DKG committee still works.
+		let result = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key.clone(),
+		);
+		assert!(result.is_ok(), "matching old committee must be accepted");
 	}
 
 	#[test]
@@ -1452,5 +2005,163 @@ mod tests {
 		let truncated = &serialized[..serialized.len() / 2];
 		let result: Result<NewShareData, _> = borsh::from_slice(truncated);
 		assert!(result.is_err(), "Should reject truncated data");
+	}
+
+	#[test]
+	fn test_resharing_ssid_binds_version_suite_and_epoch() {
+		let pk = make_test_public_key();
+		let nonce = [0x55u8; 32];
+		let old = vec![0u32, 1u32, 2u32];
+		let newp = vec![0u32, 1u32, 3u32];
+
+		let base = |epoch: u64| {
+			compute_resharing_ssid(
+				RESHARING_PROTOCOL_VERSION,
+				RESHARING_SUITE_ML_DSA_87,
+				epoch,
+				2,
+				3,
+				&old,
+				2,
+				3,
+				&newp,
+				&pk,
+				&nonce,
+			)
+		};
+
+		assert_ne!(base(0), base(1), "epoch must change the SSID");
+
+		let other_suite = compute_resharing_ssid(
+			RESHARING_PROTOCOL_VERSION,
+			RESHARING_SUITE_ML_DSA_87 + 1,
+			0,
+			2,
+			3,
+			&old,
+			2,
+			3,
+			&newp,
+			&pk,
+			&nonce,
+		);
+		assert_ne!(base(0), other_suite, "suite must change the SSID");
+	}
+
+	#[test]
+	fn test_resharing_certificate_roundtrip_within_bounds() {
+		let mut accepts = BTreeMap::new();
+		accepts.insert(1u32, alloc::vec![9u8; 16]);
+		accepts.insert(2u32, alloc::vec![3u8; 4627]);
+
+		let cert = ResharingCertificate {
+			ssid: TEST_SSID,
+			active_set: alloc::vec![0, 1, 2],
+			new_committee: alloc::vec![1, 2],
+			transcript_hash: [7u8; COMMITMENT_HASH_SIZE],
+			accepts,
+		};
+
+		let bytes = borsh::to_vec(&cert).unwrap();
+		let back: ResharingCertificate = borsh::from_slice(&bytes).unwrap();
+		assert_eq!(back.active_set, cert.active_set);
+		assert_eq!(back.new_committee, cert.new_committee);
+		assert_eq!(back.accepts, cert.accepts);
+		assert_eq!(back.transcript_hash, cert.transcript_hash);
+	}
+
+	/// A fully-present certificate whose `active_set` count exceeds `MAX_PARTIES`
+	/// must be rejected. Before the bounded deserializer this parsed successfully
+	/// (borsh would happily build the oversized collection).
+	#[test]
+	fn test_resharing_certificate_rejects_oversized_active_set() {
+		let huge = MAX_PARTIES + 100;
+
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&[0u8; RESHARING_SSID_SIZE]); // ssid
+		payload.extend_from_slice(&huge.to_le_bytes()); // active_set len
+		for i in 0..huge {
+			payload.extend_from_slice(&i.to_le_bytes()); // ParticipantId entries
+		}
+		payload.extend_from_slice(&0u32.to_le_bytes()); // new_committee len = 0
+		payload.extend_from_slice(&[0u8; COMMITMENT_HASH_SIZE]); // transcript_hash
+		payload.extend_from_slice(&0u32.to_le_bytes()); // accepts len = 0
+
+		let result: Result<ResharingCertificate, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "active_set exceeding MAX_PARTIES must be rejected");
+	}
+
+	/// Same, for the `new_committee` list count.
+	#[test]
+	fn test_resharing_certificate_rejects_oversized_new_committee() {
+		let huge = MAX_PARTIES + 100;
+
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&[0u8; RESHARING_SSID_SIZE]); // ssid
+		payload.extend_from_slice(&0u32.to_le_bytes()); // active_set len = 0
+		payload.extend_from_slice(&huge.to_le_bytes()); // new_committee len
+		for i in 0..huge {
+			payload.extend_from_slice(&i.to_le_bytes()); // ParticipantId entries
+		}
+		payload.extend_from_slice(&[0u8; COMMITMENT_HASH_SIZE]); // transcript_hash
+		payload.extend_from_slice(&0u32.to_le_bytes()); // accepts len = 0
+
+		let result: Result<ResharingCertificate, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "new_committee exceeding MAX_PARTIES must be rejected");
+	}
+
+	/// Same, for the `accepts` map count.
+	#[test]
+	fn test_resharing_certificate_rejects_oversized_accepts() {
+		let huge = MAX_PARTIES + 50;
+
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&[0u8; RESHARING_SSID_SIZE]); // ssid
+		payload.extend_from_slice(&0u32.to_le_bytes()); // active_set len = 0
+		payload.extend_from_slice(&0u32.to_le_bytes()); // new_committee len = 0
+		payload.extend_from_slice(&[0u8; COMMITMENT_HASH_SIZE]); // transcript_hash
+		payload.extend_from_slice(&huge.to_le_bytes()); // accepts len
+		for i in 0..huge {
+			payload.extend_from_slice(&i.to_le_bytes()); // key: ParticipantId
+			payload.extend_from_slice(&0u32.to_le_bytes()); // value: empty signature
+		}
+
+		let result: Result<ResharingCertificate, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "accepts exceeding MAX_PARTIES must be rejected");
+	}
+
+	/// Regression test (security review): a `ResharingAccept` whose signature
+	/// length prefix claims the maximum but whose body is truncated must fail
+	/// deserialization without allocating the full claimed length up front
+	/// (the chunked `read_length_prefixed` path, mirroring the certificate
+	/// accepts and Round 2/3 broadcasts).
+	#[test]
+	fn test_resharing_accept_rejects_truncated_signature() {
+		// Honest round-trip still works.
+		let accept =
+			ResharingAccept { ssid: TEST_SSID, party_id: 3, signature: alloc::vec![0xAAu8; 4627] };
+		let bytes = borsh::to_vec(&accept).unwrap();
+		let back: ResharingAccept = borsh::from_slice(&bytes).unwrap();
+		assert_eq!(back.party_id, accept.party_id);
+		assert_eq!(back.signature, accept.signature);
+
+		// Claim the maximum signature length but deliver only a few bytes.
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&TEST_SSID); // ssid
+		payload.extend_from_slice(&3u32.to_le_bytes()); // party_id
+		payload.extend_from_slice(&(MAX_ACCEPT_SIGNATURE_LEN as u32).to_le_bytes()); // claimed len
+		payload.extend_from_slice(&[0xBBu8; 8]); // truncated body
+
+		let result: Result<ResharingAccept, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "truncated accept signature must be rejected");
+
+		// A length above the maximum is rejected outright.
+		let mut oversized = Vec::new();
+		oversized.extend_from_slice(&TEST_SSID);
+		oversized.extend_from_slice(&3u32.to_le_bytes());
+		oversized.extend_from_slice(&((MAX_ACCEPT_SIGNATURE_LEN + 1) as u32).to_le_bytes());
+
+		let result: Result<ResharingAccept, _> = borsh::from_slice(&oversized);
+		assert!(result.is_err(), "oversized accept signature length must be rejected");
 	}
 }

@@ -28,10 +28,18 @@
 //!
 //! # Channel Requirements
 //!
-//! **IMPORTANT: `SendPrivate` messages (Round 1 K_S distribution) require an
-//! authenticated and encrypted channel.**
+//! All DKG messages require transport-level sender authentication:
 //!
-//! The caller must ensure that when handling `DkgAction::SendPrivate(to, data)`:
+//! | Action | Transport requirement |
+//! |--------|----------------------|
+//! | `DkgAction::SendMany` (Rounds 1–4 broadcasts) | Authenticated broadcast (integrity + sender authentication) |
+//! | `DkgAction::SendPrivate` (Round 1 K_S distribution) | **Authenticated encryption** (confidentiality + integrity + sender authentication) |
+//!
+//! The `from` argument to [`Dkg::message`] is trusted: it MUST be the
+//! transport-authenticated identity of the sender, never derived from
+//! attacker-controllable packet contents.
+//!
+//! For `DkgAction::SendPrivate(to, data)` the caller must ensure:
 //! - **Confidentiality**: The message is encrypted so only the recipient can read it
 //! - **Authenticity**: The recipient can verify the sender's identity
 //! - **Integrity**: The message cannot be modified in transit
@@ -39,6 +47,15 @@
 //! Failure to provide these guarantees compromises the threshold scheme's security:
 //! - Without encryption, an eavesdropper learns K_S and can compute subset shares
 //! - Without authentication, an attacker could inject fake K_S values
+//!
+//! For `DkgAction::SendMany` broadcasts, confidentiality is not needed (the
+//! payloads are public), but authenticity and integrity are: round buffers
+//! keep the first message received per sender (a memory-exhaustion defense),
+//! so on an unauthenticated transport an attacker who injects a forged
+//! broadcast first occupies that participant's slot and the honest broadcast
+//! is ignored. The forgery is detected by commitment or transcript
+//! verification, but only as a late abort — repeated injection denies
+//! completion of every session.
 //!
 //! # Security Properties and Limitations
 //!
@@ -85,8 +102,8 @@
 //!
 //! The hyperball sampling parameters are pre-computed to accommodate this wider
 //! distribution with substantial safety margins (>99% headroom in tested
-//! configurations). The `coefficient_stats()` method on `PrivateKeyShare` can
-//! be used to monitor coefficient ranges if desired.
+//! configurations). Coefficient ranges are monitored by the analysis helpers
+//! in the integration test suite (see `threshold/tests/resharing_tests.rs`).
 //!
 //! # Usage
 //!
@@ -236,7 +253,7 @@ mod tests {
 	/// Test session nonce for DKG tests.
 	const TEST_SESSION_NONCE: [u8; 32] = [0xDF; 32];
 
-	#[derive(Clone, Debug)]
+	#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 	struct TestSigner {
 		id: u32,
 	}

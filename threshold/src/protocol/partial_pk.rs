@@ -30,12 +30,12 @@ pub fn compute_partial_pk_t(
 
 	let mut s1_pv = polyvec::Polyvecl::default();
 	for (i, poly_coeffs) in s1.iter().enumerate() {
-		s1_pv.vec[i].coeffs.copy_from_slice(poly_coeffs);
+		s1_pv.vec[i].coeffs_mut().copy_from_slice(poly_coeffs);
 	}
 
 	let mut s2_pv = polyvec::Polyveck::default();
 	for (i, poly_coeffs) in s2.iter().enumerate() {
-		s2_pv.vec[i].coeffs.copy_from_slice(poly_coeffs);
+		s2_pv.vec[i].coeffs_mut().copy_from_slice(poly_coeffs);
 	}
 
 	let mut s1_hat = s1_pv.clone();
@@ -43,6 +43,10 @@ pub fn compute_partial_pk_t(
 
 	let mut t = polyvec::Polyveck::default();
 	polyvec::matrix_pointwise_montgomery(&mut t, &mat, &s1_hat);
+	// The accumulated dot products can reach L*Q in absolute value; the
+	// inverse NTT requires coefficients below Q (same as the keygen flow in
+	// dilithium's sign.rs).
+	polyvec::k_reduce(&mut t);
 	polyvec::k_invntt_tomont(&mut t);
 	polyvec::k_add(&mut t, &s2_pv);
 	polyvec::k_reduce(&mut t);
@@ -50,9 +54,20 @@ pub fn compute_partial_pk_t(
 
 	let mut t_coeffs = [[0i32; N as usize]; K];
 	for (i, poly) in t.vec.iter().enumerate() {
-		t_coeffs[i].copy_from_slice(&poly.coeffs);
+		t_coeffs[i].copy_from_slice(poly.coeffs());
 	}
 	t_coeffs
+}
+
+/// Error returned when combining partial public keys fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackCombinedPkError {
+	/// A partial-PK coefficient was outside the canonical range `[0, Q)`.
+	///
+	/// Legitimate partial PKs come from [`compute_partial_pk_t`], whose output
+	/// is always reduced into `[0, Q)`. A value outside that range indicates a
+	/// malformed or attacker-supplied contribution.
+	CoefficientOutOfRange,
 }
 
 /// Sum a collection of partial-PK polynomial vectors and pack into the canonical
@@ -60,7 +75,20 @@ pub fn compute_partial_pk_t(
 ///
 /// Each partial PK is a fixed-size `[[i32; N]; K]` array, guaranteeing the correct
 /// shape at compile time.
-pub fn pack_combined_pk<'a, I>(rho: &[u8; 32], partial_ts: I) -> PublicKey
+///
+/// # Coefficient validation
+///
+/// Every coefficient must already be reduced into `[0, Q)` (as produced by
+/// [`compute_partial_pk_t`]). Peer-supplied partial PKs (e.g. from resharing
+/// Round 5 or DKG Round 4 broadcasts) are attacker-controlled, so an unvalidated
+/// `i32 + i32` accumulation could overflow before the mod-`Q` reduction — a
+/// crafted coefficient near `i32::MAX` would panic in debug builds and wrap
+/// silently in release builds. Rejecting out-of-range coefficients up front keeps
+/// the running sum bounded below `2Q` and makes the accumulation overflow-free.
+pub fn pack_combined_pk<'a, I>(
+	rho: &[u8; 32],
+	partial_ts: I,
+) -> Result<PublicKey, PackCombinedPkError>
 where
 	I: IntoIterator<Item = &'a [[i32; N as usize]; K]>,
 {
@@ -68,7 +96,14 @@ where
 	for partial in partial_ts {
 		for (i, poly_coeffs) in partial.iter().enumerate() {
 			for (j, &coeff) in poly_coeffs.iter().enumerate() {
-				t.vec[i].coeffs[j] = (t.vec[i].coeffs[j] + coeff) % Q;
+				// Reject non-canonical coefficients. This bounds the running sum
+				// (each accumulator stays in `[0, Q)`, so `acc + coeff < 2Q`) and
+				// prevents the i32 overflow that an attacker-supplied coefficient
+				// near `i32::MAX` would otherwise trigger.
+				if !(0..Q).contains(&coeff) {
+					return Err(PackCombinedPkError::CoefficientOutOfRange);
+				}
+				t.vec[i].coeffs_mut()[j] = (t.vec[i].coeffs()[j] + coeff) % Q;
 			}
 		}
 	}
@@ -82,7 +117,7 @@ where
 	let mut pk_packed = [0u8; PUBLIC_KEY_SIZE];
 	packing::pack_pk(&mut pk_packed, rho, &t1);
 
-	PublicKey::new(pk_packed)
+	Ok(PublicKey::new(pk_packed))
 }
 
 #[cfg(test)]
@@ -117,8 +152,8 @@ mod tests {
 		let t_b = compute_partial_pk_t(&rho, &s1_b, &s2_b);
 		let t_sum = compute_partial_pk_t(&rho, &s1_sum, &s2_sum);
 
-		let combined = pack_combined_pk(&rho, [&t_a, &t_b]);
-		let expected = pack_combined_pk(&rho, [&t_sum]);
+		let combined = pack_combined_pk(&rho, [&t_a, &t_b]).unwrap();
+		let expected = pack_combined_pk(&rho, [&t_sum]).unwrap();
 
 		assert_eq!(
 			combined.as_bytes(),
@@ -136,13 +171,51 @@ mod tests {
 		let s1: Vec<[i32; N as usize]> = vec![[1i32; N as usize]; L];
 		let s2: Vec<[i32; N as usize]> = vec![[2i32; N as usize]; K];
 		let mut t = compute_partial_pk_t(&rho, &s1, &s2);
-		let honest = pack_combined_pk(&rho, [&t]);
+		let honest = pack_combined_pk(&rho, [&t]).unwrap();
 		t[0][0] = (t[0][0] + (1 << 13)) % Q;
-		let tampered = pack_combined_pk(&rho, [&t]);
+		let tampered = pack_combined_pk(&rho, [&t]).unwrap();
 		assert_ne!(
 			honest.as_bytes(),
 			tampered.as_bytes(),
 			"high-bit tamper must change the packed PK"
+		);
+	}
+
+	/// Regression test (security review): a peer-supplied partial PK coefficient
+	/// near `i32::MAX` must be rejected rather than overflowing the i32
+	/// accumulation. Before the fix this addition panicked in debug builds and
+	/// wrapped silently in release builds.
+	#[test]
+	fn pack_combined_pk_rejects_overflowing_coefficient() {
+		let rho = [1u8; 32];
+
+		// A first, canonical contribution makes the accumulator non-zero so that
+		// the malicious second addition would overflow `i32` (Q-1 + i32::MAX).
+		let honest = [[1i32; N as usize]; K];
+		let mut malicious = [[0i32; N as usize]; K];
+		malicious[0][0] = i32::MAX;
+
+		let result = pack_combined_pk(&rho, [&honest, &malicious]);
+		assert_eq!(
+			result,
+			Err(PackCombinedPkError::CoefficientOutOfRange),
+			"out-of-range coefficient must be rejected, not summed"
+		);
+
+		// A negative out-of-range coefficient is likewise rejected.
+		let mut negative = [[0i32; N as usize]; K];
+		negative[0][0] = -1;
+		assert_eq!(
+			pack_combined_pk(&rho, [&negative]),
+			Err(PackCombinedPkError::CoefficientOutOfRange),
+		);
+
+		// Q itself is out of range (canonical is [0, Q)).
+		let mut at_q = [[0i32; N as usize]; K];
+		at_q[0][0] = Q;
+		assert_eq!(
+			pack_combined_pk(&rho, [&at_q]),
+			Err(PackCombinedPkError::CoefficientOutOfRange),
 		);
 	}
 }

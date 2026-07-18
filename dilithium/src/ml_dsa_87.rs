@@ -4,7 +4,6 @@ use crate::{
 	errors::{KeyParsingError, KeyParsingError::BadSecretKey, SignatureError},
 	params, SensitiveBytes32,
 };
-use alloc::vec;
 use core::fmt;
 
 pub const SECRETKEYBYTES: usize = crate::params::SECRETKEYBYTES;
@@ -44,7 +43,10 @@ impl Keypair {
 		let mut sk = [0u8; SECRETKEYBYTES];
 		crate::sign::keypair(&mut pk, &mut sk, entropy);
 		let keypair = Keypair {
-			secret: SecretKey::from_bytes(&sk).expect("Should never fail"),
+			// Constructed directly rather than via `SecretKey::from_bytes`:
+			// a freshly generated key is consistent by construction, and the
+			// import-path validation would redo the keygen-scale derivation.
+			secret: SecretKey { bytes: sk },
 			public: PublicKey::from_bytes(&pk).expect("Should never fail"),
 		};
 		sk.zeroize();
@@ -69,16 +71,48 @@ impl Keypair {
 	/// * 'bytes' - private and public keys bytes
 	///
 	/// Returns a Keypair
+	///
+	/// # Consistency check
+	///
+	/// The public half is re-derived from the secret half and must match the
+	/// supplied public-key bytes exactly; otherwise this returns
+	/// [`KeyParsingError::BadKeypair`]. This prevents importing a keypair whose
+	/// public key does not correspond to its secret key — which would otherwise
+	/// let an object sign with one key while advertising an unrelated public key
+	/// (e.g. a receive address the victim cannot spend from).
+	///
+	/// The secret key's internal invariants are checked as well: the stored
+	/// `t0` must match the low bits re-derived from `(rho, s1, s2)`, and the
+	/// stored `tr` must equal `SHAKE256(pk)`. Signing uses both fields, so a
+	/// blob corrupted in those regions would otherwise import cleanly and then
+	/// produce signatures that fail under the advertised public key.
+	///
+	/// Note: the `secret` and `public` fields are public, so callers can still
+	/// construct or mutate a `Keypair` with mismatched halves directly. This
+	/// check only guards the deserialization/import path.
 	pub fn from_bytes(bytes: &[u8]) -> Result<Keypair, KeyParsingError> {
 		if bytes.len() != SECRETKEYBYTES + PUBLICKEYBYTES {
 			return Err(KeyParsingError::BadKeypair);
 		}
 		let (secret_bytes, public_bytes) = bytes.split_at(SECRETKEYBYTES);
-		let secret =
-			SecretKey::from_bytes(secret_bytes).map_err(|_| KeyParsingError::BadKeypair)?;
+		let secret_bytes: [u8; SECRETKEYBYTES] =
+			secret_bytes.try_into().map_err(|_| KeyParsingError::BadKeypair)?;
 		let public =
 			PublicKey::from_bytes(public_bytes).map_err(|_| KeyParsingError::BadKeypair)?;
-		Ok(Keypair { secret, public })
+
+		// Enforce the cross-field invariants: the secret key must be internally
+		// consistent (tr, t0) and the public key must be the one that corresponds
+		// to it. The derived pk is public data, so a non-constant-time comparison
+		// is fine. The SecretKey is constructed directly (not via
+		// `SecretKey::from_bytes`) so the keygen-scale derivation runs once, not
+		// twice.
+		let derived_public = crate::sign::public_key_from_secret(&secret_bytes)
+			.ok_or(KeyParsingError::BadKeypair)?;
+		if derived_public != public.bytes {
+			return Err(KeyParsingError::BadKeypair);
+		}
+
+		Ok(Keypair { secret: SecretKey { bytes: secret_bytes }, public })
 	}
 
 	/// Compute a signature for a given message.
@@ -129,7 +163,10 @@ impl fmt::Debug for Keypair {
 /// `Clone` is intentionally not derived because the underlying bytes are sensitive.
 /// To explicitly copy a secret key, use `SecretKey::from_bytes(&sk.to_bytes())?`,
 /// which makes the duplication of secret material visible at every call site.
-#[derive(ZeroizeOnDrop)]
+///
+/// `Zeroize` is derived (in addition to `ZeroizeOnDrop`) so wrapper types that
+/// embed a `SecretKey` can themselves `#[derive(Zeroize, ZeroizeOnDrop)]`.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretKey {
 	bytes: [u8; SECRETKEYBYTES],
 }
@@ -147,12 +184,26 @@ impl SecretKey {
 	/// * 'bytes' - private key bytes
 	///
 	/// Returns a SecretKey
+	///
+	/// # Consistency check
+	///
+	/// The packed key's internal invariants are validated, matching the
+	/// defense on the [`Keypair::from_bytes`] path: the stored `t0` must
+	/// equal the low bits re-derived from `(rho, s1, s2)`, and the stored
+	/// `tr` must equal `SHAKE256(pk)` for the re-derived public key. Signing
+	/// consumes both stored fields (`tr` is bound into the message digest,
+	/// `t0` into hint computation), so a corrupted or tampered blob would
+	/// otherwise import cleanly and then produce signatures that fail under
+	/// the corresponding public key. Rejecting it here fails fast at import
+	/// instead of creating a persistent signing outage — and ensures the same
+	/// serialized secret material has the same guarantees whether it is
+	/// imported as a `Keypair` or as a standalone `SecretKey`.
 	pub fn from_bytes(bytes: &[u8]) -> Result<SecretKey, KeyParsingError> {
-		let result = bytes.try_into();
-		match result {
-			Ok(bytes) => Ok(SecretKey { bytes }),
-			Err(_) => Err(BadSecretKey),
-		}
+		let bytes: [u8; SECRETKEYBYTES] = bytes.try_into().map_err(|_| BadSecretKey)?;
+		// Re-derives the public components and checks the stored tr/t0 against
+		// them; the derived pk itself is not needed here.
+		crate::sign::public_key_from_secret(&bytes).ok_or(BadSecretKey)?;
+		Ok(SecretKey { bytes })
 	}
 
 	/// Compute a signature for a given message.
@@ -176,27 +227,26 @@ impl SecretKey {
 		if msg.len() > MAX_MESSAGE_SIZE {
 			return Err(SignatureError::MessageTooLong);
 		}
+		// The message is hashed as `domain_prefix || msg`. Only the small (<= 257
+		// byte) domain prefix is materialized; `msg` is passed by reference and
+		// absorbed directly, so an attacker-sized message is never copied.
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
 					return Err(SignatureError::ContextTooLong);
 				}
 				let x_len = x.len();
-				let msg_len = msg.len();
-				let mut m = vec![0; msg_len + 2 + x_len];
-				m[1] = x_len as u8;
-				m[2..2 + x_len].copy_from_slice(x);
-				m[2 + x_len..].copy_from_slice(msg);
+				let mut prefix = [0u8; 2 + 255];
+				prefix[1] = x_len as u8;
+				prefix[2..2 + x_len].copy_from_slice(x);
 				let mut sig: Signature = [0u8; SIGNBYTES];
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
+				crate::sign::signature(&mut sig, &prefix[..2 + x_len], msg, &self.bytes, hedge);
 				Ok(sig)
 			},
 			None => {
 				let mut sig: Signature = [0u8; SIGNBYTES];
 				// Prefix 2 zero bytes (domain_sep=0, context_len=0) for pure signatures
-				let mut m = vec![0u8; msg.len() + 2];
-				m[2..2 + msg.len()].copy_from_slice(msg);
-				crate::sign::signature(&mut sig, m.as_slice(), &self.bytes, hedge);
+				crate::sign::signature(&mut sig, &[0u8, 0u8], msg, &self.bytes, hedge);
 				Ok(sig)
 			},
 		}
@@ -222,11 +272,21 @@ impl PublicKey {
 	///
 	/// Returns a PublicKey
 	pub fn from_bytes(bytes: &[u8]) -> Result<PublicKey, KeyParsingError> {
-		let result = bytes.try_into();
-		match result {
-			Ok(bytes) => Ok(PublicKey { bytes }),
-			Err(_) => Err(KeyParsingError::BadPublicKey),
+		let bytes: [u8; PUBLICKEYBYTES] =
+			bytes.try_into().map_err(|_| KeyParsingError::BadPublicKey)?;
+
+		// Reject the degenerate all-zero t1 public key. With t1 = 0 the challenge term in the
+		// verification relation vanishes, letting an attacker forge signatures without any
+		// secret key (see `sign::verify`). Honest key generation never produces t1 = 0, so
+		// this only rejects malformed/malicious keys and never a legitimate one.
+		let mut rho = [0u8; params::SEEDBYTES];
+		let mut t1 = crate::polyvec::Polyveck::default();
+		crate::packing::unpack_pk(&mut rho, &mut t1, &bytes);
+		if t1.vec.iter().all(|p| p.coeffs.iter().all(|&c| c == 0)) {
+			return Err(KeyParsingError::BadPublicKey);
 		}
+
+		Ok(PublicKey { bytes })
 	}
 
 	/// Verify a signature for a given message with a public key.
@@ -248,24 +308,20 @@ impl PublicKey {
 		if msg.len() > MAX_MESSAGE_SIZE {
 			return false;
 		}
+		// As in `sign`, only the small domain prefix is materialized; the message
+		// is absorbed by reference rather than copied into a full-size buffer.
 		match ctx {
 			Some(x) => {
 				if x.len() > 255 {
 					return false;
 				}
 				let x_len = x.len();
-				let msg_len = msg.len();
-				let mut m = vec![0; msg_len + 2 + x_len];
-				m[1] = x_len as u8;
-				m[2..2 + x_len].copy_from_slice(x);
-				m[2 + x_len..].copy_from_slice(msg);
-				crate::sign::verify(sig, m.as_slice(), &self.bytes)
+				let mut prefix = [0u8; 2 + 255];
+				prefix[1] = x_len as u8;
+				prefix[2..2 + x_len].copy_from_slice(x);
+				crate::sign::verify(sig, &prefix[..2 + x_len], msg, &self.bytes)
 			},
-			None => {
-				let mut m = vec![0; msg.len() + 2];
-				m[2..2 + msg.len()].copy_from_slice(msg);
-				crate::sign::verify(sig, m.as_slice(), &self.bytes)
-			},
+			None => crate::sign::verify(sig, &[0u8, 0u8], msg, &self.bytes),
 		}
 	}
 }
@@ -343,5 +399,155 @@ mod tests {
 		let keys = Keypair::generate(get_random_bytes());
 		let big_msg = vec![0u8; MAX_MESSAGE_SIZE + 1];
 		assert!(!keys.verify(&big_msg, &[0u8; SIGNBYTES], None));
+	}
+
+	// A keypair blob whose public half does not correspond to its secret half must
+	// be rejected. Otherwise an imported keypair could sign with one key while
+	// advertising an unrelated public key (e.g. an unspendable receive address).
+	#[test]
+	fn from_bytes_rejects_mismatched_public_key() {
+		use super::{KeyParsingError, Keypair, KEYPAIRBYTES, SECRETKEYBYTES};
+
+		let keys_a = Keypair::generate(get_random_bytes());
+		let keys_b = Keypair::generate(get_random_bytes());
+
+		// Genuine keypair bytes must round-trip.
+		let good = keys_a.to_bytes();
+		assert!(Keypair::from_bytes(&good).is_ok(), "honest keypair must be accepted");
+
+		// Splice A's secret key with B's (unrelated) public key.
+		let mut forged = [0u8; KEYPAIRBYTES];
+		forged[..SECRETKEYBYTES].copy_from_slice(&keys_a.secret.to_bytes());
+		forged[SECRETKEYBYTES..].copy_from_slice(&keys_b.public.to_bytes());
+
+		assert!(
+			matches!(Keypair::from_bytes(&forged), Err(KeyParsingError::BadKeypair)),
+			"public key not derived from the secret key must be rejected"
+		);
+	}
+
+	// The packed secret key stores tr = SHAKE256(pk) and t0 (low bits of
+	// A·s1 + s2) alongside (rho, s1, s2). Signing uses the stored tr and t0, so
+	// a blob with honest rho/s1/s2/pk but a corrupted tr or t0 region would
+	// import cleanly and then produce signatures that fail under the advertised
+	// public key. `from_bytes` must reject such blobs at import.
+	#[test]
+	fn from_bytes_rejects_corrupted_tr_or_t0() {
+		use super::{KeyParsingError, Keypair, SECRETKEYBYTES};
+		use crate::params::{POLYT0_PACKEDBYTES, SEEDBYTES, TR_BYTES};
+
+		let keys = Keypair::generate(get_random_bytes());
+		let good = keys.to_bytes();
+		assert!(Keypair::from_bytes(&good).is_ok(), "honest keypair must be accepted");
+
+		// SK layout: rho (32) || key (32) || tr (64) || s1 || s2 || t0.
+		let tr_offset = 2 * SEEDBYTES;
+		let t0_offset = SECRETKEYBYTES - crate::params::K * POLYT0_PACKEDBYTES;
+
+		// Corrupt one byte inside the stored tr region only.
+		let mut bad_tr = good;
+		bad_tr[tr_offset + TR_BYTES / 2] ^= 0x01;
+		assert!(
+			matches!(Keypair::from_bytes(&bad_tr), Err(KeyParsingError::BadKeypair)),
+			"secret key with corrupted tr must be rejected"
+		);
+
+		// Corrupt one byte inside the stored t0 region only.
+		let mut bad_t0 = good;
+		bad_t0[t0_offset] ^= 0x01;
+		assert!(
+			matches!(Keypair::from_bytes(&bad_t0), Err(KeyParsingError::BadKeypair)),
+			"secret key with corrupted t0 must be rejected"
+		);
+	}
+
+	// The standalone SecretKey import path must enforce the same tr/t0
+	// consistency defense as Keypair::from_bytes. Signing consumes the stored
+	// tr (bound into the message digest) and t0 (hint computation), so a
+	// corrupted standalone key would otherwise import cleanly and then emit
+	// signatures that fail under the corresponding public key — a persistent,
+	// hard-to-diagnose signing outage for callers that store SecretKey alone.
+	#[test]
+	fn secret_key_from_bytes_rejects_corrupted_tr_or_t0() {
+		use super::{KeyParsingError, Keypair, SecretKey, SECRETKEYBYTES};
+		use crate::params::{POLYT0_PACKEDBYTES, SEEDBYTES, TR_BYTES};
+
+		let keys = Keypair::generate(get_random_bytes());
+		let good = keys.secret.to_bytes();
+		assert!(SecretKey::from_bytes(&good).is_ok(), "honest secret key must be accepted");
+
+		// SK layout: rho (32) || key (32) || tr (64) || s1 || s2 || t0.
+		let tr_offset = 2 * SEEDBYTES;
+		let t0_offset = SECRETKEYBYTES - crate::params::K * POLYT0_PACKEDBYTES;
+
+		// Corrupt one byte inside the stored tr region only.
+		let mut bad_tr = good;
+		bad_tr[tr_offset + TR_BYTES / 2] ^= 0x01;
+		assert!(
+			matches!(SecretKey::from_bytes(&bad_tr), Err(KeyParsingError::BadSecretKey)),
+			"standalone secret key with corrupted tr must be rejected"
+		);
+
+		// Corrupt one byte inside the stored t0 region only.
+		let mut bad_t0 = good;
+		bad_t0[t0_offset] ^= 0x01;
+		assert!(
+			matches!(SecretKey::from_bytes(&bad_t0), Err(KeyParsingError::BadSecretKey)),
+			"standalone secret key with corrupted t0 must be rejected"
+		);
+	}
+
+	// The standalone SecretKey import path must reject a secret key whose
+	// derived public key has all-zero t1, matching PublicKey::from_bytes and
+	// sign::verify. Such a blob (s1 = s2 = 0, hence t1 = t0 = 0) passes the
+	// tr/t0 consistency checks by construction, so without an explicit t1
+	// check it imports cleanly and then produces signatures that can never
+	// verify — while the degenerate public key it corresponds to is exactly
+	// the malicious-key forgery class the verifier rejects.
+	#[test]
+	fn secret_key_from_bytes_rejects_zero_t1() {
+		use super::{KeyParsingError, SecretKey, SECRETKEYBYTES};
+		use crate::{packing, params, polyvec};
+
+		// Craft a fully self-consistent secret key with s1 = s2 = 0:
+		// t = A·0 + 0 = 0, so t1 = 0 and t0 = 0, and tr = SHAKE256(pk).
+		let rho = [0x42u8; params::SEEDBYTES];
+		let key = [0x17u8; params::SEEDBYTES];
+		let s1 = polyvec::Polyvecl::default();
+		let s2 = polyvec::Polyveck::default();
+		let t0 = polyvec::Polyveck::default();
+		let t1 = polyvec::Polyveck::default();
+
+		let mut pk = [0u8; super::PUBLICKEYBYTES];
+		packing::pack_pk(&mut pk, &rho, &t1);
+		let mut tr = [0u8; params::TR_BYTES];
+		crate::fips202::shake256(&mut tr, &pk);
+
+		let mut sk = [0u8; SECRETKEYBYTES];
+		packing::pack_sk(&mut sk, &rho, &tr, &key, &t0, &s1, &s2);
+
+		assert!(
+			matches!(SecretKey::from_bytes(&sk), Err(KeyParsingError::BadSecretKey)),
+			"secret key deriving an all-zero t1 public key must be rejected"
+		);
+	}
+
+	// Malicious-key forgery defense: a public key with an all-zero t1 makes verification
+	// independent of the challenge, enabling signature forgery without a secret key.
+	// `from_bytes` must reject such a key so it can never be constructed or stored.
+	#[test]
+	fn from_bytes_rejects_zero_t1_public_key() {
+		use super::{KeyParsingError, PublicKey, PUBLICKEYBYTES};
+
+		// Arbitrary rho, all-zero t1 region.
+		let mut pk = [0u8; PUBLICKEYBYTES];
+		pk[..crate::params::SEEDBYTES].copy_from_slice(&[0x42u8; crate::params::SEEDBYTES]);
+
+		assert!(matches!(PublicKey::from_bytes(&pk), Err(KeyParsingError::BadPublicKey)));
+
+		// A genuine public key must still round-trip through from_bytes.
+		let keys = Keypair::generate(get_random_bytes());
+		let good = keys.public.to_bytes();
+		assert!(PublicKey::from_bytes(&good).is_ok());
 	}
 }

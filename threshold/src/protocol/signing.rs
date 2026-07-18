@@ -24,7 +24,7 @@ use crate::{
 	protocol::{
 		primitives::{
 			compute_dilithium_hint, compute_ntt_dot_product, decompose_polyveck, mod_q,
-			normalize_assuming_le2q, pack_signature, poly_pack_w, reduce_le2q, unpack_polyveck_w,
+			normalize_assuming_le2q, pack_signature, poly_pack_w, unpack_polyveck_w,
 			HyperballSampleVector,
 		},
 		secret_sharing::{recover_share, SecretShare},
@@ -59,6 +59,17 @@ pub(crate) struct Round2Data {
 	/// Stores the actual participant IDs (which can be arbitrary u32 values).
 	/// The ParticipantList provides index mapping for internal bitmask operations.
 	pub(crate) active_participants: ParticipantList,
+	/// Round 1 commitment hashes captured from the peers' Round 1 broadcasts,
+	/// keyed by party ID, frozen at the moment this party revealed its own
+	/// Round 2 commitment.
+	///
+	/// Round 3 verifies every peer's Round 2 reveal against *this* map rather
+	/// than a caller-supplied Round 1 set. That preserves the commit-reveal
+	/// anti-rushing property: a peer cannot swap in a Round 1 hash chosen
+	/// after observing honest reveals. These hashes are public broadcast
+	/// material, so they are excluded from zeroization.
+	#[zeroize(skip)]
+	pub(crate) round1_commitments: BTreeMap<ParticipantId, [u8; 32]>,
 }
 
 // ============================================================================
@@ -208,7 +219,11 @@ pub(crate) fn verify_commitment_hash(
 }
 
 /// Convert PrivateKeyShare to the SecretShare format used by recover_share.
-pub fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
+///
+/// This copies the raw secret `s1`/`s2` share material, so it must remain
+/// crate-internal: exposing it publicly would defeat the intentional opacity
+/// of `PrivateKeyShare`.
+pub(crate) fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
 	let mut shares: BTreeMap<u16, SecretShare> = BTreeMap::new();
 
 	for (subset_id, share_data) in share.shares() {
@@ -216,11 +231,11 @@ pub fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
 		let mut s2_share = polyvec::Polyveck::default();
 
 		for i in 0..L {
-			s1_share.vec[i].coeffs.copy_from_slice(&share_data.s1[i]);
+			s1_share.vec[i].coeffs_mut().copy_from_slice(&share_data.s1[i]);
 		}
 
 		for i in 0..K {
-			s2_share.vec[i].coeffs.copy_from_slice(&share_data.s2[i]);
+			s2_share.vec[i].coeffs_mut().copy_from_slice(&share_data.s2[i]);
 		}
 
 		shares.insert(*subset_id, SecretShare { s1_share, s2_share });
@@ -342,33 +357,24 @@ pub(crate) fn generate_round1(
 		let mut w_k = polyvec::Polyveck::default();
 		let mut y_k_ntt = y_k.clone();
 		for y_poly in y_k_ntt.vec.iter_mut().take(L) {
-			crate::circl_ntt::ntt(y_poly);
+			poly::ntt(y_poly);
 		}
 
 		for (i, a_row) in a_matrix.iter().enumerate().take(K) {
 			compute_ntt_dot_product(&mut w_k.vec[i], a_row, &y_k_ntt);
 
-			// Apply ReduceLe2Q in NTT domain BEFORE InvNTT
-			for j in 0..N as usize {
-				let coeff = w_k.vec[i].coeffs[j];
-				let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
-				w_k.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
-			}
+			// Dot-product sums are bounded by L*Q; bring them within the
+			// inverse NTT's |c| < Q input contract.
+			poly::reduce(&mut w_k.vec[i]);
+			poly::invntt_tomont(&mut w_k.vec[i]);
 
-			crate::circl_ntt::inv_ntt(&mut w_k.vec[i]);
-
-			// Add error term e_k for threshold scheme
+			// Add error term e_k for threshold scheme. |c| stays < 2Q
+			// (inverse NTT output is < Q, e_k is hyperball-bounded), which
+			// normalize_assuming_le2q below accepts.
 			poly::add_ip(&mut w_k.vec[i], &e_k.vec[i]);
-
-			// Apply ReduceLe2Q after Add
-			for j in 0..N as usize {
-				let coeff = w_k.vec[i].coeffs[j];
-				let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
-				w_k.vec[i].coeffs[j] = reduce_le2q(coeff_u32) as i32;
-			}
 		}
 
-		// Apply NormalizeAssumingLe2Q
+		// Normalize to the canonical [0, Q) range for packing/hashing.
 		for i in 0..K {
 			normalize_assuming_le2q(&mut w_k.vec[i]);
 		}
@@ -422,19 +428,41 @@ pub fn get_hyperball_params(threshold: u32, parties: u32) -> Option<(f64, f64, f
 	// Threshold parameters (r, r', nu) from the reference implementation
 	// nu = 7 for ML-DSA-87
 	match (threshold, parties) {
+		// Resharing-supported committees have radii enlarged by kappa so honest
+		// post-resharing recovered partials fit under the enlarged bound B'. The
+		// enlargement scales (r, r') and B together, leaving the per-sample
+		// rejection leakage eps invariant (scale-invariant radius condition). It
+		// does NOT preserve the query budget Q_s = 1/(K*eps): K grows (the larger
+		// radius nears ML-DSA's fixed verification ceilings), and Q_s falls by that
+		// K factor (e.g. (3,5) K 35->60 at kappa=1.15 => ~0.8 bits of Q_s). See
+		// scripts/compute_hyperball_params.py and partial_secret_norm_bound().
+		// Radii = kappa x base, kappa re-derived for the v5 mean-subtracted coset
+		// splitter from the measured honest overshoot (Rust
+		// test_recovered_partial_variance_*, fixed point over all signing sets):
+		// (2,2) 0.780x -> kappa 1.00, (2,3) 0.810x -> 1.00 (both reshare at base B),
+		// (2,4) 0.961x -> 1.10, (3,5) 1.012x -> 1.15, (4,6) 1.163x -> 1.25
+		// (K 350->1600, ~15 MB/sig; enabled for the near-mpc 4-of-6 shape). See
+		// scripts/compute_hyperball_params.py (compute_resharing_params).
+		// (2,2)/(2,3) reshare at kappa=1, i.e. with the *exact* base keygen radii (a
+		// reshared committee signs identically to a fresh one). Use the reference base
+		// values directly, not the resharing script's expo-recovered approximation
+		// (whose 0.005 expo-grid drift shrinks r enough to tip the tight K=5/K=4
+		// single-shot acceptance below 1 for some seeds).
 		(2, 2) => Some((503119.0, 503192.0, 7.0)),
 		(2, 3) => Some((631601.0, 631703.0, 7.0)),
 		(3, 3) => Some((483107.0, 483180.0, 7.0)),
-		(2, 4) => Some((632903.0, 633006.0, 7.0)),
+		(2, 4) => Some((696194.0, 696307.0, 7.0)),
 		(3, 4) => Some((551752.0, 551854.0, 7.0)),
 		(4, 4) => Some((487958.0, 488031.0, 7.0)),
 		(2, 5) => Some((607694.0, 607820.0, 7.0)),
-		(3, 5) => Some((577400.0, 577546.0, 7.0)),
+		// (3,5): base (577400, 577546) x 1.15.
+		(3, 5) => Some((664010.0, 664178.0, 7.0)),
 		(4, 5) => Some((518384.0, 518510.0, 7.0)),
 		(5, 5) => Some((468214.0, 468287.0, 7.0)),
 		(2, 6) => Some((665106.0, 665232.0, 7.0)),
 		(3, 6) => Some((577541.0, 577704.0, 7.0)),
-		(4, 6) => Some((517689.0, 517853.0, 7.0)),
+		// (4,6): base (517689, 517853) x 1.25 (overshoot 1.163x, enabled for near-mpc).
+		(4, 6) => Some((647112.0, 647317.0, 7.0)),
 		(5, 6) => Some((479692.0, 479819.0, 7.0)),
 		(6, 6) => Some((424124.0, 424197.0, 7.0)),
 		_ => None,
@@ -481,6 +509,9 @@ pub(crate) fn process_round2(
 	context: &[u8],
 	other_party_ids: &[ParticipantId],
 ) -> ThresholdResult<Round2Data> {
+	// Enforce the ML-DSA size bounds before hashing/cloning attacker-controlled
+	// input: oversized messages can never yield a verifiable signature.
+	crate::error::validate_message(message)?;
 	crate::error::validate_context(context)?;
 
 	let k = config.k_iterations() as usize;
@@ -506,7 +537,9 @@ pub(crate) fn process_round2(
 	tr.copy_from_slice(public_key.tr());
 	let mu = compute_mu(&tr, message, context);
 
-	Ok(Round2Data { mu, w_aggregated, active_participants })
+	// The caller (ThresholdSigner::round2_reveal) fills in the frozen Round 1
+	// commitment hashes; process_round2 only sees the participant IDs.
+	Ok(Round2Data { mu, w_aggregated, active_participants, round1_commitments: BTreeMap::new() })
 }
 
 // ============================================================================
@@ -590,7 +623,7 @@ pub(crate) fn generate_round3_response(
 		// Note: SSID is NOT included in the challenge to maintain compatibility
 		// with standard ML-DSA verification. Cross-session replay protection is
 		// provided by SSID binding in commitment hashes and message validation.
-		let mut w1_packed = vec![0u8; K * POLYW1_PACKEDBYTES];
+		let mut w1_packed = [0u8; K * POLYW1_PACKEDBYTES];
 		polyvec::k_pack_w1(&mut w1_packed, &w1);
 
 		let mut challenge_bytes = [0u8; C_DASH_BYTES];
@@ -603,17 +636,19 @@ pub(crate) fn generate_round3_response(
 		// Derive challenge polynomial and convert to NTT domain
 		let mut challenge_ntt = poly::Poly::default();
 		poly::challenge(&mut challenge_ntt, &challenge_bytes);
-		crate::circl_ntt::ntt(&mut challenge_ntt);
+		poly::ntt(&mut challenge_ntt);
 
-		// Compute z = c·s1 (challenge times secret share)
+		// Compute z = c·s1 (challenge times secret share). Montgomery
+		// pointwise products are bounded by Q in absolute value, satisfying
+		// the inverse NTT's input contract directly.
 		let mut z = polyvec::Polyvecl::default();
 		for j in 0..L {
-			crate::circl_ntt::mul_hat(&mut z.vec[j], &challenge_ntt, &s1_ntt.vec[j]);
-			crate::circl_ntt::inv_ntt(&mut z.vec[j]);
+			poly::pointwise_montgomery(&mut z.vec[j], &challenge_ntt, &s1_ntt.vec[j]);
+			poly::invntt_tomont(&mut z.vec[j]);
 		}
 		// Normalize z
 		for j in 0..L {
-			for coeff in z.vec[j].coeffs.iter_mut() {
+			for coeff in z.vec[j].coeffs_mut().iter_mut() {
 				let c = *coeff;
 				let c_u32 = if c < 0 { (c + Q) as u32 } else { c as u32 };
 				*coeff = mod_q(c_u32) as i32;
@@ -623,12 +658,12 @@ pub(crate) fn generate_round3_response(
 		// Compute c·s2
 		let mut cs2 = polyvec::Polyveck::default();
 		for j in 0..K {
-			crate::circl_ntt::mul_hat(&mut cs2.vec[j], &challenge_ntt, &s2_ntt.vec[j]);
-			crate::circl_ntt::inv_ntt(&mut cs2.vec[j]);
+			poly::pointwise_montgomery(&mut cs2.vec[j], &challenge_ntt, &s2_ntt.vec[j]);
+			poly::invntt_tomont(&mut cs2.vec[j]);
 		}
 		// Normalize cs2
 		for j in 0..K {
-			for coeff in cs2.vec[j].coeffs.iter_mut() {
+			for coeff in cs2.vec[j].coeffs_mut().iter_mut() {
 				let c = *coeff;
 				let c_u32 = if c < 0 { (c + Q) as u32 } else { c as u32 };
 				*coeff = mod_q(c_u32) as i32;
@@ -650,7 +685,7 @@ pub(crate) fn generate_round3_response(
 
 		// Convert from centered format to [0, Q) format
 		for j in 0..L {
-			for coeff in z_out.vec[j].coeffs.iter_mut() {
+			for coeff in z_out.vec[j].coeffs_mut().iter_mut() {
 				if *coeff < 0 {
 					*coeff += Q;
 				}
@@ -673,19 +708,19 @@ pub(crate) fn pack_responses(responses: &[polyvec::Polyvecl]) -> Vec<u8> {
 		// Convert to centered format for packing
 		let mut z_centered = z.clone();
 		for j in 0..L {
-			for coeff in z_centered.vec[j].coeffs.iter_mut() {
+			for coeff in z_centered.vec[j].coeffs_mut().iter_mut() {
 				if *coeff > Q / 2 {
 					*coeff -= Q;
 				}
 			}
 		}
-		// Pack each polynomial
-		for j in 0..L {
-			let poly_offset = offset + j * POLYZ_PACKEDBYTES;
-			poly::z_pack(
-				&mut buf[poly_offset..poly_offset + POLYZ_PACKEDBYTES],
-				&z_centered.vec[j],
-			);
+		// Pack each polynomial. `as_chunks_mut` yields exact-size
+		// `&mut [u8; POLYZ_PACKEDBYTES]` arrays, matching `z_pack`'s signature
+		// without any fallible slice conversion.
+		let (chunks, _) =
+			buf[offset..offset + single_response_size].as_chunks_mut::<POLYZ_PACKEDBYTES>();
+		for (chunk, zj) in chunks.iter_mut().zip(z_centered.vec.iter()).take(L) {
+			poly::z_pack(chunk, zj);
 		}
 	}
 
@@ -720,11 +755,12 @@ pub(crate) fn unpack_responses(
 	for i in 0..k {
 		let start = i * single_response_size;
 		let mut z = polyvec::Polyvecl::default();
-		for j in 0..L {
-			let poly_start = start + j * 640;
-			let poly_end = poly_start + 640;
-			// Size already validated, so this slice is guaranteed to be valid
-			poly::z_unpack(&mut z.vec[j], &data[poly_start..poly_end]);
+		// Size already validated above; `as_chunks` splits the per-response region
+		// into exact-size `&[u8; POLYZ_PACKEDBYTES]` arrays for `z_unpack`.
+		let (chunks, _) =
+			data[start..start + single_response_size].as_chunks::<POLYZ_PACKEDBYTES>();
+		for (chunk, zj) in chunks.iter().zip(z.vec.iter_mut()).take(L) {
+			poly::z_unpack(zj, chunk);
 		}
 		responses.push(z);
 	}
@@ -743,7 +779,7 @@ pub(crate) fn unpack_responses(
 /// valid threshold contributions (they pass norm checks) but don't actually contain
 /// valid cryptographic data, breaking threshold linearity.
 fn is_zero_response(z_i: &polyvec::Polyvecl) -> bool {
-	z_i.vec.iter().take(L).all(|poly| poly.coeffs.iter().all(|&c| c == 0))
+	z_i.vec.iter().take(L).all(|poly| poly.coeffs().iter().all(|&c| c == 0))
 }
 
 /// Check if a single party's z response for one iteration satisfies the norm bound.
@@ -752,7 +788,7 @@ fn is_zero_response(z_i: &polyvec::Polyvecl) -> bool {
 /// Checks the norm bound on a party's response vector.
 fn check_party_z_norm(z_i: &polyvec::Polyvecl, gamma1_minus_beta: i32) -> bool {
 	for z_poly in z_i.vec.iter().take(L) {
-		for coeff in z_poly.coeffs.iter() {
+		for coeff in z_poly.coeffs().iter() {
 			let centered = if *coeff > Q / 2 { *coeff - Q } else { *coeff };
 			if centered.abs() >= gamma1_minus_beta {
 				return false;
@@ -778,6 +814,8 @@ pub(crate) fn combine_signature(
 	w_aggregated: &[polyvec::Polyveck],
 	all_responses: &[Vec<polyvec::Polyvecl>],
 ) -> ThresholdResult<Vec<u8>> {
+	// Enforce the ML-DSA size bounds before hashing the message into μ.
+	crate::error::validate_message(message)?;
 	crate::error::validate_context(context)?;
 
 	let k_iterations = config.k_iterations() as usize;
@@ -823,7 +861,7 @@ pub(crate) fn combine_signature(
 						z_aggregated.vec.iter_mut().zip(z_i.vec.iter()).take(L)
 					{
 						for (agg_coeff, party_coeff) in
-							agg_poly.coeffs.iter_mut().zip(party_poly.coeffs.iter())
+							agg_poly.coeffs_mut().iter_mut().zip(party_poly.coeffs().iter())
 						{
 							*agg_coeff = (*agg_coeff + *party_coeff) % Q;
 						}
@@ -847,7 +885,7 @@ pub(crate) fn combine_signature(
 		// Check aggregated z-norm (may still exceed due to sum of valid parties)
 		let mut z_exceeds = false;
 		'z_check: for z_poly in z_aggregated.vec.iter().take(L) {
-			for coeff in z_poly.coeffs.iter() {
+			for coeff in z_poly.coeffs().iter() {
 				let centered = if *coeff > Q / 2 { *coeff - Q } else { *coeff };
 				if centered.abs() >= gamma1_minus_beta {
 					z_exceeds = true;
@@ -862,12 +900,12 @@ pub(crate) fn combine_signature(
 		// Compute Az (z in NTT domain)
 		let mut zh = z_aggregated.clone();
 		for zh_poly in zh.vec.iter_mut().take(L) {
-			for coeff in zh_poly.coeffs.iter_mut() {
+			for coeff in zh_poly.coeffs_mut().iter_mut() {
 				if *coeff > Q / 2 {
 					*coeff -= Q;
 				}
 			}
-			crate::circl_ntt::ntt(zh_poly);
+			poly::ntt(zh_poly);
 		}
 
 		let mut az = polyvec::Polyveck::default();
@@ -879,7 +917,7 @@ pub(crate) fn combine_signature(
 		// Note: SSID is NOT included in the challenge to maintain compatibility
 		// with standard ML-DSA verification. Cross-session replay protection is
 		// provided by SSID binding in commitment hashes and message validation.
-		let mut w1_packed = vec![0u8; K * POLYW1_PACKEDBYTES];
+		let mut w1_packed = [0u8; K * POLYW1_PACKEDBYTES];
 		polyvec::k_pack_w1(&mut w1_packed, &w1);
 
 		let mut challenge_bytes = [0u8; C_DASH_BYTES];
@@ -892,30 +930,32 @@ pub(crate) fn combine_signature(
 		// Derive challenge polynomial and convert to NTT domain
 		let mut challenge_ntt = poly::Poly::default();
 		poly::challenge(&mut challenge_ntt, &challenge_bytes);
-		crate::circl_ntt::ntt(&mut challenge_ntt);
+		poly::ntt(&mut challenge_ntt);
 
 		// Compute 2^d * c * t1 (scaled challenge times public key component)
 		let mut scaled_challenge_t1 = polyvec::Polyveck::default();
 		for (scaled_poly, t1_poly) in scaled_challenge_t1.vec.iter_mut().zip(t1.vec.iter()).take(K)
 		{
-			for (scaled_coeff, t1_coeff) in scaled_poly.coeffs.iter_mut().zip(t1_poly.coeffs.iter())
+			for (scaled_coeff, t1_coeff) in
+				scaled_poly.coeffs_mut().iter_mut().zip(t1_poly.coeffs().iter())
 			{
 				*scaled_coeff = *t1_coeff << D;
 			}
-			crate::circl_ntt::ntt(scaled_poly);
+			poly::ntt(scaled_poly);
 			let tmp = scaled_poly.clone();
-			crate::circl_ntt::mul_hat(scaled_poly, &tmp, &challenge_ntt);
+			poly::pointwise_montgomery(scaled_poly, &tmp, &challenge_ntt);
 		}
 
 		// Compute Az - 2^d * c * t1
 		for (scaled_poly, az_poly) in scaled_challenge_t1.vec.iter_mut().zip(az.vec.iter()).take(K)
 		{
-			for (scaled_coeff, az_coeff) in scaled_poly.coeffs.iter_mut().zip(az_poly.coeffs.iter())
+			for (scaled_coeff, az_coeff) in
+				scaled_poly.coeffs_mut().iter_mut().zip(az_poly.coeffs().iter())
 			{
 				*scaled_coeff = *az_coeff - *scaled_coeff;
 			}
 			poly::reduce(scaled_poly);
-			crate::circl_ntt::inv_ntt(scaled_poly);
+			poly::invntt_tomont(scaled_poly);
 			normalize_assuming_le2q(scaled_poly);
 		}
 
@@ -928,14 +968,14 @@ pub(crate) fn combine_signature(
 			.take(K)
 		{
 			for (diff_coeff, (scaled_coeff, w_coeff)) in diff_poly
-				.coeffs
+				.coeffs_mut()
 				.iter_mut()
-				.zip(scaled_poly.coeffs.iter().zip(w_poly.coeffs.iter()))
+				.zip(scaled_poly.coeffs().iter().zip(w_poly.coeffs().iter()))
 			{
 				*diff_coeff = *scaled_coeff - *w_coeff;
 			}
 			// Normalize coefficients to [0, Q)
-			for coeff in diff_poly.coeffs.iter_mut() {
+			for coeff in diff_poly.coeffs_mut().iter_mut() {
 				let coeff_u32 = if *coeff < 0 { (*coeff + Q) as u32 } else { *coeff as u32 };
 				*coeff = mod_q(coeff_u32) as i32;
 			}
@@ -945,7 +985,7 @@ pub(crate) fn combine_signature(
 		let gamma2 = GAMMA2 as i32;
 		let mut difference_exceeds = false;
 		'diff_check: for diff_poly in difference.vec.iter().take(K) {
-			for coeff in diff_poly.coeffs.iter() {
+			for coeff in diff_poly.coeffs().iter() {
 				let centered = if *coeff > Q / 2 { *coeff - Q } else { *coeff };
 				if centered.abs() >= gamma2 {
 					difference_exceeds = true;
@@ -966,14 +1006,14 @@ pub(crate) fn combine_signature(
 			.take(K)
 		{
 			for (w0pd_coeff, (w0_coeff, diff_coeff)) in w0pd_poly
-				.coeffs
+				.coeffs_mut()
 				.iter_mut()
-				.zip(w0_poly.coeffs.iter().zip(diff_poly.coeffs.iter()))
+				.zip(w0_poly.coeffs().iter().zip(diff_poly.coeffs().iter()))
 			{
 				*w0pd_coeff = *w0_coeff + *diff_coeff;
 			}
 			// Normalize coefficients to [0, Q)
-			for coeff in w0pd_poly.coeffs.iter_mut() {
+			for coeff in w0pd_poly.coeffs_mut().iter_mut() {
 				let coeff_u32 = if *coeff < 0 { (*coeff + Q) as u32 } else { *coeff as u32 };
 				*coeff = mod_q(coeff_u32) as i32;
 			}
@@ -987,7 +1027,7 @@ pub(crate) fn combine_signature(
 			// Convert z to centered form for packing
 			let mut z_centered = z_aggregated.clone();
 			for z_poly in z_centered.vec.iter_mut().take(L) {
-				for coeff in z_poly.coeffs.iter_mut() {
+				for coeff in z_poly.coeffs_mut().iter_mut() {
 					if *coeff > Q / 2 {
 						*coeff -= Q;
 					}
@@ -1034,10 +1074,11 @@ fn unpack_t1(pk_bytes: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
 			let b3 = t1_bytes[byte_idx + 3] as i32;
 			let b4 = t1_bytes[byte_idx + 4] as i32;
 
-			t1.vec[poly_idx].coeffs[i] = b0 | ((b1 & 0x03) << 8);
-			t1.vec[poly_idx].coeffs[i + 1] = (b1 >> 2) | ((b2 & 0x0F) << 6);
-			t1.vec[poly_idx].coeffs[i + 2] = (b2 >> 4) | ((b3 & 0x3F) << 4);
-			t1.vec[poly_idx].coeffs[i + 3] = (b3 >> 6) | (b4 << 2);
+			let t1_coeffs = t1.vec[poly_idx].coeffs_mut();
+			t1_coeffs[i] = b0 | ((b1 & 0x03) << 8);
+			t1_coeffs[i + 1] = (b1 >> 2) | ((b2 & 0x0F) << 6);
+			t1_coeffs[i + 2] = (b2 >> 4) | ((b3 & 0x3F) << 4);
+			t1_coeffs[i + 3] = (b3 >> 6) | (b4 << 2);
 		}
 	}
 
@@ -1061,7 +1102,7 @@ mod tests {
 	fn test_is_zero_response_allows_nonzero() {
 		// Response with a single non-zero coefficient should not be zero
 		let mut nonzero_response = polyvec::Polyvecl::default();
-		nonzero_response.vec[0].coeffs[0] = 1;
+		nonzero_response.vec[0].coeffs_mut()[0] = 1;
 		assert!(
 			!is_zero_response(&nonzero_response),
 			"Non-zero response should not be detected as zero"
@@ -1069,7 +1110,7 @@ mod tests {
 
 		// Response with non-zero in last position
 		let mut nonzero_response2 = polyvec::Polyvecl::default();
-		nonzero_response2.vec[L - 1].coeffs[N as usize - 1] = 42;
+		nonzero_response2.vec[L - 1].coeffs_mut()[N as usize - 1] = 42;
 		assert!(
 			!is_zero_response(&nonzero_response2),
 			"Response with non-zero in last position should not be detected as zero"
@@ -1156,7 +1197,7 @@ mod tests {
 		// Scenario 2: Only 1 party has a non-zero response, below threshold
 		// Even though 3 parties "responded", only 1 is valid
 		let mut one_nonzero = polyvec::Polyvecl::default();
-		one_nonzero.vec[0].coeffs[0] = 1; // Small value within norm bounds
+		one_nonzero.vec[0].coeffs_mut()[0] = 1; // Small value within norm bounds
 
 		let mixed_responses: Vec<Vec<polyvec::Polyvecl>> = vec![
 			vec![one_nonzero.clone(); k_iterations], // Party 1: valid

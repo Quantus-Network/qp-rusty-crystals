@@ -322,8 +322,8 @@ mod hdwallet_tests {
 			"wormhole first_hash derivation changed"
 		);
 		assert_eq!(
-			w.secret,
-			hex!("30051cfa3abd462d3bc26da2d660e90ba8af6080b7fe95d9fd3f3b37c7d9ce4b"),
+			w.secret.as_bytes(),
+			&hex!("30051cfa3abd462d3bc26da2d660e90ba8af6080b7fe95d9fd3f3b37c7d9ce4b"),
 			"wormhole secret derivation changed"
 		);
 	}
@@ -337,7 +337,7 @@ mod hdwallet_tests {
 		let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
 		println!("address    = {}", hex(&w.address));
 		println!("first_hash = {}", hex(&w.first_hash));
-		println!("secret     = {}", hex(&w.secret));
+		println!("secret     = {}", hex(w.secret.as_bytes()));
 	}
 
 	#[test]
@@ -402,6 +402,55 @@ mod hdwallet_tests {
 	}
 
 	#[test]
+	fn test_passphrase_unicode_normalization() {
+		// BIP39 mandates NFKD normalization before PBKDF2: canonically equivalent
+		// passphrases must derive the same seed. "café" spelled with a precomposed
+		// U+00E9 vs a decomposed "e" + U+0301 combining acute accent.
+		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let composed = "caf\u{00e9}";
+		let decomposed = "cafe\u{0301}";
+		assert_ne!(composed.as_bytes(), decomposed.as_bytes());
+
+		let seed_composed = mnemonic_to_seed(mnemonic.to_string(), Some(composed)).unwrap();
+		let seed_decomposed = mnemonic_to_seed(mnemonic.to_string(), Some(decomposed)).unwrap();
+		assert_eq!(
+			seed_composed, seed_decomposed,
+			"canonically equivalent passphrases must derive the same seed"
+		);
+
+		// The normalized form must feed PBKDF2 (NFKD of both spellings is the
+		// decomposed byte string), matching what standard BIP39 tooling computes.
+		let reference = bip39::Mnemonic::parse_in_normalized(bip39::Language::English, mnemonic)
+			.unwrap()
+			.to_seed_normalized(decomposed);
+		assert_eq!(seed_composed, reference);
+
+		// Same guarantee through the borrowing derivation helpers.
+		let key_composed =
+			crate::derive_key_from_mnemonic(mnemonic, Some(composed), "m/44'/189189'/0'/0'/0'")
+				.unwrap();
+		let key_decomposed =
+			crate::derive_key_from_mnemonic(mnemonic, Some(decomposed), "m/44'/189189'/0'/0'/0'")
+				.unwrap();
+		assert_eq!(key_composed.secret.to_bytes(), key_decomposed.secret.to_bytes());
+	}
+
+	#[test]
+	fn test_mnemonic_unicode_normalization() {
+		// NFKD also applies to the mnemonic itself: U+00A0 (no-break space) has a
+		// compatibility decomposition to a plain space, so a mnemonic pasted with
+		// non-breaking separators must parse and derive identically.
+		let ascii = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let nbsp = ascii.replace(' ', "\u{00a0}");
+		assert_ne!(ascii.as_bytes(), nbsp.as_bytes());
+
+		let seed_ascii = mnemonic_to_seed(ascii.to_string(), None).unwrap();
+		let seed_nbsp = mnemonic_to_seed(nbsp, None)
+			.expect("NFKD-equivalent mnemonic must parse after normalization");
+		assert_eq!(seed_ascii, seed_nbsp);
+	}
+
+	#[test]
 	fn test_derive_key_from_seed_different_paths() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
@@ -452,10 +501,10 @@ mod hdwallet_tests {
 			generate_wormhole_from_seed((&mut seed).into(), "m/44'/189189189'/0'").unwrap();
 
 		// Verify wormhole pair has expected structure
-		assert_eq!(wormhole.secret.len(), 32);
+		assert_eq!(wormhole.secret.as_bytes().len(), 32);
 		assert_eq!(wormhole.address.len(), 32);
 		assert_eq!(wormhole.first_hash.len(), 32);
-		assert_ne!(wormhole.secret, [0u8; 32]);
+		assert_ne!(wormhole.secret.as_bytes(), &[0u8; 32]);
 		assert_ne!(wormhole.address, [0u8; 32]);
 	}
 
@@ -611,6 +660,86 @@ mod hdwallet_tests {
 			Err(other) => panic!("expected PathTooDeep, got {other:?}"),
 			Ok(_) => panic!("expected PathTooDeep, got Ok"),
 		}
+	}
+
+	/// The mnemonic-based helpers must validate the derivation path *before*
+	/// BIP39 seed stretching, matching the seed-based entrypoints. The error
+	/// precedence makes the ordering observable: with a bogus mnemonic AND a
+	/// bad path, a path error proves the cheap check ran first, while a
+	/// Bip39Error would prove the expensive mnemonic work ran first.
+	#[test]
+	fn test_mnemonic_helpers_validate_path_before_seed_stretching() {
+		use crate::{
+			derive_key_from_mnemonic, derive_wormhole_from_mnemonic, MAX_DERIVATION_PATH_BYTES,
+		};
+
+		let bogus_mnemonic = "not a valid bip39 mnemonic phrase at all";
+		let mut oversized = String::from("m");
+		while oversized.len() <= MAX_DERIVATION_PATH_BYTES {
+			oversized.push_str("/1'");
+		}
+
+		let err = derive_key_from_mnemonic(bogus_mnemonic, None, &oversized).unwrap_err();
+		assert!(
+			matches!(err, HDLatticeError::PathTooLong(_)),
+			"path must be rejected before seed stretching, got {err:?}"
+		);
+
+		// WormholePair has no Debug impl (it holds a secret), so match instead
+		// of unwrap_err.
+		match derive_wormhole_from_mnemonic(bogus_mnemonic, None, &oversized) {
+			Err(HDLatticeError::PathTooLong(_)) => {},
+			Err(other) => panic!("path must be rejected before seed stretching, got {other:?}"),
+			Ok(_) => panic!("expected PathTooLong, got Ok"),
+		}
+
+		// The wormhole chain-ID check must also precede seed work: this path is
+		// syntactically valid but uses the Dilithium chain ID, not the wormhole one.
+		match derive_wormhole_from_mnemonic(bogus_mnemonic, None, "m/44'/189189'/0'") {
+			Err(HDLatticeError::InvalidWormholePath(_)) => {},
+			Err(other) => {
+				panic!("wrong chain ID must be rejected before seed stretching, got {other:?}")
+			},
+			Ok(_) => panic!("expected InvalidWormholePath, got Ok"),
+		}
+	}
+
+	/// Mnemonic and passphrase inputs must be size-capped before Unicode
+	/// normalization and seed derivation, mirroring the derivation-path caps.
+	/// Without bounds, a caller-controlled huge passphrase (or a huge
+	/// non-normalized mnemonic) drives unbounded allocation, normalization
+	/// scans, and PBKDF2 work before any rejection.
+	#[test]
+	fn test_rejects_oversized_mnemonic_and_passphrase() {
+		use crate::{derive_key_from_mnemonic, MAX_MNEMONIC_BYTES, MAX_PASSPHRASE_BYTES};
+
+		let valid = "rocket primary way job input cactus submit menu zoo burger rent impose";
+
+		// A valid mnemonic paired with an oversized passphrase must be rejected
+		// up front instead of deriving a seed over attacker-sized input.
+		let huge_passphrase = "p".repeat(MAX_PASSPHRASE_BYTES + 1);
+		let err = mnemonic_to_seed(valid.to_string(), Some(&huge_passphrase))
+			.expect_err("oversized passphrase must be rejected");
+		assert!(matches!(err, HDLatticeError::PassphraseTooLong(_)), "got {err:?}");
+
+		// An oversized mnemonic must be rejected before normalization/parsing.
+		// Use a non-NFKD char so the pre-fix code path would also allocate a
+		// normalized copy of the whole input.
+		let huge_mnemonic = "\u{00e9} ".repeat(MAX_MNEMONIC_BYTES / 2 + 1);
+		let err =
+			mnemonic_to_seed(huge_mnemonic, None).expect_err("oversized mnemonic must be rejected");
+		assert!(matches!(err, HDLatticeError::MnemonicTooLong(_)), "got {err:?}");
+
+		// The borrowed-mnemonic helpers share the same parser and must enforce
+		// the same caps.
+		let err = derive_key_from_mnemonic(valid, Some(&huge_passphrase), "m/44'/189189'/0'")
+			.expect_err("oversized passphrase must be rejected in derive_key_from_mnemonic");
+		assert!(matches!(err, HDLatticeError::PassphraseTooLong(_)), "got {err:?}");
+
+		// Inputs at exactly the caps must still be accepted.
+		let max_passphrase = "p".repeat(MAX_PASSPHRASE_BYTES);
+		mnemonic_to_seed(valid.to_string(), Some(&max_passphrase))
+			.expect("passphrase at exactly MAX_PASSPHRASE_BYTES must be accepted");
 	}
 
 	#[test]

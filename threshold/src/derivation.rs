@@ -11,13 +11,34 @@
 //! 1. Each party derives a DKG contribution from their master share + tweak
 //! 2. Parties run full DKG using these contributions for randomness
 //! 3. The resulting shares are stored (cannot be recomputed on-the-fly)
-//! 4. The derived public key is deterministic for the same (master_key, tweak)
+//! 4. There is one canonical derived key per `(master_key, tweak)`: the key produced by the single
+//!    DKG run performed for that tweak, then stored and looked up by [`DerivedKeyId`]
+//!
+//! # The derived key is NOT recomputable
+//!
+//! Only the per-party *contribution* ([`derive_dkg_contribution`]) is a
+//! deterministic function of `(master_share, tweak)`. The derived public key
+//! itself is **not** a pure function of `(master_key, tweak)`: every DKG
+//! session mixes a mandatory fresh `session_nonce` (via the session SSID) into
+//! each party's Round 1 randomness, and the final key is derived from the
+//! aggregated `global_randomness`. This is deliberate — without the nonce
+//! binding, an adversary who observed a failed attempt's Round 2 reveals could
+//! predict honest randomness on retry and grind the result.
+//!
+//! Consequently, re-running the DKG for the same `(master_key, tweak)` — e.g.
+//! during node re-provisioning, disaster recovery, or to cross-check a
+//! contract-stored address — yields a **different** key. Recovery flows must
+//! restore the *stored* derived shares (step 3); they can never regenerate
+//! them.
 //!
 //! # Tweak Computation
 //!
 //! The tweak should be computed by the caller using the same algorithm as the
-//! NEAR MPC contract (`derive_dilithium_tweak`). This ensures consistency between
-//! the contract (which stores derived public keys) and the MPC nodes (which run DKG).
+//! NEAR MPC contract (`derive_dilithium_tweak`). This keeps the contract and
+//! the MPC nodes agreed on *which* derived key a request refers to: the
+//! contract stores the derived public key produced by the canonical DKG run,
+//! keyed by the same tweak the nodes use to derive their contributions and
+//! look up their stored shares.
 //!
 //! # Security
 //!
@@ -39,7 +60,7 @@ const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v2"
 /// Derive a DKG contribution from a master share and tweak.
 ///
 /// This function produces a deterministic 32-byte value that a party uses
-/// as their randomness contribution in the DKG protocol. The contribution
+/// as their per-party seed input in the DKG protocol. The contribution
 /// incorporates secret material from the master share, ensuring that:
 ///
 /// 1. Only parties with valid master shares can compute their contribution
@@ -52,7 +73,17 @@ const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v2"
 /// * `tweak` - The derivation tweak (computed from account_id + path by the caller)
 ///
 /// # Returns
-/// A 32-byte contribution for DKG randomness
+/// A 32-byte contribution passed as the `seed` argument to [`crate::keygen::dkg::Dkg::new`].
+///
+/// # Session freshness
+///
+/// The contribution alone does **not** include a DKG session nonce. Callers
+/// **must** supply a fresh, unique `session_nonce` to [`crate::keygen::dkg::Dkg::new`]
+/// for every DKG attempt (including retries of the same derived key). Round 1
+/// randomness and leader subset secrets are derived from both this seed and the
+/// session SSID (which incorporates `session_nonce`), so a retry with a new
+/// nonce produces fresh honest randomness even though the contribution is
+/// unchanged.
 ///
 /// # Security
 ///

@@ -163,18 +163,42 @@ impl fmt::Display for DkgError {
 ///
 /// The caller should handle each action appropriately:
 /// - `Wait`: No action needed, call `poke()` again after receiving messages
-/// - `SendMany`: Broadcast the data to all other participants
+/// - `SendMany`: Broadcast the data to all other participants via authenticated channel
 /// - `SendPrivate`: Send the data to a specific participant via secure channel
 /// - `Return`: The DKG is complete, the output contains the keys
 ///
 /// `Return` carries a boxed [`DkgOutput`] because the output is ~2.8 KB
 /// (full Dilithium key material) and inlining it would balloon every other
 /// variant. See `clippy::large_enum_variant`.
-#[derive(Debug)]
+///
+/// `Debug` is implemented manually (rather than derived) so that the
+/// [`SendPrivate`](DkgAction::SendPrivate) transport bytes — which carry the
+/// serialized Round 1 secret K_S — are never rendered. A derived formatter would
+/// print the raw `Vec<u8>`, persisting key material into any log or trace that
+/// includes `{:?}` output. Only the recipient and payload length are shown.
 pub enum DkgAction {
 	/// Wait for more messages before proceeding.
 	Wait,
 	/// Broadcast data to all other participants.
+	///
+	/// **IMPORTANT: This message MUST be sent over an authenticated channel
+	/// (integrity + sender authentication).**
+	///
+	/// The caller is responsible for ensuring:
+	/// - **Authenticity**: Receivers can verify the broadcast came from us — the `from` argument
+	///   that peers pass to [`Dkg::message`] is trusted and must be derived from transport-level
+	///   sender authentication, not from attacker-controllable packet contents
+	/// - **Integrity**: The message cannot be modified in transit
+	///
+	/// Confidentiality is not required; broadcast payloads are public.
+	///
+	/// Without sender authentication, an attacker who can inject packets can
+	/// spoof a participant's broadcast before the genuine one arrives. Round
+	/// buffers keep the first message per sender (first-message-wins, a
+	/// memory-exhaustion defense), so the forged packet occupies that
+	/// participant's slot and the honest broadcast is ignored. The poisoned
+	/// data is then caught by commitment or transcript verification, but only
+	/// as a late abort: the attacker can deny completion of every session.
 	SendMany(Vec<u8>),
 	/// Send data privately to a specific participant.
 	///
@@ -190,6 +214,27 @@ pub enum DkgAction {
 	SendPrivate(ParticipantId, Vec<u8>),
 	/// DKG is complete, return the output.
 	Return(Box<DkgOutput>),
+}
+
+impl fmt::Debug for DkgAction {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			DkgAction::Wait => f.write_str("Wait"),
+			// Broadcast payloads are public, but the serialized bytes are noise in
+			// a log; show only the length for consistency with SendPrivate.
+			DkgAction::SendMany(data) =>
+				f.debug_tuple("SendMany").field(&format_args!("{} bytes", data.len())).finish(),
+			// The payload is the serialized Round 1 private message (K_S). Never
+			// render the bytes; keep the recipient and length for diagnostics.
+			DkgAction::SendPrivate(to, data) => f
+				.debug_struct("SendPrivate")
+				.field("to", to)
+				.field("payload", &format_args!("<{} bytes redacted>", data.len()))
+				.finish(),
+			// Delegates to DkgOutput's Debug, which redacts the private share.
+			DkgAction::Return(output) => f.debug_tuple("Return").field(output).finish(),
+		}
+	}
 }
 
 // ============================================================================
@@ -302,17 +347,25 @@ impl DkgMessageBuffer {
 // Seed-based Randomness Derivation
 // ============================================================================
 
-/// Derive randomness for DKG Round 1 from a master seed.
+/// Derive randomness for DKG Round 1 from a master seed and session identifier.
 ///
 /// This uses SHAKE256 to derive all random values needed for Round 1:
 /// - `my_randomness`: The party's commitment randomness
 /// - `shared_secrets`: One secret per subset where this party is leader
 ///
+/// The [`DKG_SSID_SIZE`]-byte `ssid` (which incorporates the session nonce) is
+/// mixed into every derivation so that a retry with a fresh `session_nonce`
+/// produces fresh randomness even when `seed` is a deterministic derived-key
+/// contribution (`derive_dkg_contribution`). Without this binding, an adversary
+/// who observed honest Round 2 reveals from a failed attempt could predict the
+/// same values on retry and grind `global_randomness`.
+///
 /// Formula:
-/// - `my_randomness = SHAKE256("dkg-r1-rand" || seed || party_id)[0..32]`
-/// - `shared_secret[i] = SHAKE256("dkg-r1-ss" || seed || party_id || subset_mask)[0..32]`
+/// - `my_randomness = SHAKE256("dkg-r1-rand" || seed || party_id || ssid)[0..32]`
+/// - `shared_secret[i] = SHAKE256("dkg-r1-ss" || seed || party_id || subset_mask || ssid)[0..32]`
 fn derive_round1_randomness(
 	seed: &[u8; 32],
+	ssid: &[u8; DKG_SSID_SIZE],
 	party_id: ParticipantId,
 	leader_subsets: &[SubsetMask],
 ) -> ([u8; RANDOMNESS_SIZE], BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>) {
@@ -322,6 +375,7 @@ fn derive_round1_randomness(
 	fips202::shake256_absorb(&mut state, seed);
 	let party_bytes = party_id.to_le_bytes();
 	fips202::shake256_absorb(&mut state, &party_bytes);
+	fips202::shake256_absorb(&mut state, ssid);
 	fips202::shake256_finalize(&mut state);
 
 	let mut my_randomness = [0u8; RANDOMNESS_SIZE];
@@ -336,6 +390,7 @@ fn derive_round1_randomness(
 		fips202::shake256_absorb(&mut state, &party_bytes);
 		let subset_bytes = subset.to_le_bytes();
 		fips202::shake256_absorb(&mut state, &subset_bytes); // SubsetMask is u16 = 2 bytes
+		fips202::shake256_absorb(&mut state, ssid);
 		fips202::shake256_finalize(&mut state);
 
 		let mut secret = [0u8; SHARED_SECRET_SIZE];
@@ -389,16 +444,27 @@ pub struct Dkg<S: TranscriptSigner> {
 	ssid: [u8; DKG_SSID_SIZE],
 	/// Master seed for deriving all randomness (32 bytes, cryptographically random).
 	seed: [u8; 32],
-	pending_privates: Vec<(ParticipantId, Vec<u8>)>,
+	/// Round 1 private messages awaiting delivery, held as zeroizing
+	/// [`Round1Private`] structs (not pre-serialized byte buffers) so the queued
+	/// K_S material is wiped on drop rather than left in a freed `Vec<u8>`.
+	pending_privates: Vec<(ParticipantId, Round1Private)>,
 	/// Buffer for messages that arrive before we're ready to process them.
 	message_buffer: DkgMessageBuffer,
 }
 
 impl<S: TranscriptSigner> Drop for Dkg<S> {
 	fn drop(&mut self) {
-		// Zeroize sensitive data when the DKG is dropped
+		// Zeroize sensitive data when the DKG is dropped. Queued and buffered
+		// Round 1 private messages carry K_S, so wipe them too rather than freeing
+		// heap allocations that still contain secret bytes.
 		self.state.zeroize();
 		self.seed.zeroize();
+		for (_, private) in self.pending_privates.iter_mut() {
+			private.zeroize();
+		}
+		for private in self.message_buffer.round1_privates.values_mut() {
+			private.zeroize();
+		}
 	}
 }
 
@@ -457,7 +523,9 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// * `Ok(DkgAction)` - The action to perform
 	/// * `Err(DkgError)` - If the protocol encounters an error
 	pub fn poke(&mut self) -> Result<DkgAction, DkgError> {
-		if let Some((to, data)) = self.pending_privates.pop() {
+		if let Some((to, private)) = self.pending_privates.pop() {
+			let data = borsh::to_vec(&DkgMessage::Round1Private(private))
+				.map_err(|e| DkgError::InternalError(e.to_string()))?;
 			return Ok(DkgAction::SendPrivate(to, data));
 		}
 
@@ -504,8 +572,21 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// before processing. This prevents quorum inflation attacks where an attacker
 	/// injects messages with fake sender IDs to satisfy broadcast quorum checks.
 	///
+	/// **The `from` value is a trust boundary.** This function performs no
+	/// cryptographic authentication of the sender; it only checks that `from`
+	/// is a participant and matches the party ID embedded in the message. The
+	/// transport layer MUST authenticate the sender of every message (private
+	/// *and* broadcast) and pass the authenticated identity as `from`. If
+	/// `from` can be spoofed, a forged broadcast can occupy a participant's
+	/// first-message-wins slot in the round buffers, causing the honest
+	/// party's broadcast to be ignored and the session to stall or abort
+	/// during commitment/transcript verification (denial of service). See
+	/// [`DkgAction::SendMany`] and [`DkgAction::SendPrivate`] for the channel
+	/// requirements.
+	///
 	/// # Arguments
-	/// * `from` - The party ID of the sender (from the transport layer)
+	/// * `from` - The party ID of the sender. MUST come from transport-level sender authentication,
+	///   never from attacker-controllable packet contents.
 	/// * `data` - The serialized message bytes
 	///
 	/// # Errors
@@ -849,7 +930,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 		// Derive all randomness from the master seed
 		let leader_subsets = config.my_leader_subsets();
 		let (my_randomness, my_shared_secrets) =
-			derive_round1_randomness(&self.seed, config.my_party_id, &leader_subsets);
+			derive_round1_randomness(&self.seed, &self.ssid, config.my_party_id, &leader_subsets);
 
 		let my_commitment = h_commit(&self.ssid, config.my_party_id, &my_randomness);
 
@@ -971,17 +1052,18 @@ impl<S: TranscriptSigner> Dkg<S> {
 							subset_mask: subset,
 							shared_secret: secret,
 						};
-						let msg = DkgMessage::Round1Private(private);
-						let data = borsh::to_vec(&msg)
-							.map_err(|e| DkgError::InternalError(e.to_string()))?;
-						self.pending_privates.push((party, data));
+						// Queue the zeroizing struct; serialize only when popped for
+						// sending, so K_S is never parked in a plain byte buffer.
+						self.pending_privates.push((party, private));
 					}
 				}
 			}
 
 			self.state.privates_sent = true;
 
-			if let Some((to, data)) = self.pending_privates.pop() {
+			if let Some((to, private)) = self.pending_privates.pop() {
+				let data = borsh::to_vec(&DkgMessage::Round1Private(private))
+					.map_err(|e| DkgError::InternalError(e.to_string()))?;
 				return Ok(DkgAction::SendPrivate(to, data));
 			}
 		}
@@ -1396,8 +1478,14 @@ impl<S: TranscriptSigner> Dkg<S> {
 			&transcript_hash,
 		)?;
 
-		// Combine partial PKs to get final public key
-		let public_key = pack_combined_pk(&rho, all_partial_pks.values().map(|pk| &pk.t));
+		// Combine partial PKs to get final public key. Reject any partial PK with
+		// non-canonical coefficients rather than overflowing the i32 accumulation.
+		let public_key =
+			pack_combined_pk(&rho, all_partial_pks.values().map(|pk| &pk.t)).map_err(|_| {
+				DkgError::InvalidMessage(
+					"a partial public key contains out-of-range coefficients".into(),
+				)
+			})?;
 
 		// Build private key share
 		let private_share = build_private_share(config, my_contributions, &rho, &public_key)?;
@@ -1878,6 +1966,27 @@ where
 	let threshold_config = ThresholdConfig::new(threshold, total_parties)
 		.map_err(|e| DkgError::InternalError(e.to_string()))?;
 
+	// Validate vector lengths up front. Without this, mismatched lengths would
+	// reach `DkgConfig::new(...).unwrap()` (panic on a length/participant error)
+	// or, when too few signers are supplied, the driver loop's `dkgs[party_id]`
+	// indexing — turning a `Result`-returning API into a process abort.
+	if signers.len() != total_parties as usize {
+		return Err(DkgError::InvalidState(format!(
+			"expected {} signers for {} parties, got {}",
+			total_parties,
+			total_parties,
+			signers.len()
+		)));
+	}
+	if public_keys.len() != total_parties as usize {
+		return Err(DkgError::InvalidState(format!(
+			"expected {} public keys for {} parties, got {}",
+			total_parties,
+			total_parties,
+			public_keys.len()
+		)));
+	}
+
 	let participants: Vec<ParticipantId> = (0..total_parties).collect();
 
 	let mut pk_map: BTreeMap<ParticipantId, S::PublicKey> = BTreeMap::new();
@@ -1897,7 +2006,7 @@ where
 				signer,
 				pk_map.clone(),
 			)
-			.unwrap();
+			.map_err(|e| DkgError::InvalidState(e.to_string()))?;
 
 			// Derive party-specific seed: SHAKE256(master_seed || "dkg-party" || party_id)
 			let mut state = fips202::KeccakState::default();
@@ -1910,9 +2019,9 @@ where
 			let mut party_seed = [0u8; 32];
 			fips202::shake256_squeeze(&mut party_seed, &mut state);
 
-			Dkg::new(config, party_seed, session_nonce)
+			Ok(Dkg::new(config, party_seed, session_nonce))
 		})
-		.collect();
+		.collect::<Result<Vec<Dkg<S>>, DkgError>>()?;
 
 	let mut outputs: Vec<Option<DkgOutput>> = vec![None; total_parties as usize];
 	let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> =
@@ -1981,7 +2090,97 @@ mod tests {
 	/// Test session nonce for DKG tests.
 	const TEST_SESSION_NONCE: [u8; 32] = [0xDEu8; 32];
 
-	#[derive(Clone, Debug)]
+	/// A deterministic derived-key contribution (same share + tweak) must not
+	/// pin Round 1 randomness across DKG retries. Before the SSID binding fix,
+	/// `derive_round1_randomness` ignored `session_nonce`, so an honest party
+	/// replayed the same `my_randomness` on every retry and a malicious peer who
+	/// had seen Round 2 reveals could predict it.
+	#[test]
+	fn test_round1_randomness_changes_with_session_nonce() {
+		use crate::{derivation::derive_dkg_contribution, keys::SecretShareData};
+		use alloc::collections::BTreeMap;
+
+		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
+		let mut shares = BTreeMap::new();
+		shares.insert(0b011, SecretShareData { s1: [[42i32; 256]; L], s2: [[42i32; 256]; K] });
+		let master_share = PrivateKeyShare::new(
+			0,
+			3,
+			2,
+			[0u8; 32],
+			[0u8; 32],
+			[0u8; 64],
+			shares,
+			dkg_participants,
+		);
+		let tweak = [0x55u8; 32];
+		let contribution = derive_dkg_contribution(&master_share, &tweak);
+
+		let nonce_a = [0xA1u8; 32];
+		let nonce_b = [0xB2u8; 32];
+		let ssid_a = compute_dkg_ssid(2, 3, &[0, 1, 2], &nonce_a);
+		let ssid_b = compute_dkg_ssid(2, 3, &[0, 1, 2], &nonce_b);
+		let leader_subsets = [0b011u16];
+
+		let (rand_a, secrets_a) =
+			derive_round1_randomness(&contribution, &ssid_a, 0, &leader_subsets);
+		let (rand_b, secrets_b) =
+			derive_round1_randomness(&contribution, &ssid_b, 0, &leader_subsets);
+
+		assert_ne!(
+			rand_a, rand_b,
+			"same derived-key contribution must yield different Round 1 randomness per session nonce"
+		);
+		assert_ne!(
+			secrets_a[&0b011], secrets_b[&0b011],
+			"leader subset secrets must also change with session nonce"
+		);
+
+		// Same nonce → reproducible (honest parties in one session agree).
+		let (rand_a2, secrets_a2) =
+			derive_round1_randomness(&contribution, &ssid_a, 0, &leader_subsets);
+		assert_eq!(rand_a, rand_a2);
+		assert_eq!(secrets_a[&0b011], secrets_a2[&0b011]);
+	}
+
+	/// The `SendPrivate` payload carries the borsh-serialized Round 1 private
+	/// message (K_S). Its `Debug` output must never expose those secret bytes,
+	/// otherwise any downstream `{:?}` logging persists key material outside the
+	/// encrypted transport path.
+	#[test]
+	fn send_private_debug_does_not_leak_shared_secret() {
+		// A recognizable K_S: every byte 0xAB (== 171 decimal) so we can search
+		// for the exact form a derived `Debug` on `Vec<u8>` would print.
+		let secret_marker = [0xABu8; SHARED_SECRET_SIZE];
+		let private = Round1Private {
+			ssid: [0x11u8; DKG_SSID_SIZE],
+			from_party_id: 7,
+			subset_mask: 0b011,
+			shared_secret: secret_marker,
+		};
+		let data = borsh::to_vec(&DkgMessage::Round1Private(private)).unwrap();
+
+		// Sanity: the secret really is inside the transport payload.
+		assert!(
+			data.windows(SHARED_SECRET_SIZE).any(|w| w == secret_marker),
+			"test setup: secret not present in serialized payload"
+		);
+
+		let action = DkgAction::SendPrivate(3, data);
+		let rendered = format!("{action:?}");
+
+		// A derived `Debug` renders the payload as `[.., 171, 171, ..]`; the
+		// redacting impl must emit no run of the secret bytes.
+		assert!(
+			!rendered.contains("171, 171"),
+			"SendPrivate Debug leaked raw secret bytes: {rendered}"
+		);
+		// Still useful for debugging: recipient visible, payload redacted.
+		assert!(rendered.contains("to: 3"), "recipient should stay visible: {rendered}");
+		assert!(rendered.contains("redacted"), "payload should be redacted: {rendered}");
+	}
+
+	#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 	struct TestSigner {
 		id: u32,
 	}
@@ -2039,6 +2238,72 @@ mod tests {
 		}
 	}
 
+	/// The DKG output public key is intentionally NOT a pure function of the
+	/// parties' seeds: each party's Round 1 randomness is bound to the session
+	/// SSID (which incorporates `session_nonce`), and the final key is
+	/// computed from `rho = h_seed(global_randomness)`. Re-running the DKG
+	/// with identical seeds but a fresh nonce therefore yields a different
+	/// key — that is the security property that stops an adversary who saw a
+	/// failed attempt's Round 2 reveals from predicting honest randomness and
+	/// grinding `global_randomness` on retry (see `derive_round1_randomness`).
+	///
+	/// This test pins that behavior so documentation like `derivation.rs`
+	/// ("one canonical stored key per (master_key, tweak)", not "recomputable
+	/// from (master_key, tweak)") stays honest: derived keys must be stored,
+	/// never recovered by re-running the DKG.
+	#[test]
+	fn test_dkg_public_key_depends_on_session_nonce() {
+		let seed = [42u8; 32];
+		let run = |nonce: &[u8; 32]| {
+			let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+			let public_keys: Vec<u32> = (0..3).collect();
+			run_local_dkg(2, 3, signers, public_keys, seed, nonce).unwrap()
+		};
+
+		let nonce_a = [0xA1u8; 32];
+		let nonce_b = [0xB2u8; 32];
+
+		let pk_a = run(&nonce_a)[0].public_key.clone();
+		let pk_b = run(&nonce_b)[0].public_key.clone();
+		assert_ne!(
+			pk_a.as_bytes(),
+			pk_b.as_bytes(),
+			"identical seeds with a fresh session nonce must produce a different public key; \
+			 if this ever fails, Round 1 randomness lost its SSID binding (grinding risk)"
+		);
+
+		// Within one session (same nonce), the protocol is deterministic for
+		// fixed seeds — honest parties agree and reruns reproduce the key.
+		let pk_a2 = run(&nonce_a)[0].public_key.clone();
+		assert_eq!(pk_a.as_bytes(), pk_a2.as_bytes());
+	}
+
+	/// Mismatched input vector lengths must return a `DkgError`, not panic.
+	/// `run_local_dkg` is public, so untrusted setup parameters reaching a
+	/// `.unwrap()` or `dkgs[party_id]` index would be an availability DoS.
+	#[test]
+	fn test_run_local_dkg_rejects_mismatched_lengths() {
+		let seed = [7u8; 32];
+
+		// Too few signers (and the driver loop would otherwise index out of bounds).
+		let signers: Vec<TestSigner> = (0..2).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let result = run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE);
+		assert!(matches!(result, Err(DkgError::InvalidState(_))), "too few signers must error");
+
+		// Too many signers (index would fall outside all_participants).
+		let signers: Vec<TestSigner> = (0..4).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..3).collect();
+		let result = run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE);
+		assert!(matches!(result, Err(DkgError::InvalidState(_))), "too many signers must error");
+
+		// Mismatched public key count (would fail DkgConfig::new before the fix).
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let public_keys: Vec<u32> = (0..2).collect();
+		let result = run_local_dkg(2, 3, signers, public_keys, seed, &TEST_SESSION_NONCE);
+		assert!(matches!(result, Err(DkgError::InvalidState(_))), "wrong pk count must error");
+	}
+
 	#[test]
 	fn test_dkg_eta_bounded() {
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
@@ -2093,8 +2358,13 @@ mod tests {
 
 		/// Signer that wraps a Dilithium secret key.
 		/// Clone is implemented manually to explicitly copy the secret key bytes.
+		///
+		/// `Zeroize`/`ZeroizeOnDrop` are derived (not marker-implemented) so the
+		/// secret key is provably wiped on drop; the public key is skipped.
+		#[derive(zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 		struct DilithiumSigner {
 			sk: SecretKey,
+			#[zeroize(skip)]
 			pk: PublicKey,
 		}
 
@@ -2196,7 +2466,7 @@ mod tests {
 	#[test]
 	fn test_dkg_rejects_bad_signature() {
 		// A signer that produces bad signatures for party 2
-		#[derive(Clone, Debug)]
+		#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 		struct BadSigner {
 			id: u32,
 			produce_bad_sig: bool,

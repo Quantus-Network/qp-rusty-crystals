@@ -3,7 +3,7 @@
 //! These tests validate the complete end-to-end threshold signature protocol
 //! using the `ThresholdSigner` API with leader-based retry.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use qp_rusty_crystals_threshold::{
 	generate_with_dealer,
@@ -17,14 +17,56 @@ fn hex_encode(data: &[u8]) -> String {
 	data.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Run the complete threshold signing protocol using the 4-round protocol.
+/// Number of fresh signing attempts before giving up.
 ///
-/// `run_local_signing` is a single attempt — it returns an error if ML-DSA
-/// rejection sampling happens to fail on that attempt. In production (NEAR MPC),
-/// the application layer retries with a fresh `DilithiumSignProtocol` on a fresh
-/// transport channel up to `MAX_ATTEMPTS_PER_REQUEST_AS_LEADER` times. We mirror
-/// that behaviour here so tests are not flaky on parameter sets that frequently
-/// abort on the first attempt.
+/// `run_local_signing` is a single attempt — it can abort when ML-DSA rejection
+/// sampling happens to fail on that attempt. In production (NEAR MPC), the
+/// application layer retries with a fresh `DilithiumSignProtocol` on a fresh
+/// transport channel. We mirror that here so tests are not flaky on parameter
+/// sets that frequently abort on the first attempt.
+const MAX_EXTERNAL_ATTEMPTS: u32 = 100;
+
+/// Whether a signing error is transient (a fresh attempt seed may succeed) or
+/// permanent (deterministic, so retrying cannot help).
+///
+/// Only probabilistic signing aborts are worth retrying. Structural failures —
+/// serialization/size limits, malformed messages, bad config, missing data —
+/// are deterministic, so we surface them immediately instead of grinding
+/// through every attempt. (This is what previously turned a message-size
+/// regression into an ~8-minute "ERROR after 100 attempts" instead of an
+/// instant failure.)
+fn is_retryable_signing_error(err: &SignProtocolError) -> bool {
+	matches!(err, SignProtocolError::SigningError(_) | SignProtocolError::ProtocolFailed(_))
+}
+
+/// Run `run_local_signing` with fresh per-attempt seeds, stopping early on
+/// permanent (non-retryable) errors.
+///
+/// `make_signers` is called once per attempt to produce a fresh set of signers,
+/// mirroring the "fresh protocol instance per attempt" pattern used by NEAR MPC.
+fn sign_with_retries(
+	make_signers: impl Fn() -> Vec<ThresholdSigner>,
+	message: &[u8],
+	context: &[u8],
+	base_seed: &[u8; 32],
+) -> Result<Signature, SignProtocolError> {
+	let mut last_err = SignProtocolError::SigningError("no attempts made".to_string());
+	for attempt in 0..MAX_EXTERNAL_ATTEMPTS {
+		let mut attempt_seed = *base_seed;
+		for (i, b) in attempt.to_le_bytes().iter().enumerate() {
+			attempt_seed[i] ^= *b;
+		}
+		match run_local_signing(make_signers(), message, context, &attempt_seed) {
+			Ok(signature) => return Ok(signature),
+			Err(e) if is_retryable_signing_error(&e) => last_err = e,
+			// Permanent/structural failure: retrying will not help.
+			Err(e) => return Err(e),
+		}
+	}
+	Err(last_err)
+}
+
+/// Run the complete threshold signing protocol using the 4-round protocol.
 ///
 /// Returns Ok(signature_bytes) on success or Err(message) on failure.
 fn run_threshold_protocol_4_round(
@@ -40,47 +82,31 @@ fn run_threshold_protocol_4_round(
 	let (public_key, shares) =
 		generate_with_dealer(seed, config).map_err(|e| format!("Key generation error: {:?}", e))?;
 
-	// Retry with derived seeds — equivalent to NEAR MPC spawning a fresh
-	// DilithiumSignProtocol per attempt with a new round1_seed.
-	const MAX_EXTERNAL_ATTEMPTS: u32 = 100;
-	let mut last_err = String::new();
-	for attempt in 0..MAX_EXTERNAL_ATTEMPTS {
-		// Create signers for the first `threshold` parties (active signers).
-		// New ThresholdSigner instances per attempt mirror the "fresh protocol
-		// instance" pattern used by NEAR MPC.
-		let signers: Vec<ThresholdSigner> = shares
+	// Validate signer creation once up front for a clean error message.
+	shares
+		.iter()
+		.take(threshold as usize)
+		.cloned()
+		.map(|share| ThresholdSigner::new(share, public_key.clone(), config))
+		.collect::<Result<Vec<_>, _>>()
+		.map_err(|e| format!("Signer creation error: {:?}", e))?;
+
+	let make_signers = || {
+		shares
 			.iter()
 			.take(threshold as usize)
 			.cloned()
-			.map(|share| ThresholdSigner::new(share, public_key.clone(), config))
-			.collect::<Result<_, _>>()
-			.map_err(|e| format!("Signer creation error: {:?}", e))?;
+			.map(|share| ThresholdSigner::new(share, public_key.clone(), config).unwrap())
+			.collect::<Vec<_>>()
+	};
 
-		// Derive a per-attempt session seed from the base seed.
-		let mut attempt_seed = *seed;
-		let attempt_bytes = attempt.to_le_bytes();
-		for (i, b) in attempt_bytes.iter().enumerate() {
-			attempt_seed[i] ^= *b;
-		}
+	let signature = sign_with_retries(make_signers, message, context, seed)
+		.map_err(|e| format!("Signing failed: {:?}", e))?;
 
-		match run_local_signing(signers, message, context, &attempt_seed) {
-			Ok(signature) => {
-				if !verify_signature(&public_key, message, context, &signature) {
-					return Err("Signature verification failed".to_string());
-				}
-				return Ok(signature.as_bytes().to_vec());
-			},
-			Err(e) => {
-				last_err = format!("{:?}", e);
-				continue;
-			},
-		}
+	if !verify_signature(&public_key, message, context, &signature) {
+		return Err("Signature verification failed".to_string());
 	}
-
-	Err(format!(
-		"Signing failed after {} attempts (last error: {})",
-		MAX_EXTERNAL_ATTEMPTS, last_err
-	))
+	Ok(signature.as_bytes().to_vec())
 }
 
 // ============================================================================
@@ -397,12 +423,16 @@ fn test_signature_verification_with_wrong_context() {
 
 // ============================================================================
 // THRESHOLD MATRIX TESTS (Dealer-based keygen)
+//
+// One #[test] per (threshold, total_parties) config so a failure pinpoints the
+// exact config and the suite parallelizes across configs. The 4-of-6 case uses
+// k_iterations=1600 (resharing-hardened) — a single signing is multi-second in
+// release and slower in a debug build — but it runs in the default suite so the
+// near-mpc 4-of-6 committee shape stays regression-covered.
 // ============================================================================
 
-/// Helper function to run dealer-based threshold matrix test for specific configs.
-fn run_dealer_matrix_test(configs: &[(u32, u32)], test_name: &str) {
-	println!("\n=== {} ===\n", test_name);
-
+/// Run dealer-based keygen + signing for a single config and assert success.
+fn run_dealer_signing_test(threshold: u32, total_parties: u32) {
 	let mut seed = [0u8; 32];
 	for (i, byte) in seed.iter_mut().enumerate() {
 		*byte = i as u8;
@@ -411,135 +441,110 @@ fn run_dealer_matrix_test(configs: &[(u32, u32)], test_name: &str) {
 	let message = b"matrix test message";
 	let context: &[u8] = b"";
 
-	let mut passed = 0;
-	let mut failed = 0;
-	let mut total_time = Duration::ZERO;
+	let config = ThresholdConfig::new(threshold, total_parties)
+		.unwrap_or_else(|e| panic!("{threshold}-of-{total_parties}: config error: {e:?}"));
+	let (public_key, shares) = generate_with_dealer(&seed, config)
+		.unwrap_or_else(|e| panic!("{threshold}-of-{total_parties}: keygen error: {e:?}"));
 
-	println!("{:<10} {:<10} {:<10}", "Config", "Status", "Time");
-	println!("{}", "-".repeat(35));
+	// Validate signer creation once up front for a clean error message.
+	shares
+		.iter()
+		.take(threshold as usize)
+		.cloned()
+		.map(|share| ThresholdSigner::new(share, public_key.clone(), config))
+		.collect::<Result<Vec<_>, _>>()
+		.unwrap_or_else(|e| panic!("{threshold}-of-{total_parties}: signer creation error: {e:?}"));
 
-	for (threshold, total_parties) in configs.iter() {
-		let start = Instant::now();
-
-		// Generate keys with dealer
-		let config = match ThresholdConfig::new(*threshold, *total_parties) {
-			Ok(c) => c,
-			Err(e) => {
-				println!("  {}-of-{}: Config error: {:?}", threshold, total_parties, e);
-				failed += 1;
-				continue;
-			},
-		};
-
-		let (public_key, shares) = match generate_with_dealer(&seed, config) {
-			Ok(result) => result,
-			Err(e) => {
-				println!("  {}-of-{}: Keygen error: {:?}", threshold, total_parties, e);
-				failed += 1;
-				continue;
-			},
-		};
-
-		// Validate signer creation eagerly
-		if let Err(e) = shares
+	let make_signers = || {
+		shares
 			.iter()
-			.take(*threshold as usize)
+			.take(threshold as usize)
 			.cloned()
-			.map(|share| ThresholdSigner::new(share, public_key.clone(), config))
-			.collect::<Result<Vec<_>, _>>()
-		{
-			println!("  {}-of-{}: Signer creation error: {:?}", threshold, total_parties, e);
-			failed += 1;
-			continue;
-		}
+			.map(|share| ThresholdSigner::new(share, public_key.clone(), config).unwrap())
+			.collect::<Vec<_>>()
+	};
 
-		// Run the signing protocol with external retries
-		const MAX_EXTERNAL_ATTEMPTS: u32 = 100;
-		let mut sig_result: Result<Signature, SignProtocolError> =
-			Err(SignProtocolError::SigningError("no attempts made".into()));
-		for attempt in 0..MAX_EXTERNAL_ATTEMPTS {
-			let signers: Vec<ThresholdSigner> = shares
-				.iter()
-				.take(*threshold as usize)
-				.cloned()
-				.map(|share| ThresholdSigner::new(share, public_key.clone(), config).unwrap())
-				.collect();
-			let mut attempt_seed = seed;
-			let bytes = attempt.to_le_bytes();
-			for (i, b) in bytes.iter().enumerate() {
-				attempt_seed[i] ^= *b;
-			}
-			match run_local_signing(signers, message, context, &attempt_seed) {
-				Ok(s) => {
-					sig_result = Ok(s);
-					break;
-				},
-				Err(e) => sig_result = Err(e),
-			}
-		}
-
-		match sig_result {
-			Ok(signature) =>
-				if verify_signature(&public_key, message, context, &signature) {
-					let elapsed = start.elapsed();
-					total_time += elapsed;
-					println!(
-						"{:<10} {:<10} {:<10}",
-						format!("{}-of-{}", threshold, total_parties),
-						"PASSED",
-						format!("{:.2?}", elapsed)
-					);
-					passed += 1;
-				} else {
-					println!(
-						"{:<10} {:<10} {:<10}",
-						format!("{}-of-{}", threshold, total_parties),
-						"VERIFY FAIL",
-						"-"
-					);
-					failed += 1;
-				},
-			Err(e) => {
-				let elapsed = start.elapsed();
-				total_time += elapsed;
-				println!(
-					"{:<10} {:<10} {:<10}",
-					format!("{}-of-{}", threshold, total_parties),
-					"ERROR",
-					format!("{:?}", e)
-				);
-				failed += 1;
-			},
-		}
-	}
-
-	println!("\nPassed: {}, Failed: {}, Total time: {:.2?}", passed, failed, total_time);
-	assert_eq!(failed, 0, "Some threshold configurations failed");
+	let signature = sign_with_retries(make_signers, message, context, &seed)
+		.unwrap_or_else(|e| panic!("{threshold}-of-{total_parties}: signing failed: {e:?}"));
+	assert!(
+		verify_signature(&public_key, message, context, &signature),
+		"{threshold}-of-{total_parties}: signature failed to verify",
+	);
 }
 
 #[test]
-fn test_threshold_matrix_dealer_n2() {
-	run_dealer_matrix_test(&[(2, 2)], "DEALER MATRIX TEST (n=2)");
+fn test_dealer_sign_2_of_2() {
+	run_dealer_signing_test(2, 2);
 }
 
 #[test]
-fn test_threshold_matrix_dealer_n3() {
-	run_dealer_matrix_test(&[(2, 3), (3, 3)], "DEALER MATRIX TEST (n=3)");
+fn test_dealer_sign_2_of_3() {
+	run_dealer_signing_test(2, 3);
 }
 
 #[test]
-fn test_threshold_matrix_dealer_n4() {
-	run_dealer_matrix_test(&[(2, 4), (3, 4), (4, 4)], "DEALER MATRIX TEST (n=4)");
+fn test_dealer_sign_3_of_3() {
+	run_dealer_signing_test(3, 3);
 }
 
 #[test]
-fn test_threshold_matrix_dealer_n5() {
-	run_dealer_matrix_test(&[(2, 5), (3, 5), (4, 5), (5, 5)], "DEALER MATRIX TEST (n=5)");
+fn test_dealer_sign_2_of_4() {
+	run_dealer_signing_test(2, 4);
 }
 
 #[test]
-fn test_threshold_matrix_dealer_n6() {
-	run_dealer_matrix_test(&[(2, 6), (3, 6), (4, 6), (5, 6), (6, 6)], "DEALER MATRIX TEST (n=6)");
+fn test_dealer_sign_3_of_4() {
+	run_dealer_signing_test(3, 4);
+}
+
+#[test]
+fn test_dealer_sign_4_of_4() {
+	run_dealer_signing_test(4, 4);
+}
+
+#[test]
+fn test_dealer_sign_2_of_5() {
+	run_dealer_signing_test(2, 5);
+}
+
+#[test]
+fn test_dealer_sign_3_of_5() {
+	run_dealer_signing_test(3, 5);
+}
+
+#[test]
+fn test_dealer_sign_4_of_5() {
+	run_dealer_signing_test(4, 5);
+}
+
+#[test]
+fn test_dealer_sign_5_of_5() {
+	run_dealer_signing_test(5, 5);
+}
+
+#[test]
+fn test_dealer_sign_2_of_6() {
+	run_dealer_signing_test(2, 6);
+}
+
+#[test]
+fn test_dealer_sign_3_of_6() {
+	run_dealer_signing_test(3, 6);
+}
+
+#[test]
+fn test_dealer_sign_4_of_6() {
+	run_dealer_signing_test(4, 6);
+}
+
+#[test]
+fn test_dealer_sign_5_of_6() {
+	run_dealer_signing_test(5, 6);
+}
+
+#[test]
+fn test_dealer_sign_6_of_6() {
+	run_dealer_signing_test(6, 6);
 }
 
 // ============================================================================
@@ -547,7 +552,7 @@ fn test_threshold_matrix_dealer_n6() {
 // ============================================================================
 
 /// Simple test signer for DKG transcript signing.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 struct TestSigner {
 	id: u32,
 }
@@ -580,170 +585,140 @@ impl TranscriptSigner for TestSigner {
 	}
 }
 
-/// Helper function to run DKG-based threshold matrix test for specific configs.
-fn run_dkg_matrix_test(configs: &[(u32, u32)], test_name: &str) {
-	println!("\n=== {} ===\n", test_name);
-
+/// Run DKG-based keygen + signing for a single config and assert success.
+fn run_dkg_signing_test(threshold: u32, total_parties: u32) {
 	let seed = 12345u64;
 	let message = b"DKG matrix test message";
 	let context: &[u8] = b"dkg-test";
 
-	let mut passed = 0;
-	let mut failed = 0;
-	let mut total_time = Duration::ZERO;
+	let dkg_signers: Vec<TestSigner> = (0..total_parties).map(|id| TestSigner { id }).collect();
+	let dkg_public_keys: Vec<u32> = (0..total_parties).collect();
 
-	println!("{:<10} {:<10} {:<10}", "Config", "Status", "Time");
-	println!("{}", "-".repeat(35));
+	// Derive unique seed for this config.
+	let mut dkg_seed = [0u8; 32];
+	let config_id = seed + threshold as u64 * 100 + total_parties as u64;
+	dkg_seed[..8].copy_from_slice(&config_id.to_le_bytes());
 
-	for (threshold, total_parties) in configs.iter() {
-		let start = Instant::now();
+	let session_nonce = [0x42u8; 32];
 
-		// Create signers and public keys for DKG
-		let dkg_signers: Vec<TestSigner> =
-			(0..*total_parties).map(|id| TestSigner { id }).collect();
-		let dkg_public_keys: Vec<u32> = (0..*total_parties).collect();
+	let dkg_outputs = run_local_dkg(
+		threshold,
+		total_parties,
+		dkg_signers,
+		dkg_public_keys,
+		dkg_seed,
+		&session_nonce,
+	)
+	.unwrap_or_else(|e| panic!("{threshold}-of-{total_parties}: DKG error: {e:?}"));
 
-		// Derive unique seed for this config
-		let mut dkg_seed = [0u8; 32];
-		let config_id = seed + *threshold as u64 * 100 + *total_parties as u64;
-		dkg_seed[..8].copy_from_slice(&config_id.to_le_bytes());
+	let public_key = dkg_outputs[0].public_key.clone();
+	let config = ThresholdConfig::new(threshold, total_parties)
+		.unwrap_or_else(|e| panic!("{threshold}-of-{total_parties}: config error: {e:?}"));
 
-		// Session nonce for SSID computation
-		let session_nonce = [0x42u8; 32];
+	let dkg_outputs_taken: Vec<_> = dkg_outputs.into_iter().take(threshold as usize).collect();
 
-		// Run DKG to generate keys
-		let dkg_outputs = match run_local_dkg(
-			*threshold,
-			*total_parties,
-			dkg_signers,
-			dkg_public_keys,
-			dkg_seed,
-			&session_nonce,
-		) {
-			Ok(outputs) => outputs,
-			Err(e) => {
-				println!("  {}-of-{}: DKG error: {:?}", threshold, total_parties, e);
-				failed += 1;
-				continue;
-			},
-		};
+	// Validate signer creation once up front for a clean error message.
+	dkg_outputs_taken
+		.iter()
+		.cloned()
+		.map(|output| ThresholdSigner::new(output.private_share, public_key.clone(), config))
+		.collect::<Result<Vec<_>, _>>()
+		.unwrap_or_else(|e| panic!("{threshold}-of-{total_parties}: signer creation error: {e:?}"));
 
-		// Extract public key and create config
-		let public_key = dkg_outputs[0].public_key.clone();
-		let config = match ThresholdConfig::new(*threshold, *total_parties) {
-			Ok(c) => c,
-			Err(e) => {
-				println!("  {}-of-{}: Config error: {:?}", threshold, total_parties, e);
-				failed += 1;
-				continue;
-			},
-		};
+	let mut session_seed = [0u8; 32];
+	session_seed[..8].copy_from_slice(&seed.to_le_bytes());
 
-		// Keep DKG outputs for retry loop
-		let dkg_outputs_taken: Vec<_> = dkg_outputs.into_iter().take(*threshold as usize).collect();
-		if let Err(e) = dkg_outputs_taken
+	let make_signers = || {
+		dkg_outputs_taken
 			.iter()
 			.cloned()
-			.map(|output| ThresholdSigner::new(output.private_share, public_key.clone(), config))
-			.collect::<Result<Vec<_>, _>>()
-		{
-			println!("  {}-of-{}: Signer creation error: {:?}", threshold, total_parties, e);
-			failed += 1;
-			continue;
-		}
+			.map(|output| {
+				ThresholdSigner::new(output.private_share, public_key.clone(), config).unwrap()
+			})
+			.collect::<Vec<_>>()
+	};
 
-		// Create a session seed from the DKG seed for signing
-		let mut session_seed = [0u8; 32];
-		session_seed[..8].copy_from_slice(&seed.to_le_bytes());
-
-		// Run the signing protocol with external retries
-		const MAX_EXTERNAL_ATTEMPTS: u32 = 100;
-		let mut sig_result: Result<Signature, SignProtocolError> =
-			Err(SignProtocolError::SigningError("no attempts made".into()));
-		for attempt in 0..MAX_EXTERNAL_ATTEMPTS {
-			let signers: Vec<ThresholdSigner> = dkg_outputs_taken
-				.iter()
-				.cloned()
-				.map(|output| {
-					ThresholdSigner::new(output.private_share, public_key.clone(), config).unwrap()
-				})
-				.collect();
-			let mut attempt_seed = session_seed;
-			let bytes = attempt.to_le_bytes();
-			for (i, b) in bytes.iter().enumerate() {
-				attempt_seed[i] ^= *b;
-			}
-			match run_local_signing(signers, message, context, &attempt_seed) {
-				Ok(s) => {
-					sig_result = Ok(s);
-					break;
-				},
-				Err(e) => sig_result = Err(e),
-			}
-		}
-
-		match sig_result {
-			Ok(signature) =>
-				if verify_signature(&public_key, message, context, &signature) {
-					let elapsed = start.elapsed();
-					total_time += elapsed;
-					println!(
-						"{:<10} {:<10} {:<10}",
-						format!("{}-of-{}", threshold, total_parties),
-						"PASSED",
-						format!("{:.2?}", elapsed)
-					);
-					passed += 1;
-				} else {
-					println!(
-						"{:<10} {:<10} {:<10}",
-						format!("{}-of-{}", threshold, total_parties),
-						"VERIFY FAIL",
-						"-"
-					);
-					failed += 1;
-				},
-			Err(e) => {
-				let elapsed = start.elapsed();
-				total_time += elapsed;
-				println!(
-					"{:<10} {:<10} {:<10}",
-					format!("{}-of-{}", threshold, total_parties),
-					"ERROR",
-					format!("{:?}", e)
-				);
-				failed += 1;
-			},
-		}
-	}
-
-	println!("\nPassed: {}, Failed: {}, Total time: {:.2?}", passed, failed, total_time);
-	assert_eq!(failed, 0, "Some DKG threshold configurations failed");
+	let signature = sign_with_retries(make_signers, message, context, &session_seed)
+		.unwrap_or_else(|e| panic!("{threshold}-of-{total_parties}: signing failed: {e:?}"));
+	assert!(
+		verify_signature(&public_key, message, context, &signature),
+		"{threshold}-of-{total_parties}: signature failed to verify",
+	);
 }
 
 #[test]
-fn test_threshold_matrix_dkg_n2() {
-	run_dkg_matrix_test(&[(2, 2)], "DKG MATRIX TEST (n=2)");
+fn test_dkg_sign_2_of_2() {
+	run_dkg_signing_test(2, 2);
 }
 
 #[test]
-fn test_threshold_matrix_dkg_n3() {
-	run_dkg_matrix_test(&[(2, 3), (3, 3)], "DKG MATRIX TEST (n=3)");
+fn test_dkg_sign_2_of_3() {
+	run_dkg_signing_test(2, 3);
 }
 
 #[test]
-fn test_threshold_matrix_dkg_n4() {
-	run_dkg_matrix_test(&[(2, 4), (3, 4), (4, 4)], "DKG MATRIX TEST (n=4)");
+fn test_dkg_sign_3_of_3() {
+	run_dkg_signing_test(3, 3);
 }
 
 #[test]
-fn test_threshold_matrix_dkg_n5() {
-	run_dkg_matrix_test(&[(2, 5), (3, 5), (4, 5), (5, 5)], "DKG MATRIX TEST (n=5)");
+fn test_dkg_sign_2_of_4() {
+	run_dkg_signing_test(2, 4);
 }
 
 #[test]
-fn test_threshold_matrix_dkg_n6() {
-	run_dkg_matrix_test(&[(2, 6), (3, 6), (4, 6), (5, 6), (6, 6)], "DKG MATRIX TEST (n=6)");
+fn test_dkg_sign_3_of_4() {
+	run_dkg_signing_test(3, 4);
+}
+
+#[test]
+fn test_dkg_sign_4_of_4() {
+	run_dkg_signing_test(4, 4);
+}
+
+#[test]
+fn test_dkg_sign_2_of_5() {
+	run_dkg_signing_test(2, 5);
+}
+
+#[test]
+fn test_dkg_sign_3_of_5() {
+	run_dkg_signing_test(3, 5);
+}
+
+#[test]
+fn test_dkg_sign_4_of_5() {
+	run_dkg_signing_test(4, 5);
+}
+
+#[test]
+fn test_dkg_sign_5_of_5() {
+	run_dkg_signing_test(5, 5);
+}
+
+#[test]
+fn test_dkg_sign_2_of_6() {
+	run_dkg_signing_test(2, 6);
+}
+
+#[test]
+fn test_dkg_sign_3_of_6() {
+	run_dkg_signing_test(3, 6);
+}
+
+#[test]
+fn test_dkg_sign_4_of_6() {
+	run_dkg_signing_test(4, 6);
+}
+
+#[test]
+fn test_dkg_sign_5_of_6() {
+	run_dkg_signing_test(5, 6);
+}
+
+#[test]
+fn test_dkg_sign_6_of_6() {
+	run_dkg_signing_test(6, 6);
 }
 
 /// Test that configuration validation works correctly
@@ -1015,7 +990,6 @@ fn test_signing_rejects_more_than_threshold_parties() {
 		b"test message".to_vec(),
 		b"".to_vec(),
 		signing_parties,
-		0, // my_participant_id
 		0, // leader_id
 		[0u8; 32],
 		[0u8; 32], // attempt_nonce

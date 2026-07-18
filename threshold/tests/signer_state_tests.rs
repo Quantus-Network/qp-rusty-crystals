@@ -6,7 +6,7 @@
 
 use qp_rusty_crystals_threshold::{
 	compute_ssid, generate_with_dealer, ParticipantList, Round1Broadcast, Round2Broadcast,
-	ThresholdConfig, ThresholdSigner,
+	ThresholdConfig, ThresholdError, ThresholdSigner,
 };
 
 /// Test SSID for state machine tests (all parties use same SSID).
@@ -129,6 +129,92 @@ fn test_commitment_tampering_detected() {
 	);
 }
 
+/// Drive two signers (parties 0 and 1) through Rounds 1 and 2 for a 2-of-3
+/// session, returning the signers, the Round 1 broadcasts, the Round 2
+/// broadcasts, and the SSID.
+fn setup_through_round2(
+) -> (Vec<ThresholdSigner>, Vec<Round1Broadcast>, Vec<Round2Broadcast>, [u8; 32]) {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [7u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("key generation");
+
+	let mut signers: Vec<_> = shares
+		.iter()
+		.take(2)
+		.map(|share| ThresholdSigner::new(share.clone(), public_key.clone(), config).unwrap())
+		.collect();
+
+	let message = b"replay test message";
+	let context = b"replay ctx";
+	let participant_list = ParticipantList::new(&[0u32, 1u32]).unwrap();
+	let attempt_nonce = [0x11; 32];
+	let ssid = compute_ssid(&public_key, 2, 3, &participant_list, message, context, &attempt_nonce);
+
+	let r1: Vec<Round1Broadcast> = signers
+		.iter_mut()
+		.enumerate()
+		.map(|(i, s)| {
+			let mut party_seed = [0u8; 32];
+			party_seed[0] = i as u8;
+			s.round1_commit_with_seed(&ssid, &party_seed).unwrap()
+		})
+		.collect();
+
+	let r2: Vec<Round2Broadcast> = signers
+		.iter_mut()
+		.enumerate()
+		.map(|(i, s)| {
+			let others: Vec<_> = r1.iter().filter(|r| r.party_id != i as u32).cloned().collect();
+			s.round2_reveal(&ssid, message, context, &others).unwrap()
+		})
+		.collect();
+
+	(signers, r1, r2, ssid)
+}
+
+/// Replaying one party's Round 2 broadcast must be rejected. Without the
+/// duplicate check, `round3_respond` would aggregate the same commitment twice,
+/// silently corrupting the challenge material and permanently breaking the
+/// signer's ability to produce a valid response for the session.
+#[test]
+fn test_round3_rejects_replayed_round2_broadcast() {
+	let (mut signers, r1, r2, ssid) = setup_through_round2();
+
+	let others_r1: Vec<_> = r1.iter().filter(|r| r.party_id != 0).cloned().collect();
+	let party1_r2 = r2.iter().find(|r| r.party_id == 1).cloned().unwrap();
+	// Party 0 receives party 1's valid Round 2 broadcast twice (a replay).
+	let replayed = vec![party1_r2.clone(), party1_r2];
+
+	let err = signers[0]
+		.round3_respond(&ssid, &others_r1, &replayed)
+		.expect_err("replayed Round 2 broadcast must be rejected");
+
+	assert!(
+		matches!(err, ThresholdError::DuplicateBroadcast { party_id: 1 }),
+		"expected DuplicateBroadcast for the replayed party, got: {err:?}"
+	);
+}
+
+/// The reveal set must match the participants recorded during Round 2. Omitting
+/// an expected participant's reveal (here: providing none) must be rejected
+/// rather than silently signing over an under-aggregated commitment.
+#[test]
+fn test_round3_rejects_incomplete_reveal_set() {
+	let (mut signers, r1, _r2, ssid) = setup_through_round2();
+
+	let others_r1: Vec<_> = r1.iter().filter(|r| r.party_id != 0).cloned().collect();
+
+	// Party 0 expects one other reveal (party 1) but receives none.
+	let err = signers[0]
+		.round3_respond(&ssid, &others_r1, &[])
+		.expect_err("missing participant reveal must be rejected");
+
+	assert!(
+		matches!(err, ThresholdError::RevealSetMismatch { provided: 1, expected: 2 }),
+		"expected RevealSetMismatch for the incomplete reveal set, got: {err:?}"
+	);
+}
+
 /// Test state machine enforcement - can't call round3 before round2.
 #[test]
 fn test_state_machine_round3_before_round2() {
@@ -216,7 +302,6 @@ mod party_management_tests {
 			b"test message".to_vec(),
 			b"context".to_vec(),
 			vec![0, 1], // exactly threshold participants
-			0,          // my_id
 			0,          // leader_id
 			[0xAA; 32], // round1_seed
 			[0xBB; 32], // attempt_nonce

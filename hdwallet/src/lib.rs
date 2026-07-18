@@ -13,6 +13,7 @@ use alloc::{
 use bip39::{Language, Mnemonic};
 use core::str::FromStr;
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
+use unicode_normalization::{is_nfkd_quick, IsNormalized, UnicodeNormalization};
 
 use zeroize::Zeroizing;
 
@@ -47,6 +48,10 @@ pub enum HDLatticeError {
 	PathTooLong(usize),
 	#[error("Derivation path too deep: {0} segments")]
 	PathTooDeep(usize),
+	#[error("Mnemonic too long: {0} bytes")]
+	MnemonicTooLong(usize),
+	#[error("Passphrase too long: {0} bytes")]
+	PassphraseTooLong(usize),
 	#[error("hderive error: {0:?}")]
 	GenericError(hderive::Error),
 }
@@ -64,6 +69,18 @@ pub const MAX_DERIVATION_DEPTH: usize = 16;
 /// Maximum raw byte length of an accepted derivation path string.
 /// Sized for 16 segments of up to ~14 chars plus the `m/` prefix.
 pub const MAX_DERIVATION_PATH_BYTES: usize = 256;
+
+/// Maximum raw byte length of an accepted mnemonic string.
+/// The longest valid BIP39 English phrase (24 words of 8 chars plus separators)
+/// is ~215 bytes; 1 KiB leaves ample headroom (e.g. exotic whitespace, decomposed
+/// Unicode) while bounding the normalization and parsing work an attacker can force.
+pub const MAX_MNEMONIC_BYTES: usize = 1024;
+
+/// Maximum raw byte length of an accepted passphrase string.
+/// BIP39 places no limit on passphrases, but normalization allocates a full
+/// copy and PBKDF2 absorbs the passphrase into its salt, so an unbounded
+/// passphrase is a CPU/memory DoS vector. 1 KiB far exceeds any realistic use.
+pub const MAX_PASSPHRASE_BYTES: usize = 1024;
 
 /// Convert a BIP39 mnemonic phrase to a seed
 ///
@@ -98,17 +115,54 @@ pub fn mnemonic_to_seed(
 	parse_mnemonic_to_seed(mnemonic.as_str(), passphrase)
 }
 
+/// NFKD-normalize a potentially secret string. Returns `None` when the input is already
+/// normalized (the common all-ASCII case), so no extra heap copy of the secret is made.
+/// When a normalized copy is required it is wrapped in `Zeroizing` so it is wiped on drop.
+fn nfkd_owned(s: &str) -> Option<Zeroizing<String>> {
+	match is_nfkd_quick(s.chars()) {
+		IsNormalized::Yes => None,
+		// `Maybe` is treated as not-normalized; NFKD is idempotent, so re-normalizing is safe.
+		_ => Some(Zeroizing::new(s.nfkd().collect())),
+	}
+}
+
 /// Shared parser that does not take ownership of the mnemonic.
 /// Used by both `mnemonic_to_seed` (which owns and zeroizes the String) and the
 /// `derive_*_from_mnemonic` helpers (which borrow the caller's `&str` and avoid
 /// the redundant heap copy a `to_string()` would create).
+///
+/// BIP39 requires NFKD Unicode normalization of both the mnemonic and the passphrase
+/// before PBKDF2. The bip39 crate's `parse_in_normalized`/`to_seed_normalized` APIs
+/// assume the *caller* already normalized their inputs, so we normalize here. Without
+/// this, canonically equivalent inputs (e.g. a composed "é" vs a decomposed "e"+combining
+/// accent in a passphrase) would silently derive different seeds and thus different keys.
+///
+/// Both inputs are size-capped ([`MAX_MNEMONIC_BYTES`], [`MAX_PASSPHRASE_BYTES`])
+/// *before* normalization, so attacker-controlled text cannot drive unbounded
+/// allocation, normalization scans, or PBKDF2 work prior to rejection.
 fn parse_mnemonic_to_seed(
 	mnemonic: &str,
 	passphrase: Option<&str>,
 ) -> Result<[u8; 64], HDLatticeError> {
+	if mnemonic.len() > MAX_MNEMONIC_BYTES {
+		return Err(HDLatticeError::MnemonicTooLong(mnemonic.len()));
+	}
+	if let Some(p) = passphrase {
+		if p.len() > MAX_PASSPHRASE_BYTES {
+			return Err(HDLatticeError::PassphraseTooLong(p.len()));
+		}
+	}
+
+	let normalized_mnemonic = nfkd_owned(mnemonic);
+	let mnemonic = normalized_mnemonic.as_ref().map_or(mnemonic, |m| m.as_str());
+
+	let passphrase = passphrase.unwrap_or("");
+	let normalized_passphrase = nfkd_owned(passphrase);
+	let passphrase = normalized_passphrase.as_ref().map_or(passphrase, |p| p.as_str());
+
 	let parsed_mnemonic = Mnemonic::parse_in_normalized(Language::English, mnemonic)
 		.map_err(|e| HDLatticeError::Bip39Error(e.to_string()))?;
-	Ok(parsed_mnemonic.to_seed_normalized(passphrase.unwrap_or("")))
+	Ok(parsed_mnemonic.to_seed_normalized(passphrase))
 }
 
 /// Derive a Dilithium keypair from a seed at the given BIP44 path
@@ -136,6 +190,11 @@ pub fn derive_key_from_seed(seed: SensitiveBytes64, path: &str) -> Result<Keypai
 
 /// Keypair derivation from mnemonic with passphrase.
 ///
+/// The derivation path is validated *before* BIP39 seed stretching, so a
+/// request that is guaranteed to fail path validation cannot force the
+/// expensive PBKDF2 work (the seed-based entrypoints reject bad paths before
+/// any derivation; the mnemonic wrappers must not be a cheaper DoS target).
+///
 /// # Security Note
 /// Takes the mnemonic by reference and does not copy it into a heap buffer,
 /// avoiding a redundant duplicate of the secret. The caller retains ownership
@@ -145,11 +204,15 @@ pub fn derive_key_from_mnemonic(
 	passphrase: Option<&str>,
 	path: &str,
 ) -> Result<Keypair, HDLatticeError> {
+	check_derivation_path(path)?;
 	let mut seed = parse_mnemonic_to_seed(mnemonic, passphrase)?;
 	derive_key_from_seed(SensitiveBytes64::from(&mut seed), path)
 }
 
 /// Wormhole pair derivation from mnemonic with passphrase.
+///
+/// The derivation path (including the wormhole chain-ID requirement) is
+/// validated *before* BIP39 seed stretching; see [`derive_key_from_mnemonic`].
 ///
 /// # Security Note
 /// Takes the mnemonic by reference and does not copy it into a heap buffer,
@@ -160,6 +223,7 @@ pub fn derive_wormhole_from_mnemonic(
 	passphrase: Option<&str>,
 	path: &str,
 ) -> Result<WormholePair, HDLatticeError> {
+	check_wormhole_path(path)?;
 	let mut seed = parse_mnemonic_to_seed(mnemonic, passphrase)?;
 	generate_wormhole_from_seed(SensitiveBytes64::from(&mut seed), path)
 }
@@ -173,11 +237,7 @@ pub fn generate_wormhole_from_seed(
 	seed: SensitiveBytes64,
 	path: &str,
 ) -> Result<WormholePair, HDLatticeError> {
-	check_derivation_path(path)?;
-
-	if path.split("/").nth(2) != Some(QUANTUS_WORMHOLE_CHAIN_ID) {
-		return Err(HDLatticeError::InvalidWormholePath(path.to_string()));
-	}
+	check_wormhole_path(path)?;
 
 	// Derive entropy at the specified path
 	let xpriv = ExtendedPrivKey::derive(seed.as_bytes(), path)
@@ -191,6 +251,16 @@ pub fn generate_wormhole_from_seed(
 	// seed and derived_entropy are automatically zeroized when they drop
 
 	Ok(wormhole_pair)
+}
+
+/// Validate a wormhole derivation path: generic path checks plus the
+/// wormhole chain-ID requirement in the third segment.
+fn check_wormhole_path(path: &str) -> Result<(), HDLatticeError> {
+	check_derivation_path(path)?;
+	if path.split("/").nth(2) != Some(QUANTUS_WORMHOLE_CHAIN_ID) {
+		return Err(HDLatticeError::InvalidWormholePath(path.to_string()));
+	}
+	Ok(())
 }
 
 /// Validate a derivation path — bounds first, then hardened-only syntax via parsing.

@@ -73,15 +73,19 @@ pub(crate) fn mod_q(x: u32) -> u32 {
 	le2q_mod_q(reduce_le2q(x))
 }
 
-/// Normalize polynomial coefficients assuming they are ≤ 2Q.
-/// Converts to [0, Q) range. Matches reference implementation behavior.
+/// Normalize polynomial coefficients to the canonical [0, Q) range.
+///
+/// Accepts coefficients anywhere in (-2Q, 2Q): non-negative values ≤ 2Q
+/// (the historical circl convention) and signed values with |c| < 2Q (the
+/// dilithium NTT convention, whose inverse NTT outputs |c| < Q).
 pub(crate) fn normalize_assuming_le2q(poly: &mut poly::Poly) {
-	for j in 0..N as usize {
-		let coeff = poly.coeffs[j];
-		// First ensure value is positive and in reasonable range
-		let coeff_u32 = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
-		// Apply le2q_mod_q to get into [0, Q) range
-		poly.coeffs[j] = le2q_mod_q(coeff_u32) as i32;
+	for coeff in poly.coeffs_mut().iter_mut() {
+		debug_assert!(
+			(*coeff as i64).abs() < 2 * Q as i64,
+			"normalize_assuming_le2q precondition violated: |coefficient| >= 2Q"
+		);
+		let coeff_u32 = if *coeff < 0 { (*coeff + 2 * Q) as u32 } else { *coeff as u32 };
+		*coeff = le2q_mod_q(coeff_u32) as i32;
 	}
 }
 
@@ -94,10 +98,11 @@ const N_COEFFS: usize = N as usize;
 
 /// Accumulator for summing NTT-domain polynomials without overflow.
 ///
-/// After NTT, coefficients are bounded by 18*Q ≈ 150M. When summing many
-/// polynomials (e.g., C(n,k) subsets for large configurations), the sum can
-/// exceed `i32::MAX` (~2.1B). This accumulator uses `u64` internally and
-/// reduces mod Q on finalization.
+/// The forward NTT leaves coefficients as non-canonical representatives
+/// (up to ~8Q in absolute value for the dilithium NTT). When summing many
+/// polynomials (e.g., C(n,k) subsets for large configurations), a plain
+/// `i32` sum can overflow. This accumulator canonicalizes each coefficient
+/// to [0, Q) and sums in `u64`, reducing mod Q on finalization.
 ///
 /// # Example
 ///
@@ -108,6 +113,7 @@ const N_COEFFS: usize = N as usize;
 /// }
 /// let result: Polyvecl = acc.finalize();
 /// ```
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct NttAccumulator<const VECS: usize> {
 	coeffs: [[u64; N_COEFFS]; VECS],
 }
@@ -120,15 +126,16 @@ impl<const VECS: usize> NttAccumulator<VECS> {
 
 	/// Add a polynomial's coefficients to the accumulator.
 	///
-	/// The polynomial is assumed to be in NTT domain with non-negative
-	/// coefficients (or signed coefficients that should be normalized).
+	/// Accepts any signed NTT-domain representative (the dilithium forward
+	/// NTT outputs coefficients up to ~8Q in absolute value); each
+	/// coefficient is canonicalized to [0, Q) before accumulating.
 	#[inline]
 	pub fn add_poly(&mut self, vec_idx: usize, poly: &poly::Poly) {
 		debug_assert!(vec_idx < VECS);
-		for (j, &coeff) in poly.coeffs.iter().enumerate() {
-			// NTT output should be non-negative, but handle signed just in case
-			let coeff_u64 = if coeff < 0 { (coeff as i64 + Q as i64) as u64 } else { coeff as u64 };
-			self.coeffs[vec_idx][j] += coeff_u64;
+		let q = Q as i64;
+		for (j, &coeff) in poly.coeffs().iter().enumerate() {
+			let canonical = (((coeff as i64) % q) + q) % q;
+			self.coeffs[vec_idx][j] += canonical as u64;
 		}
 	}
 
@@ -139,7 +146,7 @@ impl<const VECS: usize> NttAccumulator<VECS> {
 		core::array::from_fn(|i| {
 			let mut poly = poly::Poly::default();
 			for (j, &acc) in self.coeffs[i].iter().enumerate() {
-				poly.coeffs[j] = (acc % (Q as u64)) as i32;
+				poly.coeffs_mut()[j] = (acc % (Q as u64)) as i32;
 			}
 			poly
 		})
@@ -242,10 +249,10 @@ pub(crate) fn decompose_polyveck(
 ) {
 	for i in 0..K {
 		for j in 0..N as usize {
-			let a = input.vec[i].coeffs[j] as u32;
+			let a = input.vec[i].coeffs()[j] as u32;
 			let (a0, a1) = decompose_coefficient(a);
-			w0.vec[i].coeffs[j] = a0 as i32;
-			w1.vec[i].coeffs[j] = a1 as i32;
+			w0.vec[i].coeffs_mut()[j] = a0 as i32;
+			w1.vec[i].coeffs_mut()[j] = a1 as i32;
 		}
 	}
 }
@@ -257,23 +264,26 @@ pub(crate) fn decompose_polyveck(
 /// Compute dot product of polynomial vectors in NTT domain.
 ///
 /// Computes result = Σ(a[i] * b[i]) for all polynomials in the vectors,
-/// using Montgomery multiplication. Compatible with the reference implementation.
+/// using Montgomery multiplication (each product carries a factor of R⁻¹,
+/// cancelled later by [`poly::invntt_tomont`]'s factor of R).
+///
+/// Each Montgomery product coefficient is bounded by Q in absolute value,
+/// so the sum over L = 7 polynomials is bounded by 7Q ≈ 5.9e7 — far inside
+/// `i32` range and inside [`poly::reduce`]'s input contract.
 pub(crate) fn compute_ntt_dot_product(
 	result: &mut poly::Poly,
 	a: &polyvec::Polyvecl,
 	b: &polyvec::Polyvecl,
 ) {
 	// Zero out result
-	for i in 0..N as usize {
-		result.coeffs[i] = 0;
-	}
+	result.coeffs_mut().fill(0);
 
 	// Compute dot product
 	for i in 0..L {
 		let mut tmp = poly::Poly::default();
-		crate::circl_ntt::mul_hat(&mut tmp, &a.vec[i], &b.vec[i]);
-		for j in 0..N as usize {
-			result.coeffs[j] += tmp.coeffs[j];
+		poly::pointwise_montgomery(&mut tmp, &a.vec[i], &b.vec[i]);
+		for (r, &t) in result.coeffs_mut().iter_mut().zip(tmp.coeffs().iter()) {
+			*r += t;
 		}
 	}
 }
@@ -387,7 +397,7 @@ impl HyperballSampleVector {
 				} else if reduced < -(Q / 2) {
 					reduced += Q;
 				}
-				z.vec[i].coeffs[j] = reduced;
+				z.vec[i].coeffs_mut()[j] = reduced;
 			}
 		}
 	}
@@ -407,7 +417,7 @@ impl HyperballSampleVector {
 				} else if reduced < -(Q / 2) {
 					reduced += Q;
 				}
-				s1.vec[i].coeffs[j] = reduced;
+				s1.vec[i].coeffs_mut()[j] = reduced;
 			}
 		}
 
@@ -423,7 +433,7 @@ impl HyperballSampleVector {
 				} else if reduced < -(Q / 2) {
 					reduced += Q;
 				}
-				s2.vec[i].coeffs[j] = reduced;
+				s2.vec[i].coeffs_mut()[j] = reduced;
 			}
 		}
 	}
@@ -473,7 +483,7 @@ impl HyperballSampleVector {
 		// Copy s1 polynomials (first L polynomials)
 		for i in 0..L {
 			for j in 0..N as usize {
-				let mut u = s1.vec[i].coeffs[j];
+				let mut u = s1.vec[i].coeffs()[j];
 				// Center modulo Q
 				u += Q / 2;
 				let t = u - Q;
@@ -487,7 +497,7 @@ impl HyperballSampleVector {
 		// Copy s2 polynomials (next K polynomials)
 		for i in 0..K {
 			for j in 0..N as usize {
-				let mut u = s2.vec[i].coeffs[j];
+				let mut u = s2.vec[i].coeffs()[j];
 				// Center modulo Q
 				u += Q / 2;
 				let t = u - Q;
@@ -516,8 +526,8 @@ pub(crate) fn compute_dilithium_hint(
 	let mut pop = 0;
 	for i in 0..K {
 		for j in 0..N as usize {
-			let h = make_hint_single(w0pf.vec[i].coeffs[j], w1.vec[i].coeffs[j]);
-			hint.vec[i].coeffs[j] = h;
+			let h = make_hint_single(w0pf.vec[i].coeffs()[j], w1.vec[i].coeffs()[j]);
+			hint.vec[i].coeffs_mut()[j] = h;
 			pop += h as usize;
 		}
 	}
@@ -557,7 +567,7 @@ pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8]) {
 
 	let mut bit_pos = 0usize;
 	for i in 0..N as usize {
-		let coeff = p.coeffs[i] as u32;
+		let coeff = p.coeffs()[i] as u32;
 
 		// Write 23 bits starting at bit_pos
 		let byte_pos = bit_pos / 8;
@@ -627,7 +637,7 @@ pub(crate) fn poly_unpack_w(buf: &[u8]) -> Result<poly::Poly, &'static str> {
 			return Err("coefficient out of range (>= Q)");
 		}
 
-		p.coeffs[i] = val as i32;
+		p.coeffs_mut()[i] = val as i32;
 		bit_pos += 23;
 	}
 
@@ -636,9 +646,15 @@ pub(crate) fn poly_unpack_w(buf: &[u8]) -> Result<poly::Poly, &'static str> {
 
 /// Unpack a Polyveck from 23-bit encoding.
 ///
-/// Returns an error if any coefficient is >= Q.
+/// Returns an error if the buffer is shorter than `K * 736` bytes or if any
+/// coefficient is >= Q. The length is validated up front so an undersized
+/// buffer is a recoverable `Err` rather than an out-of-bounds slice panic
+/// (which would abort the process in panic=abort deployments).
 pub(crate) fn unpack_polyveck_w(buf: &[u8]) -> Result<polyvec::Polyveck, &'static str> {
 	const POLY_W_SIZE: usize = 736;
+	if buf.len() < K * POLY_W_SIZE {
+		return Err("buffer too short for unpack_polyveck_w");
+	}
 	let mut w = polyvec::Polyveck::default();
 	for i in 0..K {
 		let offset = i * POLY_W_SIZE;
@@ -731,7 +747,7 @@ mod tests {
 	fn test_poly_pack_unpack_w() {
 		let mut p = poly::Poly::default();
 		for i in 0..N as usize {
-			p.coeffs[i] = (i * 12345) as i32 % Q;
+			p.coeffs_mut()[i] = (i * 12345) as i32 % Q;
 		}
 
 		let mut buf = vec![0u8; 736];
@@ -740,8 +756,31 @@ mod tests {
 		let p2 = poly_unpack_w(&buf).expect("valid coefficients should unpack");
 
 		for i in 0..N as usize {
-			assert_eq!(p.coeffs[i], p2.coeffs[i], "Mismatch at index {}", i);
+			assert_eq!(p.coeffs()[i], p2.coeffs()[i], "Mismatch at index {}", i);
 		}
+	}
+
+	#[test]
+	fn test_unpack_polyveck_w_rejects_short_buffer() {
+		// Audit regression: an undersized buffer must be a recoverable Err,
+		// not an out-of-bounds slice panic. The function already returns
+		// Result for coefficient-range errors; a length violation must take
+		// the same path (a panic would abort the process in panic=abort
+		// deployments before the caller's error handling runs).
+		for len in [0usize, 100, 736, 8 * 736 - 1] {
+			let buf = vec![0u8; len];
+			let result = unpack_polyveck_w(&buf);
+			assert!(
+				matches!(result, Err("buffer too short for unpack_polyveck_w")),
+				"len {} must be rejected with an error, got {:?}",
+				len,
+				result.is_ok()
+			);
+		}
+
+		// A correctly sized buffer still unpacks (all-zero coefficients are valid).
+		let buf = vec![0u8; 8 * 736];
+		assert!(unpack_polyveck_w(&buf).is_ok());
 	}
 
 	#[test]

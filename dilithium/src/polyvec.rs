@@ -5,6 +5,34 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 const K: usize = params::K;
 const L: usize = params::L;
 
+/// Unstable accessors for the crate-internal secret samplers, used only by the
+/// in-crate constant-time harness (`examples/ct_bench.rs`).
+///
+/// The samplers themselves stay `pub(crate)`; these are thin pass-through
+/// wrappers gated behind the off-by-default `ct-internals` feature, so they do
+/// not appear in the public API of a normal build. Not covered by semver; do not
+/// depend on this module outside the crate's own timing tests.
+#[cfg(feature = "ct-internals")]
+pub mod ct_internals {
+	use super::{Polyveck, Polyvecl};
+	use crate::params;
+
+	/// See [`super::l_uniform_eta`].
+	pub fn l_uniform_eta(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], base_nonce: u16) {
+		super::l_uniform_eta(v, seed, base_nonce);
+	}
+
+	/// See [`super::k_uniform_eta`].
+	pub fn k_uniform_eta(v: &mut Polyveck, seed: &[u8; params::CRHBYTES], base_nonce: u16) {
+		super::k_uniform_eta(v, seed, base_nonce);
+	}
+
+	/// See [`super::l_uniform_gamma1`].
+	pub fn l_uniform_gamma1(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], nonce: u16) {
+		super::l_uniform_gamma1(v, seed, nonce);
+	}
+}
+
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct Polyveck {
 	pub vec: [Poly; K],
@@ -55,14 +83,57 @@ pub fn matrix_pointwise_montgomery(t: &mut Polyveck, mat: &[Polyvecl; K], v: &Po
 	}
 }
 
-pub fn l_uniform_eta(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], mut nonce: u16) {
-	for i in 0..L {
-		poly::uniform_eta(&mut v.vec[i], seed, nonce);
-		nonce += 1;
+/// Streaming equivalent of `matrix_expand` followed by `matrix_pointwise_montgomery`.
+///
+/// Computes `t = A * v` (NTT domain) while generating each element `A[i][j]` of ExpandA on the
+/// fly from `rho`, so the full matrix (K*L polynomials, ~56 KB for ML-DSA-87) is never
+/// materialized. Peak extra working memory is two polynomials (~2 KB). The arithmetic and the
+/// accumulation order are identical to the non-streaming path, so the result is bit-for-bit the
+/// same; only peak stack usage differs.
+pub fn matrix_pointwise_montgomery_streamed(
+	t: &mut Polyveck,
+	rho: &[u8; params::SEEDBYTES],
+	v: &Polyvecl,
+) {
+	let mut a_ij = Poly::default();
+	let mut prod = Poly::default();
+	for (i, t_i) in t.vec.iter_mut().enumerate() {
+		poly::uniform(&mut a_ij, rho, (i << 8) as u16);
+		poly::pointwise_montgomery(t_i, &a_ij, &v.vec[0]);
+		for j in 1..L {
+			poly::uniform(&mut a_ij, rho, ((i << 8) + j) as u16);
+			poly::pointwise_montgomery(&mut prod, &a_ij, &v.vec[j]);
+			poly::add_ip(t_i, &prod);
+		}
 	}
 }
 
-pub fn l_uniform_gamma1(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], nonce: u16) {
+/// Sample an L-vector of eta-bounded polynomials, one per SHAKE stream nonce
+/// `base_nonce + i` for `i in 0..L`.
+///
+/// Crate-internal: only the low two nonce bytes are absorbed into the SHAKE
+/// stream, so callers must keep `base_nonce + (L - 1) <= u16::MAX` to avoid
+/// aliasing distinct sampler invocations onto the same stream. The in-crate
+/// callers (keygen, using constant nonces) satisfy this by construction; the
+/// helper is deliberately not part of the public API so external callers cannot
+/// supply an out-of-range nonce.
+pub(crate) fn l_uniform_eta(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], base_nonce: u16) {
+	for i in 0..L {
+		poly::uniform_eta(&mut v.vec[i], seed, base_nonce + i as u16);
+	}
+}
+
+/// Sample an L-vector of gamma1 mask polynomials, one per SHAKE stream nonce
+/// `L * nonce + i` for `i in 0..L`.
+///
+/// Crate-internal: only the low two nonce bytes are absorbed into the SHAKE
+/// stream, so `nonce` must satisfy `L * nonce + (L - 1) <= u16::MAX` — otherwise
+/// distinct mask samples alias onto the same stream, reusing a mask `y` across
+/// signing attempts (which leaks the secret via `z = y + c*s1`). The sole
+/// in-crate caller (the signer) enforces this with its `MAX_SAFE_ATTEMPT_NONCE`
+/// check before calling, and the helper is not exported, so an external caller
+/// cannot reach it with an unchecked nonce.
+pub(crate) fn l_uniform_gamma1(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], nonce: u16) {
 	for i in 0..L {
 		poly::uniform_gamma1(&mut v.vec[i], seed, L as u16 * nonce + i as u16);
 	}
@@ -121,10 +192,15 @@ pub fn polyvecl_is_norm_within_bound(v: &Polyvecl, bound: i32) -> bool {
 
 //---------------------------------
 
-pub fn k_uniform_eta(v: &mut Polyveck, seed: &[u8; params::CRHBYTES], mut nonce: u16) {
+/// Sample a K-vector of eta-bounded polynomials, one per SHAKE stream nonce
+/// `base_nonce + i` for `i in 0..K`.
+///
+/// As in [`l_uniform_eta`], this is crate-internal and only the low two nonce
+/// bytes are absorbed, so `base_nonce` must be `<= u16::MAX - (K - 1)`. Keygen,
+/// the only in-crate caller, passes a constant in-range nonce.
+pub(crate) fn k_uniform_eta(v: &mut Polyveck, seed: &[u8; params::CRHBYTES], base_nonce: u16) {
 	for i in 0..K {
-		poly::uniform_eta(&mut v.vec[i], seed, nonce);
-		nonce += 1
+		poly::uniform_eta(&mut v.vec[i], seed, base_nonce + i as u16);
 	}
 }
 
@@ -237,9 +313,12 @@ pub fn k_use_hint(a: &mut Polyveck, hint: &Polyveck) {
 	}
 }
 
-/// Pack polynomial vector w1 into byte array. Output buffer must be at least K * POLYW1_PACKEDBYTES
-/// bytes.
-pub fn k_pack_w1(r: &mut [u8], a: &Polyveck) {
+/// Pack polynomial vector w1 into byte array.
+///
+/// The output is an exact-size array (`K * POLYW1_PACKEDBYTES`) so a too-short
+/// destination buffer is rejected at compile time rather than panicking on an
+/// out-of-bounds write.
+pub fn k_pack_w1(r: &mut [u8; K * params::POLYW1_PACKEDBYTES], a: &Polyveck) {
 	for i in 0..K {
 		poly::w1_pack(&mut r[i * params::POLYW1_PACKEDBYTES..], &a.vec[i]);
 	}
@@ -325,6 +404,27 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	// The samplers are `pub(crate)`: external callers cannot reach them, so the
+	// only nonces they ever see come from in-crate callers that keep them in the
+	// valid u16 range (keygen uses constants; the signer checks
+	// `MAX_SAFE_ATTEMPT_NONCE` before expanding the mask). This test confirms the
+	// largest in-range nonces still sample correctly.
+	#[test]
+	fn samplers_accept_maximum_in_range_nonce() {
+		let seed = [0x13u8; params::CRHBYTES];
+
+		let mut vl = Polyvecl::default();
+		l_uniform_eta(&mut vl, &seed, u16::MAX - (L as u16 - 1));
+
+		let mut vk = Polyveck::default();
+		k_uniform_eta(&mut vk, &seed, u16::MAX - (K as u16 - 1));
+
+		// Largest `nonce` with L * nonce + (L - 1) <= u16::MAX.
+		let max_gamma1_nonce = (u16::MAX - (L as u16 - 1)) / L as u16;
+		let mut vg = Polyvecl::default();
+		l_uniform_gamma1(&mut vg, &seed, max_gamma1_nonce);
 	}
 
 	#[test]
@@ -430,6 +530,9 @@ mod tests {
 
 		let original = polyvecl.clone();
 		l_ntt(&mut polyvecl);
+		// Forward-NTT output can reach 8*Q; the inverse transform requires
+		// coefficients below Q in absolute value.
+		l_reduce(&mut polyvecl);
 		l_invntt_tomont(&mut polyvecl);
 
 		// After NTT and inverse NTT, values should be close to original
@@ -461,6 +564,9 @@ mod tests {
 
 		let original = polyveck.clone();
 		k_ntt(&mut polyveck);
+		// Forward-NTT output can reach 8*Q; the inverse transform requires
+		// coefficients below Q in absolute value.
+		k_reduce(&mut polyveck);
 		k_invntt_tomont(&mut polyveck);
 
 		// After NTT and inverse NTT, values should be close to original
