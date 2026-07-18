@@ -812,13 +812,13 @@ dependencies = [
 
 [[package]]
 name = "qp-poseidon-core"
-version = "3.0.0"
+version = "3.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3fd767cf8aaecf9369fab79255ff9e0ea439cdfef941976edbfb8ba70435b63"
+checksum = "55e32db7b3a5d70086f82f198ecfc021f17cb7ec70a416512dba3488f4a116c1"
 
 [[package]]
 name = "qp-rusty-crystals-dilithium"
-version = "2.5.0"
+version = "3.0.0"
 dependencies = [
  "criterion",
  "dudect-bencher",
