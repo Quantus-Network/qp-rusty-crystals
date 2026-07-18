@@ -36,7 +36,12 @@
 //! let signature = signer.combine(&all_r2_broadcasts, &all_r3_broadcasts)?;
 //! ```
 
-use alloc::{collections::BTreeSet, format, string::ToString, vec::Vec};
+use alloc::{
+	collections::{BTreeMap, BTreeSet},
+	format,
+	string::ToString,
+	vec::Vec,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use qp_rusty_crystals_dilithium::polyvec;
@@ -46,6 +51,7 @@ use crate::{
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey},
+	participants::ParticipantId,
 	protocol::signing::{
 		aggregate_commitments_dilithium, combine_signature, generate_round1,
 		generate_round3_response, pack_responses, pack_round1_commitment, process_round2,
@@ -379,7 +385,17 @@ impl ThresholdSigner {
 		context: &[u8],
 		other_round1: &[Round1Broadcast],
 	) -> ThresholdResult<Round2Broadcast> {
-		// Validate inputs first (before state check to give better errors)
+		// Validate inputs first (before state check to give better errors).
+		//
+		// The ML-DSA message/context bounds must be enforced *before*
+		// `pack_round1_commitment` below: packing allocates and serializes
+		// k_iterations * SINGLE_COMMITMENT_SIZE bytes (~9.4 MB for 4-of-6),
+		// and a request that can never yield a verifiable signature must not
+		// be able to force that work. `process_round2` re-checks these bounds
+		// as defense in depth.
+		crate::error::validate_message(message)?;
+		crate::error::validate_context(context)?;
+
 		// The scheme requires EXACTLY threshold parties (not more, not fewer).
 		// See signing_protocol.rs documentation for details.
 		let total_parties = other_round1.len() + 1; // +1 for ourselves
@@ -401,7 +417,7 @@ impl ThresholdSigner {
 		let other_party_ids: Vec<u32> = other_round1.iter().map(|r1| r1.party_id).collect();
 
 		// Process Round 2 - sets up our own commitments
-		let round2_data = process_round2(
+		let mut round2_data = process_round2(
 			&self.private_key,
 			&self.public_key,
 			&self.config,
@@ -410,6 +426,15 @@ impl ThresholdSigner {
 			context,
 			&other_party_ids,
 		)?;
+
+		// Freeze the peers' Round 1 commitment hashes now, at the moment we
+		// reveal our own Round 2 commitment. Round 3 verifies reveals against
+		// this map instead of a caller-supplied Round 1 set, so a peer cannot
+		// substitute a Round 1 hash chosen after observing honest reveals
+		// (the commit-reveal anti-rushing property). A duplicate peer party ID
+		// is already rejected while building `active_participants` above.
+		round2_data.round1_commitments =
+			other_round1.iter().map(|r1| (r1.party_id, r1.commitment_hash)).collect();
 
 		let broadcast = Round2Broadcast::new(*ssid, self.private_key.party_id(), commitment_data);
 
@@ -469,18 +494,37 @@ impl ThresholdSigner {
 	) -> ThresholdResult<Round3Broadcast> {
 		let k = self.config.k_iterations() as usize;
 
-		// Validate all reveals against their Round 1 commitments before touching
-		// any state (duplicates, sizes, hash binding).
-		let seen_parties =
-			Self::validate_reveals_against_commitments(ssid, other_round1, other_round2, k)?;
-
-		// Check state
+		// The peers' Round 1 commitment hashes were frozen when we revealed our
+		// own Round 2 commitment (see `round2_reveal`). Verifying reveals
+		// against that stored map — rather than the caller-supplied
+		// `other_round1` — is what preserves the commit-reveal anti-rushing
+		// property: a peer cannot substitute a Round 1 hash chosen after
+		// observing honest reveals. This requires AfterRound2, so grab the
+		// frozen map first.
 		if self.state.phase != SigningPhase::AfterRound2 {
 			return Err(ThresholdError::InvalidState {
 				current: self.state.phase_name(),
 				expected: "AfterRound2",
 			});
 		}
+		let stored_commitments = {
+			let round2_data =
+				self.state.round2_data.as_ref().ok_or(ThresholdError::InvalidState {
+					current: "AfterRound2", // phase already validated above
+					expected: "AfterRound2",
+				})?;
+			round2_data.round1_commitments.clone()
+		};
+
+		// Validate all reveals against the frozen Round 1 commitments before
+		// touching any state (duplicates, sizes, hash binding).
+		let seen_parties = Self::validate_reveals_against_commitments(
+			ssid,
+			&stored_commitments,
+			other_round1,
+			other_round2,
+			k,
+		)?;
 
 		// Aggregate commitments without mutating persistent state until every reveal
 		// is validated and unpacked. Two properties are enforced here:
@@ -537,11 +581,20 @@ impl ThresholdSigner {
 		Ok(broadcast)
 	}
 
-	/// Validate Round 2 reveals against their Round 1 commitments: reject
-	/// duplicate reveals, empty or mis-sized commitment data, reveals without a
-	/// matching Round 1 broadcast, and reveals whose data does not hash to the
+	/// Validate Round 2 reveals against the Round 1 commitment hashes that were
+	/// frozen during `round2_reveal`: reject duplicate reveals, empty or
+	/// mis-sized commitment data, reveals from a party we recorded no Round 1
+	/// commitment for, and reveals whose data does not hash to the frozen
 	/// Round 1 commitment. Touches no state; returns the set of revealing
 	/// party IDs for the exact-set check.
+	///
+	/// `stored_commitments` is the authoritative source (captured before this
+	/// party revealed its own commitment). The caller-supplied `other_round1`
+	/// is accepted only as defense in depth: if it carries a Round 1 hash for a
+	/// revealing party, that hash must equal the frozen one, otherwise the
+	/// caller is attempting to substitute a post-hoc commitment and the reveal
+	/// is rejected. This is what stops a rushing peer from choosing its
+	/// commitment after seeing honest reveals.
 	///
 	/// Rejecting duplicates up front matters because replaying one party's
 	/// Round 2 broadcast must never be counted twice, or the aggregate (and
@@ -549,6 +602,7 @@ impl ThresholdSigner {
 	/// corrupted.
 	fn validate_reveals_against_commitments(
 		ssid: &[u8; 32],
+		stored_commitments: &BTreeMap<ParticipantId, [u8; 32]>,
 		other_round1: &[Round1Broadcast],
 		other_round2: &[Round2Broadcast],
 		k: usize,
@@ -572,15 +626,31 @@ impl ThresholdSigner {
 				});
 			}
 
-			// Find matching Round 1 broadcast
-			let r1 = other_round1
-				.iter()
-				.find(|r1| r1.party_id == r2.party_id)
+			// The Round 1 hash frozen during round2_reveal is authoritative.
+			// A reveal from a party we recorded no Round 1 commitment for
+			// cannot be bound and is rejected.
+			let committed_hash = stored_commitments
+				.get(&r2.party_id)
 				.ok_or(ThresholdError::MissingBroadcast { party_id: r2.party_id })?;
 
-			// Verify commitment hash (using SSID instead of tr)
-			if !verify_commitment_hash(ssid, r2.party_id, &r2.commitment_data, &r1.commitment_hash)
-			{
+			// Defense in depth: a Round 1 broadcast supplied to Round 3 for a
+			// revealing party must agree with the frozen hash. A mismatch is a
+			// rushing attempt (a commitment hash chosen after observing honest
+			// reveals) and is rejected outright.
+			if let Some(supplied) = other_round1.iter().find(|r1| r1.party_id == r2.party_id) {
+				if &supplied.commitment_hash != committed_hash {
+					return Err(ThresholdError::CommitmentMismatch {
+						party_id: r2.party_id,
+						message: "Round 1 commitment hash supplied to round 3 does not match \
+						          the hash committed during round 2"
+							.to_string(),
+					});
+				}
+			}
+
+			// Verify commitment hash against the frozen Round 1 hash (using
+			// SSID instead of tr).
+			if !verify_commitment_hash(ssid, r2.party_id, &r2.commitment_data, committed_hash) {
 				return Err(ThresholdError::CommitmentMismatch {
 					party_id: r2.party_id,
 					message: "Round 2 commitment data does not match Round 1 commitment hash"
@@ -871,11 +941,12 @@ mod tests {
 		);
 
 		// Create a public key - from_bytes computes TR = SHAKE256(bytes),
-		// which will NOT match our private key's TR (0x42 repeated)
-		let pk_bytes = [0u8; PUBLIC_KEY_SIZE];
+		// which will NOT match our private key's TR (0x42 repeated). The
+		// bytes must have a nonzero t1 region to pass import validation.
+		let pk_bytes = [0x37u8; PUBLIC_KEY_SIZE];
 		let public_key = PublicKey::from_bytes(&pk_bytes).unwrap();
 
-		// The public key's TR is SHAKE256([0u8; PUBLIC_KEY_SIZE]), not [0x42; TR_SIZE]
+		// The public key's TR is SHAKE256(pk_bytes), not [0x42; TR_SIZE]
 		assert_ne!(public_key.tr(), &private_tr);
 
 		// ThresholdSigner::new should reject this mismatched key pair
@@ -927,12 +998,78 @@ mod tests {
 		assert!(ok.is_ok(), "in-bounds message must still be accepted: {ok:?}");
 	}
 
+	/// Security review: `round3_respond` must bind each peer's Round 2 reveal
+	/// to the Round 1 commitment hash that was frozen when *this* party
+	/// revealed in Round 2, not to a caller-supplied Round 1 set. Otherwise a
+	/// rushing peer can send a placeholder Round 1 hash, observe the honest
+	/// party's revealed commitment, then hand `round3_respond` a fresh,
+	/// mutually-consistent (Round 1 hash, Round 2 data) pair chosen after the
+	/// fact — defeating the commit-reveal anti-rushing property.
+	#[test]
+	fn test_round3_binds_reveal_to_round1_hash_seen_in_round2() {
+		use crate::{
+			broadcast::Round1Broadcast, generate_with_dealer,
+			protocol::signing::compute_commitment_hash,
+		};
+
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[11u8; 32], config).unwrap();
+
+		let mut s0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+		let mut s1 = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
+
+		let ssid = [0x7Cu8; 32];
+		let msg = b"anti-rushing";
+		let ctx = b"";
+
+		let r1_0 = s0.round1_commit_with_seed(&ssid, &[1u8; 32]).unwrap();
+
+		// The genuine party-1 commitment: a valid, well-formed Round 1/Round 2
+		// pair the attacker will present to s0 only in Round 3.
+		let r1_1_genuine = s1.round1_commit_with_seed(&ssid, &[2u8; 32]).unwrap();
+		let r2_1_genuine = s1.round2_reveal(&ssid, msg, ctx, core::slice::from_ref(&r1_0)).unwrap();
+
+		// In Round 1, the attacker instead sent s0 a *placeholder* commitment
+		// hash for party 1 — distinct from the genuine one it later reveals.
+		let placeholder_hash = compute_commitment_hash(&ssid, 1, b"placeholder-commitment");
+		assert_ne!(
+			placeholder_hash, r1_1_genuine.commitment_hash,
+			"placeholder must differ from the genuine commitment"
+		);
+		let r1_1_placeholder = Round1Broadcast::new(ssid, 1, placeholder_hash);
+
+		// s0 reveals its Round 2 commitment having seen only the placeholder.
+		s0.round2_reveal(&ssid, msg, ctx, core::slice::from_ref(&r1_1_placeholder))
+			.unwrap();
+
+		// The attack: hand Round 3 the genuine, self-consistent pair. Because
+		// s0 froze the placeholder hash in Round 2, the genuine reveal no
+		// longer matches, so the rushing attempt is rejected.
+		let err = s0
+			.round3_respond(
+				&ssid,
+				core::slice::from_ref(&r1_1_genuine),
+				core::slice::from_ref(&r2_1_genuine),
+			)
+			.expect_err("reveal not matching the round-2-frozen commitment must be rejected");
+		assert!(
+			matches!(err, ThresholdError::CommitmentMismatch { party_id: 1, .. }),
+			"expected CommitmentMismatch for party 1, got {err:?}"
+		);
+	}
+
 	/// Regression test for the validate-then-commit property of
 	/// `round3_respond` (preserved across the removal of the full aggregate
 	/// clone): a reveal that passes the commitment-hash check but fails to
-	/// unpack must be rejected *without* mutating `w_aggregated`, so a
-	/// corrected retry produces exactly the same response as a signer that
-	/// never saw the malformed attempt.
+	/// unpack must be rejected *without* poisoning the session, so the signer
+	/// stays in a clean `AfterRound2` state and a repeated attempt is rejected
+	/// identically rather than double-counting or resetting.
+	///
+	/// Under the commit-reveal binding fix, the only way to reach the
+	/// unpack-failure path with a hash-bound reveal is for the malformed
+	/// commitment to be the one frozen in Round 2 — a peer that committed to
+	/// garbage in Round 1. (A peer that committed to valid data but reveals
+	/// different data is caught earlier as a `CommitmentMismatch`.)
 	#[test]
 	fn test_round3_malformed_reveal_leaves_state_clean_for_retry() {
 		use crate::{
@@ -945,52 +1082,49 @@ mod tests {
 		let (pk, shares) = generate_with_dealer(&[9u8; 32], config).unwrap();
 
 		let mut s0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
-		let mut s1 = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
-		// Control signer: identical to s0 (same share, same seeds) but never
-		// fed the malformed reveal.
-		let mut c0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
 
 		let ssid = [0x5Au8; 32];
-		let r1_0 = s0.round1_commit_with_seed(&ssid, &[1u8; 32]).unwrap();
-		let r1_1 = s1.round1_commit_with_seed(&ssid, &[2u8; 32]).unwrap();
-		let r1_c = c0.round1_commit_with_seed(&ssid, &[1u8; 32]).unwrap();
-		assert_eq!(r1_0, r1_c, "control signer must mirror s0 exactly");
+		let _r1_0 = s0.round1_commit_with_seed(&ssid, &[1u8; 32]).unwrap();
+
+		// Party 1 commits (in Round 1) to malformed data: correct length, but
+		// every 23-bit coefficient is 2^23 - 1 >= Q, so unpacking fails. The
+		// commitment hash is over that same garbage, so the later reveal is
+		// genuinely hash-bound to what s0 freezes in Round 2.
+		let k = config.k_iterations() as usize;
+		let garbage = alloc::vec![0xFFu8; k * 8 * 736];
+		let garbage_hash = compute_commitment_hash(&ssid, 1, &garbage);
+		let r1_1 = Round1Broadcast::new(ssid, 1, garbage_hash);
+		let r2_1 = Round2Broadcast::new(ssid, 1, garbage);
 
 		let msg = b"atomicity";
 		let ctx = b"";
 		s0.round2_reveal(&ssid, msg, ctx, core::slice::from_ref(&r1_1)).unwrap();
-		c0.round2_reveal(&ssid, msg, ctx, core::slice::from_ref(&r1_1)).unwrap();
-		let r2_1 = s1.round2_reveal(&ssid, msg, ctx, core::slice::from_ref(&r1_0)).unwrap();
 
-		// Forge a malformed-but-hash-bound reveal from party 1: correct length,
-		// bound to a matching (forged) Round 1 hash, but every 23-bit
-		// coefficient is 2^23 - 1 >= Q, so unpacking fails.
-		let k = config.k_iterations() as usize;
-		let garbage = alloc::vec![0xFFu8; k * 8 * 736];
-		let forged_hash = compute_commitment_hash(&ssid, 1, &garbage);
-		let fake_r1 = Round1Broadcast::new(ssid, 1, forged_hash);
-		let fake_r2 = Round2Broadcast::new(ssid, 1, garbage);
-
+		// The reveal passes the hash check (it matches the frozen commitment)
+		// but fails to unpack, and is rejected in the validation pass before
+		// the aggregate is touched.
 		let err = s0
-			.round3_respond(&ssid, core::slice::from_ref(&fake_r1), core::slice::from_ref(&fake_r2))
+			.round3_respond(&ssid, core::slice::from_ref(&r1_1), core::slice::from_ref(&r2_1))
 			.expect_err("hash-bound but malformed reveal must be rejected");
 		assert!(
 			matches!(err, ThresholdError::InvalidCommitmentData { party_id: 1, .. }),
 			"expected InvalidCommitmentData for party 1, got {err:?}"
 		);
 
-		// The corrected retry must succeed and match the control signer's
-		// response byte-for-byte: any residue from the failed attempt (e.g. a
-		// partially-applied aggregate) would change the challenge material.
-		let r3_retry = s0
-			.round3_respond(&ssid, core::slice::from_ref(&r1_1), core::slice::from_ref(&r2_1))
-			.expect("corrected retry must succeed after a rejected reveal");
-		let r3_control = c0
-			.round3_respond(&ssid, core::slice::from_ref(&r1_1), core::slice::from_ref(&r2_1))
-			.expect("control signer round 3");
+		// The failed attempt neither advanced nor reset the session: the signer
+		// stays in AfterRound2 and rejects a repeated attempt identically,
+		// proving the aggregate was not partially mutated.
 		assert_eq!(
-			r3_retry, r3_control,
-			"retry after rejected reveal must match a signer that never saw it"
+			s0.state.phase,
+			SigningPhase::AfterRound2,
+			"a rejected reveal must leave the session in a clean AfterRound2 state"
+		);
+		let err_again = s0
+			.round3_respond(&ssid, core::slice::from_ref(&r1_1), core::slice::from_ref(&r2_1))
+			.expect_err("repeated malformed reveal must be rejected identically");
+		assert!(
+			matches!(err_again, ThresholdError::InvalidCommitmentData { party_id: 1, .. }),
+			"expected InvalidCommitmentData for party 1 on retry, got {err_again:?}"
 		);
 	}
 }

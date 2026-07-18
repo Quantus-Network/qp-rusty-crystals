@@ -56,12 +56,15 @@ pub fn keypair(
 	let mut seed_bytes = seed.into_bytes();
 	const SEEDBUF_LEN: usize = 2 * params::SEEDBYTES + params::CRHBYTES;
 	let mut seedbuf = [0u8; SEEDBUF_LEN];
-	// Build preimage = seed || K || L (accept any seed length when provided)
-	let mut preimage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-	preimage.extend_from_slice(&seed_bytes);
-
-	preimage.push(params::K as u8);
-	preimage.push(params::L as u8);
+	// Build preimage = seed || K || L in a fixed stack buffer. A growable
+	// Vec would reallocate while holding the seed (Vec::new +
+	// extend_from_slice sizes capacity exactly, so the pushes force a
+	// realloc), freeing a seed-bearing heap block that zeroize() can no
+	// longer reach.
+	let mut preimage = [0u8; params::SEEDBYTES + 2];
+	preimage[..params::SEEDBYTES].copy_from_slice(&seed_bytes);
+	preimage[params::SEEDBYTES] = params::K as u8;
+	preimage[params::SEEDBYTES + 1] = params::L as u8;
 	fips202::shake256(&mut seedbuf, &preimage);
 
 	let mut rho = [0u8; params::SEEDBYTES];
@@ -110,8 +113,12 @@ pub fn keypair(
 /// [`keypair`] does, and packs `pk = (rho, t1)`. In addition to re-deriving
 /// the public key, this checks the two remaining packed-SK invariants:
 ///
-/// - the stored `t0` must equal the re-derived low bits of `A·s1 + s2`, and
-/// - the stored `tr` must equal `SHAKE256(pk)`.
+/// - the stored `t0` must equal the re-derived low bits of `A·s1 + s2`,
+/// - the stored `tr` must equal `SHAKE256(pk)`, and
+/// - the derived `t1` must not be all-zero, matching the degenerate-key rejection in [`verify`] and
+///   `ml_dsa_87::PublicKey::from_bytes`. A blob with `s1 = s2 = 0` derives `t1 = t0 = 0` and passes
+///   the two consistency checks by construction, but its public key is exactly the forgeable class
+///   the verifier rejects, so signing with it can only produce unverifiable signatures.
 ///
 /// Signing uses the stored `tr` (bound into the message digest) and `t0`
 /// (hint computation), so a blob with a corrupted `tr`/`t0` region would
@@ -139,6 +146,10 @@ pub(crate) fn public_key_from_secret(
 	// Same derivation as key generation.
 	let (t1, mut t0_derived) = derive_public_components(&rho, &s1, &s2);
 
+	// Invariant: the derived public key must not be the degenerate all-zero
+	// t1 key that verify() rejects (see the doc comment above).
+	let t1_nonzero = !t1.vec.iter().all(|p| p.coeffs().iter().all(|&c| c == 0));
+
 	let mut pk = [0u8; params::PUBLICKEYBYTES];
 	packing::pack_pk(&mut pk, &rho, &t1);
 
@@ -161,7 +172,7 @@ pub(crate) fn public_key_from_secret(
 	t0.zeroize();
 	t0_derived.zeroize();
 
-	if t0_consistent && tr_consistent {
+	if t0_consistent && tr_consistent && t1_nonzero {
 		Some(pk)
 	} else {
 		None

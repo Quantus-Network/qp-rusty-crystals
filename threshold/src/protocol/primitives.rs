@@ -646,9 +646,15 @@ pub(crate) fn poly_unpack_w(buf: &[u8]) -> Result<poly::Poly, &'static str> {
 
 /// Unpack a Polyveck from 23-bit encoding.
 ///
-/// Returns an error if any coefficient is >= Q.
+/// Returns an error if the buffer is shorter than `K * 736` bytes or if any
+/// coefficient is >= Q. The length is validated up front so an undersized
+/// buffer is a recoverable `Err` rather than an out-of-bounds slice panic
+/// (which would abort the process in panic=abort deployments).
 pub(crate) fn unpack_polyveck_w(buf: &[u8]) -> Result<polyvec::Polyveck, &'static str> {
 	const POLY_W_SIZE: usize = 736;
+	if buf.len() < K * POLY_W_SIZE {
+		return Err("buffer too short for unpack_polyveck_w");
+	}
 	let mut w = polyvec::Polyveck::default();
 	for i in 0..K {
 		let offset = i * POLY_W_SIZE;
@@ -752,6 +758,29 @@ mod tests {
 		for i in 0..N as usize {
 			assert_eq!(p.coeffs()[i], p2.coeffs()[i], "Mismatch at index {}", i);
 		}
+	}
+
+	#[test]
+	fn test_unpack_polyveck_w_rejects_short_buffer() {
+		// Audit regression: an undersized buffer must be a recoverable Err,
+		// not an out-of-bounds slice panic. The function already returns
+		// Result for coefficient-range errors; a length violation must take
+		// the same path (a panic would abort the process in panic=abort
+		// deployments before the caller's error handling runs).
+		for len in [0usize, 100, 736, 8 * 736 - 1] {
+			let buf = vec![0u8; len];
+			let result = unpack_polyveck_w(&buf);
+			assert!(
+				matches!(result, Err("buffer too short for unpack_polyveck_w")),
+				"len {} must be rejected with an error, got {:?}",
+				len,
+				result.is_ok()
+			);
+		}
+
+		// A correctly sized buffer still unpacks (all-zero coefficients are valid).
+		let buf = vec![0u8; 8 * 736];
+		assert!(unpack_polyveck_w(&buf).is_ok());
 	}
 
 	#[test]

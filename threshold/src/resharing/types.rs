@@ -189,6 +189,21 @@ impl ResharingConfig {
 				return Err(ResharingConfigError::SharePartyNotInOldCommittee { party_id });
 			}
 
+			// The share's stored subset masks are defined relative to its
+			// embedded DKG participant list, but the protocol maps mask bits
+			// to parties through `old_participants` (dealer assignment,
+			// subset enumeration, share lookup). The two lists must be
+			// identical, or this party would deal sub-share material derived
+			// from its real share under a different identity mapping than
+			// the one the shares were created with. The party-count check
+			// additionally rejects shares whose stored `total_parties` is
+			// inconsistent with their own participant list.
+			if share.dkg_participants() != &old_participant_list ||
+				share.total_parties() as usize != old_participant_list.len()
+			{
+				return Err(ResharingConfigError::OldCommitteeMismatch);
+			}
+
 			// Validate share's threshold matches old_threshold parameter
 			if threshold != old_threshold {
 				return Err(ResharingConfigError::ThresholdMismatch {
@@ -371,6 +386,11 @@ pub enum ResharingConfigError {
 	OldMemberMustProvideShare { party_id: ParticipantId },
 	/// Share's party_id is not in the old committee.
 	SharePartyNotInOldCommittee { party_id: ParticipantId },
+	/// Old committee does not exactly match the share's embedded DKG
+	/// participant list, so the share's subset masks would be interpreted
+	/// under a different identity mapping than the one they were created
+	/// with.
+	OldCommitteeMismatch,
 	/// Share's public key (TR) doesn't match the provided public key.
 	PublicKeyMismatch,
 	/// Share's threshold doesn't match the old_threshold parameter.
@@ -416,6 +436,9 @@ impl fmt::Display for ResharingConfigError {
 					"Share's party_id ({}) is not in the old committee participant list",
 					party_id
 				)
+			},
+			ResharingConfigError::OldCommitteeMismatch => {
+				write!(f, "Old committee does not match the share's embedded DKG participant list")
 			},
 			ResharingConfigError::PublicKeyMismatch => {
 				write!(f, "Share's public key hash (TR) does not match the provided public key")
@@ -1150,6 +1173,17 @@ impl Default for NewShareData {
 // Round 5: Verification
 // ============================================================================
 
+/// Maximum accepted `error_message` length in bytes (bounds deserialization).
+///
+/// Genuine Round 5 error messages are short, locally generated
+/// `Display`-formatted protocol errors; 1 KiB is generous headroom. Without a
+/// bound, the `Option<String>` field is the one variable-length resharing
+/// field whose length prefix an attacker controls without limit: a ~90-byte
+/// broadcast claiming a huge length forces every recipient to allocate up to
+/// borsh's internal 1 MiB first chunk before detecting truncation, and a
+/// fully-delivered payload of up to 4 GiB would be accepted and retained.
+pub const MAX_ERROR_MESSAGE_LEN: usize = 1024;
+
 /// Round 5 broadcast.
 ///
 /// Round 5 has three purposes:
@@ -1219,7 +1253,41 @@ impl BorshDeserialize for ResharingRound5Broadcast {
 		}
 
 		let success = bool::deserialize_reader(reader)?;
-		let error_message = Option::<String>::deserialize_reader(reader)?;
+
+		// Read error_message with a bound check. Borsh's default Option<String>
+		// path would trust the attacker-controlled u32 length prefix (allocating
+		// up to its internal 1 MiB chunk on a truncated payload, or accepting a
+		// fully-delivered string of up to 4 GiB), so mirror the Option flag
+		// encoding manually and bound the length before reading, using the
+		// chunked read_length_prefixed path like every other variable-length
+		// resharing field.
+		let error_message = match u8::deserialize_reader(reader)? {
+			0 => None,
+			1 => {
+				let msg_len = u32::deserialize_reader(reader)? as usize;
+				if msg_len > MAX_ERROR_MESSAGE_LEN {
+					return Err(borsh::io::Error::new(
+						borsh::io::ErrorKind::InvalidData,
+						"ResharingRound5Broadcast.error_message exceeds MAX_ERROR_MESSAGE_LEN",
+					));
+				}
+				let bytes = crate::broadcast::read_length_prefixed(reader, msg_len)?;
+				Some(String::from_utf8(bytes).map_err(|_| {
+					borsh::io::Error::new(
+						borsh::io::ErrorKind::InvalidData,
+						"ResharingRound5Broadcast.error_message is not valid UTF-8",
+					)
+				})?)
+			},
+			flag =>
+				return Err(borsh::io::Error::new(
+					borsh::io::ErrorKind::InvalidData,
+					alloc::format!(
+						"Invalid Option representation: {}. The first byte must be 0 or 1",
+						flag
+					),
+				)),
+		};
 
 		Ok(Self { ssid, party_id, share_commitments, partial_pks, success, error_message })
 	}
@@ -1367,8 +1435,9 @@ mod tests {
 	const TEST_SSID: [u8; RESHARING_SSID_SIZE] = [0xABu8; RESHARING_SSID_SIZE];
 
 	fn make_test_public_key() -> PublicKey {
-		// Create a dummy public key for testing
-		let bytes = [0u8; 2592];
+		// Dummy public key for testing. Must have a nonzero t1 region:
+		// import paths reject the degenerate all-zero t1 key.
+		let bytes = [0x42u8; 2592];
 		PublicKey::from_bytes(&bytes).unwrap()
 	}
 
@@ -1559,6 +1628,68 @@ mod tests {
 		assert_eq!(resharing_config.role, ResharingRole::Both);
 		assert!(resharing_config.role.is_old_committee());
 		assert!(resharing_config.role.is_new_committee());
+	}
+
+	/// Security review: the caller-supplied old committee must exactly match
+	/// the share's embedded DKG participant list. The share's subset masks
+	/// are defined relative to that embedded list, but the protocol maps
+	/// mask bits to parties through `config.old_participants()` (dealer
+	/// assignment, subset enumeration, share lookup). If the two lists
+	/// differ, an old member deals Round 4 sub-share material derived from
+	/// its real share under the wrong identity mapping before any later
+	/// consistency check can fire.
+	#[test]
+	fn test_config_rejects_old_committee_not_matching_share_dkg_list() {
+		use crate::{generate_with_dealer, ThresholdConfig};
+
+		let config = ThresholdConfig::new(2, 3).expect("valid config");
+		let seed = [42u8; 32];
+		// Dealer keygen embeds dkg_participants = [0, 1, 2] in every share.
+		let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+		// Same size, victim's ID present, threshold and TR match — but two
+		// committee members are swapped for attacker-chosen IDs.
+		let result = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![1, 5, 6],
+			2,
+			vec![1, 5, 6],
+			1,
+			public_key.clone(),
+		);
+		assert!(
+			matches!(result, Err(ResharingConfigError::OldCommitteeMismatch)),
+			"old committee differing from the share's DKG list must be rejected, got {:?}",
+			result.map(|_| ())
+		);
+
+		// A superset also shifts the mask-bit-to-party mapping.
+		let result = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2, 3],
+			2,
+			vec![0, 1, 2, 3],
+			1,
+			public_key.clone(),
+		);
+		assert!(
+			matches!(result, Err(ResharingConfigError::OldCommitteeMismatch)),
+			"old committee superset of the share's DKG list must be rejected"
+		);
+
+		// The exact DKG committee still works.
+		let result = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key.clone(),
+		);
+		assert!(result.is_ok(), "matching old committee must be accepted");
 	}
 
 	#[test]

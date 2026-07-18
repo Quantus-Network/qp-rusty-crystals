@@ -312,20 +312,17 @@ pub fn uniform(a: &mut Poly, seed: &[u8; params::SEEDBYTES], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake128_stream_init(&mut state, seed, nonce);
 
-	let mut buf = [0u8; UNIFORM_NBLOCKS * fips202::SHAKE128_RATE + 2];
-	fips202::shake128_squeezeblocks(&mut buf, UNIFORM_NBLOCKS, &mut state);
+	let mut buf = [[0u8; fips202::SHAKE128_RATE]; UNIFORM_NBLOCKS];
+	fips202::shake128_squeezeblocks(&mut buf, &mut state);
 
-	let mut buflen: usize = UNIFORM_NBLOCKS * fips202::SHAKE128_RATE;
-	let mut ctr = rej_uniform(&mut a.coeffs, &buf[..buflen]);
+	let mut ctr = rej_uniform(&mut a.coeffs, buf.as_flattened());
 
+	// SHAKE128_RATE is a multiple of 3, so every block holds a whole number of
+	// 3-byte coefficient candidates and refills can be scanned block by block.
+	// (The C reference's `off` carry-over bytes are always zero here.)
 	while ctr < N {
-		let off = buflen % 3;
-		for i in 0..off {
-			buf[i] = buf[buflen - off + i];
-		}
-		fips202::shake128_squeezeblocks(&mut buf[off..], 1, &mut state);
-		buflen = fips202::SHAKE128_RATE + off;
-		ctr += rej_uniform(&mut a.coeffs[ctr..], &buf[..buflen]);
+		fips202::shake128_squeezeblocks(&mut buf[..1], &mut state);
+		ctr += rej_uniform(&mut a.coeffs[ctr..], &buf[0]);
 	}
 }
 
@@ -544,7 +541,7 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8; params::CRHBYTES], 
 
 	// Fixed number of rounds to reduce timing variations
 	const FIXED_ROUNDS: usize = 2;
-	let mut shake_output_buffer = [0u8; fips202::SHAKE256_RATE];
+	let mut shake_output_buffer = [[0u8; fips202::SHAKE256_RATE]; 1];
 	let mut temporary_coefficient_storage = [0i32; 1000]; // Temp storage for all extracted coeffs
 	let mut total_coefficients_collected = 0usize;
 
@@ -554,12 +551,12 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8; params::CRHBYTES], 
 		// Always run exactly FIXED_ROUNDS iterations
 		for _round_number in 0..FIXED_ROUNDS {
 			// Squeeze one block at a time and collect
-			fips202::shake256_squeezeblocks(&mut shake_output_buffer, 1, &mut state);
+			fips202::shake256_squeezeblocks(&mut shake_output_buffer, &mut state);
 
 			// Always call rej_eta with same parameters regardless of how many coeffs we have
 			let coefficients_extracted_this_round = rej_eta(
 				&mut temporary_coefficient_storage[total_coefficients_collected..],
-				&shake_output_buffer,
+				&shake_output_buffer[0],
 			);
 			total_coefficients_collected += coefficients_extracted_this_round;
 		}
@@ -575,11 +572,12 @@ pub fn uniform_gamma1(a: &mut Poly, seed: &[u8; params::CRHBYTES], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
-	let mut buf = [0u8; UNIFORM_GAMMA1_NBLOCKS * fips202::SHAKE256_RATE];
-	fips202::shake256_squeezeblocks(&mut buf, UNIFORM_GAMMA1_NBLOCKS, &mut state);
+	let mut buf = [[0u8; fips202::SHAKE256_RATE]; UNIFORM_GAMMA1_NBLOCKS];
+	fips202::shake256_squeezeblocks(&mut buf, &mut state);
 	// The squeeze buffer is a multiple of the rate and always >= POLYZ_PACKEDBYTES,
 	// so `first_chunk` yields the exact prefix the codec consumes.
 	let z_bytes = buf
+		.as_flattened()
 		.first_chunk::<{ params::POLYZ_PACKEDBYTES }>()
 		.expect("gamma1 buffer covers POLYZ_PACKEDBYTES");
 	z_unpack(a, z_bytes);
@@ -597,11 +595,11 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 	fips202::shake256_absorb(&mut state, seed);
 	fips202::shake256_finalize(&mut state);
 
-	let mut buf = [0u8; fips202::SHAKE256_RATE];
-	fips202::shake256_squeezeblocks(&mut buf, 1, &mut state);
+	let mut buf = [[0u8; fips202::SHAKE256_RATE]; 1];
+	fips202::shake256_squeezeblocks(&mut buf, &mut state);
 
 	let mut signs: u64 = 0;
-	for (i, &byte) in buf.iter().enumerate().take(8) {
+	for (i, &byte) in buf[0].iter().enumerate().take(8) {
 		signs |= (byte as u64) << 8 * i;
 	}
 
@@ -612,10 +610,10 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 	for i in (N - params::TAU)..N {
 		let b = loop {
 			if pos >= fips202::SHAKE256_RATE {
-				fips202::shake256_squeezeblocks(&mut buf, 1, &mut state);
+				fips202::shake256_squeezeblocks(&mut buf, &mut state);
 				pos = 0;
 			}
-			let candidate = buf[pos] as usize;
+			let candidate = buf[0][pos] as usize;
 			pos += 1;
 			if candidate <= i {
 				break candidate;
@@ -1324,14 +1322,14 @@ mod tests {
 			let mut state = fips202::KeccakState::default();
 			fips202::shake256_stream_init(&mut state, &seed, nonce);
 
-			let mut shake_output_buffer = [0u8; fips202::SHAKE256_RATE];
+			let mut shake_output_buffer = [[0u8; fips202::SHAKE256_RATE]; 1];
 
 			for _round_number in 0..FIXED_ROUNDS_FOR_CONSTANT_TIME {
-				fips202::shake256_squeezeblocks(&mut shake_output_buffer, 1, &mut state);
+				fips202::shake256_squeezeblocks(&mut shake_output_buffer, &mut state);
 
 				let coefficients_extracted_this_round = rej_eta(
 					&mut temporary_coefficient_storage[total_coefficients_collected..],
-					&shake_output_buffer,
+					&shake_output_buffer[0],
 				);
 				total_coefficients_collected += coefficients_extracted_this_round;
 			}

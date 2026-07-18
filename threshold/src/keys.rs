@@ -32,6 +32,20 @@ fn compute_tr(bytes: &[u8; PUBLIC_KEY_SIZE]) -> [u8; TR_SIZE] {
 	tr
 }
 
+/// Validate public key bytes through the canonical ML-DSA parser.
+///
+/// Every import boundary (`from_bytes`, Borsh deserialization) must apply
+/// the same key-validity rules as `ml_dsa_87::PublicKey::from_bytes` and the
+/// verifier — in particular the rejection of the degenerate all-zero t1 key,
+/// which removes challenge binding and makes signatures forgeable. Accepting
+/// such bytes here would hand downstream code a trusted-looking `PublicKey`
+/// that the core implementation itself treats as invalid.
+fn validate_pk_bytes(bytes: &[u8; PUBLIC_KEY_SIZE]) -> Result<(), &'static str> {
+	qp_rusty_crystals_dilithium::ml_dsa_87::PublicKey::from_bytes(bytes)
+		.map(|_| ())
+		.map_err(|_| "invalid ML-DSA public key")
+}
+
 /// Public key for threshold ML-DSA-87.
 ///
 /// This key is shared among all parties and is used for signature verification.
@@ -63,6 +77,8 @@ impl BorshSerialize for PublicKey {
 impl BorshDeserialize for PublicKey {
 	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
 		let bytes = <[u8; PUBLIC_KEY_SIZE]>::deserialize_reader(reader)?;
+		validate_pk_bytes(&bytes)
+			.map_err(|e| borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, e))?;
 		let tr = compute_tr(&bytes);
 		Ok(Self { bytes, tr })
 	}
@@ -92,7 +108,9 @@ impl PublicKey {
 
 	/// Create a public key from bytes.
 	///
-	/// This computes the TR hash from the public key bytes.
+	/// The bytes are validated through the canonical ML-DSA parser (rejecting
+	/// e.g. the forgeable all-zero t1 key), and the TR hash is computed from
+	/// them.
 	pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
 		if bytes.len() != PUBLIC_KEY_SIZE {
 			return Err("invalid public key length");
@@ -100,6 +118,7 @@ impl PublicKey {
 
 		let mut pk_bytes = [0u8; PUBLIC_KEY_SIZE];
 		pk_bytes.copy_from_slice(bytes);
+		validate_pk_bytes(&pk_bytes)?;
 
 		let tr = compute_tr(&pk_bytes);
 		Ok(Self { bytes: pk_bytes, tr })
@@ -181,12 +200,38 @@ impl BorshDeserialize for PrivateKeyShare {
 ///
 /// Uses fixed-size arrays to guarantee exact dimensions at compile time,
 /// preventing malformed deserialized data from causing issues downstream.
-#[derive(Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, PartialEq, Eq, BorshSerialize, Zeroize, ZeroizeOnDrop)]
 pub(crate) struct SecretShareData {
 	/// Share of s1 polynomial vector (exactly L polynomials of 256 coefficients).
 	pub(crate) s1: [[i32; 256]; L],
 	/// Share of s2 polynomial vector (exactly K polynomials of 256 coefficients).
 	pub(crate) s2: [[i32; 256]; K],
+}
+
+impl BorshDeserialize for SecretShareData {
+	/// Deserialize with coefficient-range validation.
+	///
+	/// Every producer of share data emits coefficients in (-Q, Q): the
+	/// dealer's shares are η-bounded, and DKG/resharing shares are reduced
+	/// mod Q before storage. Signing copies these raw arrays into `Poly`
+	/// values and runs `poly::ntt` on them, whose coefficient bound is a
+	/// caller-enforced contract — so a malformed blob with out-of-range
+	/// coefficients must be rejected at import, not discovered as a panic
+	/// (overflow checks on) or silent wraparound (release) mid-signing.
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		const Q: i32 = qp_rusty_crystals_dilithium::params::Q;
+		let s1 = <[[i32; 256]; L]>::deserialize_reader(reader)?;
+		let s2 = <[[i32; 256]; K]>::deserialize_reader(reader)?;
+		let in_range =
+			|polys: &[[i32; 256]]| polys.iter().all(|poly| poly.iter().all(|&c| c > -Q && c < Q));
+		if !in_range(&s1) || !in_range(&s2) {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"SecretShareData coefficient outside (-Q, Q)",
+			));
+		}
+		Ok(Self { s1, s2 })
+	}
 }
 
 impl PrivateKeyShare {
@@ -299,6 +344,34 @@ mod tests {
 		assert!(PublicKey::from_bytes(&bytes).is_err());
 	}
 
+	/// Security review: the threshold public key import paths must apply the
+	/// same degenerate-key check as the canonical ML-DSA parser
+	/// (`ml_dsa_87::PublicKey::from_bytes`) and the verifier, both of which
+	/// reject an all-zero t1 because it removes challenge binding and makes
+	/// signatures forgeable for that key. Accepting it here would let
+	/// downstream code trust a forgeable PublicKey object (or its
+	/// `as_bytes()` output) without ever re-parsing through the safe wrapper.
+	#[test]
+	fn test_public_key_from_bytes_rejects_zero_t1() {
+		// rho nonzero, t1 region all zero — the forgeable class.
+		let mut bytes = [0u8; PUBLIC_KEY_SIZE];
+		bytes[..32].copy_from_slice(&[0x42u8; 32]);
+		assert!(
+			PublicKey::from_bytes(&bytes).is_err(),
+			"all-zero t1 public key must be rejected by from_bytes"
+		);
+	}
+
+	/// Borsh deserialization is an import boundary too (broadcast messages,
+	/// stored state) and must enforce the same check as `from_bytes`.
+	#[test]
+	fn test_public_key_borsh_rejects_zero_t1() {
+		let mut bytes = [0u8; PUBLIC_KEY_SIZE];
+		bytes[..32].copy_from_slice(&[0x42u8; 32]);
+		let result: Result<PublicKey, _> = borsh::from_slice(&bytes);
+		assert!(result.is_err(), "all-zero t1 public key must be rejected by Borsh deserialize");
+	}
+
 	#[test]
 	fn test_private_key_debug_redacts_secrets() {
 		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
@@ -334,6 +407,64 @@ mod tests {
 		assert_eq!(pk_share.key, [0u8; 32]);
 		assert_eq!(pk_share.rho, [0u8; 32]);
 		assert_eq!(pk_share.tr, [0u8; TR_SIZE]);
+	}
+
+	/// Security review: PrivateKeyShare deserialization must validate share
+	/// coefficient ranges, not just the share-map length. Signing copies the
+	/// raw arrays into Poly values and runs poly::ntt on them, whose
+	/// coefficient-bound contract is caller-enforced — a malformed blob would
+	/// import cleanly and only blow up (panic with overflow checks, silent
+	/// wrap in release) once the signer tries to use it.
+	#[test]
+	fn test_private_key_share_borsh_rejects_out_of_range_coefficients() {
+		use qp_rusty_crystals_dilithium::params::Q;
+
+		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
+		let mut shares = BTreeMap::new();
+		let mut bad = SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] };
+		bad.s1[0][0] = i32::MAX;
+		shares.insert(0b011u16, bad);
+
+		let share = PrivateKeyShare::new(
+			0,
+			3,
+			2,
+			[0x11u8; 32],
+			[0x22u8; 32],
+			[0x33u8; TR_SIZE],
+			shares,
+			dkg_participants.clone(),
+		);
+		let bytes = borsh::to_vec(&share).unwrap();
+		let result: Result<PrivateKeyShare, _> = borsh::from_slice(&bytes);
+		assert!(result.is_err(), "share coefficient outside (-Q, Q) must be rejected at import");
+
+		// Boundary: exactly Q and -Q are invalid, Q-1 and -(Q-1) are valid.
+		for (value, valid) in [(Q, false), (-Q, false), (Q - 1, true), (-(Q - 1), true)] {
+			let mut shares = BTreeMap::new();
+			let mut data = SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] };
+			data.s2[K - 1][255] = value;
+			shares.insert(0b011u16, data);
+			let share = PrivateKeyShare::new(
+				0,
+				3,
+				2,
+				[0x11u8; 32],
+				[0x22u8; 32],
+				[0x33u8; TR_SIZE],
+				shares,
+				dkg_participants.clone(),
+			);
+			let bytes = borsh::to_vec(&share).unwrap();
+			let result: Result<PrivateKeyShare, _> = borsh::from_slice(&bytes);
+			assert_eq!(
+				result.is_ok(),
+				valid,
+				"coefficient {} should be {}",
+				value,
+				if valid { "accepted" } else { "rejected" }
+			);
+		}
 	}
 
 	#[test]
