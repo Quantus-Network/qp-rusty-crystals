@@ -619,7 +619,7 @@ pub struct ResharingRound1EntropyCommitment {
 /// (commitments hide entropy until Round 2). Equivocating proposals put the
 /// receiving parties in different sessions; their deterministic sub-share
 /// commitments then disagree and the protocol aborts.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, BorshSerialize)]
 pub struct ResharingActProposal {
 	/// Session identifier binding this message to the resharing session.
 	pub ssid: [u8; RESHARING_SSID_SIZE],
@@ -628,6 +628,31 @@ pub struct ResharingActProposal {
 	/// Proposed active set: old committee members that will contribute entropy
 	/// and deal sub-shares. Strictly sorted, unique, `|active_set| >= t_old`.
 	pub active_set: Vec<ParticipantId>,
+}
+
+impl BorshDeserialize for ResharingActProposal {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let ssid = <[u8; RESHARING_SSID_SIZE]>::deserialize_reader(reader)?;
+		let party_id = ParticipantId::deserialize_reader(reader)?;
+
+		// The length prefix is attacker-controlled and the protocol only
+		// validates the proposal semantically *after* deserialization, so
+		// bound it here like every other variable-length resharing field.
+		// active_set is at most one entry per old committee member.
+		let len = u32::deserialize_reader(reader)? as usize;
+		if len > MAX_PARTIES as usize {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"ResharingActProposal.active_set exceeds MAX_PARTIES",
+			));
+		}
+		let mut active_set = Vec::with_capacity(len);
+		for _ in 0..len {
+			active_set.push(ParticipantId::deserialize_reader(reader)?);
+		}
+
+		Ok(Self { ssid, party_id, active_set })
+	}
 }
 
 // ============================================================================
@@ -2141,6 +2166,40 @@ mod tests {
 
 		let result: Result<ResharingCertificate, _> = borsh::from_slice(&payload);
 		assert!(result.is_err(), "accepts exceeding MAX_PARTIES must be rejected");
+	}
+
+	/// An `ActProposal` whose `active_set` count exceeds `MAX_PARTIES` must be
+	/// rejected at the deserialization boundary, before the protocol's
+	/// leader/sortedness/threshold validation ever runs. With the derived
+	/// deserializer, borsh happily parses an attacker-controlled vector of up
+	/// to `MAX_RESHARING_MESSAGE_SIZE / 4` entries on every receiver.
+	#[test]
+	fn test_act_proposal_rejects_oversized_active_set() {
+		// Honest round-trip still works, through the enum wrapper the protocol
+		// entrypoint uses.
+		let proposal =
+			ResharingActProposal { ssid: TEST_SSID, party_id: 0, active_set: alloc::vec![0, 1, 2] };
+		let bytes = borsh::to_vec(&ResharingMessage::ActProposal(proposal.clone())).unwrap();
+		match borsh::from_slice::<ResharingMessage>(&bytes).unwrap() {
+			ResharingMessage::ActProposal(back) => {
+				assert_eq!(back.party_id, proposal.party_id);
+				assert_eq!(back.active_set, proposal.active_set);
+			},
+			_ => panic!("expected ActProposal"),
+		}
+
+		// Oversized active_set length prefix must be rejected.
+		let huge = MAX_PARTIES + 100;
+		let mut payload = Vec::new();
+		payload.extend_from_slice(&TEST_SSID); // ssid
+		payload.extend_from_slice(&0u32.to_le_bytes()); // party_id
+		payload.extend_from_slice(&huge.to_le_bytes()); // active_set len
+		for i in 0..huge {
+			payload.extend_from_slice(&i.to_le_bytes()); // ParticipantId entries
+		}
+
+		let result: Result<ResharingActProposal, _> = borsh::from_slice(&payload);
+		assert!(result.is_err(), "active_set exceeding MAX_PARTIES must be rejected");
 	}
 
 	/// Regression test (security review): a `ResharingAccept` whose signature
