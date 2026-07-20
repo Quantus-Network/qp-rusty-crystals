@@ -128,7 +128,14 @@ pub const MAX_RESHARING_MESSAGE_SIZE: usize = 2 * 1024 * 1024;
 // ============================================================================
 
 /// Actions returned by the protocol's `poke` method.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually (rather than derived) so that the
+/// [`SendPrivate`](Action::SendPrivate) transport bytes — which carry the
+/// serialized Round 4 sub-shares — are never rendered. A derived formatter
+/// would print the raw `Vec<u8>`, persisting share material into any log or
+/// trace that includes `{:?}` output. Only the recipient and payload length
+/// are shown.
+#[derive(Clone)]
 pub enum Action<T> {
 	/// Do nothing, waiting for more messages from other participants.
 	Wait,
@@ -151,6 +158,27 @@ pub enum Action<T> {
 	SendPrivate(ParticipantId, Vec<u8>),
 	/// The protocol has completed, returning the output.
 	Return(T),
+}
+
+impl<T: fmt::Debug> fmt::Debug for Action<T> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Action::Wait => f.write_str("Wait"),
+			// Broadcast payloads are public, but the serialized bytes are noise in
+			// a log; show only the length for consistency with SendPrivate.
+			Action::SendMany(data) =>
+				f.debug_tuple("SendMany").field(&format_args!("{} bytes", data.len())).finish(),
+			// The payload is the serialized Round 4 private message (plaintext
+			// sub-shares). Never render the bytes; keep the recipient and length
+			// for diagnostics.
+			Action::SendPrivate(to, data) => f
+				.debug_struct("SendPrivate")
+				.field("to", to)
+				.field("payload", &format_args!("<{} bytes redacted>", data.len()))
+				.finish(),
+			Action::Return(output) => f.debug_tuple("Return").field(output).finish(),
+		}
+	}
 }
 
 // ============================================================================
@@ -3201,6 +3229,51 @@ mod tests {
 			Action::Return(val) => assert_eq!(val, 123),
 			_ => panic!("Expected Return"),
 		}
+	}
+
+	/// The `SendPrivate` payload carries the borsh-serialized Round 4 message,
+	/// which contains plaintext sub-share coefficients. Its `Debug` output must
+	/// never expose those secret bytes, otherwise any downstream `{:?}` logging
+	/// persists share material outside the encrypted transport path.
+	#[test]
+	fn send_private_debug_does_not_leak_subshares() {
+		// A recognizable coefficient whose little-endian bytes are all 0xAB
+		// (== 171 decimal), so the serialized payload contains long runs of
+		// the exact form a derived `Debug` on `Vec<u8>` would print.
+		let marker = [0xABu8; 4];
+		let coeff = i32::from_le_bytes(marker);
+		let contribution =
+			NewShareData { s1: [[coeff; N as usize]; L], s2: [[coeff; N as usize]; K] };
+		let mut contributions = BTreeMap::new();
+		contributions.insert((0b011, 0b101), contribution);
+		let msg = ResharingRound4Message {
+			// Non-marker ssid so the sanity check below matches sub-share
+			// bytes, not session metadata.
+			ssid: [0x11u8; RESHARING_SSID_SIZE],
+			from_party_id: 1,
+			to_party_id: 3,
+			contributions,
+		};
+		let data = borsh::to_vec(&ResharingMessage::Round4(msg)).unwrap();
+
+		// Sanity: the sub-share coefficients really are inside the payload.
+		assert!(
+			data.windows(marker.len()).any(|w| w == marker),
+			"test setup: sub-share bytes not present in serialized payload"
+		);
+
+		let action: Action<()> = Action::SendPrivate(3, data);
+		let rendered = format!("{action:?}");
+
+		// A derived `Debug` renders the payload as `[.., 171, 171, ..]`; the
+		// redacting impl must emit no run of the secret bytes.
+		assert!(
+			!rendered.contains("171, 171"),
+			"SendPrivate Debug leaked raw sub-share bytes: {rendered}"
+		);
+		// Still useful for debugging: recipient visible, payload redacted.
+		assert!(rendered.contains("to: 3"), "recipient should stay visible: {rendered}");
+		assert!(rendered.contains("redacted"), "payload should be redacted: {rendered}");
 	}
 
 	#[test]
