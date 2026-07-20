@@ -14,7 +14,10 @@
 //! [`Poly`] seals its coefficient array:
 //!
 //! - [`Poly::from_coeffs`] is the validated entry point for untrusted data; it only accepts
-//!   coefficients in `(-Q, Q)`, which satisfies every precondition in this module.
+//!   coefficients in `(-Q, Q)`, which satisfies every precondition of the **public** routines
+//!   in this module. Routines with narrower preconditions (`shiftl`, whose bound is
+//!   `|c| < 2^(31-D)`) are `pub(crate)` so they cannot be reached with boundary-validated
+//!   data; their internal callers guarantee the bounds by construction.
 //! - The unpack functions (`z_unpack`, `eta_unpack`, …) produce bounded coefficients by
 //!   construction.
 //! - [`Poly::coeffs_mut`] grants raw mutable access and shifts responsibility for the documented
@@ -23,6 +26,18 @@
 //!
 //! Preconditions are additionally checked with `debug_assert!` so misuse fails
 //! loudly in tests without costing anything in release builds.
+//!
+//! The following must not compile — external code cannot funnel
+//! boundary-validated coefficients into `shiftl`'s narrower domain:
+//!
+//! ```compile_fail
+//! use qp_rusty_crystals_dilithium::{params, poly::{self, Poly}};
+//!
+//! let mut coeffs = [0i32; 256];
+//! coeffs[0] = params::Q - 1; // accepted by from_coeffs, outside shiftl's domain
+//! let mut p = Poly::from_coeffs(coeffs).unwrap();
+//! poly::shiftl(&mut p); // error: `shiftl` is crate-private
+//! ```
 
 use crate::{fips202, ntt, params, reduce, rounding};
 use core::fmt;
@@ -72,8 +87,10 @@ impl Poly {
 	/// This is the entry point for coefficients that cross a trust boundary
 	/// (deserialized, received from a peer, …). The accepted range covers both
 	/// standard representatives `[0, Q)` and signed representatives, and is
-	/// well inside the domain of every routine in this module, so a `Poly`
-	/// built here can be passed to any of them without overflow.
+	/// inside the domain of every **public** routine in this module, so a
+	/// `Poly` built here can be passed to any of them without overflow.
+	/// Routines with narrower domains (`shiftl`) are crate-private and never
+	/// receive boundary-validated data.
 	pub fn from_coeffs(coeffs: [i32; N]) -> Result<Poly, CoefficientOutOfRange> {
 		for (index, &value) in coeffs.iter().enumerate() {
 			if value <= -params::Q || value >= params::Q {
@@ -162,7 +179,14 @@ pub fn sub_ip(a: &mut Poly, b: &Poly) {
 ///
 /// Input coefficients must be less than `2^{31-D}` in absolute value,
 /// otherwise the shift overflows. Checked with `debug_assert!`.
-pub fn shiftl(a: &mut Poly) {
+///
+/// This bound is **narrower** than the `(-Q, Q)` range accepted by
+/// [`Poly::from_coeffs`], so this routine is deliberately `pub(crate)`: a
+/// polynomial that crossed the validated trust boundary must not reach it.
+/// The only caller is the signature verify path, which applies it to `t1`
+/// (the public high bits of the public key), whose coefficients are masked
+/// to 10 bits by [`t1_unpack`] — far below `2^{31-D}` — by construction.
+pub(crate) fn shiftl(a: &mut Poly) {
 	debug_assert!(
 		a.coeffs.iter().all(|&c| c.unsigned_abs() < 1 << (31 - params::D)),
 		"poly::shiftl precondition violated: |coefficient| >= 2^(31-D)"
@@ -819,6 +843,40 @@ mod tests {
 		for i in 0..N {
 			assert_eq!(poly.coeffs[i], original.coeffs[i] * (1 << params::D));
 		}
+	}
+
+	/// `shiftl`'s domain (`|c| < 2^(31-D)`) is narrower than the `(-Q, Q)`
+	/// range of the validated constructor, which is why it is `pub(crate)`
+	/// (see the module docs' `compile_fail` example). In-crate misuse must
+	/// still fail loudly wherever debug assertions are on.
+	#[test]
+	#[cfg(debug_assertions)]
+	#[should_panic(expected = "shiftl precondition violated")]
+	fn shiftl_debug_asserts_its_domain() {
+		let mut coeffs = [0i32; N];
+		// Accepted by the validated constructor, yet `(Q - 1) << D` overflows i32.
+		coeffs[0] = params::Q - 1;
+		let mut poly = Poly::from_coeffs(coeffs).expect("(-Q, Q) is accepted by from_coeffs");
+		shiftl(&mut poly);
+	}
+
+	/// The verify path feeds `t1_unpack` output into `shiftl`; the unpack
+	/// masks every coefficient to 10 bits, which must satisfy `shiftl`'s
+	/// domain. This pins the by-construction bound the crate-private
+	/// visibility relies on.
+	#[test]
+	fn t1_unpack_output_satisfies_shiftl_domain() {
+		// All-ones packed input maximizes every 10-bit coefficient.
+		let packed = [0xFFu8; 5 * N / 4];
+		let mut t1 = Poly::default();
+		t1_unpack(&mut t1, &packed);
+		for &c in t1.coeffs.iter() {
+			assert!((0..1 << 10).contains(&c), "t1_unpack out of 10-bit range: {c}");
+			assert!(c.unsigned_abs() < 1 << (31 - params::D), "outside shiftl domain: {c}");
+		}
+		// And the shift itself must be exact for the maximal value.
+		shiftl(&mut t1);
+		assert_eq!(t1.coeffs[0], ((1 << 10) - 1) << params::D);
 	}
 
 	#[test]
