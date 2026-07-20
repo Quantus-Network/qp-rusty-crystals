@@ -11,10 +11,45 @@
 
 use qp_rusty_crystals_dilithium::fips202;
 use qp_rusty_crystals_threshold::{
-	derive_dkg_contribution, generate_with_dealer, verify_signature, DerivedKeyId, PrivateKeyShare,
-	ThresholdConfig, ThresholdSigner,
+	derive_dkg_contribution, generate_with_dealer,
+	keygen::dkg::{run_local_dkg, TranscriptSigner},
+	verify_signature, DerivedKeyId, PrivateKeyShare, ThresholdConfig, ThresholdSigner,
 };
 use std::collections::HashMap;
+
+/// Simple test signer for DKG transcript signing.
+#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+struct TestSigner {
+	id: u32,
+}
+
+impl TranscriptSigner for TestSigner {
+	type Signature = Vec<u8>;
+	type PublicKey = u32;
+
+	fn sign(&self, hash: &[u8; 32]) -> Self::Signature {
+		let mut sig = vec![0u8; 36];
+		sig[..4].copy_from_slice(&self.id.to_le_bytes());
+		sig[4..36].copy_from_slice(hash);
+		sig
+	}
+
+	fn verify(pk: &Self::PublicKey, hash: &[u8; 32], sig: &Self::Signature) -> bool {
+		Self::verify_bytes(pk, hash, sig)
+	}
+
+	fn verify_bytes(pk: &Self::PublicKey, hash: &[u8; 32], sig: &[u8]) -> bool {
+		if sig.len() < 36 {
+			return false;
+		}
+		let sig_id = u32::from_le_bytes(sig[..4].try_into().unwrap());
+		sig_id == *pk && &sig[4..36] == hash
+	}
+
+	fn public_key(&self) -> Self::PublicKey {
+		self.id
+	}
+}
 
 /// Helper to create a test tweak (simulates what the contract would compute).
 /// This is for testing purposes only - production code should use the contract's
@@ -112,15 +147,19 @@ fn test_dkg_contribution_key_isolation() {
 fn test_derived_key_id() {
 	let tweak1 = test_tweak("alice.near", "ethereum");
 	let tweak2 = test_tweak("bob.near", "ethereum");
+	let key_hash_a = [0xA1u8; 64];
+	let key_hash_b = [0xB2u8; 64];
 
-	let id1 = DerivedKeyId::new(0, tweak1);
-	let id2 = DerivedKeyId::new(0, tweak1);
-	let id3 = DerivedKeyId::new(0, tweak2);
-	let id4 = DerivedKeyId::new(1, tweak1);
+	let id1 = DerivedKeyId::from_key_hash(0, tweak1, key_hash_a);
+	let id2 = DerivedKeyId::from_key_hash(0, tweak1, key_hash_a);
+	let id3 = DerivedKeyId::from_key_hash(0, tweak2, key_hash_a);
+	let id4 = DerivedKeyId::from_key_hash(1, tweak1, key_hash_a);
+	let id5 = DerivedKeyId::from_key_hash(0, tweak1, key_hash_b);
 
 	assert_eq!(id1, id2, "Same inputs should produce same ID");
 	assert_ne!(id1, id3, "Different tweaks should produce different IDs");
 	assert_ne!(id1, id4, "Different domains should produce different IDs");
+	assert_ne!(id1, id5, "Different derived keys should produce different IDs");
 }
 
 /// Test that DerivedKeyId can be used as HashMap key
@@ -130,9 +169,10 @@ fn test_derived_key_id_as_hashmap_key() {
 
 	let tweak_alice = test_tweak("alice.near", "ethereum");
 	let tweak_bob = test_tweak("bob.near", "ethereum");
+	let key_hash = [0xC3u8; 64];
 
-	let id1 = DerivedKeyId::new(0, tweak_alice);
-	let id2 = DerivedKeyId::new(0, tweak_bob);
+	let id1 = DerivedKeyId::from_key_hash(0, tweak_alice, key_hash);
+	let id2 = DerivedKeyId::from_key_hash(0, tweak_bob, key_hash);
 
 	map.insert(id1.clone(), "alice_eth_key".to_string());
 	map.insert(id2.clone(), "bob_eth_key".to_string());
@@ -141,8 +181,51 @@ fn test_derived_key_id_as_hashmap_key() {
 	assert_eq!(map.get(&id2), Some(&"bob_eth_key".to_string()));
 
 	// Lookup with freshly created ID should work
-	let id1_fresh = DerivedKeyId::new(0, tweak_alice);
+	let id1_fresh = DerivedKeyId::from_key_hash(0, tweak_alice, key_hash);
 	assert_eq!(map.get(&id1_fresh), Some(&"alice_eth_key".to_string()));
+}
+
+/// Two DKG attempts for the same `(domain, tweak)` — differing only in the
+/// mandatory fresh `session_nonce`, e.g. a retry after a stalled session —
+/// produce different, non-recomputable derived keys. The storage identifier
+/// must distinguish those attempts' outputs: if both collide under one
+/// `DerivedKeyId`, a repeated-request or retry race lets one session's shares
+/// overwrite (or split across nodes) another's, while the rest of the system
+/// registered a public key that no longer matches the stored shares.
+#[test]
+fn derived_key_id_distinguishes_dkg_attempts() {
+	let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+	let verifying_keys: Vec<u32> = (0..3).collect();
+	// Same per-party seed material for both attempts, as in a real retry for
+	// the same (master_key, tweak): only the session nonce is fresh.
+	let seed = [7u8; 32];
+
+	let attempt1 =
+		run_local_dkg(2, 3, signers.clone(), verifying_keys.clone(), seed, &[0x01u8; 32])
+			.expect("first DKG attempt");
+	let attempt2 = run_local_dkg(2, 3, signers, verifying_keys, seed, &[0x02u8; 32])
+		.expect("second DKG attempt (retry with fresh nonce)");
+
+	let pk1 = &attempt1[0].public_key;
+	let pk2 = &attempt2[0].public_key;
+	// Documented behaviour: a retry with a fresh nonce yields a different key.
+	assert_ne!(
+		pk1.as_bytes()[..],
+		pk2.as_bytes()[..],
+		"retry with a fresh session nonce must produce a fresh derived key"
+	);
+
+	let tweak = test_tweak("alice.near", "ethereum");
+	let id_attempt1 = DerivedKeyId::new(0, tweak, pk1);
+	let id_attempt2 = DerivedKeyId::new(0, tweak, pk2);
+	assert_ne!(
+		id_attempt1, id_attempt2,
+		"storage identifiers must not collide across distinct DKG attempts"
+	);
+
+	// A fresh lookup built from the registered key hash finds the same record.
+	let lookup = DerivedKeyId::from_key_hash(0, tweak, id_attempt1.public_key_hash);
+	assert_eq!(lookup, id_attempt1);
 }
 
 /// Simulate the full derived key generation flow:
