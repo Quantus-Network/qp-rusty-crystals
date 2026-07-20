@@ -20,7 +20,7 @@ rand = { version = "=0.10.1", default-features = false, features = ["std_rng", "
 rand_core = { version = "=0.10.0", default-features = false }
 rusty-crystals-integration-tests = { path = "./tests" }
 serde = { version = "=1.0.228", default-features = false, features = ["alloc", "derive"] }
-serde_json = { version = "=1.0.149", default-features = false, features = ["alloc"] }
+serde_json = { version = "=1.0.150", default-features = false, features = ["alloc"] }
 thiserror = { version = "=2.0.18", default-features = false }
 unicode-normalization = { version = "=0.1.25", default-features = false }
 zeroize = { version = "=1.8.2", default-features = false, features = ["derive"] }
