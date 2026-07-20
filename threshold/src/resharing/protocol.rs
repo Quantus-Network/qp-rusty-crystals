@@ -562,6 +562,33 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		}
 	}
 
+	/// Recover the old committee share from a session that did not complete.
+	///
+	/// Dropping the protocol erases every session secret, **including the old
+	/// share held in the config**. A session that failed or stalled before the
+	/// Round 6 certificate was produced has generated no replacement share, so
+	/// a caller that moved its only live copy of the old share into
+	/// [`ResharingConfig`] MUST call this before dropping the failed protocol,
+	/// or the old key material is lost and no retry is possible.
+	///
+	/// Returns `None` for new-only parties, and after successful completion
+	/// (the share is erased at finalize; the new share from
+	/// [`Self::take_output`] is then the only live key material).
+	///
+	/// Recovering the share renders the session unable to continue, so an
+	/// in-flight session is marked failed.
+	pub fn take_existing_share(&mut self) -> Option<PrivateKeyShare> {
+		let share = self.config.take_existing_share();
+		if share.is_some() &&
+			!matches!(self.state, ResharingState::Done | ResharingState::Failed(_))
+		{
+			self.state = ResharingState::Failed(
+				"old share recovered by caller before completion".to_string(),
+			);
+		}
+		share
+	}
+
 	/// Check if the protocol has completed successfully.
 	pub fn is_done(&self) -> bool {
 		matches!(self.state, ResharingState::Done)
@@ -3229,6 +3256,80 @@ mod tests {
 			Action::Return(val) => assert_eq!(val, 123),
 			_ => panic!("Expected Return"),
 		}
+	}
+
+	/// Build a 2-of-3 old-committee protocol for party 1, returning the
+	/// protocol and a copy of party 1's original share.
+	fn share_recovery_fixture() -> (ResharingProtocol<TestSigner>, PrivateKeyShare) {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[8u8; 32], config).expect("keygen");
+		let original = shares[1].clone();
+		let resharing_config = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(1, &[0, 1, 2]),
+			[1u8; 32],
+			&[2u8; 32],
+			0,
+		);
+		(protocol, original)
+	}
+
+	/// A session that fails before Round 6 certification has produced no
+	/// replacement share, so the old committee member must be able to recover
+	/// their share for a retry instead of losing it when the failed protocol
+	/// is dropped.
+	#[test]
+	fn failed_session_allows_old_share_recovery() {
+		let (mut protocol, original) = share_recovery_fixture();
+
+		// A peer-induced abort: e.g. leader equivocation or verification failure.
+		protocol.state = ResharingState::Failed("attacker stalled the session".to_string());
+
+		let recovered = protocol
+			.take_existing_share()
+			.expect("failed session must preserve the old share for retry");
+		assert_eq!(recovered, original, "recovered share must be intact");
+		// The protocol no longer holds the share; dropping it is now safe.
+		assert!(protocol.old_share_erased());
+	}
+
+	/// Recovering the share from an in-flight (stalled) session must also work,
+	/// and must render the session terminal: it cannot continue without the
+	/// share, and a later poke must not resurrect it.
+	#[test]
+	fn share_recovery_marks_in_flight_session_failed() {
+		let (mut protocol, original) = share_recovery_fixture();
+
+		// Session stalled mid-protocol (e.g. transport timeout while waiting).
+		let recovered =
+			protocol.take_existing_share().expect("stalled session must yield the share");
+		assert_eq!(recovered, original);
+		assert!(protocol.is_failed(), "session must be terminal after share recovery");
+	}
+
+	/// After a successful handoff the old share is erased at finalize; the
+	/// recovery path must not bypass that erasure.
+	#[test]
+	fn share_recovery_returns_none_after_successful_completion() {
+		let (mut protocol, _original) = share_recovery_fixture();
+
+		// Mirror the finalize order: erase session secrets, then mark Done.
+		protocol.zeroize_session_secrets();
+		protocol.state = ResharingState::Done;
+
+		assert!(protocol.take_existing_share().is_none());
+		assert!(protocol.is_done(), "recovery attempt must not disturb a completed session");
 	}
 
 	/// The `SendPrivate` payload carries the borsh-serialized Round 4 message,

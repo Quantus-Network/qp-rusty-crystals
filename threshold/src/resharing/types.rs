@@ -277,13 +277,26 @@ impl ResharingConfig {
 
 	/// Securely erase the old committee share held in this config.
 	///
-	/// Called automatically when the protocol completes successfully. Integrators
-	/// should treat the returned new share as the only live key material after
-	/// a successful handoff.
+	/// Called automatically when the protocol completes successfully, and again
+	/// when the protocol is dropped. Integrators should treat the returned new
+	/// share as the only live key material after a successful handoff. For
+	/// sessions that failed or stalled before completion, recover the share
+	/// with [`Self::take_existing_share`] before dropping the protocol.
 	pub fn zeroize_existing_share(&mut self) {
 		if let Some(mut share) = self.existing_share.take() {
 			share.zeroize();
 		}
+	}
+
+	/// Take ownership of the old committee share, removing it from the config.
+	///
+	/// This is the abort-recovery path: a session that failed or stalled before
+	/// Round 6 certification has produced no replacement share, so the old share
+	/// must survive for a retry. Dropping the protocol (and with it this config)
+	/// zeroizes the share, so callers that moved their only live copy in must
+	/// take it back out first.
+	pub fn take_existing_share(&mut self) -> Option<PrivateKeyShare> {
+		self.existing_share.take()
 	}
 
 	/// Get old threshold config.
