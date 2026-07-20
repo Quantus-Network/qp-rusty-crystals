@@ -63,7 +63,7 @@ use crate::{
 /// Packed size in bytes of one commitment (one `Polyveck` of K polynomials,
 /// 736 bytes each in the 23-bit encoding). Round 2 commitment data is
 /// `k_iterations` of these, concatenated.
-const SINGLE_COMMITMENT_SIZE: usize = 8 * 736; // K * POLY_Q_SIZE
+pub(crate) const SINGLE_COMMITMENT_SIZE: usize = 8 * 736; // K * POLY_Q_SIZE
 
 /// A threshold signer for a single party.
 ///
