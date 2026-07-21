@@ -2737,7 +2737,7 @@ fn add_mean_subtracted_noise(
 	is_s1: bool,
 	poly_idx: usize,
 	coeff_idx: usize,
-	state: &mut fips202::KeccakState,
+	state: &mut fips202::Shake256State,
 ) {
 	let m = out.len();
 	let m_i32 = m as i32;
@@ -2764,7 +2764,7 @@ fn balanced_split_coeff(
 	is_s1: bool,
 	poly_idx: usize,
 	coeff_idx: usize,
-	state: &mut fips202::KeccakState,
+	state: &mut fips202::Shake256State,
 ) {
 	let m = out.len();
 	let centered = center_mod_q(coeff);
@@ -2812,7 +2812,7 @@ fn split_noise_threshold(num_old_subsets: usize) -> u32 {
 /// stream, with `P(+1) = P(-1) = threshold / 256`. Consumes exactly one PRF byte
 /// per coefficient, so it is deterministic and stream-aligned across all parties
 /// (every member of an old subset derives identical sub-shares).
-fn sample_split_noise_coeff(state: &mut fips202::KeccakState, threshold: u32) -> i32 {
+fn sample_split_noise_coeff(state: &mut fips202::Shake256State, threshold: u32) -> i32 {
 	let mut buf = [0u8; 1];
 	fips202::shake256_squeeze(&mut buf, state);
 	let b = buf[0] as u32;
@@ -2825,7 +2825,7 @@ fn sample_split_noise_coeff(state: &mut fips202::KeccakState, threshold: u32) ->
 	}
 }
 
-fn sample_uniform_usize(state: &mut fips202::KeccakState, upper: usize) -> usize {
+fn sample_uniform_usize(state: &mut fips202::Shake256State, upper: usize) -> usize {
 	if upper <= 1 {
 		return 0;
 	}

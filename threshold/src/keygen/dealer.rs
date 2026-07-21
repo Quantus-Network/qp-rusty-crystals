@@ -257,7 +257,7 @@ type ThresholdSharesResult = (
 
 /// Generate threshold shares for all subset combinations.
 fn generate_threshold_shares(
-	state: &mut fips202::KeccakState,
+	state: &mut fips202::Shake256State,
 	threshold: u32,
 	parties: u32,
 ) -> ThresholdResult<ThresholdSharesResult> {
