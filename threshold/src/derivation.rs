@@ -56,7 +56,11 @@
 
 use alloc::vec::Vec;
 
-use qp_rusty_crystals_dilithium::fips202;
+use qp_rusty_crystals_dilithium::{
+	fips202,
+	params::{K, L},
+};
+use zeroize::Zeroizing;
 
 use crate::keys::{PrivateKeyShare, PublicKey, TR_SIZE};
 
@@ -126,7 +130,12 @@ pub(crate) fn hash_secret_shares(master_share: &PrivateKeyShare) -> [u8; 64] {
 	fips202::shake256_absorb(&mut state, b"threshold-share-digest-v1");
 	fips202::shake256_absorb(&mut state, &master_share.party_id().to_le_bytes());
 
-	let mut buf: Vec<u8> = Vec::new();
+	// The linearization buffer holds raw secret share coefficients, so it must
+	// be a zeroizing container (a plain Vec freed after `clear()` leaves the
+	// coefficients in allocator memory) and it must be allocated at full size
+	// up front (growing mid-fill would free an unwiped intermediate block).
+	const SUBSET_BYTES: usize = 2 + (L + K) * 256 * core::mem::size_of::<i32>();
+	let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(SUBSET_BYTES));
 	for (subset_mask, share_data) in master_share.shares() {
 		buf.clear();
 		buf.extend_from_slice(&subset_mask.to_le_bytes());

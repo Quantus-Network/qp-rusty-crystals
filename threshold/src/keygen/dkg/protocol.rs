@@ -11,7 +11,7 @@ use alloc::{
 use core::{fmt, mem};
 
 use log::warn;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
 	config::ThresholdConfig,
@@ -66,6 +66,26 @@ fn deserialize_message(data: &[u8]) -> Result<DkgMessage, String> {
 		return Err(format!("Message size {} exceeds maximum {}", data.len(), MAX_DKG_MESSAGE_SIZE));
 	}
 	borsh::from_slice(data).map_err(|e| e.to_string())
+}
+
+/// Serialize a queued Round 1 private message into a self-wiping transport buffer.
+///
+/// The frame carries the secret K_S, so two properties matter beyond plain
+/// `borsh::to_vec`:
+/// - the buffer is allocated at its exact final size before serialization —
+///   letting borsh grow a `Vec` incrementally frees intermediate blocks that
+///   already contain a prefix of the secret payload;
+/// - the buffer is [`Zeroizing`], so it is wiped when the caller drops it
+///   after handing the frame to the transport.
+fn serialize_round1_private(
+	to: ParticipantId,
+	private: Round1Private,
+) -> Result<DkgAction, DkgError> {
+	let msg = DkgMessage::Round1Private(private);
+	let len = borsh::object_length(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
+	let mut data = Zeroizing::new(Vec::with_capacity(len));
+	borsh::to_writer(&mut *data, &msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
+	Ok(DkgAction::SendPrivate(to, data))
 }
 
 // ============================================================================
@@ -211,7 +231,12 @@ pub enum DkgAction {
 	///
 	/// This is used in Round 1 to distribute the per-subset secret K_S to subset members.
 	/// Without proper channel security, the threshold scheme's security is compromised.
-	SendPrivate(ParticipantId, Vec<u8>),
+	///
+	/// The payload is [`Zeroizing`] because the serialized bytes contain K_S:
+	/// once the caller has handed the frame to the transport and drops this
+	/// value, the buffer is wiped instead of leaving key material in freed
+	/// heap memory.
+	SendPrivate(ParticipantId, Zeroizing<Vec<u8>>),
 	/// DKG is complete, return the output.
 	Return(Box<DkgOutput>),
 }
@@ -524,9 +549,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// * `Err(DkgError)` - If the protocol encounters an error
 	pub fn poke(&mut self) -> Result<DkgAction, DkgError> {
 		if let Some((to, private)) = self.pending_privates.pop() {
-			let data = borsh::to_vec(&DkgMessage::Round1Private(private))
-				.map_err(|e| DkgError::InternalError(e.to_string()))?;
-			return Ok(DkgAction::SendPrivate(to, data));
+			return serialize_round1_private(to, private);
 		}
 
 		match self.state.phase {
@@ -599,6 +622,13 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// * `Ok(())` - Message was processed, buffered, or legitimately ignored
 	/// * `Err(_)` - Message was malformed and could not be deserialized
 	pub fn message(&mut self, from: ParticipantId, data: Vec<u8>) -> Result<(), DkgError> {
+		// Round 1 private frames carry the serialized secret K_S. Taking
+		// ownership into a zeroizing wrapper wipes the transport bytes on every
+		// return path, instead of freeing a heap block that still contains key
+		// material. (Broadcast frames are public; wiping them too costs one
+		// memset.)
+		let data = Zeroizing::new(data);
+
 		// Validate sender is a known participant to prevent quorum inflation attacks
 		if let Some(participants) = self.state.all_participants() {
 			if !participants.contains(&from) {
@@ -1062,9 +1092,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 			self.state.privates_sent = true;
 
 			if let Some((to, private)) = self.pending_privates.pop() {
-				let data = borsh::to_vec(&DkgMessage::Round1Private(private))
-					.map_err(|e| DkgError::InternalError(e.to_string()))?;
-				return Ok(DkgAction::SendPrivate(to, data));
+				return serialize_round1_private(to, private);
 			}
 		}
 
@@ -1884,7 +1912,14 @@ fn build_private_share<S: TranscriptSigner>(
 		fips202::shake256_absorb(&mut h, b"dkg-party-key-v2");
 		fips202::shake256_absorb(&mut h, rho);
 		fips202::shake256_absorb(&mut h, &config.my_party_id.to_le_bytes());
-		let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+		// The linearization buffer holds raw secret share coefficients, so it
+		// must be a zeroizing container (a plain Vec freed after `clear()`
+		// leaves the coefficients in allocator memory) and it must be allocated
+		// at full size up front (growing mid-fill would free an unwiped
+		// intermediate block).
+		const SUBSET_BYTES: usize = 2 + (L + K) * 256 * core::mem::size_of::<i32>();
+		let mut buf: Zeroizing<alloc::vec::Vec<u8>> =
+			Zeroizing::new(alloc::vec::Vec::with_capacity(SUBSET_BYTES));
 		for (subset_mask, contribution) in my_contributions {
 			buf.clear();
 			buf.extend_from_slice(&subset_mask.to_le_bytes());
@@ -2024,7 +2059,10 @@ where
 		.collect::<Result<Vec<Dkg<S>>, DkgError>>()?;
 
 	let mut outputs: Vec<Option<DkgOutput>> = vec![None; total_parties as usize];
-	let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> =
+	// Queued frames may be Round 1 privates carrying K_S, so the queue holds
+	// zeroizing buffers: an early error drops the whole queue with the secrets
+	// wiped instead of leaving them in freed memory.
+	let mut pending_messages: Vec<Vec<(ParticipantId, Zeroizing<Vec<u8>>)>> =
 		vec![Vec::new(); total_parties as usize];
 
 	let mut iterations = 0;
@@ -2039,8 +2077,10 @@ where
 		// Deliver pending messages
 		for party_id in 0..total_parties as usize {
 			let messages = mem::take(&mut pending_messages[party_id]);
-			for (from, data) in messages {
-				dkgs[party_id].message(from, data)?;
+			for (from, mut data) in messages {
+				// Hand the inner Vec to `message`, which wipes it internally;
+				// the emptied wrapper drops with nothing left to erase.
+				dkgs[party_id].message(from, mem::take(&mut *data))?;
 			}
 		}
 
@@ -2061,7 +2101,7 @@ where
 						let from = party_id as ParticipantId;
 						for (other, pending) in pending_messages.iter_mut().enumerate() {
 							if other != party_id {
-								pending.push((from, data.clone()));
+								pending.push((from, Zeroizing::new(data.clone())));
 							}
 						}
 					},
@@ -2166,7 +2206,7 @@ mod tests {
 			"test setup: secret not present in serialized payload"
 		);
 
-		let action = DkgAction::SendPrivate(3, data);
+		let action = DkgAction::SendPrivate(3, Zeroizing::new(data));
 		let rendered = format!("{action:?}");
 
 		// A derived `Debug` renders the payload as `[.., 171, 171, ..]`; the
@@ -2582,7 +2622,7 @@ mod tests {
 						Ok(DkgAction::SendPrivate(to, data)) => {
 							made_progress = true;
 							let from = party_id as ParticipantId;
-							pending_messages[to as usize].push((from, data));
+							pending_messages[to as usize].push((from, data.to_vec()));
 						},
 						Ok(DkgAction::Return(output)) => {
 							made_progress = true;
@@ -2697,7 +2737,7 @@ mod tests {
 						Ok(DkgAction::SendPrivate(to, data)) => {
 							made_progress = true;
 							let from = party_id as ParticipantId;
-							pending_messages[to as usize].push((from, data));
+							pending_messages[to as usize].push((from, data.to_vec()));
 						},
 						Ok(DkgAction::Return(output)) => {
 							made_progress = true;
@@ -2824,7 +2864,7 @@ mod tests {
 						Ok(DkgAction::SendPrivate(to, data)) => {
 							made_progress = true;
 							let from = party_id as ParticipantId;
-							pending_messages[to as usize].push((from, data));
+							pending_messages[to as usize].push((from, data.to_vec()));
 						},
 						Ok(DkgAction::Return(output)) => {
 							made_progress = true;
@@ -3400,7 +3440,7 @@ mod tests {
 							}
 						},
 					DkgAction::SendPrivate(to, data) => {
-						pending[to as usize].push((from as ParticipantId, data));
+						pending[to as usize].push((from as ParticipantId, data.to_vec()));
 					},
 					DkgAction::Wait => break,
 					DkgAction::Return(_) => break,
@@ -3438,9 +3478,9 @@ mod tests {
 					DkgAction::SendPrivate(to, data) => {
 						if to == 0 {
 							// Send to party 0 - should be buffered if it's a future round message
-							dkgs[0].message(dkg_idx as ParticipantId, data).unwrap();
+							dkgs[0].message(dkg_idx as ParticipantId, data.to_vec()).unwrap();
 						} else {
-							pending[to as usize].push((dkg_idx as ParticipantId, data));
+							pending[to as usize].push((dkg_idx as ParticipantId, data.to_vec()));
 						}
 					},
 					DkgAction::Wait => break,
@@ -3942,7 +3982,7 @@ mod tests {
 						}
 					},
 					DkgAction::SendPrivate(to, data) => {
-						pending_messages[to as usize].push((party_id as ParticipantId, data));
+						pending_messages[to as usize].push((party_id as ParticipantId, data.to_vec()));
 					},
 					DkgAction::Wait => {},
 					DkgAction::Return(_) => {},
@@ -4104,7 +4144,7 @@ mod tests {
 						}
 					},
 					DkgAction::SendPrivate(to, data) => {
-						pending_messages[to as usize].push((party_id as ParticipantId, data));
+						pending_messages[to as usize].push((party_id as ParticipantId, data.to_vec()));
 					},
 					DkgAction::Wait => {},
 					DkgAction::Return(output) => {
@@ -4211,7 +4251,7 @@ mod tests {
 						}
 					},
 					DkgAction::SendPrivate(to, data) => {
-						pending_messages[to as usize].push((party_id as ParticipantId, data));
+						pending_messages[to as usize].push((party_id as ParticipantId, data.to_vec()));
 					},
 					DkgAction::Wait => {},
 					DkgAction::Return(_) => {},
@@ -4281,7 +4321,7 @@ mod tests {
 						}
 					},
 					DkgAction::SendPrivate(to, data) => {
-						pending_messages[to as usize].push((party_id as ParticipantId, data));
+						pending_messages[to as usize].push((party_id as ParticipantId, data.to_vec()));
 					},
 					_ => {},
 				}
