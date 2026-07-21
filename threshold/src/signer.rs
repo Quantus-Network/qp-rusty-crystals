@@ -275,6 +275,27 @@ impl ThresholdSigner {
             )));
 		}
 
+		// Cross-field consistency of the share itself. Borsh import enforces
+		// the same invariants, but the signer is the last construction
+		// boundary before the state machine trusts this metadata: without
+		// these checks a malformed share runs rounds 1-2 and fails only at
+		// Round 3 share recovery - a late error for a missing party_id, or an
+		// out-of-bounds panic in translated_subset_masks when
+		// dkg_participants outnumber total_parties.
+		if private_key.dkg_participants().len() != private_key.total_parties() as usize {
+			return Err(ThresholdError::InvalidConfiguration(format!(
+				"Private key dkg_participants length ({}) does not match its total parties ({})",
+				private_key.dkg_participants().len(),
+				private_key.total_parties()
+			)));
+		}
+		if private_key.dkg_index().is_none() {
+			return Err(ThresholdError::InvalidConfiguration(format!(
+				"Private key party_id ({}) is not in its dkg_participants list",
+				private_key.party_id()
+			)));
+		}
+
 		Ok(Self { config, public_key, private_key, state: SignerState::default() })
 	}
 
@@ -960,6 +981,60 @@ mod tests {
 			Err(e) => panic!("Expected InvalidConfiguration error, got: {:?}", e),
 			Ok(_) => panic!("Should reject public key with TR not matching private key TR"),
 		}
+	}
+
+	/// Security review: `ThresholdSigner::new` is the construction boundary
+	/// for locally supplied share material, so it must reject shares whose
+	/// metadata is not mutually consistent rather than let the signing state
+	/// machine run rounds 1-2 and fail (or panic out-of-bounds in
+	/// `translated_subset_masks`) only at Round 3 share recovery.
+	#[test]
+	fn test_signer_rejects_share_with_inconsistent_metadata() {
+		use crate::{generate_with_dealer, keys::PrivateKeyShare};
+
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[9u8; 32], config).unwrap();
+		let good = &shares[0];
+
+		// party_id missing from dkg_participants: passes the TR and threshold
+		// checks, then Round 3 recovery would fail late with
+		// "Party not found in DKG participants".
+		let tampered = PrivateKeyShare::new(
+			99,
+			good.total_parties(),
+			good.threshold(),
+			[0u8; 32],
+			*good.rho(),
+			*good.tr(),
+			good.shares().clone(),
+			good.dkg_participants().clone(),
+		);
+		assert!(
+			ThresholdSigner::new(tampered, pk.clone(), config).is_err(),
+			"signer must reject a share whose party_id is not in dkg_participants"
+		);
+
+		// dkg_participants larger than the claimed total_parties: signing-set
+		// masks built over dkg indices can then exceed the participant count,
+		// which panics in translated_subset_masks instead of erroring.
+		let config22 = ThresholdConfig::new(2, 2).unwrap();
+		let (pk22, shares22) = generate_with_dealer(&[10u8; 32], config22).unwrap();
+		let good22 = &shares22[0];
+		let oversized_list = ParticipantList::new(&[0, 1, 2]).unwrap();
+		let tampered = PrivateKeyShare::new(
+			good22.party_id(),
+			good22.total_parties(),
+			good22.threshold(),
+			[0u8; 32],
+			*good22.rho(),
+			*good22.tr(),
+			good22.shares().clone(),
+			oversized_list,
+		);
+		assert!(
+			ThresholdSigner::new(tampered, pk22.clone(), config22).is_err(),
+			"signer must reject a share whose dkg_participants exceed total_parties"
+		);
 	}
 
 	/// The direct signer must enforce the ML-DSA `MAX_MESSAGE_SIZE` bound before
