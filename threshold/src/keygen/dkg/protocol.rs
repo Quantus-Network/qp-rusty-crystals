@@ -516,9 +516,9 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// Using a counter, timestamp, or random value from the transport layer is acceptable.
 	pub fn new(config: DkgConfig<S>, seed: [u8; 32], session_nonce: &[u8; 32]) -> Self {
 		let ssid = compute_dkg_ssid(
-			config.threshold_config.threshold(),
-			config.threshold_config.total_parties(),
-			&config.all_participants,
+			config.threshold(),
+			config.total_parties(),
+			config.all_participants(),
 			session_nonce,
 		);
 		Self {
@@ -960,9 +960,9 @@ impl<S: TranscriptSigner> Dkg<S> {
 		// Derive all randomness from the master seed
 		let leader_subsets = config.my_leader_subsets();
 		let (my_randomness, my_shared_secrets) =
-			derive_round1_randomness(&self.seed, &self.ssid, config.my_party_id, &leader_subsets);
+			derive_round1_randomness(&self.seed, &self.ssid, config.my_party_id(), &leader_subsets);
 
-		let my_commitment = h_commit(&self.ssid, config.my_party_id, &my_randomness);
+		let my_commitment = h_commit(&self.ssid, config.my_party_id(), &my_randomness);
 
 		// Transition to Round1 by setting fields directly
 		self.state.phase = DkgPhase::Round1;
@@ -1055,7 +1055,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 			let broadcast = Round1Broadcast {
 				ssid: self.ssid,
-				party_id: config.my_party_id,
+				party_id: config.my_party_id(),
 				commitment: my_commitment,
 			};
 			let msg = DkgMessage::Round1Broadcast(broadcast);
@@ -1075,10 +1075,10 @@ impl<S: TranscriptSigner> Dkg<S> {
 			for (&subset, &secret) in my_shared_secrets {
 				let parties = config.get_parties_in_subset(subset);
 				for &party in &parties {
-					if party != config.my_party_id {
+					if party != config.my_party_id() {
 						let private = Round1Private {
 							ssid: self.ssid,
-							from_party_id: config.my_party_id,
+							from_party_id: config.my_party_id(),
 							subset_mask: subset,
 							shared_secret: secret,
 						};
@@ -1115,8 +1115,8 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 		let all_broadcasts = all_broadcasts_received(
 			round1_broadcasts,
-			&config.all_participants,
-			config.my_party_id,
+			config.all_participants(),
+			config.my_party_id(),
 		);
 		let my_subsets = config.my_subsets();
 		let all_privates =
@@ -1176,7 +1176,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 			let broadcast = Round2Broadcast {
 				ssid: self.ssid,
-				party_id: config.my_party_id,
+				party_id: config.my_party_id(),
 				randomness: my_randomness,
 			};
 			let msg = DkgMessage::Round2Broadcast(broadcast);
@@ -1200,8 +1200,8 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 		let all_broadcasts = all_broadcasts_received(
 			round2_broadcasts,
-			&config.all_participants,
-			config.my_party_id,
+			config.all_participants(),
+			config.my_party_id(),
 		);
 
 		if all_broadcasts {
@@ -1225,7 +1225,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 	fn transition_to_round3(&mut self) -> Result<(), DkgError> {
 		let config = self.state.expect_round2()?;
-		let my_party_id = config.my_party_id; // Copy before mutable borrows
+		let my_party_id = config.my_party_id(); // Copy before mutable borrows
 		let my_randomness = self
 			.state
 			.my_randomness
@@ -1307,7 +1307,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 			let broadcast = Round3Broadcast {
 				ssid: self.ssid,
-				party_id: config.my_party_id,
+				party_id: config.my_party_id(),
 				partial_pk_commitments: my_pk_commitments.clone(),
 			};
 			let msg = DkgMessage::Round3Broadcast(broadcast);
@@ -1326,8 +1326,8 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 		let all_broadcasts = all_broadcasts_received(
 			round3_broadcasts,
-			&config.all_participants,
-			config.my_party_id,
+			config.all_participants(),
+			config.my_party_id(),
 		);
 
 		if all_broadcasts {
@@ -1340,7 +1340,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 	fn transition_to_round4(&mut self) -> Result<(), DkgError> {
 		let config = self.state.expect_round3()?;
-		let my_party_id = config.my_party_id; // Copy before mutable borrows
+		let my_party_id = config.my_party_id(); // Copy before mutable borrows
 		let my_pk_commitments = self
 			.state
 			.my_pk_commitments
@@ -1399,8 +1399,8 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 		let all_broadcasts = all_broadcasts_received(
 			round4_broadcasts,
-			&config.all_participants,
-			config.my_party_id,
+			config.all_participants(),
+			config.my_party_id(),
 		);
 
 		if all_broadcasts {
@@ -1550,7 +1550,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 			})?;
 
 			// Skip if we're the leader for this subset
-			if leader_id == config.my_party_id {
+			if leader_id == config.my_party_id() {
 				continue;
 			}
 
@@ -1619,11 +1619,11 @@ impl<S: TranscriptSigner> Dkg<S> {
 		);
 		let partial_output_hash = compute_partial_output_hash(my_partial_pks);
 		let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
-		let signature = config.my_signer.sign(&signing_message);
+		let signature = config.signer().sign(&signing_message);
 
 		Ok(Round4Broadcast {
 			ssid: self.ssid,
-			party_id: config.my_party_id,
+			party_id: config.my_party_id(),
 			partial_public_keys: my_partial_pks.clone(),
 			transcript_signature: signature.as_ref().to_vec(),
 		})
@@ -1642,11 +1642,12 @@ fn compute_global_randomness<S: TranscriptSigner>(
 	received_broadcasts: &BTreeMap<ParticipantId, Round2Broadcast>,
 	my_randomness: [u8; RANDOMNESS_SIZE],
 ) -> (Vec<u8>, Round2Broadcast) {
+	let my_party_id = config.my_party_id();
 	let my_broadcast =
-		Round2Broadcast { ssid: *ssid, party_id: config.my_party_id, randomness: my_randomness };
+		Round2Broadcast { ssid: *ssid, party_id: my_party_id, randomness: my_randomness };
 
 	let mut all_randomness: Vec<_> = received_broadcasts.iter().collect();
-	all_randomness.push((&config.my_party_id, &my_broadcast));
+	all_randomness.push((&my_party_id, &my_broadcast));
 	all_randomness.sort_by_key(|(id, _)| *id);
 
 	let mut global_randomness = Vec::with_capacity(all_randomness.len() * RANDOMNESS_SIZE);
@@ -1683,7 +1684,7 @@ fn compute_my_contributions<S: TranscriptSigner>(
 			let contribution = derive_subset_contribution(&seed);
 			let t = compute_partial_pk_t(rho, &contribution.s1, &contribution.s2);
 			let partial_pk = PartialPublicKey { subset_mask: subset, t };
-			let pk_commitment = h_commit_pk(ssid, config.my_party_id, subset, &partial_pk);
+			let pk_commitment = h_commit_pk(ssid, config.my_party_id(), subset, &partial_pk);
 
 			my_contributions.insert(subset, contribution);
 			my_partial_pks.insert(subset, partial_pk);
@@ -1806,7 +1807,7 @@ fn verify_party_broadcast<S: TranscriptSigner>(
 	let partial_output_hash = compute_partial_output_hash(&broadcast.partial_public_keys);
 	let signing_message = compute_signing_message(transcript_hash, &partial_output_hash);
 
-	let public_key = config.participant_public_keys.get(&party_id).ok_or_else(|| {
+	let public_key = config.participant_public_keys().get(&party_id).ok_or_else(|| {
 		DkgError::MissingData(format!("missing public key for party {}", party_id))
 	})?;
 
@@ -1885,7 +1886,7 @@ fn build_private_share<S: TranscriptSigner>(
 	rho: &[u8; 32],
 	public_key: &PublicKey,
 ) -> Result<PrivateKeyShare, DkgError> {
-	let dkg_participants = ParticipantList::new(&config.all_participants)
+	let dkg_participants = ParticipantList::new(config.all_participants())
 		.ok_or_else(|| DkgError::InternalError("invalid participants".into()))?;
 
 	let mut combined_shares: BTreeMap<SubsetMask, SecretShareData> = BTreeMap::new();
@@ -1911,7 +1912,7 @@ fn build_private_share<S: TranscriptSigner>(
 		let mut h = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut h, b"dkg-party-key-v2");
 		fips202::shake256_absorb(&mut h, rho);
-		fips202::shake256_absorb(&mut h, &config.my_party_id.to_le_bytes());
+		fips202::shake256_absorb(&mut h, &config.my_party_id().to_le_bytes());
 		// The linearization buffer holds raw secret share coefficients, so it
 		// must be a zeroizing container (a plain Vec freed after `clear()`
 		// leaves the coefficients in allocator memory) and it must be allocated
@@ -1943,7 +1944,7 @@ fn build_private_share<S: TranscriptSigner>(
 	let tr = *public_key.tr();
 
 	Ok(PrivateKeyShare::new(
-		config.my_party_id,
+		config.my_party_id(),
 		config.total_parties(),
 		config.threshold(),
 		party_key,

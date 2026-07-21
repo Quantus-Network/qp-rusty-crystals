@@ -153,18 +153,36 @@ use qp_rusty_crystals_dilithium::{
 // ============================================================================
 
 /// Configuration for the DKG protocol.
+///
+/// # Invariants
+///
+/// The fields are private so that [`DkgConfig::new`] is the only way to build
+/// a config: the state machine (including quorum arithmetic such as
+/// [`all_broadcasts_received`](super::all_broadcasts_received)) trusts that
+/// `all_participants` is non-empty, sorted, duplicate-free, matches the
+/// threshold configuration's party count, contains `my_party_id`, and has a
+/// verifying key for every participant. A struct literal bypassing those
+/// checks does not compile:
+///
+/// ```compile_fail
+/// use qp_rusty_crystals_threshold::keygen::dkg::{DkgConfig, TranscriptSigner};
+///
+/// fn corrupt<S: TranscriptSigner>(config: &mut DkgConfig<S>) {
+///     config.all_participants.clear(); // ERROR: field is private
+/// }
+/// ```
 #[derive(Clone)]
 pub struct DkgConfig<S: TranscriptSigner> {
 	/// The threshold configuration (t, n).
-	pub threshold_config: ThresholdConfig,
+	threshold_config: ThresholdConfig,
 	/// This party's identifier.
-	pub my_party_id: ParticipantId,
+	my_party_id: ParticipantId,
 	/// All participants in the DKG (sorted).
-	pub all_participants: Vec<ParticipantId>,
+	all_participants: Vec<ParticipantId>,
 	/// This party's signing key for transcript authentication.
-	pub my_signer: S,
+	my_signer: S,
 	/// Public keys of all participants for signature verification.
-	pub participant_public_keys: BTreeMap<ParticipantId, S::PublicKey>,
+	participant_public_keys: BTreeMap<ParticipantId, S::PublicKey>,
 }
 
 impl<S: TranscriptSigner> DkgConfig<S> {
@@ -208,6 +226,39 @@ impl<S: TranscriptSigner> DkgConfig<S> {
 			my_signer,
 			participant_public_keys,
 		})
+	}
+
+	/// Get the threshold configuration (t, n).
+	pub fn threshold_config(&self) -> ThresholdConfig {
+		self.threshold_config
+	}
+
+	/// Get this party's identifier.
+	pub fn my_party_id(&self) -> ParticipantId {
+		self.my_party_id
+	}
+
+	/// Get all participants in the DKG (sorted, duplicate-free).
+	pub fn all_participants(&self) -> &[ParticipantId] {
+		&self.all_participants
+	}
+
+	/// Get this party's transcript signer.
+	pub fn signer(&self) -> &S {
+		&self.my_signer
+	}
+
+	/// Get the verifying keys of all participants.
+	pub fn participant_public_keys(&self) -> &BTreeMap<ParticipantId, S::PublicKey> {
+		&self.participant_public_keys
+	}
+
+	/// Zeroize the transcript signer's key material in place.
+	///
+	/// Called at the state machine's zeroization boundary so key erasure does
+	/// not depend on the signer's `Drop` behavior.
+	pub(crate) fn zeroize_signer(&mut self) {
+		self.my_signer.zeroize();
 	}
 
 	/// Get the threshold value.

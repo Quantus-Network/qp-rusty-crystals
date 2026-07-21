@@ -289,7 +289,7 @@ impl<S: TranscriptSigner> Zeroize for DkgState<S> {
 		// makes erasure a state-machine invariant rather than a matter of
 		// downstream implementer discipline.
 		if let Some(ref mut config) = self.config {
-			config.my_signer.zeroize();
+			config.zeroize_signer();
 		}
 		self.config = None;
 
@@ -364,7 +364,7 @@ impl<S: TranscriptSigner> DkgState<S> {
 		if self.phase == DkgPhase::Complete || self.phase == DkgPhase::Failed {
 			return None;
 		}
-		self.config.as_ref().map(|c| c.all_participants.as_slice())
+		self.config.as_ref().map(|c| c.all_participants())
 	}
 
 	/// Get this party's ID from the config.
@@ -374,7 +374,7 @@ impl<S: TranscriptSigner> DkgState<S> {
 		if self.phase == DkgPhase::Complete || self.phase == DkgPhase::Failed {
 			return None;
 		}
-		self.config.as_ref().map(|c| c.my_party_id)
+		self.config.as_ref().map(|c| c.my_party_id())
 	}
 
 	// ========================================================================
@@ -448,12 +448,19 @@ impl<S: TranscriptSigner> DkgState<S> {
 }
 
 /// Check if all broadcasts received.
+///
+/// A round is complete when a broadcast has been received from every
+/// participant other than `my_party_id`. The expected count is derived by
+/// filtering the participant list rather than assuming `len() - 1`, so the
+/// predicate stays total over untrusted inputs: an empty list is vacuously
+/// complete (no underflow), and a `my_party_id` that is not a participant
+/// means every listed party is an "other".
 pub fn all_broadcasts_received<T>(
 	received: &BTreeMap<ParticipantId, T>,
 	all_participants: &[ParticipantId],
 	my_party_id: ParticipantId,
 ) -> bool {
-	let expected_count = all_participants.len() - 1;
+	let expected_count = all_participants.iter().filter(|&&p| p != my_party_id).count();
 	let actual_count = received.keys().filter(|&&p| p != my_party_id).count();
 	actual_count >= expected_count
 }
@@ -612,6 +619,30 @@ mod tests {
 			"DkgState::zeroize() must explicitly zeroize the transcript signer; \
 			 dropping a bare-marker ZeroizeOnDrop signer wipes nothing"
 		);
+	}
+
+	/// `all_broadcasts_received` is exported publicly and takes a raw
+	/// participant slice, so its quorum arithmetic must tolerate degenerate
+	/// inputs: an empty list previously computed `0usize - 1`, panicking in
+	/// checked builds.
+	#[test]
+	fn all_broadcasts_received_does_not_underflow_on_empty_participant_list() {
+		let received: BTreeMap<ParticipantId, u8> = BTreeMap::new();
+		// Vacuously complete: there is nobody to wait for.
+		assert!(all_broadcasts_received(&received, &[], 0));
+	}
+
+	/// The expected count must be "participants other than me", not
+	/// `len() - 1`: when `my_party_id` is not in the list at all, every listed
+	/// participant is an "other", and `len() - 1` would report completion one
+	/// broadcast early.
+	#[test]
+	fn all_broadcasts_received_counts_others_when_caller_not_in_list() {
+		let mut received: BTreeMap<ParticipantId, u8> = BTreeMap::new();
+		received.insert(1, 0);
+		assert!(!all_broadcasts_received(&received, &[1, 2], 99));
+		received.insert(2, 0);
+		assert!(all_broadcasts_received(&received, &[1, 2], 99));
 	}
 
 	/// Regression test: `DkgState::zeroize()` must erase the transcript signer's
