@@ -1,4 +1,4 @@
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
 	errors::{KeyParsingError, KeyParsingError::BadSecretKey, SignatureError},
@@ -58,10 +58,17 @@ impl Keypair {
 	///
 	/// Returns an array containing private and public keys bytes
 	pub fn to_bytes(&self) -> [u8; KEYPAIRBYTES] {
-		let mut result = [0u8; KEYPAIRBYTES];
-		result[..SECRETKEYBYTES].copy_from_slice(&self.secret.to_bytes());
+		// Copy the secret half directly from the stored key rather than via
+		// `self.secret.to_bytes()`: that would materialize a `Copy` temporary
+		// of the whole secret key on the stack, dropped without zeroization.
+		// The working buffer is itself zeroizing: it is not always elided
+		// into the return slot, and an unwiped local would leave the secret
+		// key readable in this frame's dead stack memory after return. The
+		// returned (caller-owned) copy is the caller's responsibility.
+		let mut result = Zeroizing::new([0u8; KEYPAIRBYTES]);
+		result[..SECRETKEYBYTES].copy_from_slice(&self.secret.bytes);
 		result[SECRETKEYBYTES..].copy_from_slice(&self.public.to_bytes());
-		result
+		*result
 	}
 
 	/// Create a Keypair from bytes.
@@ -94,9 +101,14 @@ impl Keypair {
 		if bytes.len() != SECRETKEYBYTES + PUBLICKEYBYTES {
 			return Err(KeyParsingError::BadKeypair);
 		}
-		let (secret_bytes, public_bytes) = bytes.split_at(SECRETKEYBYTES);
-		let secret_bytes: [u8; SECRETKEYBYTES] =
-			secret_bytes.try_into().map_err(|_| KeyParsingError::BadKeypair)?;
+		let (secret_slice, public_bytes) = bytes.split_at(SECRETKEYBYTES);
+		// Copy the secret half into a zeroizing local (filled in place, so no
+		// intermediate `Copy` array is created). A plain `[u8; N]` local would
+		// survive the "move" into the returned struct — arrays are `Copy` —
+		// and leave a plaintext secret key in dead stack memory; `Zeroizing`
+		// wipes the local on every exit path, including the error returns.
+		let mut secret_bytes = Zeroizing::new([0u8; SECRETKEYBYTES]);
+		secret_bytes.copy_from_slice(secret_slice);
 		let public =
 			PublicKey::from_bytes(public_bytes).map_err(|_| KeyParsingError::BadKeypair)?;
 
@@ -112,7 +124,7 @@ impl Keypair {
 			return Err(KeyParsingError::BadKeypair);
 		}
 
-		Ok(Keypair { secret: SecretKey { bytes: secret_bytes }, public })
+		Ok(Keypair { secret: SecretKey { bytes: *secret_bytes }, public })
 	}
 
 	/// Compute a signature for a given message.
@@ -199,11 +211,18 @@ impl SecretKey {
 	/// serialized secret material has the same guarantees whether it is
 	/// imported as a `Keypair` or as a standalone `SecretKey`.
 	pub fn from_bytes(bytes: &[u8]) -> Result<SecretKey, KeyParsingError> {
-		let bytes: [u8; SECRETKEYBYTES] = bytes.try_into().map_err(|_| BadSecretKey)?;
+		if bytes.len() != SECRETKEYBYTES {
+			return Err(BadSecretKey);
+		}
+		// Zeroizing local filled in place: see `Keypair::from_bytes` — a bare
+		// `[u8; N]` local is `Copy` and would survive the move into the
+		// returned struct as an unwiped plaintext copy of the secret key.
+		let mut sk = Zeroizing::new([0u8; SECRETKEYBYTES]);
+		sk.copy_from_slice(bytes);
 		// Re-derives the public components and checks the stored tr/t0 against
 		// them; the derived pk itself is not needed here.
-		crate::sign::public_key_from_secret(&bytes).ok_or(BadSecretKey)?;
-		Ok(SecretKey { bytes })
+		crate::sign::public_key_from_secret(&sk).ok_or(BadSecretKey)?;
+		Ok(SecretKey { bytes: *sk })
 	}
 
 	/// Compute a signature for a given message.
