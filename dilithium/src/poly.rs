@@ -563,14 +563,19 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8; params::CRHBYTES], 
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
-	// Fixed number of rounds to reduce timing variations
+	// Two blocks = 544 nibbles, each accepted with probability 15/16 (mean
+	// 510, sigma ~5.7), so collecting fewer than the N = 256 needed is a
+	// ~45-sigma event (< 2^-600): the retry branch below is never taken in
+	// practice and observed timing is constant. Even in principle, timing
+	// here depends only on rejection counts (nibble == 15), which are
+	// independent of the accepted values that form the key — the standard
+	// argument for rejection sampling from a seeded XOF. A fallback must
+	// still exist for exact sampling, hence the loop.
 	const FIXED_ROUNDS: usize = 2;
 	let mut shake_output_buffer = [[0u8; fips202::SHAKE256_RATE]; 1];
 	let mut temporary_coefficient_storage = [0i32; 1000]; // Temp storage for all extracted coeffs
 	let mut total_coefficients_collected = 0usize;
 
-	// In the extremely rare case that 2 rounds isn't enough, we keep going.
-	// The vast majority of cases will run this outer loop exactly once
 	while total_coefficients_collected < N {
 		// Always run exactly FIXED_ROUNDS iterations
 		for _round_number in 0..FIXED_ROUNDS {
