@@ -671,7 +671,16 @@ pub(crate) fn eta_pack(r: &mut [u8], a: &Poly) {
 }
 
 /// Unpack polynomial with coefficients in [-ETA,ETA].
-pub(crate) fn eta_unpack(r: &mut Poly, a: &[u8]) {
+///
+/// The packed encoding stores `ETA - coefficient` in 3 bits per slot. With
+/// `ETA = 2` only slots 0..=4 are canonical; slots 5..=7 would decode to
+/// coefficients -3..-5, which key generation never emits and which lie
+/// outside the key distribution the `BETA = TAU * ETA` signing rejection
+/// margin is sized for. Returns `false` if any slot is non-canonical (the
+/// output polynomial is still fully written in that case; callers must
+/// treat it as invalid).
+#[must_use]
+pub(crate) fn eta_unpack(r: &mut Poly, a: &[u8]) -> bool {
 	for i in 0..N / 8 {
 		r.coeffs[8 * i + 0] = (a[3 * i + 0] & 0x07) as i32;
 		r.coeffs[8 * i + 1] = ((a[3 * i + 0] >> 3) & 0x07) as i32;
@@ -691,6 +700,11 @@ pub(crate) fn eta_unpack(r: &mut Poly, a: &[u8]) {
 		r.coeffs[8 * i + 6] = params::ETA as i32 - r.coeffs[8 * i + 6];
 		r.coeffs[8 * i + 7] = params::ETA as i32 - r.coeffs[8 * i + 7];
 	}
+	// Canonicality sweep after the fact: branch-free over the whole
+	// polynomial, so honest keys (which always pass) take a data-independent
+	// path through this function.
+	let eta = params::ETA as i32;
+	r.coeffs.iter().all(|&c| (-eta..=eta).contains(&c))
 }
 
 /// Bit-pack polynomial z with coefficients in [-(GAMMA1 - 1), GAMMA1 - 1].
@@ -1561,11 +1575,28 @@ mod tests {
 		eta_pack(&mut packed, &poly);
 
 		let mut unpacked = Poly::default();
-		eta_unpack(&mut unpacked, &packed);
+		assert!(eta_unpack(&mut unpacked, &packed), "canonical packing must unpack cleanly");
 
 		for i in 0..N {
 			assert_eq!(poly.coeffs[i], unpacked.coeffs[i], "ETA pack/unpack failed at index {}", i);
 		}
+	}
+
+	#[test]
+	fn test_eta_unpack_rejects_noncanonical_slots() {
+		// 3-bit slots 5..7 decode to coefficients -3..-5, outside [-ETA, ETA].
+		// eta_unpack must flag them; slot values 0..=4 (the canonical range)
+		// must pass.
+		let mut packed = [0u8; params::POLYETA_PACKEDBYTES];
+		let mut unpacked = Poly::default();
+		assert!(eta_unpack(&mut unpacked, &packed), "all-zero slots are canonical");
+
+		// First 3-bit slot = 5 -> coefficient ETA - 5 = -3.
+		packed[0] = 5;
+		assert!(
+			!eta_unpack(&mut unpacked, &packed),
+			"slot 5 decodes outside [-ETA, ETA] and must be flagged"
+		);
 	}
 
 	#[test]

@@ -551,6 +551,78 @@ mod tests {
 		);
 	}
 
+	// The packed s1/s2 regions use 3 bits per coefficient, decoded as
+	// `ETA - slot`. With ETA = 2, slots 5..7 decode to coefficients -3..-5 —
+	// outside the [-ETA, ETA] key distribution the parameters advertise and
+	// the BETA rejection margin is sized for. An attacker can recompute
+	// t0/tr/pk *from* the oversized coefficients, so every algebraic
+	// consistency check passes; the import paths must therefore enforce the
+	// coefficient range explicitly.
+	#[test]
+	fn from_bytes_rejects_out_of_range_secret_coefficients() {
+		use super::{
+			KeyParsingError, Keypair, SecretKey, KEYPAIRBYTES, PUBLICKEYBYTES, SECRETKEYBYTES,
+		};
+		use crate::{fips202, packing, params, polyvec};
+
+		// Start from an honest key and re-derive everything after planting
+		// the out-of-range coefficient, so the forged blob is fully
+		// self-consistent (valid t0, tr, and matching public key).
+		let keys = Keypair::generate(get_random_bytes());
+		let sk_bytes = keys.secret.to_bytes();
+
+		let mut rho = [0u8; params::SEEDBYTES];
+		let mut tr = [0u8; params::TR_BYTES];
+		let mut key = [0u8; params::SEEDBYTES];
+		let mut t0 = polyvec::Polyveck::default();
+		let mut s1 = polyvec::Polyvecl::default();
+		let mut s2 = polyvec::Polyveck::default();
+		assert!(
+			packing::unpack_sk(&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, &sk_bytes),
+			"honest key unpacks canonically"
+		);
+
+		// -3 packs as the 3-bit slot 5 (eta_pack stores ETA - coeff), so the
+		// forged coefficient survives the pack/unpack round trip.
+		s1.vec[0].coeffs_mut()[0] = -(params::ETA as i32) - 1;
+
+		// Same derivation as keygen: t = A·s1 + s2, split into (t1, t0).
+		let mut s1hat = s1.clone();
+		polyvec::l_ntt(&mut s1hat);
+		let mut t1 = polyvec::Polyveck::default();
+		polyvec::matrix_pointwise_montgomery_streamed(&mut t1, &rho, &s1hat);
+		polyvec::k_reduce(&mut t1);
+		polyvec::k_invntt_tomont(&mut t1);
+		polyvec::k_add(&mut t1, &s2);
+		polyvec::k_caddq(&mut t1);
+		let mut t0_forged = polyvec::Polyveck::default();
+		polyvec::k_power2round(&mut t1, &mut t0_forged);
+
+		let mut pk = [0u8; PUBLICKEYBYTES];
+		packing::pack_pk(&mut pk, &rho, &t1);
+		let mut tr_forged = [0u8; params::TR_BYTES];
+		fips202::shake256(&mut tr_forged, &pk);
+
+		let mut forged_sk = [0u8; SECRETKEYBYTES];
+		packing::pack_sk(&mut forged_sk, &rho, &tr_forged, &key, &t0_forged, &s1, &s2);
+
+		assert!(
+			matches!(SecretKey::from_bytes(&forged_sk), Err(KeyParsingError::BadSecretKey)),
+			"secret key with a coefficient outside [-ETA, ETA] must be rejected"
+		);
+
+		let mut forged_kp = [0u8; KEYPAIRBYTES];
+		forged_kp[..SECRETKEYBYTES].copy_from_slice(&forged_sk);
+		forged_kp[SECRETKEYBYTES..].copy_from_slice(&pk);
+		assert!(
+			matches!(Keypair::from_bytes(&forged_kp), Err(KeyParsingError::BadKeypair)),
+			"keypair with a secret coefficient outside [-ETA, ETA] must be rejected"
+		);
+
+		// Honest keys must still round-trip.
+		assert!(SecretKey::from_bytes(&sk_bytes).is_ok(), "honest secret key must be accepted");
+	}
+
 	// Malicious-key forgery defense: a public key with an all-zero t1 makes verification
 	// independent of the challenge, enabling signature forgery without a secret key.
 	// `from_bytes` must reject such a key so it can never be constructed or stored.
