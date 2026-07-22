@@ -8,7 +8,9 @@
 //! - `Dkg::message` receives Round 1 private frames whose bytes contain the
 //!   serialized subset secret K_S;
 //! - `sample_hyperball` (via `ThresholdSigner::round1_commit_with_seed`)
-//!   squeezes the per-signature mask randomness into a scratch `Vec<u8>`.
+//!   squeezes the per-signature mask randomness into a scratch `Vec<u8>`;
+//! - the resharing protocol's `party_key` derivation linearizes the new
+//!   committee share's polynomial coefficients into a reusable `Vec<u8>`.
 //!
 //! Ordinary vectors do not overwrite their backing allocation when cleared or
 //! dropped, so each of these left secrets in allocator memory after the
@@ -32,8 +34,11 @@ use qp_rusty_crystals_threshold::{
 	keygen::dkg::{
 		compute_dkg_ssid, Dkg, DkgConfig, DkgMessage, Round1Private, TranscriptSigner,
 	},
+	resharing::{Action, ResharingConfig},
 	PrivateKeyShare, ThresholdConfig, ThresholdSigner,
 };
+
+mod common;
 
 /// The 32-byte pattern the allocator currently scans for. Updated between
 /// scenarios (only while scanning is off, so `try_lock` in the hook never
@@ -41,6 +46,7 @@ use qp_rusty_crystals_threshold::{
 static PATTERN: Mutex<[u8; 32]> = Mutex::new([0u8; 32]);
 static SCANNING: AtomicBool = AtomicBool::new(false);
 static SECRET_FREED_UNCLEARED: AtomicBool = AtomicBool::new(false);
+static LEAK_SIZE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 struct SecretScanningAllocator;
 
@@ -55,6 +61,7 @@ unsafe impl GlobalAlloc for SecretScanningAllocator {
 				let block = unsafe { core::slice::from_raw_parts(ptr, layout.size()) };
 				if block.windows(32).any(|w| w == *pattern) {
 					SECRET_FREED_UNCLEARED.store(true, Ordering::SeqCst);
+					LEAK_SIZE.store(layout.size(), Ordering::SeqCst);
 				}
 			}
 		}
@@ -75,8 +82,9 @@ fn assert_no_secret_bearing_free(scenario: &str, pattern: [u8; 32], f: impl FnOn
 	SCANNING.store(false, Ordering::SeqCst);
 	assert!(
 		!SECRET_FREED_UNCLEARED.load(Ordering::SeqCst),
-		"{scenario}: a heap block still containing secret material was freed \
-		 without being zeroized"
+		"{scenario}: a heap block ({} bytes) still containing secret material was freed \
+		 without being zeroized",
+		LEAK_SIZE.load(Ordering::SeqCst)
 	);
 }
 
@@ -162,6 +170,88 @@ fn hyperball_stream_pattern(ssid: &[u8; 32], seed: &[u8; 32]) -> [u8; 32] {
 	pattern
 }
 
+/// Run a deterministic 2-of-2 -> 2-of-2 resharing locally and return the new
+/// share of party 0 plus the last 32 bytes of the first Round 4 transport
+/// frame (raw sub-share s2 coefficients). All seeds are fixed, and the leader
+/// is given the full expected active set, so two invocations produce
+/// byte-identical shares and frames — which lets the caller learn the secret
+/// coefficients from a first (unscanned) run and scan for them during a
+/// second run.
+fn run_local_reshare() -> (PrivateKeyShare, [u8; 32]) {
+	let config = ThresholdConfig::new(2, 2).expect("valid config");
+	let (pk, old_shares) = generate_with_dealer(&[0x51u8; 32], config).expect("keygen succeeds");
+	let participants = vec![0u32, 1u32];
+	let session_nonce = [0x7Bu8; 32];
+
+	let mut protocols: Vec<_> = participants
+		.iter()
+		.map(|&party_id| {
+			let rcfg = ResharingConfig::new(
+				Some(old_shares[party_id as usize].clone()),
+				2,
+				participants.clone(),
+				2,
+				participants.clone(),
+				party_id,
+				pk.clone(),
+			)
+			.expect("valid resharing config");
+			let mut seed = [0x60u8; 32];
+			seed[0] = party_id as u8;
+			common::new_test_protocol(rcfg, seed, &session_nonce)
+		})
+		.collect();
+
+	// The leader proposes as soon as both old members commit; no transport
+	// timeout is needed, keeping the run fully deterministic.
+	protocols[0].set_expected_active_set(&participants).expect("leader accepts expected set");
+
+	let mut queues: Vec<Vec<(u32, Vec<u8>)>> = vec![Vec::new(); participants.len()];
+	// Tail of the first private (Round 4) frame observed: the final s2
+	// coefficients of a raw sub-share, captured to a stack array so the
+	// caller can later scan freed heap blocks for them.
+	let mut round4_tail: Option<[u8; 32]> = None;
+	for _ in 0..1000 {
+		if protocols.iter().all(|p| p.is_done()) {
+			break;
+		}
+		for i in 0..protocols.len() {
+			if protocols[i].is_done() {
+				continue;
+			}
+			for (from, data) in std::mem::take(&mut queues[i]) {
+				protocols[i].message(from, data).expect("message is processed");
+			}
+			match protocols[i].poke().expect("poke succeeds") {
+				Action::Wait | Action::Return(_) => {},
+				Action::SendMany(data) => {
+					for (j, queue) in queues.iter_mut().enumerate() {
+						if j != i {
+							queue.push((i as u32, data.clone()));
+						}
+					}
+				},
+				Action::SendPrivate(to, mut data) => {
+					// The only private frames in this protocol are Round 4
+					// sub-share deliveries.
+					if round4_tail.is_none() && data.len() >= 32 {
+						round4_tail = Some(data[data.len() - 32..].try_into().unwrap());
+					}
+					queues[to as usize].push((i as u32, std::mem::take(&mut *data)));
+				},
+			}
+		}
+	}
+	assert!(protocols.iter().all(|p| p.is_done()), "resharing must complete");
+
+	let share = protocols[0]
+		.take_output()
+		.expect("party 0 has an output")
+		.private_share
+		.expect("new committee member carries a share");
+	(share, round4_tail.expect("a Round 4 private frame was exchanged"))
+}
+
 #[test]
 fn secret_intermediates_are_wiped_before_their_heap_memory_is_freed() {
 	// Scenario 1: hash_secret_shares linearization buffer.
@@ -230,6 +320,48 @@ fn secret_intermediates_are_wiped_before_their_heap_memory_is_freed() {
 			signer
 				.round1_commit_with_seed(&sign_ssid, &round1_seed)
 				.expect("round 1 commit succeeds");
+		},
+	);
+	drop(signer);
+
+	// Scenario 4: resharing party_key linearization buffer.
+	// build_private_key_share serializes every new share coefficient into a
+	// scratch Vec to derive party_key; a plain Vec leaves those coefficients
+	// in freed allocator memory (and its incremental growth frees unwiped
+	// intermediate blocks). The run is deterministic, so a first unscanned
+	// run reveals the coefficients the second, scanned run must wipe: the
+	// pattern is the tail of the serialized share (the last s2 coefficients
+	// of the highest subset mask), which is exactly the tail of the scratch
+	// buffer's final contents.
+	// The reference blob holds the real share, so wipe it before it is freed:
+	// dropping it plain would plant the pattern in recycled allocator memory
+	// and make the scanner flag stale bytes instead of a live leak.
+	let (reference_share, round4_tail) = run_local_reshare();
+	let blob = zeroize::Zeroizing::new(borsh::to_vec(&reference_share).expect("share serializes"));
+	let mut reshare_pattern = [0u8; 32];
+	reshare_pattern.copy_from_slice(&blob[blob.len() - 32..]);
+	drop(blob);
+	drop(reference_share);
+
+	assert_no_secret_bearing_free(
+		"resharing build_private_key_share (party-key buffer)",
+		reshare_pattern,
+		|| {
+			let (share, _) = run_local_reshare();
+			drop(share);
+		},
+	);
+
+	// Scenario 5: resharing Round 4 transport frames.
+	// The private frames carry raw sub-share coefficients; the frame buffer
+	// must be wiped when the receiving protocol has consumed it (and the
+	// sender-side serialization must not free unwiped intermediates).
+	assert_no_secret_bearing_free(
+		"resharing transport frames (Round 4 sub-shares)",
+		round4_tail,
+		|| {
+			let (share, _) = run_local_reshare();
+			drop(share);
 		},
 	);
 }

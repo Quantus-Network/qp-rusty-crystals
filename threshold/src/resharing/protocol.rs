@@ -50,7 +50,7 @@ use qp_rusty_crystals_dilithium::{
 	fips202,
 	params::{ETA, K, L, N, Q, TAU},
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
 	keys::{PrivateKeyShare, SecretShareData},
@@ -155,7 +155,10 @@ pub enum Action<T> {
 	///
 	/// Sending this message over an unencrypted channel exposes secret shares
 	/// to eavesdroppers and compromises the security of the threshold scheme.
-	SendPrivate(ParticipantId, Vec<u8>),
+	///
+	/// The payload is a [`Zeroizing`] buffer so the plaintext sub-shares are
+	/// wiped from heap memory when the caller drops it after transmission.
+	SendPrivate(ParticipantId, Zeroizing<Vec<u8>>),
 	/// The protocol has completed, returning the output.
 	Return(T),
 }
@@ -800,6 +803,12 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		from: ParticipantId,
 		data: Vec<u8>,
 	) -> Result<(), ResharingProtocolError> {
+		// Round 4 frames carry plaintext sub-shares. Take ownership into a
+		// zeroizing wrapper immediately so the buffer is wiped on every
+		// return path (ignored, malformed, wrong session, or processed) —
+		// dropping the frame unwiped would leave share material in freed
+		// allocator memory.
+		let data = Zeroizing::new(data);
 		if matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
 			return Ok(());
 		}
@@ -1388,7 +1397,19 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		}
 		let msg = &self.pending_round4[self.round4_sent_count];
 		let to_party = msg.to_party_id;
-		let data = Self::serialize_message(&ResharingMessage::Round4(msg.clone()))?;
+		// Round 4 frames carry plaintext sub-shares, so serialize into an
+		// exactly pre-sized zeroizing buffer: `borsh::to_vec`'s incremental
+		// growth would free unwiped intermediate blocks still holding share
+		// coefficients, and a plain payload Vec would leave them in allocator
+		// memory once the transport drops it.
+		let wire = ResharingMessage::Round4(msg.clone());
+		let len = borsh::object_length(&wire).map_err(|e| {
+			ResharingProtocolError::SerializationError(format!("Failed to serialize: {}", e))
+		})?;
+		let mut data = Zeroizing::new(Vec::with_capacity(len));
+		borsh::to_writer(&mut *data, &wire).map_err(|e| {
+			ResharingProtocolError::SerializationError(format!("Failed to serialize: {}", e))
+		})?;
 		self.round4_sent_count += 1;
 		Ok(Action::SendPrivate(to_party, data))
 	}
@@ -1831,15 +1852,21 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 					i_mask
 				))
 			})?;
-			let subshares = derive_subshares_with_session_seed(
+			let mut subshares = derive_subshares_with_session_seed(
 				i_mask,
 				s_i,
 				&new_subsets,
 				&session_seed,
 				self.old_subset_order.len(),
 			);
-			for (j_mask, subshare) in new_subsets.iter().zip(subshares.into_iter()) {
-				self.my_subshares.insert((i_mask, *j_mask), subshare);
+			// Move each sub-share out with `mem::replace` rather than
+			// `into_iter()`: consuming the Vec by value skips the elements'
+			// zeroizing drops, freeing the backing buffer with the raw
+			// coefficients still in it. Replacing leaves zeros in the slots,
+			// which the Vec's (zeroizing) element drops then wipe redundantly.
+			for (j_mask, subshare) in new_subsets.iter().zip(subshares.iter_mut()) {
+				self.my_subshares
+					.insert((i_mask, *j_mask), core::mem::replace(subshare, NewShareData::new()));
 			}
 		}
 		Ok(())
@@ -2400,7 +2427,14 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			fips202::shake256_absorb(&mut h, b"reshare-party-key-v2");
 			fips202::shake256_absorb(&mut h, &rho);
 			fips202::shake256_absorb(&mut h, &self.config.my_party_id().to_le_bytes());
-			let mut buf: Vec<u8> = Vec::new();
+			// The linearization buffer holds raw secret share coefficients, so
+			// it must be a zeroizing container (a plain Vec freed after
+			// `clear()` leaves the coefficients in allocator memory) and it
+			// must be allocated at full size up front (growing mid-fill would
+			// free an unwiped intermediate block).
+			const SUBSET_BYTES: usize =
+				2 + (L + K) * N as usize * core::mem::size_of::<i32>();
+			let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(SUBSET_BYTES));
 			for (j_mask, share) in &self.new_shares {
 				buf.clear();
 				buf.extend_from_slice(&j_mask.to_le_bytes());
@@ -2851,7 +2885,10 @@ fn build_subset_seed_with_session(
 	// Mix in session seed for per-session randomization.
 	fips202::shake256_absorb(&mut state, session_seed);
 	fips202::shake256_absorb(&mut state, &i_mask.to_le_bytes());
-	let mut buf: Vec<u8> = Vec::new();
+	// Holds raw old-share coefficients: zeroizing, pre-sized to one
+	// polynomial so it never reallocates mid-fill.
+	let mut buf: Zeroizing<Vec<u8>> =
+		Zeroizing::new(Vec::with_capacity(N as usize * core::mem::size_of::<i32>()));
 	for poly in &s_i.s1 {
 		buf.clear();
 		for c in poly {
@@ -2892,7 +2929,10 @@ fn commit_subshare(
 	fips202::shake256_absorb(&mut state, COMMIT_DOMAIN);
 	fips202::shake256_absorb(&mut state, &i_mask.to_le_bytes());
 	fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes());
-	let mut buf: Vec<u8> = Vec::new();
+	// Holds raw sub-share coefficients: zeroizing, pre-sized to one
+	// polynomial so it never reallocates mid-fill.
+	let mut buf: Zeroizing<Vec<u8>> =
+		Zeroizing::new(Vec::with_capacity(N as usize * core::mem::size_of::<i32>()));
 	for poly in &r.s1 {
 		buf.clear();
 		for c in poly {
@@ -2917,7 +2957,10 @@ fn commit_new_share(j_mask: SubsetMask, share: &NewShareData) -> [u8; COMMITMENT
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, NEW_SHARE_COMMIT_DOMAIN);
 	fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes());
-	let mut buf: Vec<u8> = Vec::new();
+	// Holds raw new-share coefficients: zeroizing, pre-sized to one
+	// polynomial so it never reallocates mid-fill.
+	let mut buf: Zeroizing<Vec<u8>> =
+		Zeroizing::new(Vec::with_capacity(N as usize * core::mem::size_of::<i32>()));
 	for poly in &share.s1 {
 		buf.clear();
 		for c in poly {
@@ -3234,7 +3277,7 @@ mod tests {
 	fn test_action_variants() {
 		let wait: Action<()> = Action::Wait;
 		let send_many: Action<()> = Action::SendMany(vec![1, 2, 3]);
-		let send_private: Action<()> = Action::SendPrivate(42, vec![4, 5, 6]);
+		let send_private: Action<()> = Action::SendPrivate(42, Zeroizing::new(vec![4, 5, 6]));
 		let ret: Action<i32> = Action::Return(123);
 
 		match wait {
@@ -3248,7 +3291,7 @@ mod tests {
 		match send_private {
 			Action::SendPrivate(to, data) => {
 				assert_eq!(to, 42);
-				assert_eq!(data, vec![4, 5, 6]);
+				assert_eq!(*data, vec![4, 5, 6]);
 			},
 			_ => panic!("Expected SendPrivate"),
 		}
@@ -3363,7 +3406,7 @@ mod tests {
 			"test setup: sub-share bytes not present in serialized payload"
 		);
 
-		let action: Action<()> = Action::SendPrivate(3, data);
+		let action: Action<()> = Action::SendPrivate(3, Zeroizing::new(data));
 		let rendered = format!("{action:?}");
 
 		// A derived `Debug` renders the payload as `[.., 171, 171, ..]`; the
