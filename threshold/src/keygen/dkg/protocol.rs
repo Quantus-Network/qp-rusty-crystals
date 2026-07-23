@@ -547,8 +547,25 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// # Returns
 	/// * `Ok(DkgAction)` - The action to perform
 	/// * `Err(DkgError)` - If the protocol encounters an error
+	/// Pop the next queued Round 1 private without leaving K_S behind.
+	///
+	/// `Vec::pop` alone moves the element out but leaves its bytes intact in
+	/// the buffer beyond the shrunken length, where the drop-time wipe (which
+	/// only covers live elements) cannot reach them. Clone the element out and
+	/// wipe the slot in place before shrinking.
+	fn pop_pending_private(&mut self) -> Option<(ParticipantId, Round1Private)> {
+		let (to, private) = {
+			let (to, slot) = self.pending_privates.last_mut()?;
+			let out = (*to, slot.clone());
+			slot.zeroize();
+			out
+		};
+		self.pending_privates.pop();
+		Some((to, private))
+	}
+
 	pub fn poke(&mut self) -> Result<DkgAction, DkgError> {
-		if let Some((to, private)) = self.pending_privates.pop() {
+		if let Some((to, private)) = self.pop_pending_private() {
 			return serialize_round1_private(to, private);
 		}
 
@@ -1001,9 +1018,13 @@ impl<S: TranscriptSigner> Dkg<S> {
 			}
 		}
 
-		// Drain buffered Round 1 private messages with validation
-		let buffered_privates = self.message_buffer.take_round1_privates();
-		for ((from_party_id, subset_mask), private) in buffered_privates {
+		// Drain buffered Round 1 private messages with validation. Iterate by
+		// mutable reference rather than by value: consuming the map would move
+		// each Copy `Round1Private` out while leaving its K_S bytes intact in
+		// the freed map nodes. Every entry — including ones discarded by
+		// validation — is wiped in place before the map is dropped.
+		let mut buffered_privates = self.message_buffer.take_round1_privates();
+		for (&(from_party_id, subset_mask), private) in buffered_privates.iter_mut() {
 			// Validate subset_mask is valid
 			if !config.is_valid_subset(subset_mask) {
 				warn!(
@@ -1037,6 +1058,9 @@ impl<S: TranscriptSigner> Dkg<S> {
 				.get_or_insert_with(BTreeMap::new)
 				.entry(subset_mask)
 				.or_insert(private.shared_secret);
+		}
+		for private in buffered_privates.values_mut() {
+			private.zeroize();
 		}
 
 		Ok(())
@@ -1091,7 +1115,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 			self.state.privates_sent = true;
 
-			if let Some((to, private)) = self.pending_privates.pop() {
+			if let Some((to, private)) = self.pop_pending_private() {
 				return serialize_round1_private(to, private);
 			}
 		}
@@ -1139,9 +1163,15 @@ impl<S: TranscriptSigner> Dkg<S> {
 			.my_shared_secrets
 			.take()
 			.ok_or_else(|| DkgError::InvalidState("Round1 but no my_shared_secrets".into()))?;
-		if let Some(received) = self.state.received_shared_secrets.take() {
-			for (subset, secret) in received {
-				combined_secrets.insert(subset, secret);
+		if let Some(mut received) = self.state.received_shared_secrets.take() {
+			// K_S is a Copy `[u8; 32]`: consuming the map would move each
+			// secret out while leaving its bytes intact in the freed map
+			// nodes, beyond the reach of `DkgState::zeroize` (the field is
+			// already None by the time it runs). Copy the secrets out and
+			// wipe each node in place before the map is dropped.
+			for (&subset, secret) in received.iter_mut() {
+				combined_secrets.insert(subset, *secret);
+				secret.zeroize();
 			}
 		}
 

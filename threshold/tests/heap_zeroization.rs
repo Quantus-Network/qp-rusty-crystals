@@ -32,7 +32,7 @@ use qp_rusty_crystals_dilithium::fips202;
 use qp_rusty_crystals_threshold::{
 	derive_dkg_contribution, generate_with_dealer,
 	keygen::dkg::{
-		compute_dkg_ssid, Dkg, DkgConfig, DkgMessage, Round1Private, TranscriptSigner,
+		compute_dkg_ssid, Dkg, DkgAction, DkgConfig, DkgMessage, Round1Private, TranscriptSigner,
 	},
 	resharing::{Action, ResharingConfig},
 	PrivateKeyShare, ThresholdConfig, ThresholdSigner,
@@ -252,6 +252,77 @@ fn run_local_reshare() -> (PrivateKeyShare, [u8; 32]) {
 	(share, round4_tail.expect("a Round 4 private frame was exchanged"))
 }
 
+/// Run a deterministic 2-of-3 DKG locally and return a subset shared secret
+/// K_S, captured as the last 32 bytes of the first Round 1 private frame (a
+/// subset leader delivering K_S to another member; subsets have size
+/// n-t+1 = 2 here, so privates are exchanged). All randomness is
+/// SHAKE-derived from the fixed per-party seeds and session nonce, so two
+/// invocations produce byte-identical secrets — a first (unscanned) run
+/// reveals the K_S a second, scanned run must wipe.
+fn run_local_dkg_2of3() -> [u8; 32] {
+	let threshold_config = ThresholdConfig::new(2, 3).expect("valid config");
+	let participants: Vec<u32> = vec![0, 1, 2];
+	let pk_map: BTreeMap<u32, u32> = participants.iter().map(|&p| (p, p)).collect();
+	let session_nonce = [0x3Eu8; 32];
+
+	let mut dkgs: Vec<_> = participants
+		.iter()
+		.map(|&party_id| {
+			let config = DkgConfig::new(
+				threshold_config,
+				party_id,
+				participants.clone(),
+				TestSigner { id: party_id },
+				pk_map.clone(),
+			)
+			.expect("valid DKG config");
+			let mut seed = [0x90u8; 32];
+			seed[0] = party_id as u8;
+			Dkg::new(config, seed, &session_nonce)
+		})
+		.collect();
+
+	let mut queues: Vec<Vec<(u32, Vec<u8>)>> = vec![Vec::new(); participants.len()];
+	let mut ks_tail: Option<[u8; 32]> = None;
+	let mut done = vec![false; participants.len()];
+	for _ in 0..1000 {
+		if done.iter().all(|&d| d) {
+			break;
+		}
+		for i in 0..dkgs.len() {
+			if done[i] {
+				continue;
+			}
+			for (from, data) in std::mem::take(&mut queues[i]) {
+				dkgs[i].message(from, data).expect("message is processed");
+			}
+			match dkgs[i].poke().expect("poke succeeds") {
+				DkgAction::Wait => {},
+				DkgAction::SendMany(data) => {
+					for (j, queue) in queues.iter_mut().enumerate() {
+						if j != i {
+							queue.push((i as u32, data.clone()));
+						}
+					}
+				},
+				DkgAction::SendPrivate(to, mut data) => {
+					// Round 1 private frames carry K_S; the serialized tail
+					// is the secret itself.
+					if ks_tail.is_none() && data.len() >= 32 {
+						ks_tail = Some(data[data.len() - 32..].try_into().unwrap());
+					}
+					queues[to as usize].push((i as u32, std::mem::take(&mut *data)));
+				},
+				DkgAction::Return(_output) => {
+					done[i] = true;
+				},
+			}
+		}
+	}
+	assert!(done.iter().all(|&d| d), "DKG must complete");
+	ks_tail.expect("a Round 1 private frame was exchanged")
+}
+
 #[test]
 fn secret_intermediates_are_wiped_before_their_heap_memory_is_freed() {
 	// Scenario 1: hash_secret_shares linearization buffer.
@@ -362,6 +433,25 @@ fn secret_intermediates_are_wiped_before_their_heap_memory_is_freed() {
 		|| {
 			let (share, _) = run_local_reshare();
 			drop(share);
+		},
+	);
+
+	// Scenario 6: DKG K_S relocation out of Copy-typed containers.
+	// The subset shared secret K_S is a Copy `[u8; 32]`, so moving it out of
+	// a container leaves the source bytes intact: `transition_to_round2`
+	// consumed `received_shared_secrets` and freed the map nodes unwiped
+	// (past the reach of `DkgState::zeroize`, which finds the field already
+	// None), and `pending_privates.pop()` left the queued `Round1Private`
+	// bytes in the Vec buffer beyond the shrunken length, where the drop-time
+	// wipe (which only covers live elements) cannot reach them. The run is
+	// deterministic, so a first unscanned run reveals the K_S the scanned run
+	// must have wiped from every freed block.
+	let dkg_ks_pattern = run_local_dkg_2of3();
+	assert_no_secret_bearing_free(
+		"DKG K_S containers (received_shared_secrets map, pending_privates queue)",
+		dkg_ks_pattern,
+		|| {
+			let _ = run_local_dkg_2of3();
 		},
 	);
 }
