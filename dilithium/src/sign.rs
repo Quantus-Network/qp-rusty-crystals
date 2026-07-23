@@ -111,8 +111,14 @@ pub fn keypair(
 ///
 /// Recomputes `t1` and `t0` from the secret key's `(rho, s1, s2)` exactly as
 /// [`keypair`] does, and packs `pk = (rho, t1)`. In addition to re-deriving
-/// the public key, this checks the two remaining packed-SK invariants:
+/// the public key, this checks the remaining packed-SK invariants:
 ///
+/// - the unpacked `s1` and `s2` coefficients must lie in `[-ETA, ETA]`. The packed encoding uses 3
+///   bits per coefficient decoded as `ETA - slot`, so with `ETA = 2` the slots 5..7 decode to
+///   -3..-5 — encodings key generation never emits. They cannot be caught by the algebraic checks
+///   below (an attacker recomputes `t0`/`tr`/pk *from* the oversized coefficients), yet such a key
+///   lies outside the ML-DSA-87 key distribution that the `BETA = TAU * ETA` rejection margin in
+///   [`signature`] is sized for,
 /// - the stored `t0` must equal the re-derived low bits of `A·s1 + s2`,
 /// - the stored `tr` must equal `SHAKE256(pk)`, and
 /// - the derived `t1` must not be all-zero, matching the degenerate-key rejection in [`verify`] and
@@ -141,7 +147,9 @@ pub(crate) fn public_key_from_secret(
 	let mut t0 = Polyveck::default();
 	let mut s1 = Polyvecl::default();
 	let mut s2 = Polyveck::default();
-	packing::unpack_sk(&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk);
+	// Invariant: every secret coefficient must be in [-ETA, ETA]; `unpack_sk`
+	// reports non-canonical packed slots (see the doc comment above).
+	let s_in_range = packing::unpack_sk(&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk);
 
 	// Same derivation as key generation.
 	let (t1, mut t0_derived) = derive_public_components(&rho, &s1, &s2);
@@ -172,7 +180,7 @@ pub(crate) fn public_key_from_secret(
 	t0.zeroize();
 	t0_derived.zeroize();
 
-	if t0_consistent && tr_consistent && t1_nonzero {
+	if s_in_range && t0_consistent && tr_consistent && t1_nonzero {
 		Some(pk)
 	} else {
 		None
@@ -229,7 +237,11 @@ fn unpack_secret_key_for_signing(
 	let mut secret_poly_s1 = Polyvecl::default();
 	let mut secret_poly_s2 = Polyveck::default();
 
-	packing::unpack_sk(
+	// Every signing entry point receives key bytes that already passed the
+	// import validation (`SecretKey`'s storage is private and only filled by
+	// `generate`/`from_bytes`), so a non-canonical encoding here is a crate
+	// bug, not reachable attacker input.
+	let canonical = packing::unpack_sk(
 		&mut public_seed_rho,
 		&mut public_key_hash_tr,
 		&mut private_key_seed,
@@ -238,6 +250,7 @@ fn unpack_secret_key_for_signing(
 		&mut secret_poly_s2,
 		secret_key_bytes,
 	);
+	debug_assert!(canonical, "signing with a secret key that failed import validation");
 
 	// Convert secret polynomials to NTT domain for efficiency
 	polyvec::l_ntt(&mut secret_poly_s1);

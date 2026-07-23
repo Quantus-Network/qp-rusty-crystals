@@ -208,7 +208,7 @@ fn sign_sk_expansion(runner: &mut CtRunner, rng: &mut BenchRng) {
 			let mut t0 = Polyveck::default();
 			let mut s1 = Polyvecl::default();
 			let mut s2 = Polyveck::default();
-			packing::unpack_sk(
+			let canonical = packing::unpack_sk(
 				&mut rho,
 				&mut tr,
 				&mut key,
@@ -217,6 +217,7 @@ fn sign_sk_expansion(runner: &mut CtRunner, rng: &mut BenchRng) {
 				&mut s2,
 				black_box(&sk),
 			);
+			black_box(canonical);
 			polyvec::l_ntt(&mut s1);
 			polyvec::k_ntt(&mut s2);
 			polyvec::k_ntt(&mut t0);

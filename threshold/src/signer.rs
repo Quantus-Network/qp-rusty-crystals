@@ -63,7 +63,7 @@ use crate::{
 /// Packed size in bytes of one commitment (one `Polyveck` of K polynomials,
 /// 736 bytes each in the 23-bit encoding). Round 2 commitment data is
 /// `k_iterations` of these, concatenated.
-const SINGLE_COMMITMENT_SIZE: usize = 8 * 736; // K * POLY_Q_SIZE
+pub(crate) const SINGLE_COMMITMENT_SIZE: usize = 8 * 736; // K * POLY_Q_SIZE
 
 /// A threshold signer for a single party.
 ///
@@ -275,6 +275,27 @@ impl ThresholdSigner {
             )));
 		}
 
+		// Cross-field consistency of the share itself. Borsh import enforces
+		// the same invariants, but the signer is the last construction
+		// boundary before the state machine trusts this metadata: without
+		// these checks a malformed share runs rounds 1-2 and fails only at
+		// Round 3 share recovery - a late error for a missing party_id, or an
+		// out-of-bounds panic in translated_subset_masks when
+		// dkg_participants outnumber total_parties.
+		if private_key.dkg_participants().len() != private_key.total_parties() as usize {
+			return Err(ThresholdError::InvalidConfiguration(format!(
+				"Private key dkg_participants length ({}) does not match its total parties ({})",
+				private_key.dkg_participants().len(),
+				private_key.total_parties()
+			)));
+		}
+		if private_key.dkg_index().is_none() {
+			return Err(ThresholdError::InvalidConfiguration(format!(
+				"Private key party_id ({}) is not in its dkg_participants list",
+				private_key.party_id()
+			)));
+		}
+
 		Ok(Self { config, public_key, private_key, state: SignerState::default() })
 	}
 
@@ -464,7 +485,11 @@ impl ThresholdSigner {
 	/// are from parties whose IDs exist in the DKG participant set.
 	///
 	/// Broadcasts with unknown `party_id` values will cause share recovery to fail
-	/// with an `InvalidConfiguration` error.
+	/// with an `InvalidConfiguration` error. Because that failure is detected after
+	/// the peers' reveals have already been folded into the commitment aggregate
+	/// (and the offending participant set was frozen in Round 2, so no retry of
+	/// this session could succeed), it resets the signing session: restart from
+	/// Round 1.
 	///
 	/// For network usage, use
 	/// [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol) which handles
@@ -563,10 +588,25 @@ impl ThresholdSigner {
 			}
 		}
 
-		// Generate the response from the committed aggregate.
-		let (round1_data, round2_data) = self.state.expect_round2()?;
-		let responses =
-			generate_round3_response(&self.private_key, &self.config, round1_data, round2_data)?;
+		// Generate the response from the committed aggregate. From this point
+		// the aggregate already includes every peer's commitment, so ANY
+		// failure before the phase advances to AfterRound3 must reset the
+		// session, exactly like the aggregation failure path above: leaving
+		// AfterRound2 would let a retry re-run `aggregate_reveals` and
+		// double-count the peers' commitments. This path is reachable with
+		// attacker-influenced input — an active party outside the DKG
+		// participant set is only detected here, inside `recover_share` —
+		// and such a failure is baked into the session's frozen participant
+		// set, so no retry of the same session could ever succeed anyway.
+		let responses = match self.state.expect_round2().and_then(|(round1_data, round2_data)| {
+			generate_round3_response(&self.private_key, &self.config, round1_data, round2_data)
+		}) {
+			Ok(responses) => responses,
+			Err(e) => {
+				self.state = SignerState::default();
+				return Err(e);
+			},
+		};
 
 		// Pack responses for broadcast
 		let packed_response = pack_responses(&responses);
@@ -626,6 +666,26 @@ impl ThresholdSigner {
 				});
 			}
 
+			// Enforce the exact per-config length BEFORE the hash check. The
+			// bounded deserializer admits payloads up to the global maximum
+			// (~10.5 MB, sized for the largest supported config), and
+			// `verify_commitment_hash` runs SHAKE256 over the whole payload —
+			// so hashing first would let a peer who pre-committed to an
+			// oversized blob force that hashing work in a session whose
+			// legitimate reveal is orders of magnitude smaller. The length is
+			// public, so rejecting on it first leaks nothing.
+			if r2.commitment_data.len() != expected_len {
+				return Err(ThresholdError::InvalidCommitmentData {
+					party_id: r2.party_id,
+					reason: format!(
+						"Commitment data length {} does not match expected {} for k={}",
+						r2.commitment_data.len(),
+						expected_len,
+						k
+					),
+				});
+			}
+
 			// The Round 1 hash frozen during round2_reveal is authoritative.
 			// A reveal from a party we recorded no Round 1 commitment for
 			// cannot be bound and is rejected.
@@ -655,19 +715,6 @@ impl ThresholdSigner {
 					party_id: r2.party_id,
 					message: "Round 2 commitment data does not match Round 1 commitment hash"
 						.to_string(),
-				});
-			}
-
-			// Validate data length
-			if r2.commitment_data.len() != expected_len {
-				return Err(ThresholdError::InvalidCommitmentData {
-					party_id: r2.party_id,
-					reason: format!(
-						"Commitment data length {} does not match expected {} for k={}",
-						r2.commitment_data.len(),
-						expected_len,
-						k
-					),
 				});
 			}
 		}
@@ -962,6 +1009,60 @@ mod tests {
 		}
 	}
 
+	/// Security review: `ThresholdSigner::new` is the construction boundary
+	/// for locally supplied share material, so it must reject shares whose
+	/// metadata is not mutually consistent rather than let the signing state
+	/// machine run rounds 1-2 and fail (or panic out-of-bounds in
+	/// `translated_subset_masks`) only at Round 3 share recovery.
+	#[test]
+	fn test_signer_rejects_share_with_inconsistent_metadata() {
+		use crate::{generate_with_dealer, keys::PrivateKeyShare};
+
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[9u8; 32], config).unwrap();
+		let good = &shares[0];
+
+		// party_id missing from dkg_participants: passes the TR and threshold
+		// checks, then Round 3 recovery would fail late with
+		// "Party not found in DKG participants".
+		let tampered = PrivateKeyShare::new(
+			99,
+			good.total_parties(),
+			good.threshold(),
+			[0u8; 32],
+			*good.rho(),
+			*good.tr(),
+			good.shares().clone(),
+			good.dkg_participants().clone(),
+		);
+		assert!(
+			ThresholdSigner::new(tampered, pk.clone(), config).is_err(),
+			"signer must reject a share whose party_id is not in dkg_participants"
+		);
+
+		// dkg_participants larger than the claimed total_parties: signing-set
+		// masks built over dkg indices can then exceed the participant count,
+		// which panics in translated_subset_masks instead of erroring.
+		let config22 = ThresholdConfig::new(2, 2).unwrap();
+		let (pk22, shares22) = generate_with_dealer(&[10u8; 32], config22).unwrap();
+		let good22 = &shares22[0];
+		let oversized_list = ParticipantList::new(&[0, 1, 2]).unwrap();
+		let tampered = PrivateKeyShare::new(
+			good22.party_id(),
+			good22.total_parties(),
+			good22.threshold(),
+			[0u8; 32],
+			*good22.rho(),
+			*good22.tr(),
+			good22.shares().clone(),
+			oversized_list,
+		);
+		assert!(
+			ThresholdSigner::new(tampered, pk22.clone(), config22).is_err(),
+			"signer must reject a share whose dkg_participants exceed total_parties"
+		);
+	}
+
 	/// The direct signer must enforce the ML-DSA `MAX_MESSAGE_SIZE` bound before
 	/// hashing/cloning the message, matching the higher-level
 	/// `DilithiumSignProtocol` guard. Without the check, `round2_reveal` would
@@ -1125,6 +1226,120 @@ mod tests {
 		assert!(
 			matches!(err_again, ThresholdError::InvalidCommitmentData { party_id: 1, .. }),
 			"expected InvalidCommitmentData for party 1 on retry, got {err_again:?}"
+		);
+	}
+
+	/// A mis-sized reveal must be rejected on its length *before* the
+	/// commitment hash is verified, so a peer cannot force SHAKE256 work over
+	/// a payload far larger than the session's configuration can legitimately
+	/// produce (the bounded deserializer admits up to the global
+	/// `MAX_COMMITMENT_DATA_SIZE`, ~10.5 MB, sized for the largest config).
+	///
+	/// The ordering is pinned through the error variant: an oversized reveal
+	/// whose hash does NOT match the frozen commitment must fail as
+	/// `InvalidCommitmentData` (the O(1) length check), not as
+	/// `CommitmentMismatch` (which would prove the hash ran first).
+	#[test]
+	fn test_oversized_reveal_rejected_on_length_before_hashing() {
+		use crate::{
+			broadcast::{Round1Broadcast, Round2Broadcast, MAX_COMMITMENT_DATA_SIZE},
+			generate_with_dealer,
+			protocol::signing::compute_commitment_hash,
+		};
+
+		let config = ThresholdConfig::new(2, 2).unwrap();
+		let (pk, shares) = generate_with_dealer(&[11u8; 32], config).unwrap();
+		let mut s0 = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+
+		let ssid = [0x77u8; 32];
+		let _r1_0 = s0.round1_commit_with_seed(&ssid, &[1u8; 32]).unwrap();
+
+		// Peer 1's frozen Round 1 commitment is over placeholder data; the
+		// Round 3 reveal is the largest blob the bounded deserializer would
+		// admit for *any* config — vastly oversized for this (2,2) session.
+		let placeholder_hash = compute_commitment_hash(&ssid, 1, b"placeholder");
+		let r1_1 = Round1Broadcast::new(ssid, 1, placeholder_hash);
+		let oversized = alloc::vec![0xA5u8; MAX_COMMITMENT_DATA_SIZE];
+		let r2_1 = Round2Broadcast::new(ssid, 1, oversized);
+
+		s0.round2_reveal(&ssid, b"dos", b"", core::slice::from_ref(&r1_1)).unwrap();
+
+		let err = s0
+			.round3_respond(&ssid, core::slice::from_ref(&r1_1), core::slice::from_ref(&r2_1))
+			.expect_err("oversized reveal must be rejected");
+		assert!(
+			matches!(err, ThresholdError::InvalidCommitmentData { party_id: 1, .. }),
+			"oversized reveal must fail the O(1) length check before any hashing; \
+			 got {err:?} (CommitmentMismatch would mean the payload was hashed first)"
+		);
+	}
+
+	/// A failure *after* `aggregate_reveals` has folded peer commitments into
+	/// `w_aggregated` must reset the session, exactly like the aggregation
+	/// failure path itself: leaving the signer in AfterRound2 with a mutated
+	/// aggregate would let a retry re-run `aggregate_reveals` and double-count
+	/// every peer's commitment, silently poisoning the session.
+	///
+	/// The failure is triggered through the documented recoverable-looking
+	/// path: a Round 1 broadcast from a party that is not in the DKG
+	/// participant set is accepted by `round2_reveal` (the docs defer the
+	/// check), passes all Round 3 reveal validation (its reveal is genuinely
+	/// hash-bound and well-formed), and only fails inside
+	/// `generate_round3_response` -> `recover_share` with
+	/// `InvalidConfiguration` — after the aggregate is already committed.
+	#[test]
+	fn test_round3_failure_after_aggregation_resets_session() {
+		use crate::{
+			broadcast::{Round1Broadcast, Round2Broadcast},
+			generate_with_dealer,
+			protocol::signing::compute_commitment_hash,
+		};
+
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[13u8; 32], config).unwrap();
+		let mut s0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+		// A real signer produces well-formed commitment data we can rebrand.
+		let mut s1 = ThresholdSigner::new(shares[1].clone(), pk, config).unwrap();
+
+		let ssid = [0x21u8; 32];
+		let r1_0 = s0.round1_commit_with_seed(&ssid, &[1u8; 32]).unwrap();
+		let _r1_1 = s1.round1_commit_with_seed(&ssid, &[2u8; 32]).unwrap();
+		let r2_1 = s1.round2_reveal(&ssid, b"reset", b"", core::slice::from_ref(&r1_0)).unwrap();
+
+		// Rebrand party 1's valid commitment data as coming from party 99,
+		// which does not exist in the DKG participant set {0, 1, 2}. The
+		// reveal is hash-bound (we pre-commit to exactly these bytes), has
+		// the correct length, and unpacks — so every Round 3 validation
+		// passes and the aggregate is committed before anything fails.
+		let ghost_hash = compute_commitment_hash(&ssid, 99, &r2_1.commitment_data);
+		let r1_99 = Round1Broadcast::new(ssid, 99, ghost_hash);
+		let r2_99 = Round2Broadcast::new(ssid, 99, r2_1.commitment_data.clone());
+
+		s0.round2_reveal(&ssid, b"reset", b"", core::slice::from_ref(&r1_99)).unwrap();
+
+		let err = s0
+			.round3_respond(&ssid, core::slice::from_ref(&r1_99), core::slice::from_ref(&r2_99))
+			.expect_err("share recovery must fail for a party outside the DKG set");
+		assert!(
+			matches!(err, ThresholdError::InvalidConfiguration(_)),
+			"expected InvalidConfiguration from recover_share, got {err:?}"
+		);
+
+		// The aggregate already contains party 99's commitment, so the
+		// session is unrecoverable: it must have been reset, not left in
+		// AfterRound2 where a retry would double-aggregate.
+		assert_ne!(
+			s0.state.phase,
+			SigningPhase::AfterRound2,
+			"a failure after the aggregate was mutated must reset the session; \
+			 leaving AfterRound2 lets a retry double-count every peer commitment"
+		);
+		let err_again = s0
+			.round3_respond(&ssid, core::slice::from_ref(&r1_99), core::slice::from_ref(&r2_99))
+			.expect_err("a reset session must reject further Round 3 attempts");
+		assert!(
+			matches!(err_again, ThresholdError::InvalidState { .. }),
+			"retry after reset must fail with InvalidState, got {err_again:?}"
 		);
 	}
 }

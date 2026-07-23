@@ -12,7 +12,10 @@
 //! 2. Parties run full DKG using these contributions for randomness
 //! 3. The resulting shares are stored (cannot be recomputed on-the-fly)
 //! 4. There is one canonical derived key per `(master_key, tweak)`: the key produced by the single
-//!    DKG run performed for that tweak, then stored and looked up by [`DerivedKeyId`]
+//!    DKG run performed for that tweak, then stored and looked up by [`DerivedKeyId`], which binds
+//!    the domain and tweak **plus the TR hash of that run's public key** — because a different DKG
+//!    attempt for the same tweak produces a different key (see below), the identifier must pin down
+//!    *which* attempt's output it refers to
 //!
 //! # The derived key is NOT recomputable
 //!
@@ -38,7 +41,10 @@
 //! the MPC nodes agreed on *which* derived key a request refers to: the
 //! contract stores the derived public key produced by the canonical DKG run,
 //! keyed by the same tweak the nodes use to derive their contributions and
-//! look up their stored shares.
+//! look up their stored shares. Node-side storage must additionally be keyed
+//! by the registered key itself (via [`DerivedKeyId`]'s `public_key_hash`), so
+//! that shares from a superseded or concurrent DKG attempt can never be
+//! confused with the canonical run's shares.
 //!
 //! # Security
 //!
@@ -50,9 +56,13 @@
 
 use alloc::vec::Vec;
 
-use qp_rusty_crystals_dilithium::fips202;
+use qp_rusty_crystals_dilithium::{
+	fips202,
+	params::{K, L},
+};
+use zeroize::Zeroizing;
 
-use crate::keys::PrivateKeyShare;
+use crate::keys::{PrivateKeyShare, PublicKey, TR_SIZE};
 
 /// Domain separator for DKG contribution derivation.
 const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v2";
@@ -120,7 +130,12 @@ pub(crate) fn hash_secret_shares(master_share: &PrivateKeyShare) -> [u8; 64] {
 	fips202::shake256_absorb(&mut state, b"threshold-share-digest-v1");
 	fips202::shake256_absorb(&mut state, &master_share.party_id().to_le_bytes());
 
-	let mut buf: Vec<u8> = Vec::new();
+	// The linearization buffer holds raw secret share coefficients, so it must
+	// be a zeroizing container (a plain Vec freed after `clear()` leaves the
+	// coefficients in allocator memory) and it must be allocated at full size
+	// up front (growing mid-fill would free an unwiped intermediate block).
+	const SUBSET_BYTES: usize = 2 + (L + K) * 256 * core::mem::size_of::<i32>();
+	let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(SUBSET_BYTES));
 	for (subset_mask, share_data) in master_share.shares() {
 		buf.clear();
 		buf.extend_from_slice(&subset_mask.to_le_bytes());
@@ -145,20 +160,48 @@ pub(crate) fn hash_secret_shares(master_share: &PrivateKeyShare) -> [u8; 64] {
 
 /// Identifier for a derived key, used for storage lookup.
 ///
-/// This uniquely identifies a derived key by the domain and tweak.
-/// MPC nodes use this to look up stored derived shares.
+/// This uniquely identifies one *specific DKG output*: the domain and tweak
+/// select which derived key a request refers to, and `public_key_hash` binds
+/// the identifier to the concrete key produced by one DKG session. MPC nodes
+/// use this to look up stored derived shares.
+///
+/// The public-key binding is load-bearing. Derived keys are **not**
+/// recomputable (see the module docs): every DKG attempt for the same
+/// `(master_key, tweak)` mixes a fresh `session_nonce` and yields a different
+/// key, so `(domain_id, tweak)` alone does not identify a key — it identifies
+/// a *family* of possible keys, one per DKG attempt. Without the binding, a
+/// repeated-request or retry race can store one session's shares under an
+/// identifier that the rest of the system associates with a different
+/// session's public key, leaving nodes disagreeing or signing under an
+/// unregistered key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DerivedKeyId {
 	/// The domain ID (identifies the master key)
 	pub domain_id: u64,
 	/// The derivation tweak (derived from account + path by the caller)
 	pub tweak: [u8; 32],
+	/// TR hash (`SHAKE256` of the packed key, as in FIPS 204) of the derived
+	/// public key produced by the canonical DKG run for this `(domain, tweak)`.
+	/// Binds the identifier to that run's non-recomputable output.
+	pub public_key_hash: [u8; TR_SIZE],
 }
 
 impl DerivedKeyId {
-	/// Create a new derived key identifier.
-	pub fn new(domain_id: u64, tweak: [u8; 32]) -> Self {
-		Self { domain_id, tweak }
+	/// Create an identifier for a derived key produced by a completed DKG run.
+	///
+	/// `derived_public_key` is the DKG output's public key (e.g.
+	/// [`DkgOutput::public_key`](crate::keygen::dkg::DkgOutput)); its TR hash
+	/// becomes the session binding.
+	pub fn new(domain_id: u64, tweak: [u8; 32], derived_public_key: &PublicKey) -> Self {
+		Self { domain_id, tweak, public_key_hash: *derived_public_key.tr() }
+	}
+
+	/// Create an identifier from a stored/registered public-key hash.
+	///
+	/// For lookups where the full public key is not at hand but its TR hash
+	/// was recorded (e.g. alongside the contract-registered derived key).
+	pub fn from_key_hash(domain_id: u64, tweak: [u8; 32], public_key_hash: [u8; TR_SIZE]) -> Self {
+		Self { domain_id, tweak, public_key_hash }
 	}
 }
 
@@ -293,11 +336,12 @@ mod tests {
 	#[test]
 	fn test_derived_key_id_new() {
 		let tweak = test_tweak("alice.near", "ethereum");
-		let id1 = DerivedKeyId::new(5, tweak);
-		let id2 = DerivedKeyId::new(5, tweak);
+		let key_hash = [0x5Au8; TR_SIZE];
+		let id1 = DerivedKeyId::from_key_hash(5, tweak, key_hash);
+		let id2 = DerivedKeyId::from_key_hash(5, tweak, key_hash);
 		assert_eq!(id1, id2);
 
-		let id3 = DerivedKeyId::new(6, tweak);
+		let id3 = DerivedKeyId::from_key_hash(6, tweak, key_hash);
 		assert_ne!(id1, id3); // Different domain
 	}
 
@@ -305,9 +349,34 @@ mod tests {
 	fn test_derived_key_id_different_tweaks() {
 		let tweak1 = test_tweak("alice.near", "ethereum");
 		let tweak2 = test_tweak("bob.near", "ethereum");
+		let key_hash = [0x5Au8; TR_SIZE];
 
-		let id1 = DerivedKeyId::new(5, tweak1);
-		let id2 = DerivedKeyId::new(5, tweak2);
+		let id1 = DerivedKeyId::from_key_hash(5, tweak1, key_hash);
+		let id2 = DerivedKeyId::from_key_hash(5, tweak2, key_hash);
 		assert_ne!(id1, id2);
+	}
+
+	#[test]
+	fn test_derived_key_id_binds_derived_key() {
+		// Same (domain, tweak), different DKG outputs: the IDs must differ,
+		// and `new` must agree with `from_key_hash` on the TR binding.
+		let tweak = test_tweak("alice.near", "ethereum");
+		let pk_a = crate::keygen::generate_with_dealer(
+			&[3u8; 32],
+			crate::ThresholdConfig::new(2, 3).unwrap(),
+		)
+		.unwrap()
+		.0;
+		let pk_b = crate::keygen::generate_with_dealer(
+			&[4u8; 32],
+			crate::ThresholdConfig::new(2, 3).unwrap(),
+		)
+		.unwrap()
+		.0;
+
+		let id_a = DerivedKeyId::new(5, tweak, &pk_a);
+		let id_b = DerivedKeyId::new(5, tweak, &pk_b);
+		assert_ne!(id_a, id_b, "different DKG outputs must not collide");
+		assert_eq!(id_a, DerivedKeyId::from_key_hash(5, tweak, *pk_a.tr()));
 	}
 }

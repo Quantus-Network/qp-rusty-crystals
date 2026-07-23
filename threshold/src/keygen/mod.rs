@@ -31,19 +31,25 @@
 //! recommended approach for production deployments.
 //!
 //! ```ignore
-//! use qp_rusty_crystals_threshold::keygen::dkg::{DilithiumDkg, DkgConfig, Action};
-//! use rand::rngs::OsRng;
+//! use qp_rusty_crystals_threshold::keygen::dkg::{Dkg, DkgConfig, DkgAction};
 //!
-//! // Each party runs this independently
-//! let config = DkgConfig::new(threshold_config, my_party_id, all_participants)?;
-//! let mut dkg = DilithiumDkg::new(config, OsRng);
+//! // Each party runs this independently. `DkgConfig::new` validates the
+//! // participant set and is the only way to construct a config.
+//! let config = DkgConfig::new(
+//!     threshold_config,
+//!     my_party_id,
+//!     all_participants,
+//!     my_signer,
+//!     participant_public_keys,
+//! )?;
+//! let mut dkg = Dkg::new(config, seed, &session_nonce);
 //!
 //! loop {
 //!     match dkg.poke()? {
-//!         Action::Wait => { /* wait for messages */ }
-//!         Action::SendMany(data) => { /* broadcast to all */ }
-//!         Action::SendPrivate(to, data) => { /* send to specific party */ }
-//!         Action::Return(output) => {
+//!         DkgAction::Wait => { /* wait for messages */ }
+//!         DkgAction::SendMany(data) => { /* broadcast to all */ }
+//!         DkgAction::SendPrivate(to, data) => { /* send to specific party */ }
+//!         DkgAction::Return(output) => {
 //!             // DKG complete!
 //!             let public_key = output.public_key;
 //!             let my_share = output.private_share;

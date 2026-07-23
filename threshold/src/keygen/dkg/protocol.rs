@@ -11,7 +11,7 @@ use alloc::{
 use core::{fmt, mem};
 
 use log::warn;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
 	config::ThresholdConfig,
@@ -66,6 +66,26 @@ fn deserialize_message(data: &[u8]) -> Result<DkgMessage, String> {
 		return Err(format!("Message size {} exceeds maximum {}", data.len(), MAX_DKG_MESSAGE_SIZE));
 	}
 	borsh::from_slice(data).map_err(|e| e.to_string())
+}
+
+/// Serialize a queued Round 1 private message into a self-wiping transport buffer.
+///
+/// The frame carries the secret K_S, so two properties matter beyond plain
+/// `borsh::to_vec`:
+/// - the buffer is allocated at its exact final size before serialization — letting borsh grow a
+///   `Vec` incrementally frees intermediate blocks that already contain a prefix of the secret
+///   payload;
+/// - the buffer is [`Zeroizing`], so it is wiped when the caller drops it after handing the frame
+///   to the transport.
+fn serialize_round1_private(
+	to: ParticipantId,
+	private: Round1Private,
+) -> Result<DkgAction, DkgError> {
+	let msg = DkgMessage::Round1Private(private);
+	let len = borsh::object_length(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
+	let mut data = Zeroizing::new(Vec::with_capacity(len));
+	borsh::to_writer(&mut *data, &msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
+	Ok(DkgAction::SendPrivate(to, data))
 }
 
 // ============================================================================
@@ -211,7 +231,12 @@ pub enum DkgAction {
 	///
 	/// This is used in Round 1 to distribute the per-subset secret K_S to subset members.
 	/// Without proper channel security, the threshold scheme's security is compromised.
-	SendPrivate(ParticipantId, Vec<u8>),
+	///
+	/// The payload is [`Zeroizing`] because the serialized bytes contain K_S:
+	/// once the caller has handed the frame to the transport and drops this
+	/// value, the buffer is wiped instead of leaving key material in freed
+	/// heap memory.
+	SendPrivate(ParticipantId, Zeroizing<Vec<u8>>),
 	/// DKG is complete, return the output.
 	Return(Box<DkgOutput>),
 }
@@ -491,9 +516,9 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// Using a counter, timestamp, or random value from the transport layer is acceptable.
 	pub fn new(config: DkgConfig<S>, seed: [u8; 32], session_nonce: &[u8; 32]) -> Self {
 		let ssid = compute_dkg_ssid(
-			config.threshold_config.threshold(),
-			config.threshold_config.total_parties(),
-			&config.all_participants,
+			config.threshold(),
+			config.total_parties(),
+			config.all_participants(),
 			session_nonce,
 		);
 		Self {
@@ -513,6 +538,23 @@ impl<S: TranscriptSigner> Dkg<S> {
 		&self.ssid
 	}
 
+	/// Pop the next queued Round 1 private without leaving K_S behind.
+	///
+	/// `Vec::pop` alone moves the element out but leaves its bytes intact in
+	/// the buffer beyond the shrunken length, where the drop-time wipe (which
+	/// only covers live elements) cannot reach them. Clone the element out and
+	/// wipe the slot in place before shrinking.
+	fn pop_pending_private(&mut self) -> Option<(ParticipantId, Round1Private)> {
+		let (to, private) = {
+			let (to, slot) = self.pending_privates.last_mut()?;
+			let out = (*to, slot.clone());
+			slot.zeroize();
+			out
+		};
+		self.pending_privates.pop();
+		Some((to, private))
+	}
+
 	/// Advance the protocol state machine.
 	///
 	/// Call this method repeatedly to drive the protocol forward. It returns
@@ -523,10 +565,8 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// * `Ok(DkgAction)` - The action to perform
 	/// * `Err(DkgError)` - If the protocol encounters an error
 	pub fn poke(&mut self) -> Result<DkgAction, DkgError> {
-		if let Some((to, private)) = self.pending_privates.pop() {
-			let data = borsh::to_vec(&DkgMessage::Round1Private(private))
-				.map_err(|e| DkgError::InternalError(e.to_string()))?;
-			return Ok(DkgAction::SendPrivate(to, data));
+		if let Some((to, private)) = self.pop_pending_private() {
+			return serialize_round1_private(to, private);
 		}
 
 		match self.state.phase {
@@ -599,6 +639,13 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// * `Ok(())` - Message was processed, buffered, or legitimately ignored
 	/// * `Err(_)` - Message was malformed and could not be deserialized
 	pub fn message(&mut self, from: ParticipantId, data: Vec<u8>) -> Result<(), DkgError> {
+		// Round 1 private frames carry the serialized secret K_S. Taking
+		// ownership into a zeroizing wrapper wipes the transport bytes on every
+		// return path, instead of freeing a heap block that still contains key
+		// material. (Broadcast frames are public; wiping them too costs one
+		// memset.)
+		let data = Zeroizing::new(data);
+
 		// Validate sender is a known participant to prevent quorum inflation attacks
 		if let Some(participants) = self.state.all_participants() {
 			if !participants.contains(&from) {
@@ -930,9 +977,9 @@ impl<S: TranscriptSigner> Dkg<S> {
 		// Derive all randomness from the master seed
 		let leader_subsets = config.my_leader_subsets();
 		let (my_randomness, my_shared_secrets) =
-			derive_round1_randomness(&self.seed, &self.ssid, config.my_party_id, &leader_subsets);
+			derive_round1_randomness(&self.seed, &self.ssid, config.my_party_id(), &leader_subsets);
 
-		let my_commitment = h_commit(&self.ssid, config.my_party_id, &my_randomness);
+		let my_commitment = h_commit(&self.ssid, config.my_party_id(), &my_randomness);
 
 		// Transition to Round1 by setting fields directly
 		self.state.phase = DkgPhase::Round1;
@@ -971,9 +1018,13 @@ impl<S: TranscriptSigner> Dkg<S> {
 			}
 		}
 
-		// Drain buffered Round 1 private messages with validation
-		let buffered_privates = self.message_buffer.take_round1_privates();
-		for ((from_party_id, subset_mask), private) in buffered_privates {
+		// Drain buffered Round 1 private messages with validation. Iterate by
+		// mutable reference rather than by value: consuming the map would move
+		// each Copy `Round1Private` out while leaving its K_S bytes intact in
+		// the freed map nodes. Every entry — including ones discarded by
+		// validation — is wiped in place before the map is dropped.
+		let mut buffered_privates = self.message_buffer.take_round1_privates();
+		for (&(from_party_id, subset_mask), private) in buffered_privates.iter_mut() {
 			// Validate subset_mask is valid
 			if !config.is_valid_subset(subset_mask) {
 				warn!(
@@ -1008,6 +1059,9 @@ impl<S: TranscriptSigner> Dkg<S> {
 				.entry(subset_mask)
 				.or_insert(private.shared_secret);
 		}
+		for private in buffered_privates.values_mut() {
+			private.zeroize();
+		}
 
 		Ok(())
 	}
@@ -1025,7 +1079,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 			let broadcast = Round1Broadcast {
 				ssid: self.ssid,
-				party_id: config.my_party_id,
+				party_id: config.my_party_id(),
 				commitment: my_commitment,
 			};
 			let msg = DkgMessage::Round1Broadcast(broadcast);
@@ -1045,10 +1099,10 @@ impl<S: TranscriptSigner> Dkg<S> {
 			for (&subset, &secret) in my_shared_secrets {
 				let parties = config.get_parties_in_subset(subset);
 				for &party in &parties {
-					if party != config.my_party_id {
+					if party != config.my_party_id() {
 						let private = Round1Private {
 							ssid: self.ssid,
-							from_party_id: config.my_party_id,
+							from_party_id: config.my_party_id(),
 							subset_mask: subset,
 							shared_secret: secret,
 						};
@@ -1061,10 +1115,8 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 			self.state.privates_sent = true;
 
-			if let Some((to, private)) = self.pending_privates.pop() {
-				let data = borsh::to_vec(&DkgMessage::Round1Private(private))
-					.map_err(|e| DkgError::InternalError(e.to_string()))?;
-				return Ok(DkgAction::SendPrivate(to, data));
+			if let Some((to, private)) = self.pop_pending_private() {
+				return serialize_round1_private(to, private);
 			}
 		}
 
@@ -1087,8 +1139,8 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 		let all_broadcasts = all_broadcasts_received(
 			round1_broadcasts,
-			&config.all_participants,
-			config.my_party_id,
+			config.all_participants(),
+			config.my_party_id(),
 		);
 		let my_subsets = config.my_subsets();
 		let all_privates =
@@ -1111,9 +1163,15 @@ impl<S: TranscriptSigner> Dkg<S> {
 			.my_shared_secrets
 			.take()
 			.ok_or_else(|| DkgError::InvalidState("Round1 but no my_shared_secrets".into()))?;
-		if let Some(received) = self.state.received_shared_secrets.take() {
-			for (subset, secret) in received {
-				combined_secrets.insert(subset, secret);
+		if let Some(mut received) = self.state.received_shared_secrets.take() {
+			// K_S is a Copy `[u8; 32]`: consuming the map would move each
+			// secret out while leaving its bytes intact in the freed map
+			// nodes, beyond the reach of `DkgState::zeroize` (the field is
+			// already None by the time it runs). Copy the secrets out and
+			// wipe each node in place before the map is dropped.
+			for (&subset, secret) in received.iter_mut() {
+				combined_secrets.insert(subset, *secret);
+				secret.zeroize();
 			}
 		}
 
@@ -1148,7 +1206,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 			let broadcast = Round2Broadcast {
 				ssid: self.ssid,
-				party_id: config.my_party_id,
+				party_id: config.my_party_id(),
 				randomness: my_randomness,
 			};
 			let msg = DkgMessage::Round2Broadcast(broadcast);
@@ -1172,8 +1230,8 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 		let all_broadcasts = all_broadcasts_received(
 			round2_broadcasts,
-			&config.all_participants,
-			config.my_party_id,
+			config.all_participants(),
+			config.my_party_id(),
 		);
 
 		if all_broadcasts {
@@ -1197,7 +1255,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 	fn transition_to_round3(&mut self) -> Result<(), DkgError> {
 		let config = self.state.expect_round2()?;
-		let my_party_id = config.my_party_id; // Copy before mutable borrows
+		let my_party_id = config.my_party_id(); // Copy before mutable borrows
 		let my_randomness = self
 			.state
 			.my_randomness
@@ -1279,7 +1337,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 			let broadcast = Round3Broadcast {
 				ssid: self.ssid,
-				party_id: config.my_party_id,
+				party_id: config.my_party_id(),
 				partial_pk_commitments: my_pk_commitments.clone(),
 			};
 			let msg = DkgMessage::Round3Broadcast(broadcast);
@@ -1298,8 +1356,8 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 		let all_broadcasts = all_broadcasts_received(
 			round3_broadcasts,
-			&config.all_participants,
-			config.my_party_id,
+			config.all_participants(),
+			config.my_party_id(),
 		);
 
 		if all_broadcasts {
@@ -1312,7 +1370,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 	fn transition_to_round4(&mut self) -> Result<(), DkgError> {
 		let config = self.state.expect_round3()?;
-		let my_party_id = config.my_party_id; // Copy before mutable borrows
+		let my_party_id = config.my_party_id(); // Copy before mutable borrows
 		let my_pk_commitments = self
 			.state
 			.my_pk_commitments
@@ -1371,8 +1429,8 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 		let all_broadcasts = all_broadcasts_received(
 			round4_broadcasts,
-			&config.all_participants,
-			config.my_party_id,
+			config.all_participants(),
+			config.my_party_id(),
 		);
 
 		if all_broadcasts {
@@ -1522,7 +1580,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 			})?;
 
 			// Skip if we're the leader for this subset
-			if leader_id == config.my_party_id {
+			if leader_id == config.my_party_id() {
 				continue;
 			}
 
@@ -1591,11 +1649,11 @@ impl<S: TranscriptSigner> Dkg<S> {
 		);
 		let partial_output_hash = compute_partial_output_hash(my_partial_pks);
 		let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
-		let signature = config.my_signer.sign(&signing_message);
+		let signature = config.signer().sign(&signing_message);
 
 		Ok(Round4Broadcast {
 			ssid: self.ssid,
-			party_id: config.my_party_id,
+			party_id: config.my_party_id(),
 			partial_public_keys: my_partial_pks.clone(),
 			transcript_signature: signature.as_ref().to_vec(),
 		})
@@ -1614,11 +1672,12 @@ fn compute_global_randomness<S: TranscriptSigner>(
 	received_broadcasts: &BTreeMap<ParticipantId, Round2Broadcast>,
 	my_randomness: [u8; RANDOMNESS_SIZE],
 ) -> (Vec<u8>, Round2Broadcast) {
+	let my_party_id = config.my_party_id();
 	let my_broadcast =
-		Round2Broadcast { ssid: *ssid, party_id: config.my_party_id, randomness: my_randomness };
+		Round2Broadcast { ssid: *ssid, party_id: my_party_id, randomness: my_randomness };
 
 	let mut all_randomness: Vec<_> = received_broadcasts.iter().collect();
-	all_randomness.push((&config.my_party_id, &my_broadcast));
+	all_randomness.push((&my_party_id, &my_broadcast));
 	all_randomness.sort_by_key(|(id, _)| *id);
 
 	let mut global_randomness = Vec::with_capacity(all_randomness.len() * RANDOMNESS_SIZE);
@@ -1655,7 +1714,7 @@ fn compute_my_contributions<S: TranscriptSigner>(
 			let contribution = derive_subset_contribution(&seed);
 			let t = compute_partial_pk_t(rho, &contribution.s1, &contribution.s2);
 			let partial_pk = PartialPublicKey { subset_mask: subset, t };
-			let pk_commitment = h_commit_pk(ssid, config.my_party_id, subset, &partial_pk);
+			let pk_commitment = h_commit_pk(ssid, config.my_party_id(), subset, &partial_pk);
 
 			my_contributions.insert(subset, contribution);
 			my_partial_pks.insert(subset, partial_pk);
@@ -1778,7 +1837,7 @@ fn verify_party_broadcast<S: TranscriptSigner>(
 	let partial_output_hash = compute_partial_output_hash(&broadcast.partial_public_keys);
 	let signing_message = compute_signing_message(transcript_hash, &partial_output_hash);
 
-	let public_key = config.participant_public_keys.get(&party_id).ok_or_else(|| {
+	let public_key = config.participant_public_keys().get(&party_id).ok_or_else(|| {
 		DkgError::MissingData(format!("missing public key for party {}", party_id))
 	})?;
 
@@ -1857,7 +1916,7 @@ fn build_private_share<S: TranscriptSigner>(
 	rho: &[u8; 32],
 	public_key: &PublicKey,
 ) -> Result<PrivateKeyShare, DkgError> {
-	let dkg_participants = ParticipantList::new(&config.all_participants)
+	let dkg_participants = ParticipantList::new(config.all_participants())
 		.ok_or_else(|| DkgError::InternalError("invalid participants".into()))?;
 
 	let mut combined_shares: BTreeMap<SubsetMask, SecretShareData> = BTreeMap::new();
@@ -1883,8 +1942,15 @@ fn build_private_share<S: TranscriptSigner>(
 		let mut h = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut h, b"dkg-party-key-v2");
 		fips202::shake256_absorb(&mut h, rho);
-		fips202::shake256_absorb(&mut h, &config.my_party_id.to_le_bytes());
-		let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+		fips202::shake256_absorb(&mut h, &config.my_party_id().to_le_bytes());
+		// The linearization buffer holds raw secret share coefficients, so it
+		// must be a zeroizing container (a plain Vec freed after `clear()`
+		// leaves the coefficients in allocator memory) and it must be allocated
+		// at full size up front (growing mid-fill would free an unwiped
+		// intermediate block).
+		const SUBSET_BYTES: usize = 2 + (L + K) * 256 * core::mem::size_of::<i32>();
+		let mut buf: Zeroizing<alloc::vec::Vec<u8>> =
+			Zeroizing::new(alloc::vec::Vec::with_capacity(SUBSET_BYTES));
 		for (subset_mask, contribution) in my_contributions {
 			buf.clear();
 			buf.extend_from_slice(&subset_mask.to_le_bytes());
@@ -1908,7 +1974,7 @@ fn build_private_share<S: TranscriptSigner>(
 	let tr = *public_key.tr();
 
 	Ok(PrivateKeyShare::new(
-		config.my_party_id,
+		config.my_party_id(),
 		config.total_parties(),
 		config.threshold(),
 		party_key,
@@ -2024,7 +2090,10 @@ where
 		.collect::<Result<Vec<Dkg<S>>, DkgError>>()?;
 
 	let mut outputs: Vec<Option<DkgOutput>> = vec![None; total_parties as usize];
-	let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> =
+	// Queued frames may be Round 1 privates carrying K_S, so the queue holds
+	// zeroizing buffers: an early error drops the whole queue with the secrets
+	// wiped instead of leaving them in freed memory.
+	let mut pending_messages: Vec<Vec<(ParticipantId, Zeroizing<Vec<u8>>)>> =
 		vec![Vec::new(); total_parties as usize];
 
 	let mut iterations = 0;
@@ -2039,8 +2108,10 @@ where
 		// Deliver pending messages
 		for party_id in 0..total_parties as usize {
 			let messages = mem::take(&mut pending_messages[party_id]);
-			for (from, data) in messages {
-				dkgs[party_id].message(from, data)?;
+			for (from, mut data) in messages {
+				// Hand the inner Vec to `message`, which wipes it internally;
+				// the emptied wrapper drops with nothing left to erase.
+				dkgs[party_id].message(from, mem::take(&mut *data))?;
 			}
 		}
 
@@ -2061,7 +2132,7 @@ where
 						let from = party_id as ParticipantId;
 						for (other, pending) in pending_messages.iter_mut().enumerate() {
 							if other != party_id {
-								pending.push((from, data.clone()));
+								pending.push((from, Zeroizing::new(data.clone())));
 							}
 						}
 					},
@@ -2166,7 +2237,7 @@ mod tests {
 			"test setup: secret not present in serialized payload"
 		);
 
-		let action = DkgAction::SendPrivate(3, data);
+		let action = DkgAction::SendPrivate(3, Zeroizing::new(data));
 		let rendered = format!("{action:?}");
 
 		// A derived `Debug` renders the payload as `[.., 171, 171, ..]`; the
@@ -2582,7 +2653,7 @@ mod tests {
 						Ok(DkgAction::SendPrivate(to, data)) => {
 							made_progress = true;
 							let from = party_id as ParticipantId;
-							pending_messages[to as usize].push((from, data));
+							pending_messages[to as usize].push((from, data.to_vec()));
 						},
 						Ok(DkgAction::Return(output)) => {
 							made_progress = true;
@@ -2697,7 +2768,7 @@ mod tests {
 						Ok(DkgAction::SendPrivate(to, data)) => {
 							made_progress = true;
 							let from = party_id as ParticipantId;
-							pending_messages[to as usize].push((from, data));
+							pending_messages[to as usize].push((from, data.to_vec()));
 						},
 						Ok(DkgAction::Return(output)) => {
 							made_progress = true;
@@ -2824,7 +2895,7 @@ mod tests {
 						Ok(DkgAction::SendPrivate(to, data)) => {
 							made_progress = true;
 							let from = party_id as ParticipantId;
-							pending_messages[to as usize].push((from, data));
+							pending_messages[to as usize].push((from, data.to_vec()));
 						},
 						Ok(DkgAction::Return(output)) => {
 							made_progress = true;
@@ -3400,7 +3471,7 @@ mod tests {
 							}
 						},
 					DkgAction::SendPrivate(to, data) => {
-						pending[to as usize].push((from as ParticipantId, data));
+						pending[to as usize].push((from as ParticipantId, data.to_vec()));
 					},
 					DkgAction::Wait => break,
 					DkgAction::Return(_) => break,
@@ -3438,9 +3509,9 @@ mod tests {
 					DkgAction::SendPrivate(to, data) => {
 						if to == 0 {
 							// Send to party 0 - should be buffered if it's a future round message
-							dkgs[0].message(dkg_idx as ParticipantId, data).unwrap();
+							dkgs[0].message(dkg_idx as ParticipantId, data.to_vec()).unwrap();
 						} else {
-							pending[to as usize].push((dkg_idx as ParticipantId, data));
+							pending[to as usize].push((dkg_idx as ParticipantId, data.to_vec()));
 						}
 					},
 					DkgAction::Wait => break,
@@ -3942,7 +4013,8 @@ mod tests {
 						}
 					},
 					DkgAction::SendPrivate(to, data) => {
-						pending_messages[to as usize].push((party_id as ParticipantId, data));
+						pending_messages[to as usize]
+							.push((party_id as ParticipantId, data.to_vec()));
 					},
 					DkgAction::Wait => {},
 					DkgAction::Return(_) => {},
@@ -4104,7 +4176,8 @@ mod tests {
 						}
 					},
 					DkgAction::SendPrivate(to, data) => {
-						pending_messages[to as usize].push((party_id as ParticipantId, data));
+						pending_messages[to as usize]
+							.push((party_id as ParticipantId, data.to_vec()));
 					},
 					DkgAction::Wait => {},
 					DkgAction::Return(output) => {
@@ -4211,7 +4284,8 @@ mod tests {
 						}
 					},
 					DkgAction::SendPrivate(to, data) => {
-						pending_messages[to as usize].push((party_id as ParticipantId, data));
+						pending_messages[to as usize]
+							.push((party_id as ParticipantId, data.to_vec()));
 					},
 					DkgAction::Wait => {},
 					DkgAction::Return(_) => {},
@@ -4281,7 +4355,8 @@ mod tests {
 						}
 					},
 					DkgAction::SendPrivate(to, data) => {
-						pending_messages[to as usize].push((party_id as ParticipantId, data));
+						pending_messages[to as usize]
+							.push((party_id as ParticipantId, data.to_vec()));
 					},
 					_ => {},
 				}

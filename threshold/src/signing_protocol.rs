@@ -146,7 +146,7 @@ use crate::{
 	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature, SSID_SIZE},
 	participants::{ParticipantId, ParticipantList},
 	protocol::signing::compute_ssid,
-	signer::ThresholdSigner,
+	signer::{ThresholdSigner, SINGLE_COMMITMENT_SIZE},
 };
 
 // ============================================================================
@@ -175,6 +175,14 @@ pub enum Action<T> {
 /// near-mpc's transport frames up to 100 MiB (`MAX_MESSAGE_SIZE_BYTES`), so this is well within the
 /// network layer's budget.
 pub const MAX_SIGNING_MESSAGE_SIZE: usize = 12 * 1024 * 1024;
+
+/// Fixed header of every serialized [`SigningMessage`]: the 1-byte Borsh enum
+/// variant tag followed by the [`SSID_SIZE`]-byte session identifier (every
+/// variant's first field is `ssid`; pinned by the
+/// `signing_frame_header_layout_pins_ssid` test). This lets wrong-session
+/// frames be discarded from the header alone, before deserializing their
+/// (attacker-controlled) variable-length payloads.
+const FRAME_HEADER_LEN: usize = 1 + SSID_SIZE;
 
 // ============================================================================
 // Error Types
@@ -801,6 +809,21 @@ impl DilithiumSignProtocol {
 		borsh::to_vec(msg).map_err(|e| SignProtocolError::SerializationError(e.to_string()))
 	}
 
+	/// Largest legitimate serialized frame for *this session's* configuration.
+	///
+	/// The dominant frame is the Round 2 commitment broadcast: a variant tag
+	/// (1 byte), the SSID (32), party_id (4), a length prefix (4), and
+	/// `k_iterations` commitments of [`SINGLE_COMMITMENT_SIZE`] bytes each.
+	/// Every other round is smaller (Round 3 responses are 4480 bytes per
+	/// iteration; Round 1 and Round 4 are fixed-size). Using the per-config
+	/// `k` instead of the global [`MAX_SIGNING_MESSAGE_SIZE`] keeps small
+	/// sessions from inheriting the (4,6) worst-case (k=1600, ~9.4 MB)
+	/// allocation budget.
+	fn max_frame_size(&self) -> usize {
+		let k = self.signer.config().k_iterations() as usize;
+		FRAME_HEADER_LEN + 4 + 4 + k * SINGLE_COMMITMENT_SIZE
+	}
+
 	/// Deserialize a message from network bytes.
 	fn deserialize_message(&self, data: &[u8]) -> Result<SigningMessage, SignProtocolError> {
 		if data.is_empty() {
@@ -813,6 +836,18 @@ impl DilithiumSignProtocol {
 				"Message size {} exceeds maximum {}",
 				data.len(),
 				MAX_SIGNING_MESSAGE_SIZE
+			)));
+		}
+
+		// Reject frames larger than anything this session's configuration can
+		// legitimately produce, still before any parsing or allocation.
+		let max_frame = self.max_frame_size();
+		if data.len() > max_frame {
+			return Err(SignProtocolError::SerializationError(format!(
+				"Message size {} exceeds maximum {} for this configuration (k={})",
+				data.len(),
+				max_frame,
+				self.signer.config().k_iterations()
 			)));
 		}
 
@@ -1078,6 +1113,24 @@ impl DilithiumSignProtocol {
 			return Ok(());
 		}
 
+		// Cheap fixed-header SSID check *before* deserialization. Round 2/3
+		// payloads can be multi-megabyte, so parsing before this check would
+		// let wrong-session frames (guaranteed to be dropped) drive avoidable
+		// allocation and CPU work on every receiver. Frames outside the size
+		// budget or too short to carry a header fall through to the
+		// deserializer, whose O(1) length checks reject them as malformed
+		// before parsing.
+		if data.len() >= FRAME_HEADER_LEN &&
+			data.len() <= self.max_frame_size() &&
+			data[1..FRAME_HEADER_LEN] != self.ssid
+		{
+			warn!(
+				"Signing: Rejecting message from {} - SSID mismatch (cross-session replay attempt?)",
+				from
+			);
+			return Ok(()); // SSID mismatch, ignore (not an error, likely cross-session replay)
+		}
+
 		// Deserialize and route the message
 		let msg = match self.deserialize_message(&data) {
 			Ok(m) => m,
@@ -1086,7 +1139,9 @@ impl DilithiumSignProtocol {
 			},
 		};
 
-		// Verify SSID matches for all message types
+		// Verify SSID matches for all message types (defense in depth behind
+		// the header check above; also covers any future variant whose layout
+		// diverges from the pinned header).
 		let msg_ssid = msg.ssid();
 		if *msg_ssid != self.ssid {
 			warn!(
@@ -1233,8 +1288,14 @@ impl DilithiumSignProtocol {
 	/// - We have no Round 1 from the claimed party (replay before any Round 1, or Round 2 from a
 	///   non-participant — already filtered earlier, but cheap to re-verify), or
 	/// - The commitment_data is empty (every participant must contribute), or
+	/// - The commitment_data is not exactly the size this session's configuration produces (a
+	///   wrong-length reveal can never pass Round 3's exact-length check, so buffering it would
+	///   only let a peer occupy the party's r2 slot with data guaranteed to fail later), or
 	/// - The hash does not match (the reveal does not correspond to that commitment, most likely a
 	///   replay from an earlier protocol instance).
+	///
+	/// The length checks run before the hash check so a hash-bound but mis-sized
+	/// reveal is dropped in O(1) instead of after SHAKE256 over the payload.
 	fn round2_matches_stored_round1(&self, r2: &Round2Broadcast) -> bool {
 		let Some(r1) = self.r1_broadcasts.get(&r2.party_id) else {
 			return false;
@@ -1245,6 +1306,10 @@ impl DilithiumSignProtocol {
 		// 2. Observing other parties' Round 2 reveals
 		// 3. Sending empty Round 2 to bypass hash verification while still counting as participant
 		if r2.commitment_data.is_empty() {
+			return false;
+		}
+		let expected_len = self.signer.config().k_iterations() as usize * SINGLE_COMMITMENT_SIZE;
+		if r2.commitment_data.len() != expected_len {
 			return false;
 		}
 		crate::protocol::signing::verify_commitment_hash(
@@ -2270,6 +2335,51 @@ mod tests {
 		assert!(protocol.message_buffer.round2.is_empty());
 	}
 
+	/// A Round 2 reveal whose commitment_data is not exactly the size this
+	/// session's configuration produces must be dropped at intake, even when
+	/// it is hash-bound to the stored Round 1 commitment (a peer can always
+	/// pre-commit to garbage). A wrong-length reveal can never pass Round 3's
+	/// exact-length check, so buffering it only lets a malicious peer occupy
+	/// the party's r2 slot with data that is guaranteed to fail later.
+	#[test]
+	fn test_round2_with_wrong_length_but_matching_hash_is_dropped() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
+		)
+		.unwrap();
+
+		let _ = protocol.poke().unwrap();
+		let ssid = *protocol.ssid();
+
+		// The peer pre-committed (Round 1) to a wrong-length blob, so the
+		// Round 2 reveal is genuinely hash-bound — only the length is off.
+		let wrong_len_data = vec![0xA5u8; 64];
+		let bound_hash =
+			crate::protocol::signing::compute_commitment_hash(&ssid, 1, &wrong_len_data);
+		protocol.r1_broadcasts.insert(1, Round1Broadcast::new(ssid, 1, bound_hash));
+		protocol.state = SignProtocolState::Round2Waiting;
+
+		let r2 = Round2Broadcast::new(ssid, 1, wrong_len_data);
+		let msg = SigningMessage::Round2(r2);
+		let data = protocol.serialize_message(&msg).unwrap();
+		protocol.message(1, data).unwrap();
+
+		assert!(
+			!protocol.r2_broadcasts.contains_key(&1),
+			"hash-bound but wrong-length Round 2 reveal must be dropped at intake"
+		);
+	}
+
 	/// Empty commitment_data in Round 2 must be rejected.
 	/// This prevents an attacker from bypassing commitment binding by:
 	/// 1. Sending a legitimate Round 1 commitment hash
@@ -2461,6 +2571,110 @@ mod tests {
 		);
 
 		assert!(result.is_ok(), "Should accept 255-byte context");
+	}
+
+	/// Build a fresh 2-of-3 protocol for party 0 with participants {0, 1}.
+	fn frame_test_protocol() -> DilithiumSignProtocol {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		DilithiumSignProtocol::new(
+			signer,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xBB; 32],
+		)
+		.unwrap()
+	}
+
+	/// Wrong-session traffic must be discarded from the fixed frame header
+	/// (tag byte + SSID) alone, before any deserialization: Round 2/3 payloads
+	/// are multi-megabyte, so parsing before the SSID check lets guaranteed-to-
+	/// be-dropped frames drive avoidable allocation and CPU work on every
+	/// receiver. Observable contract: a wrong-SSID frame is ignored (`Ok`)
+	/// regardless of how malformed its body is — it must never reach the
+	/// deserializer, whose truncated-payload error would surface as
+	/// `MalformedMessage`.
+	#[test]
+	fn wrong_ssid_frame_ignored_without_deserialization() {
+		let mut protocol = frame_test_protocol();
+
+		// Round 2 frame for a *different* session, claiming a ~9 MB payload
+		// but delivering a few bytes. If this reaches borsh, deserialization
+		// does chunked-allocation work and then fails with an error.
+		let mut frame = Vec::new();
+		frame.push(1u8); // SigningMessage::Round2 tag
+		frame.extend_from_slice(&[0xEEu8; SSID_SIZE]); // wrong ssid
+		frame.extend_from_slice(&1u32.to_le_bytes()); // party_id
+		frame.extend_from_slice(&9_000_000u32.to_le_bytes()); // claimed payload len
+		frame.extend_from_slice(&[0u8; 16]); // truncated body
+
+		let result = protocol.message(1, frame);
+		assert!(
+			result.is_ok(),
+			"wrong-SSID frame must be ignored from the header, not parsed: {result:?}"
+		);
+		assert!(protocol.r2_broadcasts.is_empty(), "nothing may be stored");
+		assert!(protocol.message_buffer.is_empty(), "nothing may be buffered");
+	}
+
+	/// A frame larger than any legitimate message for *this session's*
+	/// configuration must be rejected before parsing. The global cap is sized
+	/// for the (4,6) worst case (k=1600, ~12 MiB); a 2-of-3 session (k=5,
+	/// largest honest frame ~29 KB) must not accept and buffer megabytes of
+	/// junk that only fails at combine-time length validation.
+	#[test]
+	fn oversized_frame_for_config_rejected_before_parse() {
+		let mut protocol = frame_test_protocol();
+		let ssid = *protocol.ssid();
+
+		// Correct SSID, valid Round 2 shape, fully-delivered 1 MB payload:
+		// within the global caps, far beyond anything a k=5 session can emit.
+		let payload_len = 1_000_000usize;
+		let mut frame = Vec::new();
+		frame.push(1u8); // SigningMessage::Round2 tag
+		frame.extend_from_slice(&ssid);
+		frame.extend_from_slice(&1u32.to_le_bytes()); // party_id
+		frame.extend_from_slice(&(payload_len as u32).to_le_bytes());
+		frame.resize(frame.len() + payload_len, 0);
+
+		let result = protocol.message(1, frame);
+		assert!(
+			result.is_err(),
+			"frame exceeding this configuration's budget must be rejected before parse"
+		);
+		assert!(protocol.message_buffer.is_empty(), "oversized junk must not be buffered");
+	}
+
+	/// The cheap header check relies on every `SigningMessage` variant
+	/// serializing as `[tag u8][ssid; 32]...`. Pin that layout so a field
+	/// reorder cannot silently make the header check drop valid messages.
+	#[test]
+	fn signing_frame_header_layout_pins_ssid() {
+		use crate::broadcast::SIGNATURE_SIZE;
+
+		let ssid = [0xC7u8; SSID_SIZE];
+		let variants = vec![
+			SigningMessage::Round1(Round1Broadcast::new(ssid, 3, [9u8; 32])),
+			SigningMessage::Round2(Round2Broadcast { ssid, party_id: 3, commitment_data: vec![1] }),
+			SigningMessage::Round3(Round3Broadcast { ssid, party_id: 3, response: vec![2] }),
+			SigningMessage::Round4Complete(Round4Broadcast::new(
+				ssid,
+				Signature::from_bytes(&[7u8; SIGNATURE_SIZE]).unwrap(),
+			)),
+		];
+		for msg in variants {
+			let bytes = borsh::to_vec(&msg).unwrap();
+			assert_eq!(
+				&bytes[1..1 + SSID_SIZE],
+				&ssid[..],
+				"SSID must sit immediately after the variant tag (round {})",
+				msg.round()
+			);
+		}
 	}
 
 	/// A Round 4 message whose signature field is not exactly `SIGNATURE_SIZE`

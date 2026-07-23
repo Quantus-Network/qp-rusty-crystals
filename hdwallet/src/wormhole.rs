@@ -29,6 +29,7 @@
 use qp_poseidon_core::{
 	hash_bytes, hash_to_bytes, hash_twice,
 	serialization::{bytes_to_digest_lossy, string_to_felts},
+	Goldilocks,
 };
 extern crate alloc;
 use alloc::vec::Vec;
@@ -36,6 +37,23 @@ use qp_rusty_crystals_dilithium::SensitiveBytes32;
 
 /// Salt used when deriving wormhole addresses.
 pub const ADDRESS_SALT: &str = "wormhole";
+
+/// Overwrite field elements holding secret material with zeros.
+///
+/// `Goldilocks` is a foreign type without a `Zeroize` impl, so the `zeroize`
+/// crate cannot wipe it directly. A plain `*felt = Default::default()` loop is
+/// a dead store the optimizer may elide (the buffer is freed right after), so
+/// the writes go through `write_volatile`, followed by a compiler fence —
+/// the same construction `zeroize` itself uses.
+fn zeroize_felts(felts: &mut [Goldilocks]) {
+	for felt in felts.iter_mut() {
+		// SAFETY: `felt` is a valid, aligned, exclusive reference; writing a
+		// plain `Copy` value through it is always sound. Volatile only opts
+		// the store out of dead-store elimination.
+		unsafe { core::ptr::write_volatile(felt, Goldilocks::default()) };
+	}
+	core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
 
 /// A struct representing a wormhole identity pair: address + secret.
 ///
@@ -106,7 +124,6 @@ impl WormholePair {
 	/// The secret parameter is zeroized before returning.
 	fn generate_pair_from_secret(secret: SensitiveBytes32) -> WormholePair {
 		let mut secret_bytes = secret.into_bytes();
-		let mut preimage_felts = Vec::new();
 		let salt_felt = string_to_felts(ADDRESS_SALT);
 		// Encode the 32-byte secret as 4 felts via the 8-bytes/felt `bytes_to_digest_lossy`.
 		// This encoding is non-injective (limbs ≥ the Goldilocks prime are reduced),
@@ -115,6 +132,9 @@ impl WormholePair {
 		// it cannot forge another user's address without their secret. The same
 		// encoding is used when proving, so derivation stays consistent.
 		let mut secret_felt = bytes_to_digest_lossy(&secret_bytes);
+		// Exact capacity: growing the vector after the secret felts are in it
+		// would reallocate and free a block still holding the secret.
+		let mut preimage_felts = Vec::with_capacity(salt_felt.len() + secret_felt.len());
 		preimage_felts.extend_from_slice(&salt_felt);
 		preimage_felts.extend_from_slice(&secret_felt);
 		let inner_hash = hash_to_bytes(&preimage_felts);
@@ -129,11 +149,11 @@ impl WormholePair {
 			secret: SensitiveBytes32::new(&mut secret_bytes),
 		};
 
-		// Manually clear intermediate sensitive data
-		for elem in secret_felt.iter_mut() {
-			*elem = Default::default();
-		}
-		preimage_felts.clear();
+		// Wipe the felt-encoded copies of the secret before their backing
+		// memory is released: `clear()`/drop alone would hand the allocator a
+		// block that still contains the secret limbs.
+		zeroize_felts(&mut secret_felt);
+		zeroize_felts(&mut preimage_felts);
 
 		result
 	}

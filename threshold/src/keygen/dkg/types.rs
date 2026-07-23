@@ -153,18 +153,36 @@ use qp_rusty_crystals_dilithium::{
 // ============================================================================
 
 /// Configuration for the DKG protocol.
+///
+/// # Invariants
+///
+/// The fields are private so that [`DkgConfig::new`] is the only way to build
+/// a config: the state machine (including quorum arithmetic such as
+/// [`all_broadcasts_received`](super::all_broadcasts_received)) trusts that
+/// `all_participants` is non-empty, sorted, duplicate-free, matches the
+/// threshold configuration's party count, contains `my_party_id`, and has a
+/// verifying key for every participant. A struct literal bypassing those
+/// checks does not compile:
+///
+/// ```compile_fail
+/// use qp_rusty_crystals_threshold::keygen::dkg::{DkgConfig, TranscriptSigner};
+///
+/// fn corrupt<S: TranscriptSigner>(config: &mut DkgConfig<S>) {
+///     config.all_participants.clear(); // ERROR: field is private
+/// }
+/// ```
 #[derive(Clone)]
 pub struct DkgConfig<S: TranscriptSigner> {
 	/// The threshold configuration (t, n).
-	pub threshold_config: ThresholdConfig,
+	threshold_config: ThresholdConfig,
 	/// This party's identifier.
-	pub my_party_id: ParticipantId,
+	my_party_id: ParticipantId,
 	/// All participants in the DKG (sorted).
-	pub all_participants: Vec<ParticipantId>,
+	all_participants: Vec<ParticipantId>,
 	/// This party's signing key for transcript authentication.
-	pub my_signer: S,
+	my_signer: S,
 	/// Public keys of all participants for signature verification.
-	pub participant_public_keys: BTreeMap<ParticipantId, S::PublicKey>,
+	participant_public_keys: BTreeMap<ParticipantId, S::PublicKey>,
 }
 
 impl<S: TranscriptSigner> DkgConfig<S> {
@@ -208,6 +226,39 @@ impl<S: TranscriptSigner> DkgConfig<S> {
 			my_signer,
 			participant_public_keys,
 		})
+	}
+
+	/// Get the threshold configuration (t, n).
+	pub fn threshold_config(&self) -> ThresholdConfig {
+		self.threshold_config
+	}
+
+	/// Get this party's identifier.
+	pub fn my_party_id(&self) -> ParticipantId {
+		self.my_party_id
+	}
+
+	/// Get all participants in the DKG (sorted, duplicate-free).
+	pub fn all_participants(&self) -> &[ParticipantId] {
+		&self.all_participants
+	}
+
+	/// Get this party's transcript signer.
+	pub fn signer(&self) -> &S {
+		&self.my_signer
+	}
+
+	/// Get the verifying keys of all participants.
+	pub fn participant_public_keys(&self) -> &BTreeMap<ParticipantId, S::PublicKey> {
+		&self.participant_public_keys
+	}
+
+	/// Zeroize the transcript signer's key material in place.
+	///
+	/// Called at the state machine's zeroization boundary so key erasure does
+	/// not depend on the signer's `Drop` behavior.
+	pub(crate) fn zeroize_signer(&mut self) {
+		self.my_signer.zeroize();
 	}
 
 	/// Get the threshold value.
@@ -331,12 +382,60 @@ where
 // ============================================================================
 
 /// Contribution for a single subset (η-bounded secret polynomials).
-#[derive(Clone, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
+///
+/// # Deserialization Limits
+///
+/// This type is exported and may be deserialized from untrusted bytes, so
+/// [`BorshDeserialize`] is implemented manually (mirroring `SecretShareData`
+/// in keys.rs): `s1`/`s2` must hold exactly `L`/`K` polynomials and every
+/// coefficient must lie in `[-ETA, ETA]`. Every legitimate producer satisfies
+/// both (contributions are sampled via `uniform_eta`), and consumers feed the
+/// coefficients into NTT arithmetic whose bounds are a caller-enforced
+/// contract — so malformed blobs are rejected at import rather than
+/// discovered as an overflow panic or silent wraparound mid-protocol.
+#[derive(Clone, BorshSerialize, Zeroize, ZeroizeOnDrop)]
 pub struct SubsetContribution {
 	/// Share of s1 polynomial vector.
 	pub s1: Vec<[i32; N as usize]>,
 	/// Share of s2 polynomial vector.
 	pub s2: Vec<[i32; N as usize]>,
+}
+
+/// Read one length-prefixed polynomial vector for [`SubsetContribution`],
+/// enforcing the exact expected length (checked before any allocation
+/// proportional to the attacker-chosen prefix) and the η coefficient bound.
+fn read_eta_bounded_polys<R: borsh::io::Read>(
+	reader: &mut R,
+	expected: usize,
+) -> borsh::io::Result<Vec<[i32; N as usize]>> {
+	let eta = qp_rusty_crystals_dilithium::params::ETA as i32;
+	let len = u32::deserialize_reader(reader)? as usize;
+	if len != expected {
+		return Err(borsh::io::Error::new(
+			borsh::io::ErrorKind::InvalidData,
+			"SubsetContribution polynomial vector has wrong length",
+		));
+	}
+	let mut polys = Vec::with_capacity(expected);
+	for _ in 0..expected {
+		let poly = <[i32; N as usize]>::deserialize_reader(reader)?;
+		if poly.iter().any(|&c| c < -eta || c > eta) {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"SubsetContribution coefficient outside [-eta, eta]",
+			));
+		}
+		polys.push(poly);
+	}
+	Ok(polys)
+}
+
+impl BorshDeserialize for SubsetContribution {
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let s1 = read_eta_bounded_polys(reader, L)?;
+		let s2 = read_eta_bounded_polys(reader, K)?;
+		Ok(Self { s1, s2 })
+	}
 }
 
 impl SubsetContribution {
@@ -953,6 +1052,80 @@ mod tests {
 		let seed = [42u8; SUBSET_SEED_SIZE];
 		let contribution = derive_subset_contribution(&seed);
 		assert!(contribution.verify_bounds(2));
+	}
+
+	/// A well-formed contribution must round-trip through Borsh.
+	#[test]
+	fn test_subset_contribution_roundtrip() {
+		let contribution = derive_subset_contribution(&[7u8; SUBSET_SEED_SIZE]);
+		let bytes = borsh::to_vec(&contribution).unwrap();
+		let recovered: SubsetContribution = borsh::from_slice(&bytes).unwrap();
+		assert_eq!(recovered.s1, contribution.s1);
+		assert_eq!(recovered.s2, contribution.s2);
+	}
+
+	/// `SubsetContribution` is exported and may be deserialized from untrusted
+	/// bytes downstream. Its invariants — exactly L s1 / K s2 polynomials —
+	/// must be enforced at deserialize, mirroring `SecretShareData` in
+	/// keys.rs, rather than left to every caller.
+	#[test]
+	fn test_subset_contribution_deserialize_rejects_wrong_shape() {
+		// Too many s1 polynomials.
+		let mut fat = derive_subset_contribution(&[7u8; SUBSET_SEED_SIZE]);
+		fat.s1.push([0i32; N as usize]);
+		let bytes = borsh::to_vec(&fat).unwrap();
+		assert!(
+			borsh::from_slice::<SubsetContribution>(&bytes).is_err(),
+			"s1 with {} polynomials (expected {}) must be rejected",
+			L + 1,
+			L
+		);
+
+		// Too few s2 polynomials.
+		let mut thin = derive_subset_contribution(&[7u8; SUBSET_SEED_SIZE]);
+		thin.s2.pop();
+		let bytes = borsh::to_vec(&thin).unwrap();
+		assert!(
+			borsh::from_slice::<SubsetContribution>(&bytes).is_err(),
+			"s2 with {} polynomials (expected {}) must be rejected",
+			K - 1,
+			K
+		);
+
+		// A raw blob advertising an enormous s1 length must be rejected on
+		// the length prefix, before any allocation proportional to it.
+		let huge = u32::MAX.to_le_bytes().to_vec();
+		assert!(
+			borsh::from_slice::<SubsetContribution>(&huge).is_err(),
+			"an attacker-chosen length prefix must be rejected up front"
+		);
+	}
+
+	/// Coefficients outside [-ETA, ETA] must be rejected at deserialize:
+	/// every legitimate producer is η-bounded (`derive_subset_contribution`
+	/// samples via `uniform_eta`), and consumers feed these coefficients into
+	/// NTT arithmetic whose bounds are a caller-enforced contract.
+	#[test]
+	fn test_subset_contribution_deserialize_rejects_out_of_range_coefficients() {
+		use qp_rusty_crystals_dilithium::params::ETA;
+
+		let mut contribution = derive_subset_contribution(&[7u8; SUBSET_SEED_SIZE]);
+		contribution.s1[0][0] = ETA as i32 + 1;
+		let bytes = borsh::to_vec(&contribution).unwrap();
+		assert!(
+			borsh::from_slice::<SubsetContribution>(&bytes).is_err(),
+			"s1 coefficient {} outside [-{ETA}, {ETA}] must be rejected",
+			ETA + 1
+		);
+
+		let mut contribution = derive_subset_contribution(&[7u8; SUBSET_SEED_SIZE]);
+		contribution.s2[K - 1][N as usize - 1] = -(ETA as i32) - 1;
+		let bytes = borsh::to_vec(&contribution).unwrap();
+		assert!(
+			borsh::from_slice::<SubsetContribution>(&bytes).is_err(),
+			"s2 coefficient -{} outside [-{ETA}, {ETA}] must be rejected",
+			ETA + 1
+		);
 	}
 
 	#[test]
