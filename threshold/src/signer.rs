@@ -647,6 +647,26 @@ impl ThresholdSigner {
 				});
 			}
 
+			// Enforce the exact per-config length BEFORE the hash check. The
+			// bounded deserializer admits payloads up to the global maximum
+			// (~10.5 MB, sized for the largest supported config), and
+			// `verify_commitment_hash` runs SHAKE256 over the whole payload —
+			// so hashing first would let a peer who pre-committed to an
+			// oversized blob force that hashing work in a session whose
+			// legitimate reveal is orders of magnitude smaller. The length is
+			// public, so rejecting on it first leaks nothing.
+			if r2.commitment_data.len() != expected_len {
+				return Err(ThresholdError::InvalidCommitmentData {
+					party_id: r2.party_id,
+					reason: format!(
+						"Commitment data length {} does not match expected {} for k={}",
+						r2.commitment_data.len(),
+						expected_len,
+						k
+					),
+				});
+			}
+
 			// The Round 1 hash frozen during round2_reveal is authoritative.
 			// A reveal from a party we recorded no Round 1 commitment for
 			// cannot be bound and is rejected.
@@ -676,19 +696,6 @@ impl ThresholdSigner {
 					party_id: r2.party_id,
 					message: "Round 2 commitment data does not match Round 1 commitment hash"
 						.to_string(),
-				});
-			}
-
-			// Validate data length
-			if r2.commitment_data.len() != expected_len {
-				return Err(ThresholdError::InvalidCommitmentData {
-					party_id: r2.party_id,
-					reason: format!(
-						"Commitment data length {} does not match expected {} for k={}",
-						r2.commitment_data.len(),
-						expected_len,
-						k
-					),
 				});
 			}
 		}
@@ -1200,6 +1207,51 @@ mod tests {
 		assert!(
 			matches!(err_again, ThresholdError::InvalidCommitmentData { party_id: 1, .. }),
 			"expected InvalidCommitmentData for party 1 on retry, got {err_again:?}"
+		);
+	}
+
+	/// A mis-sized reveal must be rejected on its length *before* the
+	/// commitment hash is verified, so a peer cannot force SHAKE256 work over
+	/// a payload far larger than the session's configuration can legitimately
+	/// produce (the bounded deserializer admits up to the global
+	/// `MAX_COMMITMENT_DATA_SIZE`, ~10.5 MB, sized for the largest config).
+	///
+	/// The ordering is pinned through the error variant: an oversized reveal
+	/// whose hash does NOT match the frozen commitment must fail as
+	/// `InvalidCommitmentData` (the O(1) length check), not as
+	/// `CommitmentMismatch` (which would prove the hash ran first).
+	#[test]
+	fn test_oversized_reveal_rejected_on_length_before_hashing() {
+		use crate::{
+			broadcast::{Round1Broadcast, Round2Broadcast, MAX_COMMITMENT_DATA_SIZE},
+			generate_with_dealer,
+			protocol::signing::compute_commitment_hash,
+		};
+
+		let config = ThresholdConfig::new(2, 2).unwrap();
+		let (pk, shares) = generate_with_dealer(&[11u8; 32], config).unwrap();
+		let mut s0 = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+
+		let ssid = [0x77u8; 32];
+		let _r1_0 = s0.round1_commit_with_seed(&ssid, &[1u8; 32]).unwrap();
+
+		// Peer 1's frozen Round 1 commitment is over placeholder data; the
+		// Round 3 reveal is the largest blob the bounded deserializer would
+		// admit for *any* config — vastly oversized for this (2,2) session.
+		let placeholder_hash = compute_commitment_hash(&ssid, 1, b"placeholder");
+		let r1_1 = Round1Broadcast::new(ssid, 1, placeholder_hash);
+		let oversized = alloc::vec![0xA5u8; MAX_COMMITMENT_DATA_SIZE];
+		let r2_1 = Round2Broadcast::new(ssid, 1, oversized);
+
+		s0.round2_reveal(&ssid, b"dos", b"", core::slice::from_ref(&r1_1)).unwrap();
+
+		let err = s0
+			.round3_respond(&ssid, core::slice::from_ref(&r1_1), core::slice::from_ref(&r2_1))
+			.expect_err("oversized reveal must be rejected");
+		assert!(
+			matches!(err, ThresholdError::InvalidCommitmentData { party_id: 1, .. }),
+			"oversized reveal must fail the O(1) length check before any hashing; \
+			 got {err:?} (CommitmentMismatch would mean the payload was hashed first)"
 		);
 	}
 }

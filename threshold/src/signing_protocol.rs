@@ -1288,8 +1288,14 @@ impl DilithiumSignProtocol {
 	/// - We have no Round 1 from the claimed party (replay before any Round 1, or Round 2 from a
 	///   non-participant — already filtered earlier, but cheap to re-verify), or
 	/// - The commitment_data is empty (every participant must contribute), or
+	/// - The commitment_data is not exactly the size this session's configuration produces (a
+	///   wrong-length reveal can never pass Round 3's exact-length check, so buffering it would
+	///   only let a peer occupy the party's r2 slot with data guaranteed to fail later), or
 	/// - The hash does not match (the reveal does not correspond to that commitment, most likely a
 	///   replay from an earlier protocol instance).
+	///
+	/// The length checks run before the hash check so a hash-bound but mis-sized
+	/// reveal is dropped in O(1) instead of after SHAKE256 over the payload.
 	fn round2_matches_stored_round1(&self, r2: &Round2Broadcast) -> bool {
 		let Some(r1) = self.r1_broadcasts.get(&r2.party_id) else {
 			return false;
@@ -1300,6 +1306,10 @@ impl DilithiumSignProtocol {
 		// 2. Observing other parties' Round 2 reveals
 		// 3. Sending empty Round 2 to bypass hash verification while still counting as participant
 		if r2.commitment_data.is_empty() {
+			return false;
+		}
+		let expected_len = self.signer.config().k_iterations() as usize * SINGLE_COMMITMENT_SIZE;
+		if r2.commitment_data.len() != expected_len {
 			return false;
 		}
 		crate::protocol::signing::verify_commitment_hash(
@@ -2323,6 +2333,51 @@ mod tests {
 			"Buffered Round 2 with mismatched commitment hash must be dropped, not promoted"
 		);
 		assert!(protocol.message_buffer.round2.is_empty());
+	}
+
+	/// A Round 2 reveal whose commitment_data is not exactly the size this
+	/// session's configuration produces must be dropped at intake, even when
+	/// it is hash-bound to the stored Round 1 commitment (a peer can always
+	/// pre-commit to garbage). A wrong-length reveal can never pass Round 3's
+	/// exact-length check, so buffering it only lets a malicious peer occupy
+	/// the party's r2 slot with data that is guaranteed to fail later.
+	#[test]
+	fn test_round2_with_wrong_length_but_matching_hash_is_dropped() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
+		)
+		.unwrap();
+
+		let _ = protocol.poke().unwrap();
+		let ssid = *protocol.ssid();
+
+		// The peer pre-committed (Round 1) to a wrong-length blob, so the
+		// Round 2 reveal is genuinely hash-bound — only the length is off.
+		let wrong_len_data = vec![0xA5u8; 64];
+		let bound_hash =
+			crate::protocol::signing::compute_commitment_hash(&ssid, 1, &wrong_len_data);
+		protocol.r1_broadcasts.insert(1, Round1Broadcast::new(ssid, 1, bound_hash));
+		protocol.state = SignProtocolState::Round2Waiting;
+
+		let r2 = Round2Broadcast::new(ssid, 1, wrong_len_data);
+		let msg = SigningMessage::Round2(r2);
+		let data = protocol.serialize_message(&msg).unwrap();
+		protocol.message(1, data).unwrap();
+
+		assert!(
+			!protocol.r2_broadcasts.contains_key(&1),
+			"hash-bound but wrong-length Round 2 reveal must be dropped at intake"
+		);
 	}
 
 	/// Empty commitment_data in Round 2 must be rejected.
