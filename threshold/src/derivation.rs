@@ -14,8 +14,8 @@
 //! 4. There is one canonical derived key per `(master_key, tweak)`: the key produced by the single
 //!    DKG run performed for that tweak, then stored and looked up by [`DerivedKeyId`], which binds
 //!    the domain and tweak **plus the TR hash of that run's public key** — because a different DKG
-//!    attempt for the same tweak produces a different key (see below), the identifier must pin
-//!    down *which* attempt's output it refers to
+//!    attempt for the same tweak produces a different key (see below), the identifier must pin down
+//!    *which* attempt's output it refers to
 //!
 //! # The derived key is NOT recomputable
 //!
@@ -200,11 +200,7 @@ impl DerivedKeyId {
 	///
 	/// For lookups where the full public key is not at hand but its TR hash
 	/// was recorded (e.g. alongside the contract-registered derived key).
-	pub fn from_key_hash(
-		domain_id: u64,
-		tweak: [u8; 32],
-		public_key_hash: [u8; TR_SIZE],
-	) -> Self {
+	pub fn from_key_hash(domain_id: u64, tweak: [u8; 32], public_key_hash: [u8; TR_SIZE]) -> Self {
 		Self { domain_id, tweak, public_key_hash }
 	}
 }

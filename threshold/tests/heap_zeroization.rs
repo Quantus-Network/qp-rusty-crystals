@@ -3,14 +3,14 @@
 //!
 //! Several code paths copy secrets into ordinary heap-backed buffers:
 //!
-//! - `hash_secret_shares` (via `derive_dkg_contribution`) linearizes secret
-//!   share polynomial coefficients into a reusable `Vec<u8>`;
-//! - `Dkg::message` receives Round 1 private frames whose bytes contain the
-//!   serialized subset secret K_S;
-//! - `sample_hyperball` (via `ThresholdSigner::round1_commit_with_seed`)
-//!   squeezes the per-signature mask randomness into a scratch `Vec<u8>`;
-//! - the resharing protocol's `party_key` derivation linearizes the new
-//!   committee share's polynomial coefficients into a reusable `Vec<u8>`.
+//! - `hash_secret_shares` (via `derive_dkg_contribution`) linearizes secret share polynomial
+//!   coefficients into a reusable `Vec<u8>`;
+//! - `Dkg::message` receives Round 1 private frames whose bytes contain the serialized subset
+//!   secret K_S;
+//! - `sample_hyperball` (via `ThresholdSigner::round1_commit_with_seed`) squeezes the per-signature
+//!   mask randomness into a scratch `Vec<u8>`;
+//! - the resharing protocol's `party_key` derivation linearizes the new committee share's
+//!   polynomial coefficients into a reusable `Vec<u8>`.
 //!
 //! Ordinary vectors do not overwrite their backing allocation when cleared or
 //! dropped, so each of these left secrets in allocator memory after the
@@ -204,7 +204,9 @@ fn run_local_reshare() -> (PrivateKeyShare, [u8; 32]) {
 
 	// The leader proposes as soon as both old members commit; no transport
 	// timeout is needed, keeping the run fully deterministic.
-	protocols[0].set_expected_active_set(&participants).expect("leader accepts expected set");
+	protocols[0]
+		.set_expected_active_set(&participants)
+		.expect("leader accepts expected set");
 
 	let mut queues: Vec<Vec<(u32, Vec<u8>)>> = vec![Vec::new(); participants.len()];
 	// Tail of the first private (Round 4) frame observed: the final s2
@@ -224,13 +226,12 @@ fn run_local_reshare() -> (PrivateKeyShare, [u8; 32]) {
 			}
 			match protocols[i].poke().expect("poke succeeds") {
 				Action::Wait | Action::Return(_) => {},
-				Action::SendMany(data) => {
+				Action::SendMany(data) =>
 					for (j, queue) in queues.iter_mut().enumerate() {
 						if j != i {
 							queue.push((i as u32, data.clone()));
 						}
-					}
-				},
+					},
 				Action::SendPrivate(to, mut data) => {
 					// The only private frames in this protocol are Round 4
 					// sub-share deliveries.
@@ -298,13 +299,12 @@ fn run_local_dkg_2of3() -> [u8; 32] {
 			}
 			match dkgs[i].poke().expect("poke succeeds") {
 				DkgAction::Wait => {},
-				DkgAction::SendMany(data) => {
+				DkgAction::SendMany(data) =>
 					for (j, queue) in queues.iter_mut().enumerate() {
 						if j != i {
 							queue.push((i as u32, data.clone()));
 						}
-					}
-				},
+					},
 				DkgAction::SendPrivate(to, mut data) => {
 					// Round 1 private frames carry K_S; the serialized tail
 					// is the secret itself.
@@ -347,14 +347,9 @@ fn secret_intermediates_are_wiped_before_their_heap_memory_is_freed() {
 	let threshold_config = ThresholdConfig::new(2, 3).expect("valid config");
 	let participants: Vec<u32> = vec![0, 1, 2];
 	let pk_map: BTreeMap<u32, u32> = participants.iter().map(|&p| (p, p)).collect();
-	let config = DkgConfig::new(
-		threshold_config,
-		0,
-		participants.clone(),
-		TestSigner { id: 0 },
-		pk_map,
-	)
-	.expect("valid DKG config");
+	let config =
+		DkgConfig::new(threshold_config, 0, participants.clone(), TestSigner { id: 0 }, pk_map)
+			.expect("valid DKG config");
 	let session_nonce = [0xA5u8; 32];
 	let ssid = compute_dkg_ssid(2, 3, &participants, &session_nonce);
 	let mut dkg = Dkg::new(config, [0x77u8; 32], &session_nonce);

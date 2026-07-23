@@ -6,10 +6,9 @@
 //! both. This module enforces the rate at compile time and the phase at
 //! runtime:
 //!
-//! - [`KeccakState`] carries its rate as a const generic parameter
-//!   ([`Shake128State`] vs [`Shake256State`]), so a state built by SHAKE128
-//!   operations cannot reach a SHAKE256 function at all. Mixing rates used to
-//!   underflow `rate - pos` and panic; now it does not compile:
+//! - [`KeccakState`] carries its rate as a const generic parameter ([`Shake128State`] vs
+//!   [`Shake256State`]), so a state built by SHAKE128 operations cannot reach a SHAKE256 function
+//!   at all. Mixing rates used to underflow `rate - pos` and panic; now it does not compile:
 //!
 //! ```compile_fail
 //! use qp_rusty_crystals_dilithium::fips202::*;
@@ -21,11 +20,10 @@
 //! shake256_absorb(&mut state, b"more");
 //! ```
 //!
-//! - The absorb→squeeze phase is tracked in the state and checked with debug
-//!   assertions: absorbing into a finalized state or squeezing an unfinalized
-//!   one is a caller bug that panics in debug builds. In release builds these
-//!   misuses stay deterministic and panic-free (they yield a well-defined but
-//!   non-standard stream), matching the crate's policy of not panicking in
+//! - The absorb→squeeze phase is tracked in the state and checked with debug assertions: absorbing
+//!   into a finalized state or squeezing an unfinalized one is a caller bug that panics in debug
+//!   builds. In release builds these misuses stay deterministic and panic-free (they yield a
+//!   well-defined but non-standard stream), matching the crate's policy of not panicking in
 //!   production for domain violations.
 //!
 //! Squeezing (both [`shake256_squeeze`] and the block-sized
@@ -771,10 +769,7 @@ mod tests {
 		chunked[17..17 + SHAKE256_RATE].copy_from_slice(&block[0]);
 		shake256_squeeze(&mut chunked[17 + SHAKE256_RATE..], &mut state);
 
-		assert_eq!(
-			reference, chunked,
-			"SHAKE256 output stream depends on how reads are chunked"
-		);
+		assert_eq!(reference, chunked, "SHAKE256 output stream depends on how reads are chunked");
 	}
 
 	/// The debug-mode phase check: absorbing into a finalized state is a caller

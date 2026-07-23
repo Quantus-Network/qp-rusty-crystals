@@ -72,11 +72,11 @@ fn deserialize_message(data: &[u8]) -> Result<DkgMessage, String> {
 ///
 /// The frame carries the secret K_S, so two properties matter beyond plain
 /// `borsh::to_vec`:
-/// - the buffer is allocated at its exact final size before serialization —
-///   letting borsh grow a `Vec` incrementally frees intermediate blocks that
-///   already contain a prefix of the secret payload;
-/// - the buffer is [`Zeroizing`], so it is wiped when the caller drops it
-///   after handing the frame to the transport.
+/// - the buffer is allocated at its exact final size before serialization — letting borsh grow a
+///   `Vec` incrementally frees intermediate blocks that already contain a prefix of the secret
+///   payload;
+/// - the buffer is [`Zeroizing`], so it is wiped when the caller drops it after handing the frame
+///   to the transport.
 fn serialize_round1_private(
 	to: ParticipantId,
 	private: Round1Private,
@@ -538,15 +538,6 @@ impl<S: TranscriptSigner> Dkg<S> {
 		&self.ssid
 	}
 
-	/// Advance the protocol state machine.
-	///
-	/// Call this method repeatedly to drive the protocol forward. It returns
-	/// an action that the caller should perform (broadcast, send private, wait,
-	/// or return the final output).
-	///
-	/// # Returns
-	/// * `Ok(DkgAction)` - The action to perform
-	/// * `Err(DkgError)` - If the protocol encounters an error
 	/// Pop the next queued Round 1 private without leaving K_S behind.
 	///
 	/// `Vec::pop` alone moves the element out but leaves its bytes intact in
@@ -564,6 +555,15 @@ impl<S: TranscriptSigner> Dkg<S> {
 		Some((to, private))
 	}
 
+	/// Advance the protocol state machine.
+	///
+	/// Call this method repeatedly to drive the protocol forward. It returns
+	/// an action that the caller should perform (broadcast, send private, wait,
+	/// or return the final output).
+	///
+	/// # Returns
+	/// * `Ok(DkgAction)` - The action to perform
+	/// * `Err(DkgError)` - If the protocol encounters an error
 	pub fn poke(&mut self) -> Result<DkgAction, DkgError> {
 		if let Some((to, private)) = self.pop_pending_private() {
 			return serialize_round1_private(to, private);
@@ -4013,7 +4013,8 @@ mod tests {
 						}
 					},
 					DkgAction::SendPrivate(to, data) => {
-						pending_messages[to as usize].push((party_id as ParticipantId, data.to_vec()));
+						pending_messages[to as usize]
+							.push((party_id as ParticipantId, data.to_vec()));
 					},
 					DkgAction::Wait => {},
 					DkgAction::Return(_) => {},
@@ -4175,7 +4176,8 @@ mod tests {
 						}
 					},
 					DkgAction::SendPrivate(to, data) => {
-						pending_messages[to as usize].push((party_id as ParticipantId, data.to_vec()));
+						pending_messages[to as usize]
+							.push((party_id as ParticipantId, data.to_vec()));
 					},
 					DkgAction::Wait => {},
 					DkgAction::Return(output) => {
@@ -4282,7 +4284,8 @@ mod tests {
 						}
 					},
 					DkgAction::SendPrivate(to, data) => {
-						pending_messages[to as usize].push((party_id as ParticipantId, data.to_vec()));
+						pending_messages[to as usize]
+							.push((party_id as ParticipantId, data.to_vec()));
 					},
 					DkgAction::Wait => {},
 					DkgAction::Return(_) => {},
@@ -4352,7 +4355,8 @@ mod tests {
 						}
 					},
 					DkgAction::SendPrivate(to, data) => {
-						pending_messages[to as usize].push((party_id as ParticipantId, data.to_vec()));
+						pending_messages[to as usize]
+							.push((party_id as ParticipantId, data.to_vec()));
 					},
 					_ => {},
 				}

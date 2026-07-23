@@ -27,8 +27,9 @@
 //! Poseidon hashing, which is particularly well-suited for zero-knowledge proof systems.
 
 use qp_poseidon_core::{
-	hash_bytes, hash_to_bytes, hash_twice, Goldilocks,
+	hash_bytes, hash_to_bytes, hash_twice,
 	serialization::{bytes_to_digest_lossy, string_to_felts},
+	Goldilocks,
 };
 extern crate alloc;
 use alloc::vec::Vec;

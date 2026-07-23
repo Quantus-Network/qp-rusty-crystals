@@ -1859,14 +1859,13 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 				&session_seed,
 				self.old_subset_order.len(),
 			);
-			// Move each sub-share out with `mem::replace` rather than
+			// Move each sub-share out with `mem::take` rather than
 			// `into_iter()`: consuming the Vec by value skips the elements'
 			// zeroizing drops, freeing the backing buffer with the raw
-			// coefficients still in it. Replacing leaves zeros in the slots,
+			// coefficients still in it. Taking leaves zeros in the slots,
 			// which the Vec's (zeroizing) element drops then wipe redundantly.
 			for (j_mask, subshare) in new_subsets.iter().zip(subshares.iter_mut()) {
-				self.my_subshares
-					.insert((i_mask, *j_mask), core::mem::replace(subshare, NewShareData::new()));
+				self.my_subshares.insert((i_mask, *j_mask), core::mem::take(subshare));
 			}
 		}
 		Ok(())
@@ -2432,8 +2431,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			// `clear()` leaves the coefficients in allocator memory) and it
 			// must be allocated at full size up front (growing mid-fill would
 			// free an unwiped intermediate block).
-			const SUBSET_BYTES: usize =
-				2 + (L + K) * N as usize * core::mem::size_of::<i32>();
+			const SUBSET_BYTES: usize = 2 + (L + K) * N as usize * core::mem::size_of::<i32>();
 			let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(SUBSET_BYTES));
 			for (j_mask, share) in &self.new_shares {
 				buf.clear();

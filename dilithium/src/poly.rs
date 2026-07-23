@@ -14,10 +14,10 @@
 //! [`Poly`] seals its coefficient array:
 //!
 //! - [`Poly::from_coeffs`] is the validated entry point for untrusted data; it only accepts
-//!   coefficients in `(-Q, Q)`, which satisfies every precondition of the **public** routines
-//!   in this module. Routines with narrower preconditions (`shiftl`, whose bound is
-//!   `|c| < 2^(31-D)`) are `pub(crate)` so they cannot be reached with boundary-validated
-//!   data; their internal callers guarantee the bounds by construction.
+//!   coefficients in `(-Q, Q)`, which satisfies every precondition of the **public** routines in
+//!   this module. Routines with narrower preconditions (`shiftl`, whose bound is `|c| < 2^(31-D)`)
+//!   are `pub(crate)` so they cannot be reached with boundary-validated data; their internal
+//!   callers guarantee the bounds by construction.
 //! - The unpack functions (`z_unpack`, `eta_unpack`, …) produce bounded coefficients by
 //!   construction.
 //! - [`Poly::coeffs_mut`] grants raw mutable access and shifts responsibility for the documented

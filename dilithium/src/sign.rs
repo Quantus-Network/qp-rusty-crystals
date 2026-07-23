@@ -149,8 +149,7 @@ pub(crate) fn public_key_from_secret(
 	let mut s2 = Polyveck::default();
 	// Invariant: every secret coefficient must be in [-ETA, ETA]; `unpack_sk`
 	// reports non-canonical packed slots (see the doc comment above).
-	let s_in_range =
-		packing::unpack_sk(&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk);
+	let s_in_range = packing::unpack_sk(&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk);
 
 	// Same derivation as key generation.
 	let (t1, mut t0_derived) = derive_public_components(&rho, &s1, &s2);
