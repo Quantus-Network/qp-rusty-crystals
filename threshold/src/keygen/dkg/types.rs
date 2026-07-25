@@ -593,6 +593,16 @@ impl BorshDeserialize for Round3Broadcast {
 	}
 }
 
+/// Maximum accepted size of `Round4Broadcast::transcript_signature`.
+///
+/// The production transcript signer is ML-DSA-87 (4627-byte signatures);
+/// 64 KiB leaves an order of magnitude of headroom for alternative
+/// [`TranscriptSigner`] implementations while staying far below the 256 KiB
+/// `Dkg::message` frame gate. The bound must live in the type's own
+/// deserializer: the frame gate only guards the private protocol entrypoint,
+/// not integrators that deserialize this exported wire type directly.
+pub const MAX_TRANSCRIPT_SIGNATURE_SIZE: usize = 64 * 1024;
+
 /// Round 4 broadcast: Reveal partial PKs + transcript signature.
 #[derive(Debug, Clone, BorshSerialize)]
 pub struct Round4Broadcast {
@@ -627,7 +637,19 @@ impl BorshDeserialize for Round4Broadcast {
 			partial_public_keys.insert(key, value);
 		}
 
-		let transcript_signature = Vec::<u8>::deserialize_reader(reader)?;
+		// Bound the signature before reading it: a fully-supplied oversized
+		// payload would otherwise allocate and decode here and only be
+		// rejected later by signature verification. Read incrementally so a
+		// truncated payload cannot force an up-front allocation of the full
+		// claimed length either.
+		let sig_len = u32::deserialize_reader(reader)? as usize;
+		if sig_len > MAX_TRANSCRIPT_SIGNATURE_SIZE {
+			return Err(borsh::io::Error::new(
+				borsh::io::ErrorKind::InvalidData,
+				"Round4Broadcast.transcript_signature exceeds MAX_TRANSCRIPT_SIGNATURE_SIZE",
+			));
+		}
+		let transcript_signature = crate::broadcast::read_length_prefixed(reader, sig_len)?;
 
 		Ok(Self { ssid, party_id, partial_public_keys, transcript_signature })
 	}
@@ -952,6 +974,41 @@ mod tests {
 		fn public_key(&self) -> Self::PublicKey {
 			self.id
 		}
+	}
+
+	/// `Round4Broadcast` is an exported wire type whose deserializer must
+	/// bound `transcript_signature` itself: the 256 KiB frame gate lives in
+	/// the *private* `Dkg::message` path, so an integrator deserializing the
+	/// public type directly gets no protection from it. A fully-supplied
+	/// oversized signature (unlike the truncated-length-prefix case, which
+	/// borsh rejects on short input) would otherwise allocate and decode
+	/// successfully, only to be rejected megabytes later by verification.
+	#[test]
+	fn round4_broadcast_rejects_oversized_transcript_signature() {
+		let oversized = Round4Broadcast {
+			ssid: TEST_SSID,
+			party_id: 1,
+			partial_public_keys: BTreeMap::new(),
+			transcript_signature: vec![0xAB; MAX_TRANSCRIPT_SIGNATURE_SIZE + 1],
+		};
+		// The serializer is intentionally unbounded; the boundary is import.
+		let bytes = borsh::to_vec(&oversized).unwrap();
+		assert!(
+			borsh::from_slice::<Round4Broadcast>(&bytes).is_err(),
+			"transcript_signature above MAX_TRANSCRIPT_SIGNATURE_SIZE must be rejected \
+			 by the public deserializer, not just by the private frame gate"
+		);
+
+		// A signature at the bound still round-trips.
+		let at_bound = Round4Broadcast {
+			ssid: TEST_SSID,
+			party_id: 1,
+			partial_public_keys: BTreeMap::new(),
+			transcript_signature: vec![0xAB; MAX_TRANSCRIPT_SIGNATURE_SIZE],
+		};
+		let bytes = borsh::to_vec(&at_bound).unwrap();
+		let decoded = borsh::from_slice::<Round4Broadcast>(&bytes).unwrap();
+		assert_eq!(decoded.transcript_signature.len(), MAX_TRANSCRIPT_SIGNATURE_SIZE);
 	}
 
 	#[test]
