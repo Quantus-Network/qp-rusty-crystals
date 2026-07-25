@@ -200,11 +200,15 @@ mod protocol;
 mod state;
 mod types;
 
-// Re-export public types
+// Re-export public types.
+//
+// The quorum predicate `all_broadcasts_received` is deliberately not
+// re-exported: it takes a raw participant slice and returns "complete" for an
+// empty list (vacuous truth), which is only sound because every in-crate
+// caller passes a `DkgConfig`-validated, non-empty list. See the invariants
+// section of `DkgConfig`'s docs, which pins this with a compile_fail test.
 pub use protocol::{run_local_dkg, Dkg, DkgAction, DkgError};
-pub use state::{
-	all_broadcasts_received, all_private_messages_received, DkgOutput, DkgPhase, DkgState,
-};
+pub use state::{all_private_messages_received, DkgOutput, DkgPhase, DkgState};
 pub use types::{
 	compute_dkg_ssid,
 	compute_partial_output_hash,

@@ -1,4 +1,4 @@
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
 	errors::{KeyParsingError, KeyParsingError::BadSecretKey, SignatureError},
@@ -56,12 +56,27 @@ impl Keypair {
 
 	/// Convert a Keypair to a bytes array.
 	///
-	/// Returns an array containing private and public keys bytes
-	pub fn to_bytes(&self) -> [u8; KEYPAIRBYTES] {
-		let mut result = [0u8; KEYPAIRBYTES];
-		result[..SECRETKEYBYTES].copy_from_slice(&self.secret.to_bytes());
+	/// Returns a self-wiping buffer containing private and public key bytes.
+	/// The buffer contains the full secret key, so it is `Zeroizing`: it is
+	/// erased when dropped, and callers no longer need (or are able to
+	/// forget) manual cleanup. Deref to `[u8; KEYPAIRBYTES]` for access.
+	pub fn to_bytes(&self) -> Zeroizing<[u8; KEYPAIRBYTES]> {
+		// Copy the secret half directly from the stored key rather than via
+		// `self.secret.to_bytes()`: that would materialize a temporary copy
+		// of the whole secret key on the stack.
+		//
+		// The working buffer is deliberately *not* returned by move: a
+		// moved-from local never runs `Drop`, so if the compiler does not
+		// elide the return move (empirically it does not here), the frame
+		// would keep an unwiped copy. Instead the buffer is copied into a
+		// fresh wrapper for the caller and then wiped by its own `Drop` on
+		// scope exit — only the copy into the return slot is left to the
+		// optimizer, and the release-mode stack probe in
+		// `tests/import_stack_zeroization.rs` verifies it is elided.
+		let mut result = Zeroizing::new([0u8; KEYPAIRBYTES]);
+		result[..SECRETKEYBYTES].copy_from_slice(&self.secret.bytes);
 		result[SECRETKEYBYTES..].copy_from_slice(&self.public.to_bytes());
-		result
+		Zeroizing::new(*result)
 	}
 
 	/// Create a Keypair from bytes.
@@ -94,9 +109,14 @@ impl Keypair {
 		if bytes.len() != SECRETKEYBYTES + PUBLICKEYBYTES {
 			return Err(KeyParsingError::BadKeypair);
 		}
-		let (secret_bytes, public_bytes) = bytes.split_at(SECRETKEYBYTES);
-		let secret_bytes: [u8; SECRETKEYBYTES] =
-			secret_bytes.try_into().map_err(|_| KeyParsingError::BadKeypair)?;
+		let (secret_slice, public_bytes) = bytes.split_at(SECRETKEYBYTES);
+		// Copy the secret half into a zeroizing local (filled in place, so no
+		// intermediate `Copy` array is created). A plain `[u8; N]` local would
+		// survive the "move" into the returned struct — arrays are `Copy` —
+		// and leave a plaintext secret key in dead stack memory; `Zeroizing`
+		// wipes the local on every exit path, including the error returns.
+		let mut secret_bytes = Zeroizing::new([0u8; SECRETKEYBYTES]);
+		secret_bytes.copy_from_slice(secret_slice);
 		let public =
 			PublicKey::from_bytes(public_bytes).map_err(|_| KeyParsingError::BadKeypair)?;
 
@@ -112,7 +132,7 @@ impl Keypair {
 			return Err(KeyParsingError::BadKeypair);
 		}
 
-		Ok(Keypair { secret: SecretKey { bytes: secret_bytes }, public })
+		Ok(Keypair { secret: SecretKey { bytes: *secret_bytes }, public })
 	}
 
 	/// Compute a signature for a given message.
@@ -172,9 +192,13 @@ pub struct SecretKey {
 }
 
 impl SecretKey {
-	/// Returns a copy of underlying bytes.
-	pub fn to_bytes(&self) -> [u8; SECRETKEYBYTES] {
-		self.bytes
+	/// Returns a copy of the underlying bytes in a self-wiping buffer.
+	///
+	/// The copy is `Zeroizing`: it is erased when dropped, so callers no
+	/// longer need (or are able to forget) manual cleanup. Deref to
+	/// `[u8; SECRETKEYBYTES]` for access.
+	pub fn to_bytes(&self) -> Zeroizing<[u8; SECRETKEYBYTES]> {
+		Zeroizing::new(self.bytes)
 	}
 
 	/// Create a SecretKey from bytes.
@@ -199,11 +223,18 @@ impl SecretKey {
 	/// serialized secret material has the same guarantees whether it is
 	/// imported as a `Keypair` or as a standalone `SecretKey`.
 	pub fn from_bytes(bytes: &[u8]) -> Result<SecretKey, KeyParsingError> {
-		let bytes: [u8; SECRETKEYBYTES] = bytes.try_into().map_err(|_| BadSecretKey)?;
+		if bytes.len() != SECRETKEYBYTES {
+			return Err(BadSecretKey);
+		}
+		// Zeroizing local filled in place: see `Keypair::from_bytes` — a bare
+		// `[u8; N]` local is `Copy` and would survive the move into the
+		// returned struct as an unwiped plaintext copy of the secret key.
+		let mut sk = Zeroizing::new([0u8; SECRETKEYBYTES]);
+		sk.copy_from_slice(bytes);
 		// Re-derives the public components and checks the stored tr/t0 against
 		// them; the derived pk itself is not needed here.
-		crate::sign::public_key_from_secret(&bytes).ok_or(BadSecretKey)?;
-		Ok(SecretKey { bytes })
+		crate::sign::public_key_from_secret(&sk).ok_or(BadSecretKey)?;
+		Ok(SecretKey { bytes: *sk })
 	}
 
 	/// Compute a signature for a given message.
@@ -413,11 +444,11 @@ mod tests {
 
 		// Genuine keypair bytes must round-trip.
 		let good = keys_a.to_bytes();
-		assert!(Keypair::from_bytes(&good).is_ok(), "honest keypair must be accepted");
+		assert!(Keypair::from_bytes(good.as_slice()).is_ok(), "honest keypair must be accepted");
 
 		// Splice A's secret key with B's (unrelated) public key.
 		let mut forged = [0u8; KEYPAIRBYTES];
-		forged[..SECRETKEYBYTES].copy_from_slice(&keys_a.secret.to_bytes());
+		forged[..SECRETKEYBYTES].copy_from_slice(keys_a.secret.to_bytes().as_slice());
 		forged[SECRETKEYBYTES..].copy_from_slice(&keys_b.public.to_bytes());
 
 		assert!(
@@ -438,17 +469,17 @@ mod tests {
 
 		let keys = Keypair::generate(get_random_bytes());
 		let good = keys.to_bytes();
-		assert!(Keypair::from_bytes(&good).is_ok(), "honest keypair must be accepted");
+		assert!(Keypair::from_bytes(good.as_slice()).is_ok(), "honest keypair must be accepted");
 
 		// SK layout: rho (32) || key (32) || tr (64) || s1 || s2 || t0.
 		let tr_offset = 2 * SEEDBYTES;
 		let t0_offset = SECRETKEYBYTES - crate::params::K * POLYT0_PACKEDBYTES;
 
 		// Corrupt one byte inside the stored tr region only.
-		let mut bad_tr = good;
+		let mut bad_tr = good.clone();
 		bad_tr[tr_offset + TR_BYTES / 2] ^= 0x01;
 		assert!(
-			matches!(Keypair::from_bytes(&bad_tr), Err(KeyParsingError::BadKeypair)),
+			matches!(Keypair::from_bytes(bad_tr.as_slice()), Err(KeyParsingError::BadKeypair)),
 			"secret key with corrupted tr must be rejected"
 		);
 
@@ -456,7 +487,7 @@ mod tests {
 		let mut bad_t0 = good;
 		bad_t0[t0_offset] ^= 0x01;
 		assert!(
-			matches!(Keypair::from_bytes(&bad_t0), Err(KeyParsingError::BadKeypair)),
+			matches!(Keypair::from_bytes(bad_t0.as_slice()), Err(KeyParsingError::BadKeypair)),
 			"secret key with corrupted t0 must be rejected"
 		);
 	}
@@ -474,17 +505,20 @@ mod tests {
 
 		let keys = Keypair::generate(get_random_bytes());
 		let good = keys.secret.to_bytes();
-		assert!(SecretKey::from_bytes(&good).is_ok(), "honest secret key must be accepted");
+		assert!(
+			SecretKey::from_bytes(good.as_slice()).is_ok(),
+			"honest secret key must be accepted"
+		);
 
 		// SK layout: rho (32) || key (32) || tr (64) || s1 || s2 || t0.
 		let tr_offset = 2 * SEEDBYTES;
 		let t0_offset = SECRETKEYBYTES - crate::params::K * POLYT0_PACKEDBYTES;
 
 		// Corrupt one byte inside the stored tr region only.
-		let mut bad_tr = good;
+		let mut bad_tr = good.clone();
 		bad_tr[tr_offset + TR_BYTES / 2] ^= 0x01;
 		assert!(
-			matches!(SecretKey::from_bytes(&bad_tr), Err(KeyParsingError::BadSecretKey)),
+			matches!(SecretKey::from_bytes(bad_tr.as_slice()), Err(KeyParsingError::BadSecretKey)),
 			"standalone secret key with corrupted tr must be rejected"
 		);
 
@@ -492,7 +526,7 @@ mod tests {
 		let mut bad_t0 = good;
 		bad_t0[t0_offset] ^= 0x01;
 		assert!(
-			matches!(SecretKey::from_bytes(&bad_t0), Err(KeyParsingError::BadSecretKey)),
+			matches!(SecretKey::from_bytes(bad_t0.as_slice()), Err(KeyParsingError::BadSecretKey)),
 			"standalone secret key with corrupted t0 must be rejected"
 		);
 	}
@@ -529,6 +563,81 @@ mod tests {
 		assert!(
 			matches!(SecretKey::from_bytes(&sk), Err(KeyParsingError::BadSecretKey)),
 			"secret key deriving an all-zero t1 public key must be rejected"
+		);
+	}
+
+	// The packed s1/s2 regions use 3 bits per coefficient, decoded as
+	// `ETA - slot`. With ETA = 2, slots 5..7 decode to coefficients -3..-5 —
+	// outside the [-ETA, ETA] key distribution the parameters advertise and
+	// the BETA rejection margin is sized for. An attacker can recompute
+	// t0/tr/pk *from* the oversized coefficients, so every algebraic
+	// consistency check passes; the import paths must therefore enforce the
+	// coefficient range explicitly.
+	#[test]
+	fn from_bytes_rejects_out_of_range_secret_coefficients() {
+		use super::{
+			KeyParsingError, Keypair, SecretKey, KEYPAIRBYTES, PUBLICKEYBYTES, SECRETKEYBYTES,
+		};
+		use crate::{fips202, packing, params, polyvec};
+
+		// Start from an honest key and re-derive everything after planting
+		// the out-of-range coefficient, so the forged blob is fully
+		// self-consistent (valid t0, tr, and matching public key).
+		let keys = Keypair::generate(get_random_bytes());
+		let sk_bytes = keys.secret.to_bytes();
+
+		let mut rho = [0u8; params::SEEDBYTES];
+		let mut tr = [0u8; params::TR_BYTES];
+		let mut key = [0u8; params::SEEDBYTES];
+		let mut t0 = polyvec::Polyveck::default();
+		let mut s1 = polyvec::Polyvecl::default();
+		let mut s2 = polyvec::Polyveck::default();
+		assert!(
+			packing::unpack_sk(&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, &sk_bytes),
+			"honest key unpacks canonically"
+		);
+
+		// -3 packs as the 3-bit slot 5 (eta_pack stores ETA - coeff), so the
+		// forged coefficient survives the pack/unpack round trip.
+		s1.vec[0].coeffs_mut()[0] = -(params::ETA as i32) - 1;
+
+		// Same derivation as keygen: t = A·s1 + s2, split into (t1, t0).
+		let mut s1hat = s1.clone();
+		polyvec::l_ntt(&mut s1hat);
+		let mut t1 = polyvec::Polyveck::default();
+		polyvec::matrix_pointwise_montgomery_streamed(&mut t1, &rho, &s1hat);
+		polyvec::k_reduce(&mut t1);
+		polyvec::k_invntt_tomont(&mut t1);
+		polyvec::k_add(&mut t1, &s2);
+		polyvec::k_caddq(&mut t1);
+		let mut t0_forged = polyvec::Polyveck::default();
+		polyvec::k_power2round(&mut t1, &mut t0_forged);
+
+		let mut pk = [0u8; PUBLICKEYBYTES];
+		packing::pack_pk(&mut pk, &rho, &t1);
+		let mut tr_forged = [0u8; params::TR_BYTES];
+		fips202::shake256(&mut tr_forged, &pk);
+
+		let mut forged_sk = [0u8; SECRETKEYBYTES];
+		packing::pack_sk(&mut forged_sk, &rho, &tr_forged, &key, &t0_forged, &s1, &s2);
+
+		assert!(
+			matches!(SecretKey::from_bytes(&forged_sk), Err(KeyParsingError::BadSecretKey)),
+			"secret key with a coefficient outside [-ETA, ETA] must be rejected"
+		);
+
+		let mut forged_kp = [0u8; KEYPAIRBYTES];
+		forged_kp[..SECRETKEYBYTES].copy_from_slice(&forged_sk);
+		forged_kp[SECRETKEYBYTES..].copy_from_slice(&pk);
+		assert!(
+			matches!(Keypair::from_bytes(&forged_kp), Err(KeyParsingError::BadKeypair)),
+			"keypair with a secret coefficient outside [-ETA, ETA] must be rejected"
+		);
+
+		// Honest keys must still round-trip.
+		assert!(
+			SecretKey::from_bytes(sk_bytes.as_slice()).is_ok(),
+			"honest secret key must be accepted"
 		);
 	}
 

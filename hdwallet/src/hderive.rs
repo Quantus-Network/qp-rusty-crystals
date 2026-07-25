@@ -12,9 +12,17 @@ pub enum Error {
 	NotHardened,
 	PathTooLong(usize),
 	PathTooDeep(usize),
+	InvalidSeedLength(usize),
 }
 
 const HARDENED_BIT: u32 = 1 << 31;
+
+/// Master-seed length bounds (bytes), per BIP32 (128..=512 bits). The
+/// higher-level wrappers always pass a fixed 64-byte BIP39 seed; this bound
+/// keeps the public low-level entrypoint from doing unbounded HMAC work over
+/// an attacker-sized buffer.
+pub const MIN_SEED_BYTES: usize = 16;
+pub const MAX_SEED_BYTES: usize = 64;
 
 /// Reject paths whose raw byte length or `/`-segment count exceed the workspace caps.
 /// Runs before any allocation so attacker-controlled paths cannot drive memory or CPU.
@@ -138,10 +146,19 @@ pub struct ExtendedPrivKey {
 
 impl ExtendedPrivKey {
 	/// Attempts to derive an extended private key from a path.
+	///
+	/// The path is parsed and validated first and the seed length is bounded
+	/// to [`MIN_SEED_BYTES`]`..=`[`MAX_SEED_BYTES`], so malformed requests are
+	/// rejected before any HMAC work is spent on the seed.
 	pub fn derive<Path>(seed: &[u8], path: Path) -> Result<ExtendedPrivKey, Error>
 	where
 		Path: IntoDerivationPath,
 	{
+		let path = path.into()?;
+		if seed.len() < MIN_SEED_BYTES || seed.len() > MAX_SEED_BYTES {
+			return Err(Error::InvalidSeedLength(seed.len()));
+		}
+
 		let mut hmac: Hmac<Sha512> =
 			Hmac::new_from_slice(b"Dilithium seed").expect("seed is always correct; qed");
 		hmac.update(seed);
@@ -154,7 +171,7 @@ impl ExtendedPrivKey {
 			chain_code: SensitiveBytes32::from(&mut chain_code.try_into().unwrap()),
 		};
 
-		for child in path.into()?.as_ref() {
+		for child in path.as_ref() {
 			sk = sk.child(*child)?;
 		}
 
@@ -282,5 +299,40 @@ mod tests {
 		}
 		// Beyond u32 entirely.
 		assert_eq!("4294967296'".parse::<ChildNumber>().unwrap_err(), Error::InvalidChildNumber);
+	}
+
+	// `derive` is a public entrypoint that may see attacker-controlled input.
+	// The seed must be bounded (BIP32-style 16..=64 bytes) so a caller cannot
+	// force linear HMAC work over an arbitrarily large buffer.
+	#[test]
+	fn seed_length_bounds_enforced() {
+		let path = "m/44'/60'/0'";
+		for ok_len in [16usize, 32, 64] {
+			assert!(
+				ExtendedPrivKey::derive(&vec![7u8; ok_len], path).is_ok(),
+				"seed of {ok_len} bytes must be accepted"
+			);
+		}
+		for bad_len in [0usize, 15, 65, 1 << 20] {
+			assert_eq!(
+				ExtendedPrivKey::derive(&vec![7u8; bad_len], path).unwrap_err(),
+				Error::InvalidSeedLength(bad_len),
+				"seed of {bad_len} bytes must be rejected"
+			);
+		}
+	}
+
+	// The path must be validated before any seed processing, so a malformed
+	// request fails on the cheap string parse rather than after doing HMAC
+	// work over the seed. Pinned observably: with a bad path AND a bad seed,
+	// the path error wins.
+	#[test]
+	fn invalid_path_rejected_before_seed_is_touched() {
+		let huge_seed = vec![7u8; 1 << 20];
+		assert_eq!(
+			ExtendedPrivKey::derive(&huge_seed, "not-a-path").unwrap_err(),
+			Error::InvalidDerivationPath,
+			"path validation must run (and fail) before the seed is processed"
+		);
 	}
 }

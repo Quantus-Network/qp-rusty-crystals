@@ -245,7 +245,7 @@ fn run_resharing_protocol_full(
 						}
 					}
 				},
-				Ok(Action::SendPrivate(to, data)) => {
+				Ok(Action::SendPrivate(to, mut data)) => {
 					any_activity = true;
 					// Send to specific party. We deliberately do NOT loop self-private
 					// messages back: the protocol must handle self-deals locally and
@@ -256,9 +256,12 @@ fn run_resharing_protocol_full(
 						 self-deals must be handled locally",
 						party_id
 					);
-					let payload = match tamper.as_mut() {
-						Some(f) => f(party_id, Some(to), data),
-						None => data,
+					let payload = {
+						let raw = std::mem::take(&mut *data);
+						match tamper.as_mut() {
+							Some(f) => f(party_id, Some(to), raw),
+							None => raw,
+						}
 					};
 					// Messages to offline parties are dropped (dead node).
 					if let Some(queue) = message_queues.get_mut(&to) {
@@ -1814,9 +1817,12 @@ fn run_resharing_protocol_with_seeds(
 								.push((party_id, data.clone()));
 						}
 					},
-				Ok(Action::SendPrivate(to, data)) => {
+				Ok(Action::SendPrivate(to, mut data)) => {
 					assert_ne!(to, party_id);
-					message_queues.get_mut(&to).unwrap().push((party_id, data));
+					message_queues
+						.get_mut(&to)
+						.unwrap()
+						.push((party_id, std::mem::take(&mut *data)));
 				},
 				Ok(Action::Return(_)) => {},
 				Err(e) => {

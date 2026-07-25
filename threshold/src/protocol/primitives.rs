@@ -39,7 +39,7 @@ use qp_rusty_crystals_dilithium::{
 	params::{C_DASH_BYTES, GAMMA2, K, L, N, Q, SIGNBYTES},
 	poly, polyvec,
 };
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 // Constants for decompose (ML-DSA-87)
 // ALPHA = 2 * GAMMA2 = 2 * ((Q-1)/32) = 523776
@@ -326,7 +326,13 @@ impl HyperballSampleVector {
 	/// timing information about the sampled values.
 	pub fn sample_hyperball(&mut self, radius: f64, nu: f64, rhop: &[u8; 64], nonce: u16) {
 		let size = self.data.len();
-		let mut samples = vec![0.0f64; size + 2];
+		// Both intermediates duplicate the per-signature mask material that
+		// ends up in `self.data` (which zeroizes on drop): `buf` is the raw
+		// nonce-derived XOF stream and `samples` the unscaled Gaussian draws.
+		// Leaking either with the published response allows recovering the
+		// secret share, so they must be wiped before their allocations are
+		// freed — hence the zeroizing wrappers.
+		let mut samples = Zeroizing::new(vec![0.0f64; size + 2]);
 
 		// Use SHAKE256 for cryptographic randomness
 		let mut keccak_state = fips202::KeccakState::default();
@@ -336,7 +342,7 @@ impl HyperballSampleVector {
 		fips202::shake256_absorb(&mut keccak_state, &nonce_bytes);
 		fips202::shake256_finalize(&mut keccak_state);
 
-		let mut buf = vec![0u8; (size + 2) * 8]; // 8 bytes per f64
+		let mut buf = Zeroizing::new(vec![0u8; (size + 2) * 8]); // 8 bytes per f64
 		fips202::shake256_squeeze(&mut buf, &mut keccak_state);
 
 		// Generate normally distributed random numbers using Box-Muller transform

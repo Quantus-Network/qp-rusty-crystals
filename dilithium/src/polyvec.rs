@@ -238,8 +238,11 @@ pub fn k_sub(w: &mut Polyveck, v: &Polyveck) {
 }
 
 /// Multiply vector of polynomials of Length K by 2^D without modular
-/// reduction. Assumes input coefficients to be less than 2^{32-D}.
-pub fn k_shiftl(v: &mut Polyveck) {
+/// reduction. Input coefficients must be less than 2^{31-D} in absolute
+/// value — narrower than the `(-Q, Q)` range accepted by
+/// [`Poly::from_coeffs`](crate::poly::Poly::from_coeffs) — so this routine
+/// is `pub(crate)`; see [`poly::shiftl`].
+pub(crate) fn k_shiftl(v: &mut Polyveck) {
 	for i in 0..K {
 		poly::shiftl(&mut v.vec[i]);
 	}

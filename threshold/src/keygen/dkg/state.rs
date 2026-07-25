@@ -289,7 +289,7 @@ impl<S: TranscriptSigner> Zeroize for DkgState<S> {
 		// makes erasure a state-machine invariant rather than a matter of
 		// downstream implementer discipline.
 		if let Some(ref mut config) = self.config {
-			config.my_signer.zeroize();
+			config.zeroize_signer();
 		}
 		self.config = None;
 
@@ -364,7 +364,7 @@ impl<S: TranscriptSigner> DkgState<S> {
 		if self.phase == DkgPhase::Complete || self.phase == DkgPhase::Failed {
 			return None;
 		}
-		self.config.as_ref().map(|c| c.all_participants.as_slice())
+		self.config.as_ref().map(|c| c.all_participants())
 	}
 
 	/// Get this party's ID from the config.
@@ -374,7 +374,7 @@ impl<S: TranscriptSigner> DkgState<S> {
 		if self.phase == DkgPhase::Complete || self.phase == DkgPhase::Failed {
 			return None;
 		}
-		self.config.as_ref().map(|c| c.my_party_id)
+		self.config.as_ref().map(|c| c.my_party_id())
 	}
 
 	// ========================================================================
@@ -448,12 +448,26 @@ impl<S: TranscriptSigner> DkgState<S> {
 }
 
 /// Check if all broadcasts received.
-pub fn all_broadcasts_received<T>(
+///
+/// A round is complete when a broadcast has been received from every
+/// participant other than `my_party_id`. The expected count is derived by
+/// filtering the participant list rather than assuming `len() - 1`, so the
+/// predicate stays total (no underflow panic) even on degenerate inputs, and
+/// a `my_party_id` that is not a participant means every listed party is an
+/// "other".
+///
+/// Crate-internal on purpose: an empty participant list is treated as
+/// vacuously complete, which is the permissive reading of the quorum. That
+/// is sound only because every caller passes a `DkgConfig`-validated list
+/// (non-empty, contains `my_party_id`), so the vacuous case is unreachable —
+/// exposing the predicate publicly would let a caller advance a round having
+/// received zero broadcasts.
+pub(crate) fn all_broadcasts_received<T>(
 	received: &BTreeMap<ParticipantId, T>,
 	all_participants: &[ParticipantId],
 	my_party_id: ParticipantId,
 ) -> bool {
-	let expected_count = all_participants.len() - 1;
+	let expected_count = all_participants.iter().filter(|&&p| p != my_party_id).count();
 	let actual_count = received.keys().filter(|&&p| p != my_party_id).count();
 	actual_count >= expected_count
 }
@@ -612,6 +626,30 @@ mod tests {
 			"DkgState::zeroize() must explicitly zeroize the transcript signer; \
 			 dropping a bare-marker ZeroizeOnDrop signer wipes nothing"
 		);
+	}
+
+	/// `all_broadcasts_received`'s quorum arithmetic must stay total over
+	/// degenerate inputs: an empty list previously computed `0usize - 1`,
+	/// panicking in checked builds. The predicate is `pub(crate)` and every
+	/// caller passes a `DkgConfig`-validated (non-empty) list, so this pins
+	/// totality — no panic — not a reachable "vacuously complete" semantics.
+	#[test]
+	fn all_broadcasts_received_does_not_underflow_on_empty_participant_list() {
+		let received: BTreeMap<ParticipantId, u8> = BTreeMap::new();
+		assert!(all_broadcasts_received(&received, &[], 0));
+	}
+
+	/// The expected count must be "participants other than me", not
+	/// `len() - 1`: when `my_party_id` is not in the list at all, every listed
+	/// participant is an "other", and `len() - 1` would report completion one
+	/// broadcast early.
+	#[test]
+	fn all_broadcasts_received_counts_others_when_caller_not_in_list() {
+		let mut received: BTreeMap<ParticipantId, u8> = BTreeMap::new();
+		received.insert(1, 0);
+		assert!(!all_broadcasts_received(&received, &[1, 2], 99));
+		received.insert(2, 0);
+		assert!(all_broadcasts_received(&received, &[1, 2], 99));
 	}
 
 	/// Regression test: `DkgState::zeroize()` must erase the transcript signer's

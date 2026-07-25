@@ -77,6 +77,14 @@ pub fn pack_sk(
 }
 
 /// Unpack secret key sk = (rho, key, tr, s1, s2, t0).
+///
+/// Returns `false` if the packed `s1`/`s2` regions contain a non-canonical
+/// 3-bit slot — an encoding that would decode to a coefficient outside
+/// `[-ETA, ETA]`, which key generation never emits and which lies outside
+/// the key distribution the signing rejection margin (`BETA = TAU * ETA`)
+/// is sized for. All output buffers are fully written either way; callers
+/// must treat the unpacked values as invalid when `false` is returned.
+#[must_use]
 pub fn unpack_sk(
 	rho: &mut [u8; params::SEEDBYTES],
 	tr: &mut [u8; params::TR_BYTES],
@@ -85,7 +93,7 @@ pub fn unpack_sk(
 	s1: &mut Polyvecl,
 	s2: &mut Polyveck,
 	sk: &[u8; params::SECRETKEYBYTES],
-) {
+) -> bool {
 	rho.copy_from_slice(&sk[..params::SEEDBYTES]);
 	let mut idx = params::SEEDBYTES;
 
@@ -95,19 +103,25 @@ pub fn unpack_sk(
 	tr.copy_from_slice(&sk[idx..idx + params::TR_BYTES]);
 	idx += params::TR_BYTES;
 
+	// Accumulate with `&` rather than short-circuiting so every polynomial is
+	// unpacked and checked regardless of earlier results (data-independent
+	// control flow; honest keys always pass anyway).
+	let mut canonical = true;
 	for i in 0..L {
-		poly::eta_unpack(&mut s1.vec[i], &sk[idx + i * params::POLYETA_PACKEDBYTES..]);
+		canonical &= poly::eta_unpack(&mut s1.vec[i], &sk[idx + i * params::POLYETA_PACKEDBYTES..]);
 	}
 	idx += L * params::POLYETA_PACKEDBYTES;
 
 	for i in 0..K {
-		poly::eta_unpack(&mut s2.vec[i], &sk[idx + i * params::POLYETA_PACKEDBYTES..]);
+		canonical &= poly::eta_unpack(&mut s2.vec[i], &sk[idx + i * params::POLYETA_PACKEDBYTES..]);
 	}
 	idx += K * params::POLYETA_PACKEDBYTES;
 
 	for i in 0..K {
 		poly::t0_unpack(&mut t0.vec[i], &sk[idx + i * params::POLYT0_PACKEDBYTES..]);
 	}
+
+	canonical
 }
 
 /// Bit-pack signature sig = (c, z, h).
@@ -285,14 +299,17 @@ mod tests {
 		let mut unpacked_s1 = Polyvecl::default();
 		let mut unpacked_s2 = Polyveck::default();
 
-		unpack_sk(
-			&mut unpacked_rho,
-			&mut unpacked_tr,
-			&mut unpacked_key,
-			&mut unpacked_t0,
-			&mut unpacked_s1,
-			&mut unpacked_s2,
-			&packed_sk,
+		assert!(
+			unpack_sk(
+				&mut unpacked_rho,
+				&mut unpacked_tr,
+				&mut unpacked_key,
+				&mut unpacked_t0,
+				&mut unpacked_s1,
+				&mut unpacked_s2,
+				&packed_sk,
+			),
+			"canonically packed secret key must unpack cleanly"
 		);
 
 		assert_eq!(rho, unpacked_rho);

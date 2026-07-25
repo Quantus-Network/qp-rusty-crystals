@@ -167,7 +167,22 @@ pub struct PrivateKeyShare {
 }
 
 impl BorshDeserialize for PrivateKeyShare {
+	/// Deserialize with cross-field consistency validation.
+	///
+	/// The signing state machine treats this metadata as authoritative
+	/// without re-checking it: Round 3 share recovery looks `party_id` up in
+	/// `dkg_participants`, and `translated_subset_masks` indexes arrays sized
+	/// by `total_parties` with dkg indices. A tampered blob violating these
+	/// invariants would otherwise initialize a signer, run rounds 1-2
+	/// (wasting local and peer work on a session that can never complete),
+	/// and only surface at Round 3 - as a late `InvalidConfiguration` error
+	/// or, for `dkg_participants.len() > total_parties`, an out-of-bounds
+	/// panic. Every producer (dealer, DKG, resharing) satisfies these
+	/// invariants by construction, so rejecting violations here only rejects
+	/// malformed or tampered blobs.
 	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let invalid = |msg: &str| borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, msg);
+
 		let party_id = ParticipantId::deserialize_reader(reader)?;
 		let total_parties = u32::deserialize_reader(reader)?;
 		let threshold = u32::deserialize_reader(reader)?;
@@ -176,18 +191,38 @@ impl BorshDeserialize for PrivateKeyShare {
 		let rho = <[u8; 32]>::deserialize_reader(reader)?;
 		let tr = <[u8; TR_SIZE]>::deserialize_reader(reader)?;
 
+		// (threshold, total_parties) must be a combination the scheme
+		// actually supports; this also bounds total_parties by MAX_PARTIES,
+		// keeping the mask-domain shift below well-defined.
+		crate::config::ThresholdConfig::new(threshold, total_parties).map_err(|_| {
+			invalid("PrivateKeyShare threshold/total_parties is not a supported configuration")
+		})?;
+		if dkg_participants.len() != total_parties as usize {
+			return Err(invalid(
+				"PrivateKeyShare dkg_participants length does not match total_parties",
+			));
+		}
+		if dkg_participants.index_of(party_id).is_none() {
+			return Err(invalid("PrivateKeyShare party_id is not in dkg_participants"));
+		}
+
 		// Read shares map with bound check
 		let len = u32::deserialize_reader(reader)? as usize;
 		if len > MAX_SUBSETS {
-			return Err(borsh::io::Error::new(
-				borsh::io::ErrorKind::InvalidData,
-				"PrivateKeyShare.shares exceeds MAX_SUBSETS",
-			));
+			return Err(invalid("PrivateKeyShare.shares exceeds MAX_SUBSETS"));
 		}
+
+		// Subset masks are bitmasks over dkg indices 0..total_parties.
+		let mask_domain: u32 = 1u32 << total_parties;
 
 		let mut shares = BTreeMap::new();
 		for _ in 0..len {
 			let key = u16::deserialize_reader(reader)?;
+			if key == 0 || u32::from(key) >= mask_domain {
+				return Err(invalid(
+					"PrivateKeyShare share subset mask outside participant index domain",
+				));
+			}
 			let value = SecretShareData::deserialize_reader(reader)?;
 			shares.insert(key, value);
 		}
@@ -465,6 +500,85 @@ mod tests {
 				if valid { "accepted" } else { "rejected" }
 			);
 		}
+	}
+
+	/// Security review: deserialization must reject metadata that is not
+	/// mutually consistent. Round 3 share recovery and
+	/// `translated_subset_masks` treat `party_id`, `threshold`,
+	/// `total_parties`, and `dkg_participants` as already self-consistent; a
+	/// tampered blob that violates that either fails only after the signing
+	/// state machine has progressed (wasting peer work) or panics with an
+	/// out-of-bounds index instead of returning an error.
+	#[test]
+	fn test_private_key_share_borsh_rejects_inconsistent_metadata() {
+		let roundtrip = |party_id: u32,
+		                 total_parties: u32,
+		                 threshold: u32,
+		                 participants: &[ParticipantId],
+		                 masks: &[u16]|
+		 -> Result<PrivateKeyShare, borsh::io::Error> {
+			let dkg_participants = ParticipantList::new(participants).unwrap();
+			let mut shares = BTreeMap::new();
+			for &mask in masks {
+				shares.insert(mask, SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] });
+			}
+			let share = PrivateKeyShare::new(
+				party_id,
+				total_parties,
+				threshold,
+				[0x11u8; 32],
+				[0x22u8; 32],
+				[0x33u8; TR_SIZE],
+				shares,
+				dkg_participants,
+			);
+			let bytes = borsh::to_vec(&share).unwrap();
+			borsh::from_slice(&bytes)
+		};
+
+		// Baseline: consistent metadata imports fine.
+		assert!(roundtrip(0, 3, 2, &[0, 1, 2], &[0b011]).is_ok());
+
+		// party_id not in dkg_participants: Round 3 recovery would fail late
+		// with InvalidConfiguration after rounds 1-2 already ran.
+		assert!(
+			roundtrip(99, 3, 2, &[0, 1, 2], &[0b011]).is_err(),
+			"party_id missing from dkg_participants must be rejected at import"
+		);
+
+		// dkg_participants larger than total_parties: drives an out-of-bounds
+		// panic in translated_subset_masks during signing.
+		assert!(
+			roundtrip(0, 2, 2, &[0, 1, 2], &[0b01]).is_err(),
+			"dkg_participants.len() > total_parties must be rejected at import"
+		);
+
+		// dkg_participants smaller than total_parties: protocol waits on
+		// share subsets that cannot exist.
+		assert!(
+			roundtrip(0, 3, 2, &[0, 1], &[0b011]).is_err(),
+			"dkg_participants.len() < total_parties must be rejected at import"
+		);
+
+		// (threshold, total_parties) pairs the scheme does not support.
+		assert!(
+			roundtrip(0, 3, 1, &[0, 1, 2], &[0b011]).is_err(),
+			"threshold below 2 must be rejected at import"
+		);
+		assert!(
+			roundtrip(0, 3, 4, &[0, 1, 2], &[0b011]).is_err(),
+			"threshold above total_parties must be rejected at import"
+		);
+
+		// Subset masks outside the participant index domain.
+		assert!(
+			roundtrip(0, 3, 2, &[0, 1, 2], &[0b1001]).is_err(),
+			"share mask with a bit beyond total_parties must be rejected at import"
+		);
+		assert!(
+			roundtrip(0, 3, 2, &[0, 1, 2], &[0]).is_err(),
+			"empty share mask must be rejected at import"
+		);
 	}
 
 	#[test]

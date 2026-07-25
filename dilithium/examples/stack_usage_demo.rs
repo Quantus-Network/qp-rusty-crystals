@@ -170,16 +170,20 @@ fn main() {
 			true
 		});
 
+		// `to_bytes` now returns a self-wiping `Zeroizing` buffer, which is
+		// not `Copy`; clone a copy into each spawned-thread closure.
+		let sign_bytes = ml87_keypair_bytes.clone();
 		let ml87_sign = test_sign_with_stack_size(size_kb, "ml-dsa-87", move || {
-			let kp = ml_dsa_87::Keypair::from_bytes(&ml87_keypair_bytes)
+			let kp = ml_dsa_87::Keypair::from_bytes(sign_bytes.as_slice())
 				.expect("from_bytes must succeed for known-good bytes");
 			let _sig = kp.sign(test_msg, None, None);
 			true
 		});
 
 		let ml87_sig_clone = ml87_sig;
+		let verify_bytes = ml87_keypair_bytes.clone();
 		let ml87_verify = test_verify_with_stack_size(size_kb, "ml-dsa-87", move || {
-			let kp = ml_dsa_87::Keypair::from_bytes(&ml87_keypair_bytes)
+			let kp = ml_dsa_87::Keypair::from_bytes(verify_bytes.as_slice())
 				.expect("from_bytes must succeed for known-good bytes");
 			kp.verify(test_msg, &ml87_sig_clone, None)
 		});
