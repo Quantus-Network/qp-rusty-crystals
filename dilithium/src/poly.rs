@@ -705,11 +705,12 @@ pub(crate) fn eta_unpack(r: &mut Poly, a: &[u8]) -> bool {
 		r.coeffs[8 * i + 6] = params::ETA as i32 - r.coeffs[8 * i + 6];
 		r.coeffs[8 * i + 7] = params::ETA as i32 - r.coeffs[8 * i + 7];
 	}
-	// Canonicality sweep after the fact: branch-free over the whole
-	// polynomial, so honest keys (which always pass) take a data-independent
-	// path through this function.
+	// Canonicality sweep after the fact, accumulated with non-short-circuiting
+	// `&` (`Iterator::all` would exit at the first failure): the sweep always
+	// traverses the whole polynomial, so honest keys (which always pass) take
+	// a data-independent path through this function.
 	let eta = params::ETA as i32;
-	r.coeffs.iter().all(|&c| (-eta..=eta).contains(&c))
+	r.coeffs.iter().fold(true, |ok, &c| ok & (c >= -eta) & (c <= eta))
 }
 
 /// Bit-pack polynomial z with coefficients in [-(GAMMA1 - 1), GAMMA1 - 1].
