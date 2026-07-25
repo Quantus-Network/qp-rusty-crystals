@@ -375,19 +375,19 @@ impl ThresholdSigner {
 	/// * `context` - Optional context string (max 255 bytes)
 	/// * `other_round1` - Round 1 broadcasts from other participating parties
 	///
-	/// # Caller Responsibility
+	/// # Participant Validation
 	///
-	/// **Important:** This method does not validate that Round 1 broadcasts come from
-	/// parties that participated in the original DKG. The caller must ensure that
-	/// `other_round1` contains only broadcasts from parties whose IDs exist in the
-	/// DKG participant set (i.e., parties that hold valid key shares).
-	///
-	/// Passing broadcasts with unknown `party_id` values will cause `round3_respond()`
-	/// to fail with an `InvalidConfiguration` error during share recovery.
+	/// Every Round 1 broadcast's `party_id` is checked against the DKG
+	/// participant set before any state is modified. A broadcast from an
+	/// unknown party is rejected with `InvalidConfiguration` and the session
+	/// stays in `AfterRound1`, so the caller can retry with a corrected set.
+	/// (Deferred to Round 3, the same condition would only surface inside
+	/// share recovery — after the session's participant set was frozen and
+	/// the commitment aggregate mutated, forcing a full session reset.)
 	///
 	/// For network usage, use
-	/// [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol) which handles
-	/// participant validation automatically.
+	/// [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol) which also
+	/// validates participants at message receipt.
 	///
 	/// # Errors
 	///
@@ -395,6 +395,7 @@ impl ThresholdSigner {
 	/// - The signer is not in the `AfterRound1` state
 	/// - Context is too long (> 255 bytes)
 	/// - Not enough parties are participating
+	/// - A Round 1 broadcast comes from a party outside the DKG participant set
 	///
 	/// # State Transition
 	///
@@ -426,6 +427,23 @@ impl ThresholdSigner {
 				provided: total_parties,
 				required: self.config.threshold(),
 			});
+		}
+
+		// Reject Round 1 broadcasts from parties outside the DKG participant
+		// set now, before the commit point below (and before the keygen-scale
+		// commitment packing). Deferred, such a party is only detected inside
+		// `recover_share` during Round 3 — after the peers' reveals have been
+		// folded into the commitment aggregate, where the only safe recovery
+		// is a full session reset. Failing here is cheap and leaves the
+		// session in AfterRound1, cleanly retryable with a corrected set.
+		let dkg_participants = self.private_key.dkg_participants();
+		for r1 in other_round1 {
+			if dkg_participants.index_of(r1.party_id).is_none() {
+				return Err(ThresholdError::InvalidConfiguration(format!(
+					"Round 1 broadcast from party {} which is not in the DKG participant set",
+					r1.party_id
+				)));
+			}
 		}
 
 		// Check state and get round1_data
@@ -478,22 +496,23 @@ impl ThresholdSigner {
 	/// * `other_round1` - Round 1 broadcasts from other parties (for commitment verification)
 	/// * `other_round2` - Round 2 broadcasts from other participating parties
 	///
-	/// # Caller Responsibility
+	/// # Participant Validation
 	///
-	/// **Important:** This method does not validate that broadcasts come from parties
-	/// that participated in the original DKG. The caller must ensure that all broadcasts
-	/// are from parties whose IDs exist in the DKG participant set.
+	/// Parties outside the DKG participant set are rejected by
+	/// [`round2_reveal`](Self::round2_reveal) before the session's participant
+	/// set is frozen, so through the public API they cannot reach this method.
+	/// Reveals are verified against the commitment map frozen in Round 2; a
+	/// reveal from a party not in that map fails the exact-set check before
+	/// the aggregate is touched.
 	///
-	/// Broadcasts with unknown `party_id` values will cause share recovery to fail
-	/// with an `InvalidConfiguration` error. Because that failure is detected after
-	/// the peers' reveals have already been folded into the commitment aggregate
-	/// (and the offending participant set was frozen in Round 2, so no retry of
-	/// this session could succeed), it resets the signing session: restart from
-	/// Round 1.
+	/// Should share recovery nonetheless fail after the peers' reveals have
+	/// been folded into the commitment aggregate (defense in depth), the
+	/// signing session is reset — the frozen participant set means no retry
+	/// of the same session could succeed: restart from Round 1.
 	///
 	/// For network usage, use
-	/// [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol) which handles
-	/// participant validation automatically.
+	/// [`DilithiumSignProtocol`](crate::signing_protocol::DilithiumSignProtocol) which also
+	/// validates participants at message receipt.
 	///
 	/// # Security
 	///
@@ -593,11 +612,11 @@ impl ThresholdSigner {
 		// failure before the phase advances to AfterRound3 must reset the
 		// session, exactly like the aggregation failure path above: leaving
 		// AfterRound2 would let a retry re-run `aggregate_reveals` and
-		// double-count the peers' commitments. This path is reachable with
-		// attacker-influenced input — an active party outside the DKG
-		// participant set is only detected here, inside `recover_share` —
-		// and such a failure is baked into the session's frozen participant
-		// set, so no retry of the same session could ever succeed anyway.
+		// double-count the peers' commitments. Through the public API this
+		// path should be unreachable — `round2_reveal` rejects parties
+		// outside the DKG set before freezing the session — but the reset
+		// stays as defense in depth: a failure here is baked into the frozen
+		// participant set, so no retry of the same session could succeed.
 		let responses = match self.state.expect_round2().and_then(|(round1_data, round2_data)| {
 			generate_round3_response(&self.private_key, &self.config, round1_data, round2_data)
 		}) {
@@ -1274,19 +1293,64 @@ mod tests {
 		);
 	}
 
+	/// A Round 1 broadcast from a party outside the DKG participant set must
+	/// be rejected by `round2_reveal` *before* its commit point. Deferring
+	/// the check means Round 3 only detects the ghost inside
+	/// `recover_share`, after the peers' reveals have been folded into the
+	/// aggregate — where the only safe recovery is a full session reset.
+	/// Failing early keeps the session in AfterRound1, cleanly retryable
+	/// with a corrected participant set.
+	#[test]
+	fn test_round2_rejects_party_outside_dkg_set_before_commit() {
+		use crate::{broadcast::Round1Broadcast, generate_with_dealer};
+
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[14u8; 32], config).unwrap();
+		let mut s0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+		let mut s1 = ThresholdSigner::new(shares[1].clone(), pk, config).unwrap();
+
+		let ssid = [0x22u8; 32];
+		let r1_0 = s0.round1_commit_with_seed(&ssid, &[1u8; 32]).unwrap();
+		let r1_1 = s1.round1_commit_with_seed(&ssid, &[2u8; 32]).unwrap();
+		let _ = r1_0;
+
+		// Well-formed Round 1 broadcast from party 99, which is not in the
+		// DKG participant set {0, 1, 2}.
+		let r1_99 = Round1Broadcast::new(ssid, 99, [0xEEu8; 32]);
+
+		let err = s0
+			.round2_reveal(&ssid, b"early", b"", core::slice::from_ref(&r1_99))
+			.expect_err("round2_reveal must reject a party outside the DKG set");
+		assert!(
+			matches!(err, ThresholdError::InvalidConfiguration(_)),
+			"expected InvalidConfiguration for a non-DKG party, got {err:?}"
+		);
+
+		// The rejection must precede the commit point: the session stays in
+		// AfterRound1 and a retry with the honest participant set succeeds.
+		assert_eq!(
+			s0.state.phase,
+			SigningPhase::AfterRound1,
+			"early rejection must leave the session cleanly retryable"
+		);
+		s0.round2_reveal(&ssid, b"early", b"", core::slice::from_ref(&r1_1))
+			.expect("retry with the honest participant set must succeed");
+	}
+
 	/// A failure *after* `aggregate_reveals` has folded peer commitments into
 	/// `w_aggregated` must reset the session, exactly like the aggregation
 	/// failure path itself: leaving the signer in AfterRound2 with a mutated
 	/// aggregate would let a retry re-run `aggregate_reveals` and double-count
 	/// every peer's commitment, silently poisoning the session.
 	///
-	/// The failure is triggered through the documented recoverable-looking
-	/// path: a Round 1 broadcast from a party that is not in the DKG
-	/// participant set is accepted by `round2_reveal` (the docs defer the
-	/// check), passes all Round 3 reveal validation (its reveal is genuinely
-	/// hash-bound and well-formed), and only fails inside
-	/// `generate_round3_response` -> `recover_share` with
-	/// `InvalidConfiguration` — after the aggregate is already committed.
+	/// The failure is triggered inside `generate_round3_response` ->
+	/// `recover_share` (`InvalidConfiguration` for a party outside the DKG
+	/// set) — after the aggregate is already committed. Through the public
+	/// API this trigger is no longer reachable: `round2_reveal` rejects
+	/// non-DKG parties before freezing the session (see
+	/// `test_round2_rejects_party_outside_dkg_set_before_commit`). The test
+	/// therefore plants the ghost by editing the frozen session state
+	/// directly, keeping the defensive reset covered.
 	#[test]
 	fn test_round3_failure_after_aggregation_resets_session() {
 		use crate::{
@@ -1303,7 +1367,7 @@ mod tests {
 
 		let ssid = [0x21u8; 32];
 		let r1_0 = s0.round1_commit_with_seed(&ssid, &[1u8; 32]).unwrap();
-		let _r1_1 = s1.round1_commit_with_seed(&ssid, &[2u8; 32]).unwrap();
+		let r1_1 = s1.round1_commit_with_seed(&ssid, &[2u8; 32]).unwrap();
 		let r2_1 = s1.round2_reveal(&ssid, b"reset", b"", core::slice::from_ref(&r1_0)).unwrap();
 
 		// Rebrand party 1's valid commitment data as coming from party 99,
@@ -1315,7 +1379,16 @@ mod tests {
 		let r1_99 = Round1Broadcast::new(ssid, 99, ghost_hash);
 		let r2_99 = Round2Broadcast::new(ssid, 99, r2_1.commitment_data.clone());
 
-		s0.round2_reveal(&ssid, b"reset", b"", core::slice::from_ref(&r1_99)).unwrap();
+		// Run an honest Round 2 (party 99 would now be rejected), then plant
+		// the ghost in the frozen session state: swap the frozen commitment
+		// map and active-participant list to name party 99 instead of 1.
+		s0.round2_reveal(&ssid, b"reset", b"", core::slice::from_ref(&r1_1)).unwrap();
+		{
+			let round2_data = s0.state.round2_data.as_mut().unwrap();
+			round2_data.round1_commitments.clear();
+			round2_data.round1_commitments.insert(99, ghost_hash);
+			round2_data.active_participants = ParticipantList::new(&[0, 99]).unwrap();
+		}
 
 		let err = s0
 			.round3_respond(&ssid, core::slice::from_ref(&r1_99), core::slice::from_ref(&r2_99))
