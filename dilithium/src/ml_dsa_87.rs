@@ -23,11 +23,38 @@ pub type Signature = [u8; SIGNBYTES];
 ///
 /// `Clone` is intentionally not derived because the embedded `SecretKey` is sensitive.
 /// To explicitly copy a keypair (e.g. to move it into a closure), serialize and
-/// reconstruct: `Keypair::from_bytes(&keypair.to_bytes())?`. This forces the
-/// duplication of secret material to be visible at every call site.
+/// reconstruct: `Keypair::from_bytes(keypair.to_bytes().as_slice())?`. This forces
+/// the duplication of secret material to be visible at every call site.
+///
+/// # Invariant
+///
+/// The public half always corresponds to the secret half. Every constructor
+/// enforces it — [`Keypair::generate`] by construction, [`Keypair::from_bytes`]
+/// and [`Keypair::from_parts`] by re-deriving the public key from the secret —
+/// and the fields are private, so the halves cannot be assembled or swapped
+/// independently. [`sign`](Self::sign) and [`verify`](Self::verify) delegate
+/// to the respective halves, and [`to_bytes`](Self::to_bytes) serializes them
+/// directly; all three rely on this invariant. A mismatched keypair does not
+/// compile:
+///
+/// ```compile_fail
+/// use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, PublicKey, SecretKey};
+///
+/// fn forge(secret: SecretKey, public: PublicKey) -> Keypair {
+///     Keypair { secret, public } // ERROR: fields are private
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, PublicKey};
+///
+/// fn swap_public(kp: &mut Keypair, other: PublicKey) {
+///     kp.public = other; // ERROR: field is private
+/// }
+/// ```
 pub struct Keypair {
-	pub secret: SecretKey,
-	pub public: PublicKey,
+	secret: SecretKey,
+	public: PublicKey,
 }
 
 impl Keypair {
@@ -52,6 +79,34 @@ impl Keypair {
 		sk.zeroize();
 		// entropy is automatically zeroized when it drops (ZeroizeOnDrop)
 		keypair
+	}
+
+	/// The secret half.
+	pub fn secret(&self) -> &SecretKey {
+		&self.secret
+	}
+
+	/// The public half.
+	pub fn public(&self) -> &PublicKey {
+		&self.public
+	}
+
+	/// Assemble a keypair from an already-imported secret and public key.
+	///
+	/// Enforces the same correspondence invariant as [`Keypair::from_bytes`]:
+	/// the public key is re-derived from the secret half (a keygen-scale
+	/// computation) and must match `public` exactly, otherwise
+	/// [`KeyParsingError::BadKeypair`] is returned and the secret is wiped by
+	/// its own drop. This is the only way to build a `Keypair` from parts —
+	/// the fields are private precisely so a mismatched pair (signing under
+	/// one key while advertising another) is unrepresentable.
+	pub fn from_parts(secret: SecretKey, public: PublicKey) -> Result<Keypair, KeyParsingError> {
+		let derived_public = crate::sign::public_key_from_secret(&secret.bytes)
+			.ok_or(KeyParsingError::BadKeypair)?;
+		if derived_public != public.bytes {
+			return Err(KeyParsingError::BadKeypair);
+		}
+		Ok(Keypair { secret, public })
 	}
 
 	/// Convert a Keypair to a bytes array.
@@ -102,9 +157,9 @@ impl Keypair {
 	/// blob corrupted in those regions would otherwise import cleanly and then
 	/// produce signatures that fail under the advertised public key.
 	///
-	/// Note: the `secret` and `public` fields are public, so callers can still
-	/// construct or mutate a `Keypair` with mismatched halves directly. This
-	/// check only guards the deserialization/import path.
+	/// The fields are private and [`Keypair::from_parts`] performs the same
+	/// correspondence check, so the invariant established here holds for the
+	/// lifetime of every `Keypair` value.
 	pub fn from_bytes(bytes: &[u8]) -> Result<Keypair, KeyParsingError> {
 		if bytes.len() != SECRETKEYBYTES + PUBLICKEYBYTES {
 			return Err(KeyParsingError::BadKeypair);
@@ -175,6 +230,16 @@ impl Keypair {
 impl fmt::Debug for Keypair {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("Keypair").field("public", &self.public).finish()
+	}
+}
+
+/// Wipes the secret half in place (the public half is public data and is
+/// left intact). With the fields private, this is the supported way for
+/// callers to erase an imported keypair's secret material on demand; the
+/// same wipe runs automatically when the `Keypair` drops.
+impl Zeroize for Keypair {
+	fn zeroize(&mut self) {
+		self.secret.zeroize();
 	}
 }
 
@@ -455,6 +520,32 @@ mod tests {
 			matches!(Keypair::from_bytes(&forged), Err(KeyParsingError::BadKeypair)),
 			"public key not derived from the secret key must be rejected"
 		);
+	}
+
+	// `from_parts` is the only way to assemble a `Keypair` from separately
+	// imported halves (the fields are private), so it must enforce the same
+	// secret/public correspondence as `from_bytes`: a keypair that signs
+	// under one key while advertising another must be unrepresentable.
+	#[test]
+	fn from_parts_enforces_secret_public_correspondence() {
+		use super::{KeyParsingError, Keypair, SecretKey};
+
+		let keys_a = Keypair::generate(get_random_bytes());
+		let keys_b = Keypair::generate(get_random_bytes());
+
+		let secret_a = SecretKey::from_bytes(keys_a.secret.to_bytes().as_slice()).unwrap();
+		assert!(
+			matches!(
+				Keypair::from_parts(secret_a, keys_b.public.clone()),
+				Err(KeyParsingError::BadKeypair)
+			),
+			"unrelated halves must be rejected"
+		);
+
+		let secret_a = SecretKey::from_bytes(keys_a.secret.to_bytes().as_slice()).unwrap();
+		let assembled = Keypair::from_parts(secret_a, keys_a.public.clone())
+			.expect("matching halves must be accepted");
+		assert_eq!(*assembled.to_bytes(), *keys_a.to_bytes());
 	}
 
 	// The packed secret key stores tr = SHAKE256(pk) and t0 (low bits of
