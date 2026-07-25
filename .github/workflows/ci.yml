@@ -71,6 +71,23 @@ jobs:
         run: cargo build --workspace --locked
       - name: Test workspace
         run: cargo test --workspace --locked
+      # The stack-zeroization guard is gated to optimized builds
+      # (#![cfg(not(debug_assertions))]): debug codegen materializes compiler
+      # temporaries of the secret key that no source-level fix can wipe, so the
+      # debug `cargo test` above compiles this file to zero tests. The property
+      # it guards is entirely a function of codegen, making it the test most
+      # likely to silently regress on a toolchain bump — run it in release, and
+      # fail if zero tests ran so a gating/rename change can't turn the guard
+      # back into documentation.
+      - name: Optimized-build regression tests (stack zeroization)
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p qp-rusty-crystals-dilithium \
+            --test import_stack_zeroization 2>&1 | tee stack-zeroization.log
+          grep -Eq "test result: ok\. [1-9][0-9]* passed" stack-zeroization.log || {
+            echo "::error::stack-zeroization tests were filtered out (0 tests ran)"
+            exit 1
+          }
 
   no-std-build:
     name: 📦 no_std Build (wasm32v1-none)
