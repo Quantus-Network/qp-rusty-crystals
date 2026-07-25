@@ -58,7 +58,7 @@ use alloc::vec::Vec;
 
 use qp_rusty_crystals_dilithium::{
 	fips202,
-	params::{K, L},
+	params::{K, L, N},
 };
 use zeroize::Zeroizing;
 
@@ -134,7 +134,7 @@ pub(crate) fn hash_secret_shares(master_share: &PrivateKeyShare) -> [u8; 64] {
 	// be a zeroizing container (a plain Vec freed after `clear()` leaves the
 	// coefficients in allocator memory) and it must be allocated at full size
 	// up front (growing mid-fill would free an unwiped intermediate block).
-	const SUBSET_BYTES: usize = 2 + (L + K) * 256 * core::mem::size_of::<i32>();
+	const SUBSET_BYTES: usize = 2 + (L + K) * N as usize * core::mem::size_of::<i32>();
 	let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(SUBSET_BYTES));
 	for (subset_mask, share_data) in master_share.shares() {
 		buf.clear();

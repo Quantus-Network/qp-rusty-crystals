@@ -37,7 +37,7 @@ use crate::participants::ParticipantId;
 
 use qp_rusty_crystals_dilithium::{
 	fips202,
-	params::{K, L},
+	params::{K, L, N},
 };
 
 /// Maximum DKG message size in bytes (256 KB).
@@ -1948,7 +1948,7 @@ fn build_private_share<S: TranscriptSigner>(
 		// leaves the coefficients in allocator memory) and it must be allocated
 		// at full size up front (growing mid-fill would free an unwiped
 		// intermediate block).
-		const SUBSET_BYTES: usize = 2 + (L + K) * 256 * core::mem::size_of::<i32>();
+		const SUBSET_BYTES: usize = 2 + (L + K) * N as usize * core::mem::size_of::<i32>();
 		let mut buf: Zeroizing<alloc::vec::Vec<u8>> =
 			Zeroizing::new(alloc::vec::Vec::with_capacity(SUBSET_BYTES));
 		for (subset_mask, contribution) in my_contributions {
