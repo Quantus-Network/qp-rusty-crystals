@@ -130,7 +130,7 @@ Because sub-share derivation is deterministic from the (public, post-Round-2) se
 
 On successful completion (`Action::Return`), the protocol zeroizes, in place: the caller-provided seed, this party's entropy, the session seed, all derived sub-shares `r_{I→J}`, all received Round 4 messages, the aggregated new-share working set, and — for old committee members — **the old share held in the config**. `old_share_erased()` reports whether the config's share is gone. The same erasure runs again on `Drop` (covering abort paths). Callers must still erase their own copies: the original share file/keystore entry and anything cloned before `ResharingConfig::new`.
 
-**Abort recovery**: a session that fails or stalls before Round 6 certification has produced no replacement share, and dropping the failed protocol erases the old share held in the config. Old committee members that moved their only live copy of the share into `ResharingConfig` must recover it with `take_existing_share()` before dropping the protocol, then retry with a fresh session. Recovering the share marks an in-flight session as failed (it cannot continue without the share).
+**Abort recovery**: a session that fails or stalls before Round 6 certification has produced no replacement share, and dropping the failed protocol erases the old share held in the config. Old committee members that moved their only live copy of the share into `ResharingConfig` must recover it with `abort_and_take_existing_share()` before dropping the protocol, then retry with a fresh session. Recovering the share marks an in-flight session as failed (it cannot continue without the share) — hence the `abort_` prefix.
 
 ## Security Properties
 
@@ -240,6 +240,9 @@ loop {
         Action::Wait => { /* wait for network messages */ }
         Action::SendMany(data) => { /* broadcast to all parties */ }
         // ⚠️ CRITICAL: Use authenticated-encrypted channel!
+        // `data` is `Zeroizing<Vec<u8>>`, not a plain `Vec<u8>`: the payload
+        // carries plaintext sub-shares, so it wipes itself from heap memory
+        // when dropped after transmission. Deref (`&data[..]`) to send.
         Action::SendPrivate(to, data) => { /* send to specific party over secure channel */ }
         Action::Return(output) => {
             // Resharing complete

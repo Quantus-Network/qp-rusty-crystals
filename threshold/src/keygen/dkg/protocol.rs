@@ -544,6 +544,17 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// the buffer beyond the shrunken length, where the drop-time wipe (which
 	/// only covers live elements) cannot reach them. Clone the element out and
 	/// wipe the slot in place before shrinking.
+	///
+	/// Known residual (heap is covered, stack is not): the clone returned
+	/// here moves by value through `poke` into `serialize_round1_private`,
+	/// and each move can leave a bitwise temporary of K_S in a dead stack
+	/// frame. The final binding is wiped (`Round1Private: ZeroizeOnDrop`),
+	/// but intermediate move temporaries are compiler-managed — the same
+	/// class of leak addressed for key import/serialize in the dilithium
+	/// crate, where it is pinned by a painted-stack probe. Closing it here
+	/// would need a by-reference serialization path plus an equivalent
+	/// probe; tracked as follow-up, not covered by the heap-zeroization
+	/// tests.
 	fn pop_pending_private(&mut self) -> Option<(ParticipantId, Round1Private)> {
 		let (to, private) = {
 			let (to, slot) = self.pending_privates.last_mut()?;

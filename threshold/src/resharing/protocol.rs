@@ -579,8 +579,9 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// [`Self::take_output`] is then the only live key material).
 	///
 	/// Recovering the share renders the session unable to continue, so an
-	/// in-flight session is marked failed.
-	pub fn take_existing_share(&mut self) -> Option<PrivateKeyShare> {
+	/// in-flight session is marked failed — the name carries the side
+	/// effect: this is an abort-recovery operation, not an accessor.
+	pub fn abort_and_take_existing_share(&mut self) -> Option<PrivateKeyShare> {
 		let share = self.config.take_existing_share();
 		if share.is_some() &&
 			!matches!(self.state, ResharingState::Done | ResharingState::Failed(_))
@@ -3338,7 +3339,7 @@ mod tests {
 		protocol.state = ResharingState::Failed("attacker stalled the session".to_string());
 
 		let recovered = protocol
-			.take_existing_share()
+			.abort_and_take_existing_share()
 			.expect("failed session must preserve the old share for retry");
 		assert_eq!(recovered, original, "recovered share must be intact");
 		// The protocol no longer holds the share; dropping it is now safe.
@@ -3353,8 +3354,9 @@ mod tests {
 		let (mut protocol, original) = share_recovery_fixture();
 
 		// Session stalled mid-protocol (e.g. transport timeout while waiting).
-		let recovered =
-			protocol.take_existing_share().expect("stalled session must yield the share");
+		let recovered = protocol
+			.abort_and_take_existing_share()
+			.expect("stalled session must yield the share");
 		assert_eq!(recovered, original);
 		assert!(protocol.is_failed(), "session must be terminal after share recovery");
 	}
@@ -3369,7 +3371,7 @@ mod tests {
 		protocol.zeroize_session_secrets();
 		protocol.state = ResharingState::Done;
 
-		assert!(protocol.take_existing_share().is_none());
+		assert!(protocol.abort_and_take_existing_share().is_none());
 		assert!(protocol.is_done(), "recovery attempt must not disturb a completed session");
 	}
 

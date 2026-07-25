@@ -281,7 +281,8 @@ impl ResharingConfig {
 	/// when the protocol is dropped. Integrators should treat the returned new
 	/// share as the only live key material after a successful handoff. For
 	/// sessions that failed or stalled before completion, recover the share
-	/// with [`Self::take_existing_share`] before dropping the protocol.
+	/// with `ResharingProtocol::abort_and_take_existing_share` before
+	/// dropping the protocol.
 	pub fn zeroize_existing_share(&mut self) {
 		if let Some(mut share) = self.existing_share.take() {
 			share.zeroize();

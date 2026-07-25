@@ -1116,10 +1116,16 @@ impl DilithiumSignProtocol {
 		// Cheap fixed-header SSID check *before* deserialization. Round 2/3
 		// payloads can be multi-megabyte, so parsing before this check would
 		// let wrong-session frames (guaranteed to be dropped) drive avoidable
-		// allocation and CPU work on every receiver. Frames outside the size
-		// budget or too short to carry a header fall through to the
-		// deserializer, whose O(1) length checks reject them as malformed
-		// before parsing.
+		// allocation and CPU work on every receiver.
+		//
+		// The size gate does not change what is ultimately rejected — it
+		// picks the failure mode. A well-sized frame with a foreign SSID is
+		// silently ignored (`Ok(())`): most likely cross-session traffic or
+		// a replay, not this session's problem. A frame outside the size
+		// budget (or too short to carry a header) skips the SSID early-out
+		// and falls to the deserializer, whose O(1) length checks reject it
+		// as `MalformedMessage`: oversize is sender misbehavior worth
+		// surfacing regardless of which session the frame claims.
 		if data.len() >= FRAME_HEADER_LEN &&
 			data.len() <= self.max_frame_size() &&
 			data[1..FRAME_HEADER_LEN] != self.ssid

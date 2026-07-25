@@ -11,7 +11,9 @@ This PR addresses the fourth round of security review findings across the `dilit
 - DKG K_S relocation out of Copy-typed containers: `transition_to_round2` freed the `received_shared_secrets` map nodes with the secrets still in them (the state zeroizer runs too late — the field is already `None`), `pending_privates.pop()` left queued `Round1Private` bytes beyond the `Vec`'s shrunken length, and the buffered-privates drain consumed its map the same way (`4e6cb6d`);
 - the wormhole Poseidon preimage (`preimage_felts`) was `clear()`ed but never wiped; covered by a dedicated allocator-instrumented test in `hdwallet/tests/wormhole_zeroization.rs` (`7d63cf9`).
 
-**Stack copies of the ML-DSA-87 secret key are wiped in import/serialize paths.** `Keypair::from_bytes`, `SecretKey::from_bytes`, and `Keypair::to_bytes` left plaintext `[u8; SECRETKEYBYTES]` copies in dead stack frames because `[u8; N]` is `Copy`. All three now stage the secret in `Zeroizing` locals. A painted-stack probe test (`dilithium/tests/import_stack_zeroization.rs`, release-mode only — debug builds create compiler temporaries no source fix can wipe) verifies no copy survives (`2197133`).
+**Stack copies of the ML-DSA-87 secret key are wiped in import/serialize paths.** `Keypair::from_bytes`, `SecretKey::from_bytes`, and `Keypair::to_bytes` left plaintext `[u8; SECRETKEYBYTES]` copies in dead stack frames because `[u8; N]` is `Copy`. All three now stage the secret in `Zeroizing` locals, and the secret-bearing `to_bytes` methods return `Zeroizing<[u8; N]>` so the caller's copy self-wipes too (semver-breaking; a caller who simply drops the result leaks nothing). A painted-stack probe test (`dilithium/tests/import_stack_zeroization.rs`, release-mode only — debug builds create compiler temporaries no source fix can wipe) verifies no copy survives, and CI runs it in release mode with a zero-tests-ran guard.
+
+Known residual: the DKG private-send path (`pop_pending_private` → `poke` → `serialize_round1_private`) moves a `Round1Private` by value, and intermediate move temporaries holding K_S in dead stack frames are compiler-managed — the same class the dilithium probe pins. Heap copies on that path are covered; the stack side is noted in the code as follow-up.
 
 **Debug output no longer leaks key material.** The resharing `Action::SendPrivate` payload (serialized sub-shares) is redacted from the manual `Debug` impl (`df8dee3`).
 
@@ -32,7 +34,7 @@ This PR addresses the fourth round of security review findings across the `dilit
 ## Protocol state-machine correctness
 
 - Aborted resharing sessions no longer strand the old share: recovery restores it so the party can rejoin a retried session (`5e5c7ef`).
-- `round3_respond` failures **after** the peers' reveals were folded into the commitment aggregate (e.g. `recover_share` rejecting an active party outside the DKG set — only detectable at that point) now reset the session instead of leaving a poisoned aggregate in the "cleanly retryable" `AfterRound2` state, where a retry would double-count every peer's commitment. Pre-commit-point failures still leave the session clean for corrected retries (`243bb0d`).
+- `round3_respond` failures **after** the peers' reveals were folded into the commitment aggregate now reset the session instead of leaving a poisoned aggregate in the "cleanly retryable" `AfterRound2` state, where a retry would double-count every peer's commitment. Pre-commit-point failures still leave the session clean for corrected retries (`243bb0d`). The trigger for the reset — a Round 1 broadcast from a party outside the DKG participant set, previously only detected inside `recover_share` — is now rejected by `round2_reveal` before the commit point, so the failure is early and recoverable and the round-3 reset is defense in depth.
 - `DerivedKeyId` is bound to the DKG output public key, preventing cross-key derivation-ID collisions (`5599c69`).
 
 ## API contract enforcement
@@ -46,8 +48,8 @@ This PR addresses the fourth round of security review findings across the `dilit
 Behavioral tightenings downstream consumers may notice:
 
 - `hdwallet`: seeds outside 16..=64 bytes are now rejected by `ExtendedPrivKey::derive` (new `Error::InvalidSeedLength` variant). The Quantus SDK's `derive_hd_path` passes 64-byte BIP39 seeds and is unaffected.
-- `threshold`: resharing `Action::SendPrivate` now carries `Zeroizing<Vec<u8>>`; `DkgConfig` fields are private (use the accessors); `SubsetContribution` and secret-key/share imports reject blobs that previously deserialized.
-- `dilithium`: `packing::unpack_sk` returns a `bool` canonicality flag; `poly::shiftl` is crate-private.
+- `threshold`: resharing `Action::SendPrivate` now carries `Zeroizing<Vec<u8>>`; `DkgConfig` fields are private (use the accessors); `SubsetContribution` and secret-key/share imports reject blobs that previously deserialized; `ThresholdSigner::round2_reveal` rejects Round 1 broadcasts from parties outside the DKG set (previously deferred to Round 3); `ResharingProtocol::take_existing_share` is renamed `abort_and_take_existing_share` (the name now carries its abort side effect); `all_broadcasts_received` is no longer exported.
+- `dilithium`: `packing::unpack_sk` returns a `bool` canonicality flag; `poly::shiftl` is crate-private; `Keypair::to_bytes` and `SecretKey::to_bytes` return `Zeroizing` buffers (deref or `as_slice()` for access).
 
 ## Test plan
 
