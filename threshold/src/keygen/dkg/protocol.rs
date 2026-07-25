@@ -2507,9 +2507,8 @@ mod tests {
 
 			public_keys.push(keypair.public.clone());
 			// Explicitly copy secret key to create signer (keypair.secret is moved)
-			let sk =
-				SecretKey::from_bytes(keypair.secret.to_bytes().as_slice())
-					.expect("valid secret key bytes");
+			let sk = SecretKey::from_bytes(keypair.secret.to_bytes().as_slice())
+				.expect("valid secret key bytes");
 			signers.push(DilithiumSigner { sk, pk: keypair.public });
 		}
 

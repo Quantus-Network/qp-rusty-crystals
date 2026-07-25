@@ -110,8 +110,8 @@
 //! session that aborts before Round 6 certification has produced no replacement share, so old
 //! committee members that moved their only live copy of the share into [`ResharingConfig`]
 //! MUST recover it via `ResharingProtocol::abort_and_take_existing_share` before dropping the
-//! failed protocol, then retry with a fresh session. Otherwise the old key material is destroyed and
-//! the group can fall below signing quorum.
+//! failed protocol, then retry with a fresh session. Otherwise the old key material is destroyed
+//! and the group can fall below signing quorum.
 //!
 //! # Why Custom Protocol?
 //!

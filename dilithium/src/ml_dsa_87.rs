@@ -505,7 +505,10 @@ mod tests {
 
 		let keys = Keypair::generate(get_random_bytes());
 		let good = keys.secret.to_bytes();
-		assert!(SecretKey::from_bytes(good.as_slice()).is_ok(), "honest secret key must be accepted");
+		assert!(
+			SecretKey::from_bytes(good.as_slice()).is_ok(),
+			"honest secret key must be accepted"
+		);
 
 		// SK layout: rho (32) || key (32) || tr (64) || s1 || s2 || t0.
 		let tr_offset = 2 * SEEDBYTES;
