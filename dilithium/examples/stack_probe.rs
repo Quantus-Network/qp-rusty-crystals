@@ -54,13 +54,16 @@ fn main() {
 		let _ = ml_dsa_87::Keypair::generate((&mut [1u8; 32]).into());
 	});
 
+	// `to_bytes` now returns a self-wiping `Zeroizing` buffer, which is not
+	// `Copy`; clone a copy into each closure.
+	let sign_bytes = kp_bytes.clone();
 	let sign = peak_stack(move || {
-		let kp = ml_dsa_87::Keypair::from_bytes(&kp_bytes).expect("from_bytes");
+		let kp = ml_dsa_87::Keypair::from_bytes(sign_bytes.as_slice()).expect("from_bytes");
 		let _ = kp.sign(msg, None, None);
 	});
 
 	let verify = peak_stack(move || {
-		let kp = ml_dsa_87::Keypair::from_bytes(&kp_bytes).expect("from_bytes");
+		let kp = ml_dsa_87::Keypair::from_bytes(kp_bytes.as_slice()).expect("from_bytes");
 		let _ = kp.verify(msg, &sig, None);
 	});
 

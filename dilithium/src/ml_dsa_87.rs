@@ -56,19 +56,27 @@ impl Keypair {
 
 	/// Convert a Keypair to a bytes array.
 	///
-	/// Returns an array containing private and public keys bytes
-	pub fn to_bytes(&self) -> [u8; KEYPAIRBYTES] {
+	/// Returns a self-wiping buffer containing private and public key bytes.
+	/// The buffer contains the full secret key, so it is `Zeroizing`: it is
+	/// erased when dropped, and callers no longer need (or are able to
+	/// forget) manual cleanup. Deref to `[u8; KEYPAIRBYTES]` for access.
+	pub fn to_bytes(&self) -> Zeroizing<[u8; KEYPAIRBYTES]> {
 		// Copy the secret half directly from the stored key rather than via
-		// `self.secret.to_bytes()`: that would materialize a `Copy` temporary
-		// of the whole secret key on the stack, dropped without zeroization.
-		// The working buffer is itself zeroizing: it is not always elided
-		// into the return slot, and an unwiped local would leave the secret
-		// key readable in this frame's dead stack memory after return. The
-		// returned (caller-owned) copy is the caller's responsibility.
+		// `self.secret.to_bytes()`: that would materialize a temporary copy
+		// of the whole secret key on the stack.
+		//
+		// The working buffer is deliberately *not* returned by move: a
+		// moved-from local never runs `Drop`, so if the compiler does not
+		// elide the return move (empirically it does not here), the frame
+		// would keep an unwiped copy. Instead the buffer is copied into a
+		// fresh wrapper for the caller and then wiped by its own `Drop` on
+		// scope exit — only the copy into the return slot is left to the
+		// optimizer, and the release-mode stack probe in
+		// `tests/import_stack_zeroization.rs` verifies it is elided.
 		let mut result = Zeroizing::new([0u8; KEYPAIRBYTES]);
 		result[..SECRETKEYBYTES].copy_from_slice(&self.secret.bytes);
 		result[SECRETKEYBYTES..].copy_from_slice(&self.public.to_bytes());
-		*result
+		Zeroizing::new(*result)
 	}
 
 	/// Create a Keypair from bytes.
@@ -184,9 +192,13 @@ pub struct SecretKey {
 }
 
 impl SecretKey {
-	/// Returns a copy of underlying bytes.
-	pub fn to_bytes(&self) -> [u8; SECRETKEYBYTES] {
-		self.bytes
+	/// Returns a copy of the underlying bytes in a self-wiping buffer.
+	///
+	/// The copy is `Zeroizing`: it is erased when dropped, so callers no
+	/// longer need (or are able to forget) manual cleanup. Deref to
+	/// `[u8; SECRETKEYBYTES]` for access.
+	pub fn to_bytes(&self) -> Zeroizing<[u8; SECRETKEYBYTES]> {
+		Zeroizing::new(self.bytes)
 	}
 
 	/// Create a SecretKey from bytes.
@@ -432,11 +444,11 @@ mod tests {
 
 		// Genuine keypair bytes must round-trip.
 		let good = keys_a.to_bytes();
-		assert!(Keypair::from_bytes(&good).is_ok(), "honest keypair must be accepted");
+		assert!(Keypair::from_bytes(good.as_slice()).is_ok(), "honest keypair must be accepted");
 
 		// Splice A's secret key with B's (unrelated) public key.
 		let mut forged = [0u8; KEYPAIRBYTES];
-		forged[..SECRETKEYBYTES].copy_from_slice(&keys_a.secret.to_bytes());
+		forged[..SECRETKEYBYTES].copy_from_slice(keys_a.secret.to_bytes().as_slice());
 		forged[SECRETKEYBYTES..].copy_from_slice(&keys_b.public.to_bytes());
 
 		assert!(
@@ -457,17 +469,17 @@ mod tests {
 
 		let keys = Keypair::generate(get_random_bytes());
 		let good = keys.to_bytes();
-		assert!(Keypair::from_bytes(&good).is_ok(), "honest keypair must be accepted");
+		assert!(Keypair::from_bytes(good.as_slice()).is_ok(), "honest keypair must be accepted");
 
 		// SK layout: rho (32) || key (32) || tr (64) || s1 || s2 || t0.
 		let tr_offset = 2 * SEEDBYTES;
 		let t0_offset = SECRETKEYBYTES - crate::params::K * POLYT0_PACKEDBYTES;
 
 		// Corrupt one byte inside the stored tr region only.
-		let mut bad_tr = good;
+		let mut bad_tr = good.clone();
 		bad_tr[tr_offset + TR_BYTES / 2] ^= 0x01;
 		assert!(
-			matches!(Keypair::from_bytes(&bad_tr), Err(KeyParsingError::BadKeypair)),
+			matches!(Keypair::from_bytes(bad_tr.as_slice()), Err(KeyParsingError::BadKeypair)),
 			"secret key with corrupted tr must be rejected"
 		);
 
@@ -475,7 +487,7 @@ mod tests {
 		let mut bad_t0 = good;
 		bad_t0[t0_offset] ^= 0x01;
 		assert!(
-			matches!(Keypair::from_bytes(&bad_t0), Err(KeyParsingError::BadKeypair)),
+			matches!(Keypair::from_bytes(bad_t0.as_slice()), Err(KeyParsingError::BadKeypair)),
 			"secret key with corrupted t0 must be rejected"
 		);
 	}
@@ -493,17 +505,17 @@ mod tests {
 
 		let keys = Keypair::generate(get_random_bytes());
 		let good = keys.secret.to_bytes();
-		assert!(SecretKey::from_bytes(&good).is_ok(), "honest secret key must be accepted");
+		assert!(SecretKey::from_bytes(good.as_slice()).is_ok(), "honest secret key must be accepted");
 
 		// SK layout: rho (32) || key (32) || tr (64) || s1 || s2 || t0.
 		let tr_offset = 2 * SEEDBYTES;
 		let t0_offset = SECRETKEYBYTES - crate::params::K * POLYT0_PACKEDBYTES;
 
 		// Corrupt one byte inside the stored tr region only.
-		let mut bad_tr = good;
+		let mut bad_tr = good.clone();
 		bad_tr[tr_offset + TR_BYTES / 2] ^= 0x01;
 		assert!(
-			matches!(SecretKey::from_bytes(&bad_tr), Err(KeyParsingError::BadSecretKey)),
+			matches!(SecretKey::from_bytes(bad_tr.as_slice()), Err(KeyParsingError::BadSecretKey)),
 			"standalone secret key with corrupted tr must be rejected"
 		);
 
@@ -511,7 +523,7 @@ mod tests {
 		let mut bad_t0 = good;
 		bad_t0[t0_offset] ^= 0x01;
 		assert!(
-			matches!(SecretKey::from_bytes(&bad_t0), Err(KeyParsingError::BadSecretKey)),
+			matches!(SecretKey::from_bytes(bad_t0.as_slice()), Err(KeyParsingError::BadSecretKey)),
 			"standalone secret key with corrupted t0 must be rejected"
 		);
 	}
@@ -620,7 +632,10 @@ mod tests {
 		);
 
 		// Honest keys must still round-trip.
-		assert!(SecretKey::from_bytes(&sk_bytes).is_ok(), "honest secret key must be accepted");
+		assert!(
+			SecretKey::from_bytes(sk_bytes.as_slice()).is_ok(),
+			"honest secret key must be accepted"
+		);
 	}
 
 	// Malicious-key forgery defense: a public key with an all-zero t1 makes verification

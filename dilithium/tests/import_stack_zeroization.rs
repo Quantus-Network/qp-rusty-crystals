@@ -14,8 +14,10 @@
 //! `stack_probe` example: run the operation on a dedicated sentinel-painted
 //! buffer via `psm::on_stack`, then scan the buffer — which we own, so the
 //! read is sound — for a distinctive window of the packed secret key. The
-//! caller-side result is wiped inside the probe, so any surviving match is a
-//! copy the library itself failed to clean up.
+//! import scenarios wipe the caller-side result in place; the serialize
+//! scenarios simply drop it, since `to_bytes` returns a self-wiping
+//! `Zeroizing` buffer. Any surviving match is a copy the library failed to
+//! clean up.
 //!
 //! The scan window is taken from the packed s1 region of the secret key:
 //! those bytes only ever appear in this packed form in full serialized-key
@@ -83,7 +85,7 @@ fn key_import_and_serialize_leave_no_secret_copies_on_the_stack() {
 	// deliberately leaves the secret key in a dead stack frame must be seen.
 	assert!(
 		probe_stack_for(&pattern, || {
-			let leaked: [u8; SECRETKEYBYTES] = sk_bytes;
+			let leaked: [u8; SECRETKEYBYTES] = *sk_bytes;
 			core::hint::black_box(&leaked);
 		}),
 		"probe self-check: a deliberately leaked stack copy was not detected"
@@ -94,7 +96,7 @@ fn key_import_and_serialize_leave_no_secret_copies_on_the_stack() {
 	// cannot smear its own copies around); anything left afterwards is a copy
 	// the import path failed to wipe.
 	let keypair_import_leaked = probe_stack_for(&pattern, || {
-		let mut imported = Keypair::from_bytes(&kp_bytes);
+		let mut imported = Keypair::from_bytes(kp_bytes.as_slice());
 		if let Ok(kp) = imported.as_mut() {
 			kp.secret.zeroize();
 		}
@@ -102,18 +104,26 @@ fn key_import_and_serialize_leave_no_secret_copies_on_the_stack() {
 
 	// Scenario B: SecretKey::from_bytes, same contract.
 	let secret_key_import_leaked = probe_stack_for(&pattern, || {
-		let mut imported = SecretKey::from_bytes(&sk_bytes);
+		let mut imported = SecretKey::from_bytes(sk_bytes.as_slice());
 		if let Ok(sk) = imported.as_mut() {
 			sk.zeroize();
 		}
 	});
 
 	// Scenario C: Keypair::to_bytes. The returned serialization necessarily
-	// contains the secret key; the caller wipes it, so any surviving match is
-	// an internal temporary the library dropped unwiped.
+	// contains the secret key, but it is `Zeroizing`, so simply dropping it
+	// — as a caller who forgets manual hygiene would — must leave nothing.
+	// Any surviving match is either an internal temporary the library
+	// dropped unwiped or a caller-side copy the API failed to self-wipe.
 	let serialize_leaked = probe_stack_for(&pattern, || {
-		let mut serialized = keypair.to_bytes();
-		serialized.zeroize();
+		let serialized = keypair.to_bytes();
+		core::hint::black_box(&serialized);
+	});
+
+	// Scenario D: SecretKey::to_bytes, same contract as C.
+	let sk_serialize_leaked = probe_stack_for(&pattern, || {
+		let serialized = keypair.secret.to_bytes();
+		core::hint::black_box(&serialized);
 	});
 
 	assert!(
@@ -127,5 +137,9 @@ fn key_import_and_serialize_leave_no_secret_copies_on_the_stack() {
 	assert!(
 		!serialize_leaked,
 		"Keypair::to_bytes left a plaintext secret key copy in stack memory"
+	);
+	assert!(
+		!sk_serialize_leaked,
+		"SecretKey::to_bytes left a plaintext secret key copy in stack memory"
 	);
 }
