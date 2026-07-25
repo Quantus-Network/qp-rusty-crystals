@@ -452,10 +452,17 @@ impl<S: TranscriptSigner> DkgState<S> {
 /// A round is complete when a broadcast has been received from every
 /// participant other than `my_party_id`. The expected count is derived by
 /// filtering the participant list rather than assuming `len() - 1`, so the
-/// predicate stays total over untrusted inputs: an empty list is vacuously
-/// complete (no underflow), and a `my_party_id` that is not a participant
-/// means every listed party is an "other".
-pub fn all_broadcasts_received<T>(
+/// predicate stays total (no underflow panic) even on degenerate inputs, and
+/// a `my_party_id` that is not a participant means every listed party is an
+/// "other".
+///
+/// Crate-internal on purpose: an empty participant list is treated as
+/// vacuously complete, which is the permissive reading of the quorum. That
+/// is sound only because every caller passes a `DkgConfig`-validated list
+/// (non-empty, contains `my_party_id`), so the vacuous case is unreachable —
+/// exposing the predicate publicly would let a caller advance a round having
+/// received zero broadcasts.
+pub(crate) fn all_broadcasts_received<T>(
 	received: &BTreeMap<ParticipantId, T>,
 	all_participants: &[ParticipantId],
 	my_party_id: ParticipantId,
@@ -621,14 +628,14 @@ mod tests {
 		);
 	}
 
-	/// `all_broadcasts_received` is exported publicly and takes a raw
-	/// participant slice, so its quorum arithmetic must tolerate degenerate
-	/// inputs: an empty list previously computed `0usize - 1`, panicking in
-	/// checked builds.
+	/// `all_broadcasts_received`'s quorum arithmetic must stay total over
+	/// degenerate inputs: an empty list previously computed `0usize - 1`,
+	/// panicking in checked builds. The predicate is `pub(crate)` and every
+	/// caller passes a `DkgConfig`-validated (non-empty) list, so this pins
+	/// totality — no panic — not a reachable "vacuously complete" semantics.
 	#[test]
 	fn all_broadcasts_received_does_not_underflow_on_empty_participant_list() {
 		let received: BTreeMap<ParticipantId, u8> = BTreeMap::new();
-		// Vacuously complete: there is nobody to wait for.
 		assert!(all_broadcasts_received(&received, &[], 0));
 	}
 

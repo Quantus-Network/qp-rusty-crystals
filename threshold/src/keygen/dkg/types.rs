@@ -157,12 +157,12 @@ use qp_rusty_crystals_dilithium::{
 /// # Invariants
 ///
 /// The fields are private so that [`DkgConfig::new`] is the only way to build
-/// a config: the state machine (including quorum arithmetic such as
-/// [`all_broadcasts_received`](super::all_broadcasts_received)) trusts that
-/// `all_participants` is non-empty, sorted, duplicate-free, matches the
-/// threshold configuration's party count, contains `my_party_id`, and has a
-/// verifying key for every participant. A struct literal bypassing those
-/// checks does not compile:
+/// a config: the state machine (including quorum arithmetic such as the
+/// crate-internal `all_broadcasts_received`) trusts that `all_participants`
+/// is non-empty, sorted, duplicate-free, matches the threshold
+/// configuration's party count, contains `my_party_id`, and has a verifying
+/// key for every participant. A struct literal bypassing those checks does
+/// not compile:
 ///
 /// ```compile_fail
 /// use qp_rusty_crystals_threshold::keygen::dkg::{DkgConfig, TranscriptSigner};
@@ -170,6 +170,15 @@ use qp_rusty_crystals_dilithium::{
 /// fn corrupt<S: TranscriptSigner>(config: &mut DkgConfig<S>) {
 ///     config.all_participants.clear(); // ERROR: field is private
 /// }
+/// ```
+///
+/// The quorum predicate itself is `pub(crate)` for the same reason: it treats
+/// an empty participant list as vacuously complete, which is only sound
+/// because every caller passes a config-validated list. It cannot be reached
+/// with raw, unvalidated inputs from outside the crate:
+///
+/// ```compile_fail
+/// use qp_rusty_crystals_threshold::keygen::dkg::all_broadcasts_received;
 /// ```
 #[derive(Clone)]
 pub struct DkgConfig<S: TranscriptSigner> {
