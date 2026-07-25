@@ -160,6 +160,13 @@ impl Keypair {
 	/// The fields are private and [`Keypair::from_parts`] performs the same
 	/// correspondence check, so the invariant established here holds for the
 	/// lifetime of every `Keypair` value.
+	///
+	/// One packed field is *not* (and cannot be) validated: the nonce seed
+	/// `K`, which is independent entropy with no stored commitment. A blob
+	/// whose `K` was tampered imports cleanly and signs verifiably, but
+	/// known-K **deterministic** signatures leak the secret key. Store key
+	/// blobs with integrity protection, or pass fresh `hedge` randomness to
+	/// [`sign`](Self::sign) when storage integrity cannot be guaranteed.
 	pub fn from_bytes(bytes: &[u8]) -> Result<Keypair, KeyParsingError> {
 		if bytes.len() != SECRETKEYBYTES + PUBLICKEYBYTES {
 			return Err(KeyParsingError::BadKeypair);
@@ -196,7 +203,12 @@ impl Keypair {
 	///
 	/// * 'msg' - message to sign (max 64 MiB)
 	/// * 'ctx' - optional context string (max 255 bytes)
-	/// * 'hedge' - optional random bytes for hedged signing
+	/// * 'hedge' - optional random bytes for hedged signing. `None` selects
+	///   deterministic mode (`ρ' = H(K || 0 || μ)`), whose masks are a pure
+	///   function of the stored nonce seed `K` and the message — prefer
+	///   `Some(fresh randomness)` unless byte-reproducible signatures are
+	///   required, especially when key-blob storage integrity cannot be
+	///   guaranteed (see [`SecretKey::from_bytes`] on the unvalidatable `K`).
 	///
 	/// # Errors
 	///
@@ -287,6 +299,13 @@ impl SecretKey {
 	/// instead of creating a persistent signing outage — and ensures the same
 	/// serialized secret material has the same guarantees whether it is
 	/// imported as a `Keypair` or as a standalone `SecretKey`.
+	///
+	/// The nonce seed `K` is *not* (and cannot be) validated: it is
+	/// independent entropy with no stored commitment. A blob whose `K` was
+	/// tampered imports cleanly and signs verifiably, but known-K
+	/// **deterministic** signatures leak the secret key. Store key blobs
+	/// with integrity protection, or pass fresh `hedge` randomness to
+	/// [`sign`](Self::sign) when storage integrity cannot be guaranteed.
 	pub fn from_bytes(bytes: &[u8]) -> Result<SecretKey, KeyParsingError> {
 		if bytes.len() != SECRETKEYBYTES {
 			return Err(BadSecretKey);
@@ -308,7 +327,12 @@ impl SecretKey {
 	///
 	/// * 'msg' - message to sign (max 64 MiB)
 	/// * 'ctx' - context string (max 255 bytes)
-	/// * 'hedged' - wether to use RNG or not
+	/// * 'hedge' - optional random bytes for hedged signing. `None` selects
+	///   deterministic mode (`ρ' = H(K || 0 || μ)`), whose masks are a pure
+	///   function of the stored nonce seed `K` and the message — prefer
+	///   `Some(fresh randomness)` unless byte-reproducible signatures are
+	///   required, especially when key-blob storage integrity cannot be
+	///   guaranteed (see [`SecretKey::from_bytes`] on the unvalidatable `K`).
 	///
 	/// # Errors
 	///
