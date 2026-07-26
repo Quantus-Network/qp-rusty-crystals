@@ -177,6 +177,25 @@ pub fn pack_sig(
 /// only the current signature — otherwise a reused (or attacker-poisoned) `h`
 /// buffer would retain stale hint bits from a previous parse, letting a signature
 /// that encodes fewer/zero hints verify or canonicalize against hidden data.
+///
+/// The returned flag is the *only* signal that the hint encoding is canonical
+/// (in-order indices, counts within `OMEGA`, zero padding). All output buffers
+/// are written even on `false` — `c` and `z` fully, `h` partially — so a caller
+/// that drops the flag proceeds with a structurally invalid signature:
+///
+/// ```compile_fail
+/// #![deny(unused_must_use)]
+/// use qp_rusty_crystals_dilithium::{packing, params, polyvec::{Polyveck, Polyvecl}};
+/// let sig = [0u8; params::SIGNBYTES];
+/// let mut c = [0u8; params::C_DASH_BYTES];
+/// let mut z = Polyvecl::default();
+/// let mut h = Polyveck::default();
+/// // Discarding the validity flag must be a compile error under
+/// // deny(unused_must_use), not a silent acceptance of a bad hint encoding.
+/// packing::unpack_sig(&mut c, &mut z, &mut h, &sig);
+/// ```
+#[must_use = "the return value is the only signal that the hint encoding is canonical; \
+              on false the outputs are invalid and must be rejected"]
 pub fn unpack_sig(
 	c: &mut [u8; params::C_DASH_BYTES],
 	z: &mut Polyvecl,
