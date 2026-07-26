@@ -491,10 +491,13 @@ const UNIFORM_GAMMA1_NBLOCKS: usize = params::POLYZ_PACKEDBYTES.div_ceil(fips202
 ///
 /// * 'a' - input polynomial
 ///
-/// Returns a touple of polynomials with coefficients c0, c1
+/// On return `a1` holds the high parts (c1) and `a0` the low parts (c0) —
+/// the same output-parameter convention as [`power2round`]. (The
+/// destructuring order historically inverted this, silently handing an
+/// external caller swapped halves; `k_decompose` compensated with a `swap`.)
 pub fn decompose(a1: &mut Poly, a0: &mut Poly) {
 	for i in 0..N {
-		(a1.coeffs[i], a0.coeffs[i]) = rounding::decompose(a1.coeffs[i]);
+		(a0.coeffs[i], a1.coeffs[i]) = rounding::decompose(a1.coeffs[i]);
 	}
 }
 
@@ -988,6 +991,25 @@ mod tests {
 		b.coeffs[0] = 1 << 30;
 		let mut c = Poly::default();
 		pointwise_montgomery(&mut c, &a, &b);
+	}
+
+	/// Both `decompose` and `power2round` document the same output-parameter
+	/// convention: the first parameter (`a1`) receives the high part, the
+	/// second (`a0`) the low part. `power2round` honors it; `decompose`
+	/// historically destructured the rounding tuple in the opposite order
+	/// (patched up downstream by an ad-hoc `swap` in `k_decompose`), so an
+	/// external caller following the documented convention got swapped halves.
+	#[test]
+	fn decompose_parameter_order_matches_power2round_convention() {
+		let value = 1_234_567i32;
+		let (low, high) = rounding::decompose(value);
+		assert_ne!(low, high, "test value must distinguish the two halves");
+		let mut a1 = Poly::default();
+		a1.coeffs[0] = value;
+		let mut a0 = Poly::default();
+		decompose(&mut a1, &mut a0);
+		assert_eq!(a1.coeffs[0], high, "a1 must receive the high part c1");
+		assert_eq!(a0.coeffs[0], low, "a0 must receive the low part c0");
 	}
 
 	#[test]
