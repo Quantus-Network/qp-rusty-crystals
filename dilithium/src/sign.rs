@@ -468,7 +468,10 @@ fn generate_challenge_polynomial(
 	fips202::shake256_squeeze(&mut signature_buffer[..params::C_DASH_BYTES], &mut keccak_state);
 
 	let mut challenge_poly_c = Poly::default();
-	poly::challenge(&mut challenge_poly_c, &signature_buffer[..params::C_DASH_BYTES]);
+	let challenge_seed = signature_buffer
+		.first_chunk::<{ params::C_DASH_BYTES }>()
+		.expect("signature buffer covers the challenge seed");
+	poly::challenge(&mut challenge_poly_c, challenge_seed);
 	poly::ntt(&mut challenge_poly_c);
 	challenge_poly_c
 }
