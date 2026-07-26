@@ -473,7 +473,17 @@ pub(crate) fn all_broadcasts_received<T>(
 }
 
 /// Check if all private messages received.
-pub fn all_private_messages_received(
+///
+/// A subset's `K_S` is accounted for either as a received Round 1 private
+/// (`received_secrets`) or as one this party generated itself
+/// (`my_shared_secrets`).
+///
+/// Crate-internal on purpose, mirroring [`all_broadcasts_received`]: an
+/// empty `my_subsets` is treated as vacuously complete, which is only sound
+/// because every caller derives the subset list from a `DkgConfig`-validated
+/// participant set. Exposing the predicate publicly would let a caller gate
+/// its round on "complete" having received zero private messages.
+pub(crate) fn all_private_messages_received(
 	received_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	my_shared_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
 	my_subsets: &[SubsetMask],

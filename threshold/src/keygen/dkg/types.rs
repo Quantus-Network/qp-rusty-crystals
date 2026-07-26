@@ -180,6 +180,14 @@ use qp_rusty_crystals_dilithium::{
 /// ```compile_fail
 /// use qp_rusty_crystals_threshold::keygen::dkg::all_broadcasts_received;
 /// ```
+///
+/// The private-message completion predicate has the same vacuous-truth shape
+/// (an empty `my_subsets` reads as "all private messages received") and is
+/// scoped `pub(crate)` for the same reason:
+///
+/// ```compile_fail
+/// use qp_rusty_crystals_threshold::keygen::dkg::all_private_messages_received;
+/// ```
 #[derive(Clone)]
 pub struct DkgConfig<S: TranscriptSigner> {
 	/// The threshold configuration (t, n).
