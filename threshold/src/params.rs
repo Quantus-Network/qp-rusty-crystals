@@ -87,6 +87,25 @@ pub fn hyperball_params(t: u32, n: u32) -> Option<(f64, f64, f64)> {
 		.map(|(_, _, r, rp, nu)| (*r, *rp, *nu))
 }
 
+/// Resharing enlargement factor `κ` for `(t, n)` on this parameter set.
+///
+/// `κ` is the factor by which the Round-5 recovered-partial guard bound `B`
+/// *and* the shipped hyperball radii `(r, r')` were jointly enlarged to accept
+/// honest reshares whose measured overshoot exceeds the keygen bound (see
+/// `resharing::resharing_norm_enlargement` for the full analysis). Configs
+/// absent from the table reshare at `κ = 1` (base signing parameters).
+///
+/// Invariant: any entry here with `κ > 1` must have its `HYPERBALL` and
+/// `K_ITERATIONS` entries derived at the *enlarged* radii, so the guard bound
+/// and the sampling radii stay consistent.
+pub fn resharing_kappa(t: u32, n: u32) -> f64 {
+	tables::RESHARING_KAPPA
+		.iter()
+		.find(|(tt, nn, _)| *tt == t && *nn == n)
+		.map(|(_, _, k)| *k)
+		.unwrap_or(1.0)
+}
+
 #[cfg(feature = "ml-dsa-87")]
 mod tables {
 	/// Shipped `(t, n, k_iterations)` for ML-DSA-87 (v5 coset-splitter calibration).
@@ -126,6 +145,15 @@ mod tables {
 		(5, 6, 479692.0, 479819.0, 7.0),
 		(6, 6, 424124.0, 424197.0, 7.0),
 	];
+
+	/// Resharing enlargement `(t, n, κ)` for ML-DSA-87.
+	///
+	/// Measured honest overshoots (v5 coset splitter, fixed point):
+	/// (2,4) 0.961×, (3,5) 1.012×, (4,6) 1.163×. The (2,4)/(3,5)/(4,6)
+	/// `HYPERBALL` and `K_ITERATIONS` entries above are derived at these
+	/// enlarged radii.
+	pub(super) const RESHARING_KAPPA: &[(u32, u32, f64)] =
+		&[(2, 4, 1.10), (3, 5, 1.15), (4, 6, 1.25)];
 }
 
 #[cfg(all(feature = "ml-dsa-65", not(feature = "ml-dsa-87")))]

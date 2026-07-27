@@ -100,6 +100,18 @@ const BOUNDED_SPLIT_DOMAIN: &[u8] = b"resharing-bounded-split-v5";
 /// The `0.49` constant (= `(0.7)²`, i.e. `σ_split = 0.7·σ_keygen/√S_old`) is
 /// tuned by Monte-Carlo (`scripts/compute_hyperball_params.py`) so the
 /// aggregated hiding σ stays ≈ `σ_keygen = √2` across supported committees.
+///
+/// # η dependence (ML-DSA-65 caveat)
+///
+/// The tuning targets `σ_keygen = √(η(η+1)/3) = √2` for η = 2 (ML-DSA-44/87).
+/// ML-DSA-65 uses η = 4 (keygen variance 20/3 ≈ 6.67), so on that parameter
+/// set the aggregated split noise is ~3.3× *below* keygen variance. This is
+/// norm-safe — measured honest overshoots stay below the base bound `B`
+/// everywhere (0.62–0.92, so 65 reshares at κ = 1) — but the "new shares are
+/// distributed like a fresh keygen sharing" hiding claim is weaker than on
+/// η = 2 sets. Scaling the intensity to η = 4 keygen level is future
+/// calibration work (it would raise the overshoots and require κ > 1 radii
+/// re-derivation for 65). See SECURITY_PROOF.md, "Parameter-set scope".
 const SPLIT_NOISE_NUM_X256: u32 = 125; // round(0.49 * 256)
 
 const COMMIT_DOMAIN: &[u8] = b"resharing-commit-v3";
@@ -2612,17 +2624,23 @@ fn single_share_weighted_norm(share: &NewShareData, nu: f64) -> f64 {
 /// Exposed (re-exported at `resharing::resharing_norm_enlargement`) for analysis and
 /// testing: the recovered-partial regression tests assert that the measured honest
 /// overshoot stays `≤ κ`, the exact margin this guard enlargement provides.
+///
+/// The `κ` values are **per parameter set** and live next to the hyperball and
+/// `K_ITERATIONS` tables in [`crate::params`] (each entry with `κ > 1` has its
+/// radii/K derived at the enlarged radius, keeping the guard bound and the
+/// sampling radii consistent). Measured overshoots per variant (v5 splitter,
+/// fixed point over all signing sets):
+///
+/// - ML-DSA-87: (2,2) 0.780, (2,3) 0.810, (2,4) 0.961, (3,5) 1.012, (4,6) 1.163
+/// - ML-DSA-44: (2,2) 0.794, (2,3) 0.827, (2,4) 0.991, (3,5) 1.023, (4,6) 1.166
+/// - ML-DSA-65: (2,2) 0.620, (2,3) 0.672, (2,4) 0.869, (3,5) 0.809, (4,6) 0.917
+///
+/// ML-DSA-65's overshoots sit below 1 everywhere because its keygen secrets use
+/// η = 4 (per-coefficient variance 20/3) while the split noise intensity is
+/// tuned to η = 2 keygen variance — so it reshares at κ = 1 with base signing
+/// parameters (see `split_noise_threshold` for the hiding-side caveat).
 pub fn resharing_norm_enlargement(threshold: u32, parties: u32) -> f64 {
-	match (threshold, parties) {
-		// Re-derived for the v5 mean-subtracted coset splitter: kappa = measured honest
-		// overshoot (+ ~7-15% margin where >1). Scaling (r,r') by the same kappa keeps
-		// per-sample leakage eps fixed (get_hyperball_params); K sets Q_s = 1/(K*eps).
-		(2, 4) => 1.10, // overshoot 0.961x
-		(3, 5) => 1.15, // overshoot 1.012x
-		(4, 6) => 1.25, // overshoot 1.163x (enabled for near-mpc; K = 1600)
-		// (2,2) 0.780x, (2,3) 0.810x: comfortably below base B, reshare at kappa = 1.
-		_ => 1.0,
-	}
+	crate::params::resharing_kappa(threshold, parties)
 }
 
 /// Enumerate subset masks of size `k` over `n` bits in canonical (numerically

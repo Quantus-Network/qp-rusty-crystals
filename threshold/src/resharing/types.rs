@@ -37,11 +37,6 @@ pub const RESHARING_PROTOCOL_VERSION: u32 = 2;
 /// Value is the active FIPS 204 parameter set ([`SUITE_ID`]: 1=87, 2=44, 3=65).
 pub use crate::params::SUITE_ID as RESHARING_SUITE_ID;
 
-/// Historical alias for [`RESHARING_SUITE_ID`] when only ML-DSA-87 existed.
-#[allow(dead_code, deprecated)]
-#[deprecated(note = "use RESHARING_SUITE_ID instead")]
-pub const RESHARING_SUITE_ML_DSA_87: u32 = RESHARING_SUITE_ID;
-
 /// Maximum absolute value for sub-share coefficients in resharing.
 ///
 /// This bound defends against malicious dealers who might inject arbitrarily large

@@ -37,3 +37,8 @@ pub(super) const HYPERBALL: &[(u32, u32, f64, f64, f64)] = &[
 	(5, 6, 120426.2, 120499.6, 6.0),
 	(6, 6, 114483.6, 114525.5, 6.0),
 ];
+
+/// Pending calibration for this parameter set: with no entries every config
+/// reshares at κ = 1, so any committee whose honest overshoot exceeds the
+/// base bound fails closed at the Round-5 guard (never fail-open).
+pub(super) const RESHARING_KAPPA: &[(u32, u32, f64)] = &[];
