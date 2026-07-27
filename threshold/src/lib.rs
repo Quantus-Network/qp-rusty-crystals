@@ -187,6 +187,9 @@ pub use derivation::{derive_dkg_contribution, DerivedKeyId};
 // Verification
 pub use verification::verify_signature;
 
+/// Maximum message length accepted by the active ML-DSA parameter set.
+pub use mldsa::MAX_MESSAGE_SIZE;
+
 // SSID computation (for tests and advanced use cases)
 pub use protocol::signing::compute_ssid;
 
