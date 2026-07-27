@@ -1,6 +1,18 @@
 # Resharing (Committee Handoff) Protocol
 
-This module implements resharing for threshold ML-DSA-87, allowing the participant set to change while preserving the same public key.
+This module implements resharing for threshold ML-DSA, allowing the participant set to change while preserving the same public key.
+
+> **Parameter-set scope.** The protocol is parameter-set generic (all bounds are
+> computed from the active ML-DSA-44/65/87 feature), but the *calibration* is per
+> variant. The concrete numbers in this document (`τ = 60`, `ν = 7`, the `B`/κ/`K`
+> tables) are for **ML-DSA-87**, the fully analyzed default. Per-variant status:
+> 87 supports all documented committees; 44 supports resharing with κ-enlarged
+> params for (2,4)/(3,5) (K = 16/696) but **fails closed for reshares into (4,6)**
+> (κ-enlargement is infeasible under its verification ceilings); 65 reshares at
+> κ = 1 everywhere (measured overshoots 0.62–0.92) with a weaker quantitative
+> hiding margin because its η = 4 keygen variance exceeds the η = 2-tuned split
+> noise. See SECURITY_PROOF.md, "Parameter-Set Scope" for details and measured
+> overshoot tables.
 
 ## Why Resharing?
 

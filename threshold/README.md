@@ -9,8 +9,8 @@ Build for **exactly one** FIPS 204 parameter set via Cargo feature (default `ml-
 | Feature | NIST category | Notes |
 |---------|---------------|-------|
 | `ml-dsa-87` | 5 (~256-bit) | Default; production-calibrated hyperball / `k_iterations` |
-| `ml-dsa-65` | 3 (~192-bit) | Base signing tables from Monte Carlo; resharing κ pending |
-| `ml-dsa-44` | 2 (~128-bit) | Base signing tables from Monte Carlo; resharing κ pending |
+| `ml-dsa-65` | 3 (~192-bit) | Provisional signing tables; reshares at κ=1 everywhere (measured overshoots 0.62–0.92) |
+| `ml-dsa-44` | 2 (~128-bit) | Provisional signing tables; reshare κ-enlarged for (2,4)/(3,5); reshare into (4,6) fails closed |
 
 ```bash
 cargo test -p qp-rusty-crystals-threshold --features ml-dsa-87
@@ -29,7 +29,7 @@ Suite IDs (SSID / resharing): `1` = ML-DSA-87, `2` = ML-DSA-44, `3` = ML-DSA-65.
 | Threshold signing protocol | ✅ Audited (ML-DSA-87 calibration) |
 | Distributed Key Generation (DKG) | ✅ Audited |
 | Resharing protocol | ⚠️ Not audited |
-| ML-DSA-44 / ML-DSA-65 tables | ⚠️ Provisional (MC-derived; resharing overshoot/κ not re-measured) |
+| ML-DSA-44 / ML-DSA-65 tables | ⚠️ Provisional (400-sample MC signing tables; resharing overshoots measured, κ per variant — see `src/resharing/SECURITY_PROOF.md` "Parameter-Set Scope") |
 
 The threshold signing and DKG protocols have undergone security review for the ML-DSA-87 parameter set. The resharing (committee handoff) protocol has not been audited. See `src/resharing/README.md` for security analysis and empirical verification of the resharing protocol's safety properties.
 

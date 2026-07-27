@@ -9,6 +9,44 @@ The proof is conditional on the same assumptions used by the Threshold ML-DSA
 paper, plus the transport and erasure assumptions stated below. It is not an
 independent audit.
 
+## Parameter-Set Scope
+
+The crate builds against one of three ML-DSA parameter sets (44 / 65 / 87,
+cargo features). The structural argument in this note (public-key preservation,
+commitment binding, the Round-5 guard) is parameter-set independent: every
+bound (`B`, `B_G`, ν, τ, η) is computed from the active set. The *calibration*
+— measured overshoots, the enlargement `κ`, and the enlarged `(r, r', K)` —
+is per variant:
+
+- **ML-DSA-87** (default): the fully analyzed configuration. All concrete
+  numbers in the body of this note (B tables, κ = 1.10/1.15/1.25 for
+  (2,4)/(3,5)/(4,6), the `Q_s` bit-loss table) refer to it.
+- **ML-DSA-44**: measured overshoots are nearly identical to 87 — (2,2) 0.794,
+  (2,3) 0.827, (2,4) 0.991, (3,5) 1.023, (4,6) 1.166. (2,4) and (3,5) ship the
+  same κ = 1.10/1.15 with radii and `K` re-derived at the enlarged radius
+  (K = 16 and 696; the tighter 44 verification ceilings, γ₁ = 2¹⁷ and
+  γ₂ = (Q−1)/88, make enlargement much more expensive than on 87).
+  **(4,6) is not reshare-supported on 44**: at κ = 1.25 the Monte-Carlo `K` is
+  ≈ 5.8·10⁵ (infeasible), so the table ships κ = 1 and the Round-5 guard
+  rejects honest reshares into 4-of-6 — fail closed, never fail open. Freshly
+  dealt/DKG 4-of-6 committees sign normally at base parameters.
+- **ML-DSA-65**: measured overshoots are below 1 everywhere — (2,2) 0.620,
+  (2,3) 0.672, (2,4) 0.869, (3,5) 0.809, (4,6) 0.917 — because keygen uses
+  η = 4 (per-coefficient variance 20/3) while the split-noise intensity is
+  tuned to η = 2 keygen variance. Every committee reshares at κ = 1 with base
+  signing parameters. The flip side: the aggregated split noise is ~3.3× below
+  keygen variance, so the a-posteriori "reshared shares are distributed like a
+  fresh keygen sharing" hiding argument (§ Privacy) is quantitatively weaker
+  on 65 than on the η = 2 sets. Re-tuning the intensity to η = 4 (and
+  re-deriving κ and the radii, since overshoots would rise) is future
+  calibration work.
+
+The 44/65 signing tables themselves remain provisional (400-sample Monte Carlo
+with 2× K margin; see the crate README). Overshoots above were measured with
+the Rust `test_recovered_partial_variance_*` tests built with the respective
+feature; the enlarged 44 entries were derived with
+`scripts/compute_hyperball_params.py --variant 44 --resharing-only`.
+
 ## Protocol Summary
 
 Let the old committee have threshold `t_old` and size `n_old`. Let the new
