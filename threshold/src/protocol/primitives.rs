@@ -34,17 +34,17 @@
 
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::f64::consts::PI;
-use qp_rusty_crystals_dilithium::{
-	fips202, packing, params,
-	params::{C_DASH_BYTES, GAMMA2, K, L, N, Q, SIGNBYTES},
-	poly, polyvec,
-};
+use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-// Constants for decompose (ML-DSA-87)
-// ALPHA = 2 * GAMMA2 = 2 * ((Q-1)/32) = 523776
-const ALPHA: u32 = 2 * GAMMA2 as u32;
+use crate::params::{
+	C_DASH_BYTES, GAMMA1, GAMMA2, K, L, N, POLY_Q_PACKEDBYTES, Q, SIGNBYTES,
+};
+
 const Q_U32: u32 = Q as u32;
+const ALPHA: u32 = 2 * GAMMA2 as u32;
+const GAMMA2_32: usize = (Q as usize - 1) / 32;
+const GAMMA2_88: usize = (Q as usize - 1) / 88;
 
 // ============================================================================
 // Modular Arithmetic Helpers
@@ -174,7 +174,7 @@ impl NttAccumulatorL {
 	}
 
 	/// Finalize to a `Polyvec<L>`.
-	pub fn finalize(self) -> polyvec::Polyvec<L> {
+	pub fn finalize_l(self) -> polyvec::Polyvec<L> {
 		let polys = self.finalize_to_polys();
 		let mut result = polyvec::Polyvec::<L>::default();
 		for (i, poly) in polys.into_iter().enumerate() {
@@ -193,7 +193,7 @@ impl NttAccumulatorK {
 	}
 
 	/// Finalize to a `Polyvec<K>`.
-	pub fn finalize(self) -> polyvec::Polyvec<K> {
+	pub fn finalize_k(self) -> polyvec::Polyvec<K> {
 		let polys = self.finalize_to_polys();
 		let mut result = polyvec::Polyvec::<K>::default();
 		for (i, poly) in polys.into_iter().enumerate() {
@@ -211,32 +211,29 @@ impl NttAccumulatorK {
 ///
 /// Splits 0 ≤ a < q into (a₀, a₁) where a = a₁*α + a₀ with -α/2 < a₀ ≤ α/2,
 /// except when a₁ would equal (q-1)/α, in which case a₁=0 and -α/2 ≤ a₀ < 0.
-/// Returns (a₀ + q, a₁) where 0 ≤ a₁ < 16 and α = 2γ₂ = 523776.
+/// Returns (a₀ + q, a₁) where a₁ is the high part.
 ///
-/// This matches the reference Threshold-ML-DSA implementation for compatibility.
+/// Uses the same high-bits extraction as dilithium's `rounding::decompose` for
+/// both GAMMA2 variants, then converts to the threshold wire convention
+/// (unsigned a₀ + q).
 pub(crate) fn decompose_coefficient(a: u32) -> (u32, u32) {
-	// a₁ = ⌈a / 128⌉
-	let mut a1 = (a + 127) >> 7;
-
-	// For Alpha == 523776 (ML-DSA-87):
-	// 1025/2²² is close enough to 1/4092 so that a₁
-	// becomes a/α rounded down.
-	a1 = ((a1 as u64 * 1025 + (1 << 21)) >> 22) as u32;
-
-	// For the corner-case a₁ = (q-1)/α = 16, we have to set a₁=0.
-	a1 &= 15;
-
-	let mut a0_plus_q = a.wrapping_sub(a1.wrapping_mul(ALPHA));
-
-	// In the corner-case, when we set a₁=0, we will incorrectly
-	// have a₀ > (q-1)/2 and we'll need to subtract q.  As we
-	// return a₀ + q, that comes down to adding q if a₀ < (q-1)/2.
-	let threshold = (Q_U32 - 1) / 2;
-	// Use i32 arithmetic to handle the comparison correctly
-	let cond = ((a0_plus_q as i32).wrapping_sub(threshold as i32)) >> 31; // -1 if a0_plus_q < threshold, 0 otherwise
-	a0_plus_q = a0_plus_q.wrapping_add((cond as u32) & Q_U32);
-
-	(a0_plus_q, a1)
+	const {
+		assert!(GAMMA2 == GAMMA2_32 || GAMMA2 == GAMMA2_88, "unsupported GAMMA2");
+	}
+	let a_i = a as i32;
+	let gamma2 = GAMMA2 as i32;
+	let mut a1: i32 = (a_i + 127) >> 7;
+	if GAMMA2 == GAMMA2_32 {
+		a1 = (a1 * 1025 + (1 << 21)) >> 22;
+		a1 &= 15;
+	} else {
+		a1 = (a1 * 11275 + (1 << 23)) >> 24;
+		a1 ^= ((43 - a1) >> 31) & a1;
+	}
+	let mut a0: i32 = a_i - a1 * 2 * gamma2;
+	a0 -= (((Q - 1) / 2 - a0) >> 31) & Q;
+	let a0_plus_q = if a0 < 0 { (a0 + Q) as u32 } else { a0 as u32 };
+	(a0_plus_q, a1 as u32)
 }
 
 /// Decompose a vector of K polynomials into low and high parts.
@@ -568,8 +565,7 @@ fn make_hint_single(z0: i32, r1: i32) -> i32 {
 /// Debug builds will panic if any coefficient is >= Q, indicating a bug
 /// in the calling code's reduction logic.
 pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8]) {
-	// 23 bits per coefficient, 256 coefficients = 736 bytes
-	assert!(buf.len() >= 736);
+	assert!(buf.len() >= POLY_Q_PACKEDBYTES);
 
 	let mut bit_pos = 0usize;
 	for i in 0..N as usize {
@@ -607,7 +603,7 @@ pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8]) {
 /// Returns an error if any coefficient is >= Q, which would indicate
 /// malformed or malicious input data.
 pub(crate) fn poly_unpack_w(buf: &[u8]) -> Result<poly::Poly, &'static str> {
-	if buf.len() < 736 {
+	if buf.len() < POLY_Q_PACKEDBYTES {
 		return Err("buffer too short for poly_unpack_w");
 	}
 	let mut p = poly::Poly::default();
@@ -652,19 +648,18 @@ pub(crate) fn poly_unpack_w(buf: &[u8]) -> Result<poly::Poly, &'static str> {
 
 /// Unpack a `Polyvec<K>` from 23-bit encoding.
 ///
-/// Returns an error if the buffer is shorter than `K * 736` bytes or if any
+/// Returns an error if the buffer is shorter than `K * POLY_Q_PACKEDBYTES` bytes or if any
 /// coefficient is >= Q. The length is validated up front so an undersized
 /// buffer is a recoverable `Err` rather than an out-of-bounds slice panic
 /// (which would abort the process in panic=abort deployments).
 pub(crate) fn unpack_polyvec_w(buf: &[u8]) -> Result<polyvec::Polyvec<K>, &'static str> {
-	const POLY_W_SIZE: usize = 736;
-	if buf.len() < K * POLY_W_SIZE {
+	if buf.len() < K * POLY_Q_PACKEDBYTES {
 		return Err("buffer too short for unpack_polyvec_w");
 	}
 	let mut w = polyvec::Polyvec::<K>::default();
 	for i in 0..K {
-		let offset = i * POLY_W_SIZE;
-		w.vec[i] = poly_unpack_w(&buf[offset..offset + POLY_W_SIZE])?;
+		let offset = i * POLY_Q_PACKEDBYTES;
+		w.vec[i] = poly_unpack_w(&buf[offset..offset + POLY_Q_PACKEDBYTES])?;
 	}
 	Ok(w)
 }
@@ -688,14 +683,14 @@ pub(crate) fn pack_signature(
 	let c_tilde_arr: Option<&[u8; C_DASH_BYTES]> =
 		c_tilde.get(..C_DASH_BYTES).and_then(|slice| slice.try_into().ok());
 
-	// Use dilithium's pack_sig function, pinned to the ML-DSA-87 parameters.
+	// Use dilithium's pack_sig function for the active parameter set.
 	packing::pack_sig::<
 		K,
 		L,
-		{ params::GAMMA1 },
-		{ params::OMEGA },
+		{ GAMMA1 },
+		{ crate::params::OMEGA },
 		C_DASH_BYTES,
-		{ params::POLYZ_PACKEDBYTES },
+		{ crate::params::POLYZ_PACKEDBYTES },
 		SIGNBYTES,
 	>(&mut sig, c_tilde_arr, z, hint);
 
@@ -717,17 +712,17 @@ mod tests {
 
 	#[test]
 	fn test_decompose_coefficient() {
-		// Test that high part is always < 16
+		// High-bits range: 16 values for γ₂=(Q-1)/32, 44 for γ₂=(Q-1)/88.
+		let a1_mod = if GAMMA2 == GAMMA2_32 { 16u32 } else { 44u32 };
 		let (_a0, a1) = decompose_coefficient(0);
-		assert!(a1 < 16);
+		assert!(a1 < a1_mod);
 
 		let (_a0, a1) = decompose_coefficient(Q_U32 - 1);
-		assert!(a1 < 16);
+		assert!(a1 < a1_mod);
 
-		// Test various values to ensure a1 is always < 16
 		for a in [0u32, 1, 100, 1000, Q_U32 / 2, Q_U32 - 1, ALPHA, ALPHA * 2, ALPHA * 15] {
 			let (_a0, a1) = decompose_coefficient(a);
-			assert!(a1 < 16, "a1 should be < 16 for a={}, got a1={}", a, a1);
+			assert!(a1 < a1_mod, "a1 should be < {a1_mod} for a={a}, got a1={a1}");
 		}
 	}
 
@@ -764,7 +759,7 @@ mod tests {
 			p.coeffs_mut()[i] = (i * 12345) as i32 % Q;
 		}
 
-		let mut buf = vec![0u8; 736];
+		let mut buf = vec![0u8; POLY_Q_PACKEDBYTES];
 		poly_pack_w(&p, &mut buf);
 
 		let p2 = poly_unpack_w(&buf).expect("valid coefficients should unpack");
@@ -781,7 +776,7 @@ mod tests {
 		// Result for coefficient-range errors; a length violation must take
 		// the same path (a panic would abort the process in panic=abort
 		// deployments before the caller's error handling runs).
-		for len in [0usize, 100, 736, 8 * 736 - 1] {
+		for len in [0usize, 100, POLY_Q_PACKEDBYTES, K * POLY_Q_PACKEDBYTES - 1] {
 			let buf = vec![0u8; len];
 			let result = unpack_polyvec_w(&buf);
 			assert!(
@@ -793,14 +788,14 @@ mod tests {
 		}
 
 		// A correctly sized buffer still unpacks (all-zero coefficients are valid).
-		let buf = vec![0u8; 8 * 736];
+		let buf = vec![0u8; K * POLY_Q_PACKEDBYTES];
 		assert!(unpack_polyvec_w(&buf).is_ok());
 	}
 
 	#[test]
 	fn test_poly_unpack_w_rejects_invalid_coefficients() {
 		// Create a buffer with a coefficient >= Q
-		let mut buf = vec![0u8; 736];
+		let mut buf = vec![0u8; POLY_Q_PACKEDBYTES];
 		// Pack Q (which is invalid, should be < Q) into the first coefficient
 		// Q = 8380417 = 0x7FE001, which fits in 23 bits
 		let invalid_val = Q as u32;

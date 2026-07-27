@@ -14,14 +14,12 @@ use alloc::{
 	vec::Vec,
 };
 
-use qp_rusty_crystals_dilithium::{
-	params::{K, L},
-	poly, polyvec,
-};
+use qp_rusty_crystals_dilithium::{poly, polyvec};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	error::{ThresholdError, ThresholdResult},
+	params::{K, L},
 	participants::{ParticipantId, ParticipantList},
 	protocol::primitives::{NttAccumulatorK, NttAccumulatorL},
 };
@@ -305,8 +303,8 @@ pub fn recover_share(
 	}
 
 	// Finalize accumulators (reduces mod Q)
-	let s1_combined = s1_acc.finalize();
-	let s2_combined = s2_acc.finalize();
+	let s1_combined = s1_acc.finalize_l();
+	let s2_combined = s2_acc.finalize_k();
 
 	Ok((s1_combined, s2_combined))
 }

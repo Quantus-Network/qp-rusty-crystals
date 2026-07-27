@@ -6,18 +6,14 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use qp_rusty_crystals_dilithium::{
-	fips202, packing,
-	params::{ETA, K, L, Q},
-	poly, polyvec,
-};
-
+use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey, SecretShareData, PUBLIC_KEY_SIZE},
+	params::{ETA, K, L, Q},
 	participants::{ParticipantId, ParticipantList},
 	protocol::primitives::{mod_q, NttAccumulatorL},
 };
@@ -362,7 +358,7 @@ fn generate_threshold_shares(
 	}
 
 	// Finalize NTT accumulator (reduces mod Q)
-	let s1h_total = s1h_acc.finalize();
+	let s1h_total = s1h_acc.finalize_l();
 
 	// Normalize s1_total (η-bounded sums)
 	for total_poly in s1_total.vec.iter_mut().take(L) {
