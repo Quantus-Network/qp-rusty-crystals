@@ -704,19 +704,6 @@ pub fn keypair(
 	>(pk, sk, seed)
 }
 
-/// Re-derive the ML-DSA-87 public key from a secret key (see [`public_key_from_secret_var`]).
-pub(crate) fn public_key_from_secret(
-	sk: &[u8; params::SECRETKEYBYTES],
-) -> Option<[u8; params::PUBLICKEYBYTES]> {
-	public_key_from_secret_var::<
-		{ params::K },
-		{ params::L },
-		{ params::ETA },
-		{ params::PUBLICKEYBYTES },
-		{ params::SECRETKEYBYTES },
-	>(sk)
-}
-
 /// Compute an ML-DSA-87 signature (see [`signature_var`]).
 pub(crate) fn signature(
 	signature_output: &mut [u8; params::SIGNBYTES],

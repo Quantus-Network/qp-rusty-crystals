@@ -95,7 +95,7 @@ mod errors;
 pub use errors::{KeyParsingError, SignatureError};
 
 pub mod fips202;
-pub mod ml_dsa_87;
+pub(crate) mod frontend;
 pub(crate) mod ntt;
 pub mod packing;
 pub mod params;
@@ -104,6 +104,13 @@ pub mod polyvec;
 pub(crate) mod reduce;
 pub(crate) mod rounding;
 pub(crate) mod sign;
+
+#[cfg(feature = "ml-dsa-44")]
+pub mod ml_dsa_44;
+#[cfg(feature = "ml-dsa-65")]
+pub mod ml_dsa_65;
+#[cfg(feature = "ml-dsa-87")]
+pub mod ml_dsa_87;
 
 #[cfg(test)]
 mod acvp;

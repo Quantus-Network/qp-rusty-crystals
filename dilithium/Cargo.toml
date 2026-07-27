@@ -48,7 +48,12 @@ name = "dilithium_benchmarks"
 harness = false
 
 [features]
-default = []
+default = ["ml-dsa-87"]
+# Public API modules for each FIPS 204 parameter set. Additive: enable any
+# combination so a single binary can verify (or sign) at multiple levels.
+ml-dsa-44 = []
+ml-dsa-65 = []
+ml-dsa-87 = []
 # Exposes the crate-internal secret samplers (`polyvec::ct_internals`) so the
 # `ct_bench` constant-time harness can time them directly. Not for production use.
 ct-internals = []
