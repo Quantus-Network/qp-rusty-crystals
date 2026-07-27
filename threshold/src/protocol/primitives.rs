@@ -726,6 +726,60 @@ mod tests {
 		}
 	}
 
+	/// The original ML-DSA-87-only decompose that shipped in the audited
+	/// threshold implementation (bit-twiddled for α = 523776, returning
+	/// `a₀ + q` unconditionally). Kept verbatim as a test oracle.
+	fn decompose_coefficient_87_reference(a: u32) -> (u32, u32) {
+		let mut a1 = (a + 127) >> 7;
+		a1 = ((a1 as u64 * 1025 + (1 << 21)) >> 22) as u32;
+		a1 &= 15;
+
+		let mut a0_plus_q = a.wrapping_sub(a1.wrapping_mul(523776));
+		let threshold = (Q_U32 - 1) / 2;
+		let cond = ((a0_plus_q as i32).wrapping_sub(threshold as i32)) >> 31;
+		a0_plus_q = a0_plus_q.wrapping_add((cond as u32) & Q_U32);
+		(a0_plus_q, a1)
+	}
+
+	/// Exhaustive check of `decompose_coefficient` over the full input domain
+	/// `[0, Q)` against the FIPS 204 Decompose contract, and — for
+	/// γ₂ = (Q−1)/32 — against the original audited 87 implementation.
+	///
+	/// Contract: `a ≡ a₁·α + a₀ (mod q)` with `|a₀| ≤ γ₂` and
+	/// `0 ≤ a₁ < (q−1)/α`, where `a₀` is the centered representative of the
+	/// returned low part. The returned low part may differ from the audited
+	/// original by exactly `q` (the original always returned `a₀ + q`; the
+	/// current code returns `a₀ mod q`), which every consumer normalizes away.
+	#[test]
+	fn test_decompose_coefficient_exhaustive() {
+		let m = (Q as u32 - 1) / ALPHA;
+		let gamma2 = GAMMA2 as i64;
+		for a in 0..Q_U32 {
+			let (a0_pq, a1) = decompose_coefficient(a);
+			assert!(a1 < m, "a={a}: a1={a1} out of range (m={m})");
+
+			// Centered low part.
+			let a0 = if a0_pq as i64 > gamma2 { a0_pq as i64 - Q as i64 } else { a0_pq as i64 };
+			assert!(a0.abs() <= gamma2, "a={a}: |a0|={} exceeds gamma2={gamma2}", a0.abs());
+
+			// Reconstruction: a ≡ a1·α + a0 (mod q).
+			let recon = (a1 as i64 * ALPHA as i64 + a0).rem_euclid(Q as i64);
+			assert_eq!(recon, a as i64, "a={a}: reconstruction failed (a0={a0}, a1={a1})");
+
+			// Equivalence with the audited ML-DSA-87 original (mod q on the
+			// low part; identical high part).
+			if GAMMA2 == GAMMA2_32 {
+				let (ref_a0_pq, ref_a1) = decompose_coefficient_87_reference(a);
+				assert_eq!(a1, ref_a1, "a={a}: a1 diverges from audited 87 reference");
+				assert_eq!(
+					a0_pq % Q_U32,
+					ref_a0_pq % Q_U32,
+					"a={a}: a0 diverges from audited 87 reference mod q"
+				);
+			}
+		}
+	}
+
 	#[test]
 	fn test_hyperball_vector_new() {
 		let vec = HyperballSampleVector::new(100);
