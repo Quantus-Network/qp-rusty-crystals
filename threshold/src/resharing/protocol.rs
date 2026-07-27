@@ -46,14 +46,12 @@ use alloc::{
 };
 use core::fmt;
 
-use qp_rusty_crystals_dilithium::{
-	fips202,
-	params::{ETA, K, L, N, Q, TAU},
-};
+use qp_rusty_crystals_dilithium::fips202;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
 	keys::{PrivateKeyShare, SecretShareData},
+	params::{ETA, K, L, N, Q, TAU},
 	participants::ParticipantId,
 };
 
@@ -63,7 +61,7 @@ use super::types::{
 	ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal, ResharingRound3Broadcast,
 	ResharingRound4Message, ResharingRound5Broadcast, ResharingSignerConfig, SubsetMask,
 	SubsetPair, COMMITMENT_HASH_SIZE, ENTROPY_SIZE, RESHARING_PROTOCOL_VERSION,
-	RESHARING_SSID_SIZE, RESHARING_SUITE_ML_DSA_87, SUBSHARE_COEFF_BOUND,
+	RESHARING_SSID_SIZE, RESHARING_SUITE_ID, SUBSHARE_COEFF_BOUND,
 };
 use crate::keygen::dkg::TranscriptSigner;
 
@@ -485,7 +483,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		let new_participants: Vec<_> = config.new_participants().iter().collect();
 		let ssid = compute_resharing_ssid(
 			RESHARING_PROTOCOL_VERSION,
-			RESHARING_SUITE_ML_DSA_87,
+			RESHARING_SUITE_ID,
 			epoch,
 			config.old_threshold(),
 			config.old_participants().len() as u32,

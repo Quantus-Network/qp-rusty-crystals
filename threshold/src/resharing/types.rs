@@ -10,11 +10,10 @@ use core::fmt;
 use borsh::{BorshDeserialize, BorshSerialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use qp_rusty_crystals_dilithium::params::{K, L, N};
-
 use crate::{
 	error::{MAX_PARTIES, MAX_SUBSETS, MAX_SUBSET_PAIRS},
 	keys::{PrivateKeyShare, PublicKey},
+	params::{K, L, N},
 	participants::{ParticipantId, ParticipantList},
 	ThresholdConfig,
 };
@@ -33,8 +32,15 @@ pub const RESHARING_SSID_SIZE: usize = 32;
 /// Bump when the round structure or wire format changes incompatibly.
 pub const RESHARING_PROTOCOL_VERSION: u32 = 2;
 
-/// Cryptographic suite identifier for threshold ML-DSA-87 RSS resharing.
-pub const RESHARING_SUITE_ML_DSA_87: u32 = 1;
+/// Cryptographic suite identifier for threshold ML-DSA RSS resharing.
+///
+/// Value is the active FIPS 204 parameter set ([`SUITE_ID`]: 1=87, 2=44, 3=65).
+pub use crate::params::SUITE_ID as RESHARING_SUITE_ID;
+
+/// Historical alias for [`RESHARING_SUITE_ID`] when only ML-DSA-87 existed.
+#[allow(dead_code, deprecated)]
+#[deprecated(note = "use RESHARING_SUITE_ID instead")]
+pub const RESHARING_SUITE_ML_DSA_87: u32 = RESHARING_SUITE_ID;
 
 /// Maximum absolute value for sub-share coefficients in resharing.
 ///
@@ -662,7 +668,7 @@ impl BorshDeserialize for ResharingActProposal {
 
 /// Maximum accepted signature length in bytes (bounds deserialization).
 ///
-/// Large enough for ML-DSA-87 signatures (4627 bytes) with headroom; small
+/// Large enough for ML-DSA signatures with headroom; small
 /// enough to bound memory on malformed input.
 pub const MAX_ACCEPT_SIGNATURE_LEN: usize = 8192;
 
@@ -1385,7 +1391,7 @@ pub struct ResharingOutput {
 /// # Arguments
 ///
 /// * `protocol_version` - Wire/logic version ([`RESHARING_PROTOCOL_VERSION`])
-/// * `suite_id` - Cryptographic suite ([`RESHARING_SUITE_ML_DSA_87`])
+/// * `suite_id` - Cryptographic suite ([`RESHARING_SUITE_ID`])
 /// * `epoch` - Monotonic handoff counter for this public key (0 for the first resharing after
 ///   keygen; increment for each subsequent handoff)
 /// * `old_threshold` - Threshold of the old committee
@@ -1468,6 +1474,7 @@ pub fn compute_resharing_ssid(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::params::{PUBLICKEYBYTES, SIGNBYTES};
 	use alloc::{format, string::ToString};
 
 	/// Test SSID for use in unit tests.
@@ -1476,7 +1483,7 @@ mod tests {
 	fn make_test_public_key() -> PublicKey {
 		// Dummy public key for testing. Must have a nonzero t1 region:
 		// import paths reject the degenerate all-zero t1 key.
-		let bytes = [0x42u8; 2592];
+		let bytes = [0x42u8; PUBLICKEYBYTES];
 		PublicKey::from_bytes(&bytes).unwrap()
 	}
 
@@ -2056,7 +2063,7 @@ mod tests {
 		let base = |epoch: u64| {
 			compute_resharing_ssid(
 				RESHARING_PROTOCOL_VERSION,
-				RESHARING_SUITE_ML_DSA_87,
+				RESHARING_SUITE_ID,
 				epoch,
 				2,
 				3,
@@ -2073,7 +2080,7 @@ mod tests {
 
 		let other_suite = compute_resharing_ssid(
 			RESHARING_PROTOCOL_VERSION,
-			RESHARING_SUITE_ML_DSA_87 + 1,
+			RESHARING_SUITE_ID + 1,
 			0,
 			2,
 			3,
@@ -2091,7 +2098,7 @@ mod tests {
 	fn test_resharing_certificate_roundtrip_within_bounds() {
 		let mut accepts = BTreeMap::new();
 		accepts.insert(1u32, alloc::vec![9u8; 16]);
-		accepts.insert(2u32, alloc::vec![3u8; 4627]);
+		accepts.insert(2u32, alloc::vec![3u8; SIGNBYTES]);
 
 		let cert = ResharingCertificate {
 			ssid: TEST_SSID,
@@ -2212,7 +2219,7 @@ mod tests {
 	fn test_resharing_accept_rejects_truncated_signature() {
 		// Honest round-trip still works.
 		let accept =
-			ResharingAccept { ssid: TEST_SSID, party_id: 3, signature: alloc::vec![0xAAu8; 4627] };
+			ResharingAccept { ssid: TEST_SSID, party_id: 3, signature: alloc::vec![0xAAu8; SIGNBYTES] };
 		let bytes = borsh::to_vec(&accept).unwrap();
 		let back: ResharingAccept = borsh::from_slice(&bytes).unwrap();
 		assert_eq!(back.party_id, accept.party_id);

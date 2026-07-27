@@ -180,7 +180,7 @@ pub use types::{
 	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast,
 	ResharingSignerConfig, SubsetMask, SubsetPair, ENTROPY_SIZE, MAX_ACCEPT_SIGNATURE_LEN,
 	MAX_ERROR_MESSAGE_LEN, RESHARING_PROTOCOL_VERSION, RESHARING_SSID_SIZE,
-	RESHARING_SUITE_ML_DSA_87, SUBSHARE_COEFF_BOUND,
+	RESHARING_SUITE_ID, SUBSHARE_COEFF_BOUND,
 };
 
 // Re-export the long-term-key signing trait used for Round 6 acceptance, so
