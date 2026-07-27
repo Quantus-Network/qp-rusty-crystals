@@ -682,15 +682,15 @@ pub(crate) fn verify_var<
 }
 
 // ---------------------------------------------------------------------------
-// ML-DSA-87 convenience wrappers
+// ML-DSA-87 convenience wrappers (test-only)
 //
-// The historical entry points keep their audited fixed-size signatures so
-// `ml_dsa_87`, ACVP, and unit tests need no call-site churn. Each is a thin
-// monomorphization of the generic core at the ML-DSA-87 parameter set.
+// Thin monomorphizations used by the in-module unit tests so their bodies
+// stay readable. Production call sites (frontends, ACVP) invoke the generic
+// `*_var` cores directly.
 // ---------------------------------------------------------------------------
 
-/// Generate ML-DSA-87 public and private key.
-pub fn keypair(
+#[cfg(test)]
+fn keypair(
 	pk: &mut [u8; params::PUBLICKEYBYTES],
 	sk: &mut [u8; params::SECRETKEYBYTES],
 	seed: SensitiveBytes32,
@@ -704,8 +704,8 @@ pub fn keypair(
 	>(pk, sk, seed)
 }
 
-/// Compute an ML-DSA-87 signature (see [`signature_var`]).
-pub(crate) fn signature(
+#[cfg(test)]
+fn signature(
 	signature_output: &mut [u8; params::SIGNBYTES],
 	domain_prefix: &[u8],
 	message: &[u8],
@@ -730,8 +730,8 @@ pub(crate) fn signature(
 	>(signature_output, domain_prefix, message, secret_key_bytes, hedge)
 }
 
-/// Verify an ML-DSA-87 signature (see [`verify_var`]).
-pub(crate) fn verify(
+#[cfg(test)]
+fn verify(
 	sig: &[u8; params::SIGNBYTES],
 	domain_prefix: &[u8],
 	m: &[u8],
