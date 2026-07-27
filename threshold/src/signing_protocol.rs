@@ -139,14 +139,17 @@ use core::{fmt, mem};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use log::warn;
-use qp_rusty_crystals_dilithium::{fips202, ml_dsa_87::MAX_MESSAGE_SIZE};
+use qp_rusty_crystals_dilithium::fips202;
+
+use crate::mldsa::MAX_MESSAGE_SIZE;
 use zeroize::Zeroize;
 
 use crate::{
 	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature, SSID_SIZE},
 	participants::{ParticipantId, ParticipantList},
 	protocol::signing::compute_ssid,
-	signer::{ThresholdSigner, SINGLE_COMMITMENT_SIZE},
+	signer::ThresholdSigner,
+	params::SINGLE_COMMITMENT_SIZE,
 };
 
 // ============================================================================
@@ -2171,7 +2174,7 @@ mod tests {
 		follower.state = SignProtocolState::WaitingForLeaderDecision;
 
 		// Create an invalid signature (all zeros)
-		let invalid_sig = Signature::from_bytes(&[0u8; 4627]).unwrap();
+		let invalid_sig = Signature::from_bytes(&[0u8; crate::broadcast::SIGNATURE_SIZE]).unwrap();
 		follower.received_signature = Some(invalid_sig);
 
 		// Follower should reject the invalid signature

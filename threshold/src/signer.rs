@@ -1,4 +1,4 @@
-//! Threshold signer for ML-DSA-87.
+//! Threshold signer for ML-DSA.
 //!
 //! This module provides the main API for threshold signing. Each party
 //! creates a `ThresholdSigner` with their private key share and uses it
@@ -44,13 +44,14 @@ use alloc::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use qp_rusty_crystals_dilithium::{params::L, polyvec};
+use qp_rusty_crystals_dilithium::polyvec;
 
 use crate::{
 	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature},
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey},
+	params::{L, SINGLE_COMMITMENT_SIZE},
 	participants::ParticipantId,
 	protocol::signing::{
 		aggregate_commitments_dilithium, combine_signature, generate_round1,
@@ -59,11 +60,6 @@ use crate::{
 		Round2Data,
 	},
 };
-
-/// Packed size in bytes of one commitment (one `Polyvec<K>` of K polynomials,
-/// 736 bytes each in the 23-bit encoding). Round 2 commitment data is
-/// `k_iterations` of these, concatenated.
-pub(crate) const SINGLE_COMMITMENT_SIZE: usize = 8 * 736; // K * POLY_Q_SIZE
 
 /// A threshold signer for a single party.
 ///
@@ -1091,7 +1087,7 @@ mod tests {
 	/// that verification then rejects.
 	#[test]
 	fn test_round2_reveal_rejects_oversized_message() {
-		use qp_rusty_crystals_dilithium::ml_dsa_87::MAX_MESSAGE_SIZE;
+		use crate::mldsa::MAX_MESSAGE_SIZE;
 
 		use crate::generate_with_dealer;
 
@@ -1213,7 +1209,7 @@ mod tests {
 		// commitment hash is over that same garbage, so the later reveal is
 		// genuinely hash-bound to what s0 freezes in Round 2.
 		let k = config.k_iterations() as usize;
-		let garbage = alloc::vec![0xFFu8; k * 8 * 736];
+		let garbage = alloc::vec![0xFFu8; k * SINGLE_COMMITMENT_SIZE];
 		let garbage_hash = compute_commitment_hash(&ssid, 1, &garbage);
 		let r1_1 = Round1Broadcast::new(ssid, 1, garbage_hash);
 		let r2_1 = Round2Broadcast::new(ssid, 1, garbage);
