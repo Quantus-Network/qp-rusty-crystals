@@ -3,6 +3,8 @@
 .DS_Store/
 .DS_Store
 venv/
+.venv/
+**/scripts/.venv/
 __pycache__/
 *.pyc
 
