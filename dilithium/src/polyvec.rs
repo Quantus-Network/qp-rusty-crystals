@@ -2,9 +2,6 @@ use crate::{params, poly, poly::Poly};
 use core::{array, mem::swap};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-const K: usize = params::K;
-const L: usize = params::L;
-
 /// Unstable accessors for the crate-internal secret samplers, used only by the
 /// in-crate constant-time harness (`examples/ct_bench.rs`).
 ///
@@ -33,31 +30,39 @@ pub mod ct_internals {
 	}
 }
 
+/// A vector of `N` polynomials.
+///
+/// `N` is a compile-time parameter so the same audited code serves every
+/// ML-DSA parameter set: the two shapes used by the scheme are `Polyvec<K>`
+/// (rows of `A`, e.g. `t`, `w`, `s2`) and `Polyvec<L>` (columns of `A`, e.g.
+/// `s1`, `y`, `z`). Monomorphization gives each instantiation the same code
+/// the previous hardcoded `Polyveck`/`Polyvecl` types compiled to.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct Polyveck {
-	pub vec: [Poly; K],
+pub struct Polyvec<const N: usize> {
+	pub vec: [Poly; N],
 }
 
-impl Default for Polyveck {
+impl<const N: usize> Default for Polyvec<N> {
 	fn default() -> Self {
-		Polyveck { vec: array::from_fn(|_| Poly::default()) }
+		Polyvec { vec: array::from_fn(|_| Poly::default()) }
 	}
 }
 
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct Polyvecl {
-	pub vec: [Poly; L],
-}
+/// Vector of `K` polynomials (ML-DSA-87 shape). Compatibility alias.
+pub type Polyveck = Polyvec<{ params::K }>;
+/// Vector of `L` polynomials (ML-DSA-87 shape). Compatibility alias.
+pub type Polyvecl = Polyvec<{ params::L }>;
 
-impl Default for Polyvecl {
-	fn default() -> Self {
-		Polyvecl { vec: array::from_fn(|_| Poly::default()) }
-	}
-}
+// ---------------------------------------------------------------------------
+// Generic operations over Polyvec<N>
+// ---------------------------------------------------------------------------
 
 /// Implementation of ExpandA. Generates matrix A with uniformly random coefficients a_{i,j} by
 /// performing rejection sampling on the output stream of SHAKE128(rho|j|i).
-pub fn matrix_expand(mat: &mut [Polyvecl; K], rho: &[u8; params::SEEDBYTES]) {
+pub fn matrix_expand<const K: usize, const L: usize>(
+	mat: &mut [Polyvec<L>; K],
+	rho: &[u8; params::SEEDBYTES],
+) {
 	for (i, mat_i) in mat.iter_mut().enumerate() {
 		for j in 0..L {
 			poly::uniform(&mut mat_i.vec[j], rho, ((i << 8) + j) as u16);
@@ -65,21 +70,25 @@ pub fn matrix_expand(mat: &mut [Polyvecl; K], rho: &[u8; params::SEEDBYTES]) {
 	}
 }
 
-/// Pointwise multiply vectors of polynomials of length L, multiply resulting vector by 2^{-32} and
+/// Pointwise multiply vectors of polynomials of length N, multiply resulting vector by 2^{-32} and
 /// add (accumulate) polynomials in it. Input/output vectors are in NTT domain representation. Input
-/// coefficients are assumed to be less than 22*Q. Output coeffcient are less than 2*L*Q.
-pub fn l_pointwise_acc_montgomery(w: &mut Poly, u: &Polyvecl, v: &Polyvecl) {
+/// coefficients are assumed to be less than 22*Q. Output coeffcient are less than 2*N*Q.
+pub fn pointwise_acc_montgomery<const N: usize>(w: &mut Poly, u: &Polyvec<N>, v: &Polyvec<N>) {
 	poly::pointwise_montgomery(w, &u.vec[0], &v.vec[0]);
 	let mut t = Poly::default();
-	for i in 1..L {
+	for i in 1..N {
 		poly::pointwise_montgomery(&mut t, &u.vec[i], &v.vec[i]);
 		poly::add_ip(w, &t);
 	}
 }
 
-pub fn matrix_pointwise_montgomery(t: &mut Polyveck, mat: &[Polyvecl; K], v: &Polyvecl) {
+pub fn matrix_pointwise_montgomery<const K: usize, const L: usize>(
+	t: &mut Polyvec<K>,
+	mat: &[Polyvec<L>; K],
+	v: &Polyvec<L>,
+) {
 	for (i, t_i) in t.vec.iter_mut().enumerate() {
-		l_pointwise_acc_montgomery(t_i, &mat[i], v);
+		pointwise_acc_montgomery(t_i, &mat[i], v);
 	}
 }
 
@@ -90,10 +99,10 @@ pub fn matrix_pointwise_montgomery(t: &mut Polyveck, mat: &[Polyvecl; K], v: &Po
 /// materialized. Peak extra working memory is two polynomials (~2 KB). The arithmetic and the
 /// accumulation order are identical to the non-streaming path, so the result is bit-for-bit the
 /// same; only peak stack usage differs.
-pub fn matrix_pointwise_montgomery_streamed(
-	t: &mut Polyveck,
+pub fn matrix_pointwise_montgomery_streamed<const K: usize, const L: usize>(
+	t: &mut Polyvec<K>,
 	rho: &[u8; params::SEEDBYTES],
-	v: &Polyvecl,
+	v: &Polyvec<L>,
 ) {
 	let mut a_ij = Poly::default();
 	let mut prod = Poly::default();
@@ -108,228 +117,326 @@ pub fn matrix_pointwise_montgomery_streamed(
 	}
 }
 
-/// Sample an L-vector of eta-bounded polynomials, one per SHAKE stream nonce
-/// `base_nonce + i` for `i in 0..L`.
+/// Sample an N-vector of eta-bounded polynomials, one per SHAKE stream nonce
+/// `base_nonce + i` for `i in 0..N`.
 ///
 /// Crate-internal: only the low two nonce bytes are absorbed into the SHAKE
-/// stream, so callers must keep `base_nonce + (L - 1) <= u16::MAX` to avoid
+/// stream, so callers must keep `base_nonce + (N - 1) <= u16::MAX` to avoid
 /// aliasing distinct sampler invocations onto the same stream. The in-crate
 /// callers (keygen, using constant nonces) satisfy this by construction; the
 /// helper is deliberately not part of the public API so external callers cannot
 /// supply an out-of-range nonce.
-pub(crate) fn l_uniform_eta(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], base_nonce: u16) {
-	for i in 0..L {
+pub(crate) fn uniform_eta<const N: usize>(
+	v: &mut Polyvec<N>,
+	seed: &[u8; params::CRHBYTES],
+	base_nonce: u16,
+) {
+	for i in 0..N {
 		poly::uniform_eta(&mut v.vec[i], seed, base_nonce + i as u16);
 	}
 }
 
-/// Sample an L-vector of gamma1 mask polynomials, one per SHAKE stream nonce
-/// `L * nonce + i` for `i in 0..L`.
+/// Sample an N-vector of gamma1 mask polynomials, one per SHAKE stream nonce
+/// `N * nonce + i` for `i in 0..N`.
 ///
 /// Crate-internal: only the low two nonce bytes are absorbed into the SHAKE
-/// stream, so `nonce` must satisfy `L * nonce + (L - 1) <= u16::MAX` — otherwise
+/// stream, so `nonce` must satisfy `N * nonce + (N - 1) <= u16::MAX` — otherwise
 /// distinct mask samples alias onto the same stream, reusing a mask `y` across
 /// signing attempts (which leaks the secret via `z = y + c*s1`). The sole
 /// in-crate caller (the signer) enforces this with its `MAX_SAFE_ATTEMPT_NONCE`
 /// check before calling, and the helper is not exported, so an external caller
 /// cannot reach it with an unchecked nonce.
-pub(crate) fn l_uniform_gamma1(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], nonce: u16) {
-	for i in 0..L {
-		poly::uniform_gamma1(&mut v.vec[i], seed, L as u16 * nonce + i as u16);
+pub(crate) fn uniform_gamma1<const N: usize>(
+	v: &mut Polyvec<N>,
+	seed: &[u8; params::CRHBYTES],
+	nonce: u16,
+) {
+	for i in 0..N {
+		poly::uniform_gamma1(&mut v.vec[i], seed, N as u16 * nonce + i as u16);
 	}
 }
-/// Reduce coefficients of polynomials in vector of length L
+
+/// Reduce coefficients of polynomials in vector of length N
 /// to representatives in [-6283008, 6283008].
-pub fn l_reduce(v: &mut Polyvecl) {
-	for i in 0..L {
+pub fn reduce<const N: usize>(v: &mut Polyvec<N>) {
+	for i in 0..N {
 		poly::reduce(&mut v.vec[i]);
 	}
 }
 
-/// Add vectors of polynomials of length L.
-/// No modular reduction is performed.
-pub fn l_add(w: &mut Polyvecl, v: &Polyvecl) {
-	for i in 0..L {
-		poly::add_ip(&mut w.vec[i], &v.vec[i]);
-	}
-}
-
-/// Forward NTT of all polynomials in vector of length L. Output coefficients can be up to 16*Q
-/// larger than input coefficients.
-pub fn l_ntt(v: &mut Polyvecl) {
-	for i in 0..L {
-		poly::ntt(&mut v.vec[i]);
-	}
-}
-
-pub fn l_invntt_tomont(v: &mut Polyvecl) {
-	for i in 0..L {
-		poly::invntt_tomont(&mut v.vec[i]);
-	}
-}
-
-pub fn l_pointwise_poly_montgomery(r: &mut Polyvecl, a: &Poly, v: &Polyvecl) {
-	for i in 0..L {
-		poly::pointwise_montgomery(&mut r.vec[i], a, &v.vec[i]);
-	}
-}
-
-/// Check if the infinity norm of a Polyvecl is within the given bound.
-///
-/// # Arguments
-/// * `v` - The polynomial vector to check
-/// * `bound` - The norm bound
-///
-/// Returns true if all polynomials in the vector have infinity norm < bound, false otherwise.
-pub fn polyvecl_is_norm_within_bound(v: &Polyvecl, bound: i32) -> bool {
-	let mut result = true;
-	for i in 0..L {
-		let norm_check = poly::check_norm(&v.vec[i], bound);
-		result = result && !norm_check;
-	}
-	result
-}
-
-//---------------------------------
-
-/// Sample a K-vector of eta-bounded polynomials, one per SHAKE stream nonce
-/// `base_nonce + i` for `i in 0..K`.
-///
-/// As in [`l_uniform_eta`], this is crate-internal and only the low two nonce
-/// bytes are absorbed, so `base_nonce` must be `<= u16::MAX - (K - 1)`. Keygen,
-/// the only in-crate caller, passes a constant in-range nonce.
-pub(crate) fn k_uniform_eta(v: &mut Polyveck, seed: &[u8; params::CRHBYTES], base_nonce: u16) {
-	for i in 0..K {
-		poly::uniform_eta(&mut v.vec[i], seed, base_nonce + i as u16);
-	}
-}
-
-/// Reduce coefficients of polynomials in vector of length K
-/// to representatives in [-6283008, 6283008].
-pub fn k_reduce(v: &mut Polyveck) {
-	for i in 0..K {
-		poly::reduce(&mut v.vec[i]);
-	}
-}
-
-/// For all coefficients of polynomials in vector of length K
+/// For all coefficients of polynomials in vector of length N
 /// add Q if coefficient is negative.
-pub fn k_caddq(v: &mut Polyveck) {
-	for i in 0..K {
+pub fn caddq<const N: usize>(v: &mut Polyvec<N>) {
+	for i in 0..N {
 		poly::caddq(&mut v.vec[i]);
 	}
 }
 
-/// Add vectors of polynomials of length K.
+/// Add vectors of polynomials of length N.
 /// No modular reduction is performed.
-pub fn k_add(w: &mut Polyveck, v: &Polyveck) {
-	for i in 0..K {
+pub fn add<const N: usize>(w: &mut Polyvec<N>, v: &Polyvec<N>) {
+	for i in 0..N {
 		poly::add_ip(&mut w.vec[i], &v.vec[i]);
 	}
 }
 
-/// Subtract vectors of polynomials of length K.
+/// Subtract vectors of polynomials of length N.
 /// Assumes coefficients of polynomials in second input vector
 /// to be less than 2*Q. No modular reduction is performed.
-pub fn k_sub(w: &mut Polyveck, v: &Polyveck) {
-	for i in 0..K {
+pub fn sub<const N: usize>(w: &mut Polyvec<N>, v: &Polyvec<N>) {
+	for i in 0..N {
 		poly::sub_ip(&mut w.vec[i], &v.vec[i]);
 	}
 }
 
-/// Multiply vector of polynomials of Length K by 2^D without modular
+/// Multiply vector of polynomials of length N by 2^D without modular
 /// reduction. Input coefficients must be less than 2^{31-D} in absolute
 /// value — narrower than the `(-Q, Q)` range accepted by
 /// [`Poly::from_coeffs`](crate::poly::Poly::from_coeffs) — so this routine
 /// is `pub(crate)`; see [`poly::shiftl`].
-pub(crate) fn k_shiftl(v: &mut Polyveck) {
-	for i in 0..K {
+pub(crate) fn shiftl<const N: usize>(v: &mut Polyvec<N>) {
+	for i in 0..N {
 		poly::shiftl(&mut v.vec[i]);
 	}
 }
 
-/// Forward NTT of all polynomials in vector of length K. Output
-/// coefficients can be up to 16*Q larger than input coefficients.
-pub fn k_ntt(v: &mut Polyveck) {
-	for i in 0..K {
+/// Forward NTT of all polynomials in vector of length N. Output coefficients can be up to 16*Q
+/// larger than input coefficients.
+pub fn ntt<const N: usize>(v: &mut Polyvec<N>) {
+	for i in 0..N {
 		poly::ntt(&mut v.vec[i]);
 	}
 }
 
 /// Inverse NTT and multiplication by 2^{32} of polynomials
-/// in vector of length K. Input coefficients need to be less
+/// in vector of length N. Input coefficients need to be less
 /// than 2*Q.
-pub fn k_invntt_tomont(v: &mut Polyveck) {
-	for i in 0..K {
+pub fn invntt_tomont<const N: usize>(v: &mut Polyvec<N>) {
+	for i in 0..N {
 		poly::invntt_tomont(&mut v.vec[i]);
 	}
 }
 
-pub fn k_pointwise_poly_montgomery(r: &mut Polyveck, a: &Poly, v: &Polyveck) {
-	for i in 0..K {
+pub fn pointwise_poly_montgomery<const N: usize>(r: &mut Polyvec<N>, a: &Poly, v: &Polyvec<N>) {
+	for i in 0..N {
 		poly::pointwise_montgomery(&mut r.vec[i], a, &v.vec[i]);
 	}
 }
 
-/// Check if the infinity norm of a Polyveck is within the given bound.
+/// Check if the infinity norm of a Polyvec is within the given bound.
 ///
 /// # Arguments
 /// * `v` - The polynomial vector to check
 /// * `bound` - The norm bound
 ///
 /// Returns true if all polynomials in the vector have infinity norm < bound, false otherwise.
-pub fn polyveck_is_norm_within_bound(v: &Polyveck, bound: i32) -> bool {
+pub fn is_norm_within_bound<const N: usize>(v: &Polyvec<N>, bound: i32) -> bool {
 	let mut result = true;
-	for i in 0..K {
+	for i in 0..N {
 		let norm_check = poly::check_norm(&v.vec[i], bound);
 		result = result && !norm_check;
 	}
 	result
 }
 
-/// For all coefficients a of polynomials in vector of length K, compute a0, a1 such that a mod Q =
+/// For all coefficients a of polynomials in vector of length N, compute a0, a1 such that a mod Q =
 /// a1*2^D + a0 with -2^{D-1} < a0 <= 2^{D-1}. Assumes coefficients to be standard representatives.
-pub fn k_power2round(v1: &mut Polyveck, v0: &mut Polyveck) {
-	for i in 0..K {
+pub fn power2round<const N: usize>(v1: &mut Polyvec<N>, v0: &mut Polyvec<N>) {
+	for i in 0..N {
 		poly::power2round(&mut v1.vec[i], &mut v0.vec[i]);
 	}
 }
 
-pub fn k_decompose(v1: &mut Polyveck, v0: &mut Polyveck) {
-	for i in 0..K {
+pub fn decompose<const N: usize>(v1: &mut Polyvec<N>, v0: &mut Polyvec<N>) {
+	for i in 0..N {
 		poly::decompose(&mut v1.vec[i], &mut v0.vec[i]);
 	}
 	swap(v1, v0);
 }
 
-pub fn k_make_hint(h: &mut Polyveck, v0: &Polyveck, v1: &Polyveck) -> i32 {
+pub fn make_hint<const N: usize>(h: &mut Polyvec<N>, v0: &Polyvec<N>, v1: &Polyvec<N>) -> i32 {
 	let mut s: i32 = 0;
-	for i in 0..K {
+	for i in 0..N {
 		s += poly::make_hint(&mut h.vec[i], &v0.vec[i], &v1.vec[i]);
 	}
 	s
 }
 
-pub fn k_use_hint(a: &mut Polyveck, hint: &Polyveck) {
-	for i in 0..K {
+pub fn use_hint<const N: usize>(a: &mut Polyvec<N>, hint: &Polyvec<N>) {
+	for i in 0..N {
 		poly::use_hint(&mut a.vec[i], &hint.vec[i]);
 	}
 }
 
 /// Pack polynomial vector w1 into byte array.
 ///
-/// The output is an exact-size array (`K * POLYW1_PACKEDBYTES`) so a too-short
-/// destination buffer is rejected at compile time rather than panicking on an
-/// out-of-bounds write.
-pub fn k_pack_w1(r: &mut [u8; K * params::POLYW1_PACKEDBYTES], a: &Polyveck) {
-	for i in 0..K {
+/// The output is an exact-size array (`N * POLYW1_PACKEDBYTES`, enforced by a
+/// compile-time assertion) so a too-short destination buffer is rejected at
+/// compile time rather than panicking on an out-of-bounds write.
+pub fn pack_w1<const N: usize, const W1BYTES: usize>(r: &mut [u8; W1BYTES], a: &Polyvec<N>) {
+	const {
+		assert!(W1BYTES == N * params::POLYW1_PACKEDBYTES);
+	}
+	for i in 0..N {
 		poly::w1_pack(&mut r[i * params::POLYW1_PACKEDBYTES..], &a.vec[i]);
 	}
+}
+
+// ---------------------------------------------------------------------------
+// ML-DSA-87 compatibility wrappers
+//
+// The `k_*`/`l_*` names predate the const-generic `Polyvec<N>` core and are
+// still used by the ML-DSA-87 signing driver and external consumers (the
+// threshold crate, the ct_bench harness). Each is a thin `#[inline]` shim onto
+// the generic operation with the vector length fixed to the ML-DSA-87 K or L.
+// ---------------------------------------------------------------------------
+
+/// See [`uniform_eta`].
+pub(crate) fn l_uniform_eta(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], base_nonce: u16) {
+	uniform_eta(v, seed, base_nonce);
+}
+
+/// See [`uniform_gamma1`].
+pub(crate) fn l_uniform_gamma1(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], nonce: u16) {
+	uniform_gamma1(v, seed, nonce);
+}
+
+/// See [`reduce`].
+#[inline]
+pub fn l_reduce(v: &mut Polyvecl) {
+	reduce(v);
+}
+
+/// See [`add`].
+#[inline]
+pub fn l_add(w: &mut Polyvecl, v: &Polyvecl) {
+	add(w, v);
+}
+
+/// See [`ntt`].
+#[inline]
+pub fn l_ntt(v: &mut Polyvecl) {
+	ntt(v);
+}
+
+/// See [`invntt_tomont`].
+#[inline]
+pub fn l_invntt_tomont(v: &mut Polyvecl) {
+	invntt_tomont(v);
+}
+
+/// See [`pointwise_poly_montgomery`].
+#[inline]
+pub fn l_pointwise_poly_montgomery(r: &mut Polyvecl, a: &Poly, v: &Polyvecl) {
+	pointwise_poly_montgomery(r, a, v);
+}
+
+/// See [`pointwise_acc_montgomery`].
+#[inline]
+pub fn l_pointwise_acc_montgomery(w: &mut Poly, u: &Polyvecl, v: &Polyvecl) {
+	pointwise_acc_montgomery(w, u, v);
+}
+
+/// See [`is_norm_within_bound`].
+#[inline]
+pub fn polyvecl_is_norm_within_bound(v: &Polyvecl, bound: i32) -> bool {
+	is_norm_within_bound(v, bound)
+}
+
+/// See [`uniform_eta`].
+pub(crate) fn k_uniform_eta(v: &mut Polyveck, seed: &[u8; params::CRHBYTES], base_nonce: u16) {
+	uniform_eta(v, seed, base_nonce);
+}
+
+/// See [`reduce`].
+#[inline]
+pub fn k_reduce(v: &mut Polyveck) {
+	reduce(v);
+}
+
+/// See [`caddq`].
+#[inline]
+pub fn k_caddq(v: &mut Polyveck) {
+	caddq(v);
+}
+
+/// See [`add`].
+#[inline]
+pub fn k_add(w: &mut Polyveck, v: &Polyveck) {
+	add(w, v);
+}
+
+/// See [`sub`].
+#[inline]
+pub fn k_sub(w: &mut Polyveck, v: &Polyveck) {
+	sub(w, v);
+}
+
+/// See [`shiftl`].
+#[inline]
+pub(crate) fn k_shiftl(v: &mut Polyveck) {
+	shiftl(v);
+}
+
+/// See [`ntt`].
+#[inline]
+pub fn k_ntt(v: &mut Polyveck) {
+	ntt(v);
+}
+
+/// See [`invntt_tomont`].
+#[inline]
+pub fn k_invntt_tomont(v: &mut Polyveck) {
+	invntt_tomont(v);
+}
+
+/// See [`pointwise_poly_montgomery`].
+#[inline]
+pub fn k_pointwise_poly_montgomery(r: &mut Polyveck, a: &Poly, v: &Polyveck) {
+	pointwise_poly_montgomery(r, a, v);
+}
+
+/// See [`is_norm_within_bound`].
+#[inline]
+pub fn polyveck_is_norm_within_bound(v: &Polyveck, bound: i32) -> bool {
+	is_norm_within_bound(v, bound)
+}
+
+/// See [`power2round`].
+#[inline]
+pub fn k_power2round(v1: &mut Polyveck, v0: &mut Polyveck) {
+	power2round(v1, v0);
+}
+
+/// See [`decompose`].
+#[inline]
+pub fn k_decompose(v1: &mut Polyveck, v0: &mut Polyveck) {
+	decompose(v1, v0);
+}
+
+/// See [`make_hint`].
+#[inline]
+pub fn k_make_hint(h: &mut Polyveck, v0: &Polyveck, v1: &Polyveck) -> i32 {
+	make_hint(h, v0, v1)
+}
+
+/// See [`use_hint`].
+#[inline]
+pub fn k_use_hint(a: &mut Polyveck, hint: &Polyveck) {
+	use_hint(a, hint);
+}
+
+/// See [`pack_w1`].
+#[inline]
+pub fn k_pack_w1(r: &mut [u8; params::K * params::POLYW1_PACKEDBYTES], a: &Polyveck) {
+	pack_w1(r, a);
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	const K: usize = params::K;
+	const L: usize = params::L;
 	const N: usize = params::N as usize;
 
 	#[test]
@@ -428,6 +535,28 @@ mod tests {
 		let max_gamma1_nonce = (u16::MAX - (L as u16 - 1)) / L as u16;
 		let mut vg = Polyvecl::default();
 		l_uniform_gamma1(&mut vg, &seed, max_gamma1_nonce);
+	}
+
+	// The generic operations must be shape-agnostic: the same code instantiated
+	// at a vector length used by no current variant still behaves correctly.
+	#[test]
+	fn generic_polyvec_operations_at_arbitrary_length() {
+		let mut a = Polyvec::<3>::default();
+		let mut b = Polyvec::<3>::default();
+		for i in 0..3 {
+			for j in 0..N {
+				a.vec[i].coeffs[j] = (i * 100 + j) as i32;
+				b.vec[i].coeffs[j] = (i * 7 + 2 * j) as i32;
+			}
+		}
+		let original_a = a.clone();
+		add(&mut a, &b);
+		for i in 0..3 {
+			for j in 0..N {
+				assert_eq!(a.vec[i].coeffs[j], original_a.vec[i].coeffs[j] + b.vec[i].coeffs[j]);
+			}
+		}
+		assert!(is_norm_within_bound(&Polyvec::<3>::default(), 1));
 	}
 
 	#[test]
