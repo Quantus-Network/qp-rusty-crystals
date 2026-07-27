@@ -110,6 +110,62 @@ fn run_threshold_protocol_4_round(
 }
 
 // ============================================================================
+// Standard (non-threshold) verifier compatibility
+// ============================================================================
+
+// Feature-priority selection of the active dilithium frontend (87 > 65 > 44),
+// mirroring the crate's `mldsa` module.
+#[cfg(feature = "ml-dsa-87")]
+use qp_rusty_crystals_dilithium::ml_dsa_87 as active_mldsa;
+#[cfg(all(feature = "ml-dsa-65", not(feature = "ml-dsa-87")))]
+use qp_rusty_crystals_dilithium::ml_dsa_65 as active_mldsa;
+#[cfg(all(feature = "ml-dsa-44", not(feature = "ml-dsa-87"), not(feature = "ml-dsa-65")))]
+use qp_rusty_crystals_dilithium::ml_dsa_44 as active_mldsa;
+
+/// A threshold signature must verify under the *standard* ML-DSA verifier of
+/// the active parameter set, using only the dilithium crate's public API on
+/// the raw key/signature bytes.
+///
+/// `threshold::verify_signature` happens to delegate to the same verifier,
+/// but that delegation is an implementation detail; this test pins the
+/// compatibility claim independently of it, so a future change to the
+/// threshold-side verification path cannot silently break standard-verifier
+/// compatibility for any variant.
+#[test]
+fn test_signature_verifies_with_standard_dilithium_verifier() {
+	let seed = [7u8; 32];
+	let message = b"cross-crate verification message";
+	let context: &[u8] = b"cross-crate-ctx";
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+	let make_signers = || {
+		shares
+			.iter()
+			.take(2)
+			.cloned()
+			.map(|share| ThresholdSigner::new(share, public_key.clone(), config).unwrap())
+			.collect::<Vec<_>>()
+	};
+	let signature = sign_with_retries(make_signers, message, context, &seed).expect("signing");
+
+	let standard_pk = active_mldsa::PublicKey::from_bytes(public_key.as_bytes())
+		.expect("threshold public key must parse as a standard ML-DSA public key");
+	assert!(
+		standard_pk.verify(message, signature.as_bytes(), Some(context)),
+		"threshold signature must verify under the standard ML-DSA verifier"
+	);
+	assert!(
+		!standard_pk.verify(b"different message", signature.as_bytes(), Some(context)),
+		"standard verifier must reject a different message"
+	);
+	assert!(
+		!standard_pk.verify(message, signature.as_bytes(), None),
+		"standard verifier must bind the context"
+	);
+}
+
+// ============================================================================
 // Deterministic Tests (using fixed seeds - 4-round protocol handles retries)
 // ============================================================================
 
