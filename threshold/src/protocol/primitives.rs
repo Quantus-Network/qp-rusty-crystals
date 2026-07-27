@@ -35,7 +35,7 @@
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::f64::consts::PI;
 use qp_rusty_crystals_dilithium::{
-	fips202, packing,
+	fips202, packing, params,
 	params::{C_DASH_BYTES, GAMMA2, K, L, N, Q, SIGNBYTES},
 	poly, polyvec,
 };
@@ -688,8 +688,16 @@ pub(crate) fn pack_signature(
 	let c_tilde_arr: Option<&[u8; C_DASH_BYTES]> =
 		c_tilde.get(..C_DASH_BYTES).and_then(|slice| slice.try_into().ok());
 
-	// Use dilithium's pack_sig function
-	packing::pack_sig(&mut sig, c_tilde_arr, z, hint);
+	// Use dilithium's pack_sig function, pinned to the ML-DSA-87 parameters.
+	packing::pack_sig::<
+		K,
+		L,
+		{ params::GAMMA1 },
+		{ params::OMEGA },
+		C_DASH_BYTES,
+		{ params::POLYZ_PACKEDBYTES },
+		SIGNBYTES,
+	>(&mut sig, c_tilde_arr, z, hint);
 
 	sig.to_vec()
 }

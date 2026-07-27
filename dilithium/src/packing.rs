@@ -1,23 +1,25 @@
-use crate::{
-	params, poly,
-	polyvec::{Polyveck, Polyvecl},
-};
-const K: usize = params::K;
-const L: usize = params::L;
+use crate::{params, poly, polyvec::Polyvec};
+
 const N: usize = params::N as usize;
 
 /// Bit-pack public key pk = (rho, t1).
+///
+/// Generic over the variant's row count `K`; `PK` is the packed public key
+/// size, checked against `K` at compile time.
 ///
 /// # Arguments
 ///
 /// * 'pk' - output buffer for public key (PUBLICKEYBYTES)
 /// * 'rho' - const reference to rho of SEEDBYTES length
 /// * 't1' - const reference to t1
-pub fn pack_pk(
-	pk: &mut [u8; params::PUBLICKEYBYTES],
+pub fn pack_pk<const K: usize, const PK: usize>(
+	pk: &mut [u8; PK],
 	rho: &[u8; params::SEEDBYTES],
-	t1: &Polyveck,
+	t1: &Polyvec<K>,
 ) {
+	const {
+		assert!(PK == params::publickeybytes(K));
+	}
 	pk[..params::SEEDBYTES].copy_from_slice(rho);
 	for i in 0..K {
 		poly::t1_pack(&mut pk[params::SEEDBYTES + i * params::POLYT1_PACKEDBYTES..], &t1.vec[i]);
@@ -31,11 +33,14 @@ pub fn pack_pk(
 /// * 'rho' - output for rho value of SEEDBYTES length
 /// * 't1' - output for t1 value
 /// * 'pk' - const reference to public key
-pub fn unpack_pk(
+pub fn unpack_pk<const K: usize, const PK: usize>(
 	rho: &mut [u8; params::SEEDBYTES],
-	t1: &mut Polyveck,
-	pk: &[u8; params::PUBLICKEYBYTES],
+	t1: &mut Polyvec<K>,
+	pk: &[u8; PK],
 ) {
+	const {
+		assert!(PK == params::publickeybytes(K));
+	}
 	rho.copy_from_slice(&pk[..params::SEEDBYTES]);
 	for i in 0..K {
 		poly::t1_unpack(&mut t1.vec[i], &pk[params::SEEDBYTES + i * params::POLYT1_PACKEDBYTES..]);
@@ -43,15 +48,23 @@ pub fn unpack_pk(
 }
 
 /// Bit-pack secret key sk = (rho, key, tr, s1, s2, t0).
-pub fn pack_sk(
-	sk: &mut [u8; params::SECRETKEYBYTES],
+///
+/// Generic over the variant's `K`/`L`/`ETA`; `SK` is the packed secret key
+/// size, checked for consistency at compile time.
+pub fn pack_sk<const K: usize, const L: usize, const ETA: usize, const SK: usize>(
+	sk: &mut [u8; SK],
 	rho: &[u8; params::SEEDBYTES],
 	tr: &[u8; params::TR_BYTES],
 	key: &[u8; params::SEEDBYTES],
-	t0: &Polyveck,
-	s1: &Polyvecl,
-	s2: &Polyveck,
+	t0: &Polyvec<K>,
+	s1: &Polyvec<L>,
+	s2: &Polyvec<K>,
 ) {
+	const {
+		assert!(SK == params::secretkeybytes(K, L, ETA));
+	}
+	let peta = params::polyeta_packedbytes(ETA);
+
 	sk[..params::SEEDBYTES].copy_from_slice(rho);
 	let mut idx = params::SEEDBYTES;
 
@@ -62,14 +75,14 @@ pub fn pack_sk(
 	idx += params::TR_BYTES;
 
 	for i in 0..L {
-		poly::eta_pack::<{ params::ETA }>(&mut sk[idx + i * params::POLYETA_PACKEDBYTES..], &s1.vec[i]);
+		poly::eta_pack::<ETA>(&mut sk[idx + i * peta..], &s1.vec[i]);
 	}
-	idx += L * params::POLYETA_PACKEDBYTES;
+	idx += L * peta;
 
 	for i in 0..K {
-		poly::eta_pack::<{ params::ETA }>(&mut sk[idx + i * params::POLYETA_PACKEDBYTES..], &s2.vec[i]);
+		poly::eta_pack::<ETA>(&mut sk[idx + i * peta..], &s2.vec[i]);
 	}
-	idx += K * params::POLYETA_PACKEDBYTES;
+	idx += K * peta;
 
 	for i in 0..K {
 		poly::t0_pack(&mut sk[idx + i * params::POLYT0_PACKEDBYTES..], &t0.vec[i]);
@@ -79,21 +92,26 @@ pub fn pack_sk(
 /// Unpack secret key sk = (rho, key, tr, s1, s2, t0).
 ///
 /// Returns `false` if the packed `s1`/`s2` regions contain a non-canonical
-/// 3-bit slot — an encoding that would decode to a coefficient outside
+/// eta slot — an encoding that would decode to a coefficient outside
 /// `[-ETA, ETA]`, which key generation never emits and which lies outside
 /// the key distribution the signing rejection margin (`BETA = TAU * ETA`)
 /// is sized for. All output buffers are fully written either way; callers
 /// must treat the unpacked values as invalid when `false` is returned.
 #[must_use]
-pub fn unpack_sk(
+pub fn unpack_sk<const K: usize, const L: usize, const ETA: usize, const SK: usize>(
 	rho: &mut [u8; params::SEEDBYTES],
 	tr: &mut [u8; params::TR_BYTES],
 	key: &mut [u8; params::SEEDBYTES],
-	t0: &mut Polyveck,
-	s1: &mut Polyvecl,
-	s2: &mut Polyveck,
-	sk: &[u8; params::SECRETKEYBYTES],
+	t0: &mut Polyvec<K>,
+	s1: &mut Polyvec<L>,
+	s2: &mut Polyvec<K>,
+	sk: &[u8; SK],
 ) -> bool {
+	const {
+		assert!(SK == params::secretkeybytes(K, L, ETA));
+	}
+	let peta = params::polyeta_packedbytes(ETA);
+
 	rho.copy_from_slice(&sk[..params::SEEDBYTES]);
 	let mut idx = params::SEEDBYTES;
 
@@ -108,20 +126,14 @@ pub fn unpack_sk(
 	// control flow; honest keys always pass anyway).
 	let mut canonical = true;
 	for i in 0..L {
-		canonical &= poly::eta_unpack::<{ params::ETA }>(
-			&mut s1.vec[i],
-			&sk[idx + i * params::POLYETA_PACKEDBYTES..],
-		);
+		canonical &= poly::eta_unpack::<ETA>(&mut s1.vec[i], &sk[idx + i * peta..]);
 	}
-	idx += L * params::POLYETA_PACKEDBYTES;
+	idx += L * peta;
 
 	for i in 0..K {
-		canonical &= poly::eta_unpack::<{ params::ETA }>(
-			&mut s2.vec[i],
-			&sk[idx + i * params::POLYETA_PACKEDBYTES..],
-		);
+		canonical &= poly::eta_unpack::<ETA>(&mut s2.vec[i], &sk[idx + i * peta..]);
 	}
-	idx += K * params::POLYETA_PACKEDBYTES;
+	idx += K * peta;
 
 	for i in 0..K {
 		poly::t0_unpack(&mut t0.vec[i], &sk[idx + i * params::POLYT0_PACKEDBYTES..]);
@@ -131,26 +143,42 @@ pub fn unpack_sk(
 }
 
 /// Bit-pack signature sig = (c, z, h).
-pub fn pack_sig(
-	sig: &mut [u8; params::SIGNBYTES],
-	c: Option<&[u8; params::C_DASH_BYTES]>,
-	z: &Polyvecl,
-	h: &Polyveck,
+///
+/// Generic over the variant's `K`/`L`/`GAMMA1`/`OMEGA`; `CD` is the challenge
+/// size (lambda/4), `PZ` the packed size of one `z` polynomial, and `SIG` the
+/// total signature size, all checked for consistency at compile time.
+pub fn pack_sig<
+	const K: usize,
+	const L: usize,
+	const GAMMA1: usize,
+	const OMEGA: usize,
+	const CD: usize,
+	const PZ: usize,
+	const SIG: usize,
+>(
+	sig: &mut [u8; SIG],
+	c: Option<&[u8; CD]>,
+	z: &Polyvec<L>,
+	h: &Polyvec<K>,
 ) {
+	const {
+		assert!(PZ == params::polyz_packedbytes(GAMMA1));
+		assert!(SIG == params::signbytes(K, L, GAMMA1, OMEGA, CD));
+	}
 	if let Some(challenge) = c {
-		sig[..params::C_DASH_BYTES].copy_from_slice(challenge);
+		sig[..CD].copy_from_slice(challenge);
 	}
 
-	let mut idx = params::C_DASH_BYTES;
-	// `as_chunks_mut` splits the buffer into exact-size `&mut [u8; POLYZ_PACKEDBYTES]`
+	let mut idx = CD;
+	// `as_chunks_mut` splits the buffer into exact-size `&mut [u8; PZ]`
 	// arrays, so no per-polynomial length check or fallible conversion is needed.
-	let (z_chunks, _) = sig[idx..].as_chunks_mut::<{ params::POLYZ_PACKEDBYTES }>();
+	let (z_chunks, _) = sig[idx..].as_chunks_mut::<PZ>();
 	for (chunk, zi) in z_chunks.iter_mut().zip(z.vec.iter()).take(L) {
-		poly::z_pack::<{ params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(chunk, zi);
+		poly::z_pack::<GAMMA1, PZ>(chunk, zi);
 	}
 
-	idx += L * params::POLYZ_PACKEDBYTES;
-	sig[idx..idx + params::OMEGA + K].copy_from_slice(&[0u8; params::OMEGA + K]);
+	idx += L * PZ;
+	sig[idx..idx + OMEGA + K].fill(0);
 
 	// Branchless hint packing: the hint pattern is secret on rejected attempts, so no
 	// data-dependent branches. The write index is clamped with `min` (conditional move) and
@@ -159,10 +187,10 @@ pub fn pack_sig(
 	for i in 0..K {
 		for j in 0..N {
 			let is_nonzero = h.vec[i].coeffs[j] != 0;
-			let has_space = k < params::OMEGA;
+			let has_space = k < OMEGA;
 			let should_store = is_nonzero & has_space;
 
-			let write_idx = idx + k.min(params::OMEGA - 1);
+			let write_idx = idx + k.min(OMEGA - 1);
 
 			// Create a mask from should_store (0x00 or 0xFF)
 			let mask = (should_store as i8).wrapping_neg() as u8;
@@ -172,7 +200,7 @@ pub fn pack_sig(
 
 			k += is_nonzero as usize;
 		}
-		sig[idx + params::OMEGA + i] = k as u8;
+		sig[idx + OMEGA + i] = k as u8;
 	}
 }
 
@@ -183,43 +211,53 @@ pub fn pack_sig(
 /// only the current signature — otherwise a reused (or attacker-poisoned) `h`
 /// buffer would retain stale hint bits from a previous parse, letting a signature
 /// that encodes fewer/zero hints verify or canonicalize against hidden data.
-pub fn unpack_sig(
-	c: &mut [u8; params::C_DASH_BYTES],
-	z: &mut Polyvecl,
-	h: &mut Polyveck,
-	sig: &[u8; params::SIGNBYTES],
+pub fn unpack_sig<
+	const K: usize,
+	const L: usize,
+	const GAMMA1: usize,
+	const OMEGA: usize,
+	const CD: usize,
+	const PZ: usize,
+	const SIG: usize,
+>(
+	c: &mut [u8; CD],
+	z: &mut Polyvec<L>,
+	h: &mut Polyvec<K>,
+	sig: &[u8; SIG],
 ) -> bool {
-	// Overwrite, don't merge: clear any prior hint bits before decoding this signature.
-	*h = Polyveck::default();
-
-	c.copy_from_slice(&sig[..params::C_DASH_BYTES]);
-
-	let mut idx = params::C_DASH_BYTES;
-	// Exact-size chunks: each `&[u8; POLYZ_PACKEDBYTES]` is produced by the split,
-	// so a truncated per-polynomial slice can't reach `z_unpack`.
-	let (z_chunks, _) = sig[idx..].as_chunks::<{ params::POLYZ_PACKEDBYTES }>();
-	for (chunk, zi) in z_chunks.iter().zip(z.vec.iter_mut()).take(L) {
-		poly::z_unpack::<{ params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(zi, chunk);
+	const {
+		assert!(PZ == params::polyz_packedbytes(GAMMA1));
+		assert!(SIG == params::signbytes(K, L, GAMMA1, OMEGA, CD));
 	}
-	idx += L * params::POLYZ_PACKEDBYTES;
+	// Overwrite, don't merge: clear any prior hint bits before decoding this signature.
+	*h = Polyvec::<K>::default();
+
+	c.copy_from_slice(&sig[..CD]);
+
+	let mut idx = CD;
+	// Exact-size chunks: each `&[u8; PZ]` is produced by the split,
+	// so a truncated per-polynomial slice can't reach `z_unpack`.
+	let (z_chunks, _) = sig[idx..].as_chunks::<PZ>();
+	for (chunk, zi) in z_chunks.iter().zip(z.vec.iter_mut()).take(L) {
+		poly::z_unpack::<GAMMA1, PZ>(zi, chunk);
+	}
+	idx += L * PZ;
 
 	let mut k: usize = 0;
 	for i in 0..K {
-		if sig[idx + params::OMEGA + i] < k as u8 ||
-			sig[idx + params::OMEGA + i] > params::OMEGA as u8
-		{
+		if sig[idx + OMEGA + i] < k as u8 || sig[idx + OMEGA + i] > OMEGA as u8 {
 			return false;
 		}
-		for j in k..sig[idx + params::OMEGA + i] as usize {
+		for j in k..sig[idx + OMEGA + i] as usize {
 			if j > k && sig[idx + j as usize] <= sig[idx + j as usize - 1] {
 				return false;
 			}
 			h.vec[i].coeffs[sig[idx + j] as usize] = 1;
 		}
-		k = sig[idx + params::OMEGA + i] as usize;
+		k = sig[idx + OMEGA + i] as usize;
 	}
 
-	for j in k..params::OMEGA {
+	for j in k..OMEGA {
 		if sig[idx + j as usize] > 0 {
 			return false;
 		}
@@ -232,6 +270,75 @@ pub fn unpack_sig(
 mod tests {
 	use super::*;
 	use crate::polyvec::{Polyveck, Polyvecl};
+
+	const K: usize = params::K;
+	const L: usize = params::L;
+
+	// The generic pack/unpack functions pinned to the ML-DSA-87 parameters.
+	// These shadow the glob-imported generics so the test bodies below read
+	// exactly as they did when the module was single-variant.
+	fn pack_sk(
+		sk: &mut [u8; params::SECRETKEYBYTES],
+		rho: &[u8; params::SEEDBYTES],
+		tr: &[u8; params::TR_BYTES],
+		key: &[u8; params::SEEDBYTES],
+		t0: &Polyveck,
+		s1: &Polyvecl,
+		s2: &Polyveck,
+	) {
+		super::pack_sk::<K, L, { params::ETA }, { params::SECRETKEYBYTES }>(
+			sk, rho, tr, key, t0, s1, s2,
+		)
+	}
+
+	#[must_use]
+	fn unpack_sk(
+		rho: &mut [u8; params::SEEDBYTES],
+		tr: &mut [u8; params::TR_BYTES],
+		key: &mut [u8; params::SEEDBYTES],
+		t0: &mut Polyveck,
+		s1: &mut Polyvecl,
+		s2: &mut Polyveck,
+		sk: &[u8; params::SECRETKEYBYTES],
+	) -> bool {
+		super::unpack_sk::<K, L, { params::ETA }, { params::SECRETKEYBYTES }>(
+			rho, tr, key, t0, s1, s2, sk,
+		)
+	}
+
+	fn pack_sig(
+		sig: &mut [u8; params::SIGNBYTES],
+		c: Option<&[u8; params::C_DASH_BYTES]>,
+		z: &Polyvecl,
+		h: &Polyveck,
+	) {
+		super::pack_sig::<
+			K,
+			L,
+			{ params::GAMMA1 },
+			{ params::OMEGA },
+			{ params::C_DASH_BYTES },
+			{ params::POLYZ_PACKEDBYTES },
+			{ params::SIGNBYTES },
+		>(sig, c, z, h)
+	}
+
+	fn unpack_sig(
+		c: &mut [u8; params::C_DASH_BYTES],
+		z: &mut Polyvecl,
+		h: &mut Polyveck,
+		sig: &[u8; params::SIGNBYTES],
+	) -> bool {
+		super::unpack_sig::<
+			K,
+			L,
+			{ params::GAMMA1 },
+			{ params::OMEGA },
+			{ params::C_DASH_BYTES },
+			{ params::POLYZ_PACKEDBYTES },
+			{ params::SIGNBYTES },
+		>(c, z, h, sig)
+	}
 
 	#[test]
 	fn test_pack_unpack_pk_roundtrip() {

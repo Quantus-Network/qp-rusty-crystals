@@ -91,7 +91,9 @@ pub fn keypair(
 	let mut tr = [0u8; params::TR_BYTES];
 	fips202::shake256(&mut tr, pk);
 
-	packing::pack_sk(sk, &rho, &tr, &key, &t0, &s1, &s2);
+	packing::pack_sk::<K, L, { params::ETA }, { params::SECRETKEYBYTES }>(
+		sk, &rho, &tr, &key, &t0, &s1, &s2,
+	);
 
 	// Zeroize sensitive intermediate material. `s1`, `s2`, and `t0` are the
 	// secret polynomials; now that they're packed into `sk` the working copies
@@ -149,7 +151,9 @@ pub(crate) fn public_key_from_secret(
 	let mut s2 = Polyveck::default();
 	// Invariant: every secret coefficient must be in [-ETA, ETA]; `unpack_sk`
 	// reports non-canonical packed slots (see the doc comment above).
-	let s_in_range = packing::unpack_sk(&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk);
+	let s_in_range = packing::unpack_sk::<K, L, { params::ETA }, { params::SECRETKEYBYTES }>(
+		&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk,
+	);
 
 	// Same derivation as key generation.
 	let (t1, mut t0_derived) = derive_public_components(&rho, &s1, &s2);
@@ -241,7 +245,7 @@ fn unpack_secret_key_for_signing(
 	// import validation (`SecretKey`'s storage is private and only filled by
 	// `generate`/`from_bytes`), so a non-canonical encoding here is a crate
 	// bug, not reachable attacker input.
-	let canonical = packing::unpack_sk(
+	let canonical = packing::unpack_sk::<K, L, { params::ETA }, { params::SECRETKEYBYTES }>(
 		&mut public_seed_rho,
 		&mut public_key_hash_tr,
 		&mut private_key_seed,
@@ -452,7 +456,10 @@ fn generate_challenge_polynomial(
 	fips202::shake256_squeeze(&mut signature_buffer[..params::C_DASH_BYTES], &mut keccak_state);
 
 	let mut challenge_poly_c = Poly::default();
-	poly::challenge::<{ params::TAU }>(&mut challenge_poly_c, &signature_buffer[..params::C_DASH_BYTES]);
+	poly::challenge::<{ params::TAU }>(
+		&mut challenge_poly_c,
+		&signature_buffer[..params::C_DASH_BYTES],
+	);
 	poly::ntt(&mut challenge_poly_c);
 	challenge_poly_c
 }
@@ -553,7 +560,15 @@ pub(crate) fn signature(
 
 		if condition1 & condition2 & condition3 & condition4 {
 			// Challenge bytes are already in place; pack z and h around them.
-			packing::pack_sig(signature_output, None, &signature_z, &hint_vector_h);
+			packing::pack_sig::<
+				K,
+				L,
+				{ params::GAMMA1 },
+				{ params::OMEGA },
+				{ params::C_DASH_BYTES },
+				{ params::POLYZ_PACKEDBYTES },
+				{ params::SIGNBYTES },
+			>(signature_output, None, &signature_z, &hint_vector_h);
 			return;
 		}
 
@@ -605,7 +620,16 @@ pub(crate) fn verify(
 		return false;
 	}
 
-	if !packing::unpack_sig(&mut c, &mut z, &mut h, sig) {
+	if !packing::unpack_sig::<
+		K,
+		L,
+		{ params::GAMMA1 },
+		{ params::OMEGA },
+		{ params::C_DASH_BYTES },
+		{ params::POLYZ_PACKEDBYTES },
+		{ params::SIGNBYTES },
+	>(&mut c, &mut z, &mut h, sig)
+	{
 		return false;
 	}
 	if !polyvec::polyvecl_is_norm_within_bound(
@@ -920,7 +944,15 @@ mod tests {
 		let mut challenge_seed = [0u8; params::C_DASH_BYTES];
 		let mut z = Polyvecl::default();
 		let mut h = Polyveck::default();
-		assert!(packing::unpack_sig(&mut challenge_seed, &mut z, &mut h, sig));
+		assert!(packing::unpack_sig::<
+			K,
+			L,
+			{ params::GAMMA1 },
+			{ params::OMEGA },
+			{ params::C_DASH_BYTES },
+			{ params::POLYZ_PACKEDBYTES },
+			{ params::SIGNBYTES },
+		>(&mut challenge_seed, &mut z, &mut h, sig));
 
 		let unpacked = unpack_secret_key_for_signing(sk); // s1 already in NTT domain
 		let mut challenge_poly = Poly::default();
@@ -1012,7 +1044,15 @@ mod tests {
 		let z = Polyvecl::default();
 		let h = Polyveck::default();
 		let mut sig = [0u8; params::SIGNBYTES];
-		packing::pack_sig(&mut sig, Some(&c), &z, &h);
+		packing::pack_sig::<
+			K,
+			L,
+			{ params::GAMMA1 },
+			{ params::OMEGA },
+			{ params::C_DASH_BYTES },
+			{ params::POLYZ_PACKEDBYTES },
+			{ params::SIGNBYTES },
+		>(&mut sig, Some(&c), &z, &h);
 
 		assert!(
 			!super::verify(&sig, &[], m, &pk),

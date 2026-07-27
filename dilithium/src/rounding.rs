@@ -224,8 +224,7 @@ mod tests {
 		];
 		for &a0 in &interesting {
 			for a1 in [0, 1, 15, 43] {
-				let expected =
-					(a0 > gamma2 || a0 < -gamma2 || (a0 == -gamma2 && a1 != 0)) as i32;
+				let expected = (a0 > gamma2 || a0 < -gamma2 || (a0 == -gamma2 && a1 != 0)) as i32;
 				assert_eq!(
 					make_hint::<GAMMA2>(a0, a1),
 					expected,

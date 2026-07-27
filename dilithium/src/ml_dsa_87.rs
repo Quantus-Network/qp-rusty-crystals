@@ -558,7 +558,9 @@ mod tests {
 		crate::fips202::shake256(&mut tr, &pk);
 
 		let mut sk = [0u8; SECRETKEYBYTES];
-		packing::pack_sk(&mut sk, &rho, &tr, &key, &t0, &s1, &s2);
+		packing::pack_sk::<{ params::K }, { params::L }, { params::ETA }, SECRETKEYBYTES>(
+			&mut sk, &rho, &tr, &key, &t0, &s1, &s2,
+		);
 
 		assert!(
 			matches!(SecretKey::from_bytes(&sk), Err(KeyParsingError::BadSecretKey)),
@@ -593,7 +595,9 @@ mod tests {
 		let mut s1 = polyvec::Polyvecl::default();
 		let mut s2 = polyvec::Polyveck::default();
 		assert!(
-			packing::unpack_sk(&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, &sk_bytes),
+			packing::unpack_sk::<{ params::K }, { params::L }, { params::ETA }, SECRETKEYBYTES>(
+				&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, &sk_bytes,
+			),
 			"honest key unpacks canonically"
 		);
 
@@ -619,7 +623,15 @@ mod tests {
 		fips202::shake256(&mut tr_forged, &pk);
 
 		let mut forged_sk = [0u8; SECRETKEYBYTES];
-		packing::pack_sk(&mut forged_sk, &rho, &tr_forged, &key, &t0_forged, &s1, &s2);
+		packing::pack_sk::<{ params::K }, { params::L }, { params::ETA }, SECRETKEYBYTES>(
+			&mut forged_sk,
+			&rho,
+			&tr_forged,
+			&key,
+			&t0_forged,
+			&s1,
+			&s2,
+		);
 
 		assert!(
 			matches!(SecretKey::from_bytes(&forged_sk), Err(KeyParsingError::BadSecretKey)),

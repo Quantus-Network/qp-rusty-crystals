@@ -599,8 +599,8 @@ pub fn uniform_eta<const ETA: usize>(
 	//   ~5.7) — falling short of 256 is a ~45-sigma event (< 2^-600).
 	// - ETA = 4: the acceptance probability drops to 9/16, so two blocks (mean 306, sigma ~11.6)
 	//   would fall short of 256 at a ~4.3-sigma rate (~1e-5) — an observable timing variation.
-	//   Three blocks = 816 nibbles (mean 459, sigma ~14.2) push the shortfall back out to ~14
-	//   sigma (< 2^-150).
+	//   Three blocks = 816 nibbles (mean 459, sigma ~14.2) push the shortfall back out to ~14 sigma
+	//   (< 2^-150).
 	//
 	// Even in principle, timing here depends only on rejection counts
 	// (nibble == 15 resp. nibble >= 9), which are independent of the accepted
@@ -653,8 +653,10 @@ pub fn uniform_gamma1<const GAMMA1: usize, const PZ: usize>(
 	fips202::shake256_squeezeblocks(&mut buf, &mut state);
 	// The squeeze buffer is a multiple of the rate and always >= PZ (checked
 	// above), so `first_chunk` yields the exact prefix the codec consumes.
-	let z_bytes =
-		buf.as_flattened().first_chunk::<PZ>().expect("gamma1 buffer covers the packed-z size");
+	let z_bytes = buf
+		.as_flattened()
+		.first_chunk::<PZ>()
+		.expect("gamma1 buffer covers the packed-z size");
 	z_unpack::<GAMMA1, PZ>(a, z_bytes);
 }
 
@@ -1621,7 +1623,9 @@ mod tests {
 		let nonce = 5678;
 		let mut poly = Poly::default();
 
-		uniform_gamma1::<{ params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(&mut poly, &seed, nonce);
+		uniform_gamma1::<{ params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(
+			&mut poly, &seed, nonce,
+		);
 
 		// All coefficients should be in the range [-GAMMA1, GAMMA1]
 		for i in 0..N {
@@ -1650,7 +1654,9 @@ mod tests {
 			let nonce = rng.next_u32() as u16;
 
 			let mut poly = Poly::default();
-			uniform_gamma1::<{ params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(&mut poly, &seed, nonce);
+			uniform_gamma1::<{ params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(
+				&mut poly, &seed, nonce,
+			);
 
 			let mut even_all_zero = true;
 			let mut odd_all_zero = true;
@@ -1739,7 +1745,10 @@ mod tests {
 		eta_pack::<{ params::ETA }>(&mut packed, &poly);
 
 		let mut unpacked = Poly::default();
-		assert!(eta_unpack::<{ params::ETA }>(&mut unpacked, &packed), "canonical packing must unpack cleanly");
+		assert!(
+			eta_unpack::<{ params::ETA }>(&mut unpacked, &packed),
+			"canonical packing must unpack cleanly"
+		);
 
 		for i in 0..N {
 			assert_eq!(poly.coeffs[i], unpacked.coeffs[i], "ETA pack/unpack failed at index {}", i);
@@ -1753,7 +1762,10 @@ mod tests {
 		// must pass.
 		let mut packed = [0u8; params::POLYETA_PACKEDBYTES];
 		let mut unpacked = Poly::default();
-		assert!(eta_unpack::<{ params::ETA }>(&mut unpacked, &packed), "all-zero slots are canonical");
+		assert!(
+			eta_unpack::<{ params::ETA }>(&mut unpacked, &packed),
+			"all-zero slots are canonical"
+		);
 
 		// First 3-bit slot = 5 -> coefficient ETA - 5 = -3.
 		packed[0] = 5;
@@ -1938,7 +1950,12 @@ mod tests {
 				"w1 6-bit slot 2 wrong at chunk {}",
 				i
 			);
-			assert_eq!((b2 >> 2) & 0x3F, a.coeffs[4 * i + 3], "w1 6-bit slot 3 wrong at chunk {}", i);
+			assert_eq!(
+				(b2 >> 2) & 0x3F,
+				a.coeffs[4 * i + 3],
+				"w1 6-bit slot 3 wrong at chunk {}",
+				i
+			);
 		}
 	}
 
