@@ -1,23 +1,36 @@
 # Quantus Network CRYSTALS-Dilithium
 
-Pure Rust implementation of the ML-DSA-87 (CRYSTALS-Dilithium) post-quantum digital signature scheme.
+Pure Rust implementation of ML-DSA (CRYSTALS-Dilithium) post-quantum digital signatures, supporting all three FIPS 204 parameter sets.
 
 ## Features
 
-- **ML-DSA-87 Only** - Highest security level implementation (~256-bit security)
+- **ML-DSA-44 / 65 / 87** - All FIPS 204 security levels behind additive Cargo features
 - **Pure Rust** - No unsafe code, memory-safe implementation
 - **NO-STD** - Does not depend on standard library so more portable
-- **NIST Compliant** - Verified against official test vectors
+- **NIST Compliant** - Verified against official ACVP known-answer test vectors
 - **Reasonably Constant-Time** - [Reasonably constant-time execution for keygen and signing](CONSTANT_TIME_TESTING.md)
 - **Context String Support** - Support for domain separation contexts
 
-## Usage
+### Cargo features
 
-Add to your `Cargo.toml`:
+| Feature | Default | Module |
+|---------|---------|--------|
+| `ml-dsa-87` | yes | `ml_dsa_87` |
+| `ml-dsa-65` | no | `ml_dsa_65` |
+| `ml-dsa-44` | no | `ml_dsa_44` |
+
+Features are additive: enable any combination so one binary can verify (or sign) at multiple levels.
+
 ```toml
 [dependencies]
-qp-rusty-crystals-dilithium = "2.0.0"
+# Default: ML-DSA-87 only
+qp-rusty-crystals-dilithium = "3.0.1"
+
+# Or enable several levels:
+qp-rusty-crystals-dilithium = { version = "3.0.1", features = ["ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
 ```
+
+## Usage
 
 ### Basic Example
 
@@ -29,15 +42,12 @@ let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
 let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
 
-// Alternative: you could also use a different secure entropy source
-// let keypair = ml_dsa_87::Keypair::generate(&other_secure_entropy);
-
 // Sign a message
 let message = b"Hello, post-quantum world!";
-let signature = keypair.sign(message, None, None);
+let signature = keypair.sign(message, None, None).expect("Signing should succeed");
 
 // Verify the signature
-let is_valid = keypair.verify(message, &signature, None);
+let is_valid = keypair.verify(message, signature.as_slice(), None);
 assert!(is_valid);
 ```
 
@@ -46,7 +56,6 @@ assert!(is_valid);
 ```rust
 use qp_rusty_crystals_dilithium::ml_dsa_87;
 
-// Generate secure entropy
 let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
 let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
@@ -54,11 +63,8 @@ let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
 let message = b"Important message";
 let context = b"email-signature-v1"; // Domain separation
 
-// Sign with context
-let signature = keypair.sign(message, Some(context), None);
-
-// Verify with context
-let is_valid = keypair.verify(message, &signature, Some(context));
+let signature = keypair.sign(message, Some(context), None).expect("Signing should succeed");
+let is_valid = keypair.verify(message, signature.as_slice(), Some(context));
 assert!(is_valid);
 ```
 
@@ -67,42 +73,41 @@ assert!(is_valid);
 ```rust
 use qp_rusty_crystals_dilithium::ml_dsa_87;
 
-// Generate secure entropy for keypair
 let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
 let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
 
 let message = b"Message to sign";
 
-// Generate secure hedge entropy
 let mut hedge_entropy = [0u8; 32];
 getrandom::getrandom(&mut hedge_entropy).expect("Failed to generate hedge entropy");
 
-// Hedged signing provides additional randomness
-let signature = keypair.sign(message, None, Some(hedge_entropy));
-let is_valid = keypair.verify(message, &signature, None);
+let signature = keypair
+	.sign(message, None, Some(hedge_entropy))
+	.expect("Signing should succeed");
+let is_valid = keypair.verify(message, signature.as_slice(), None);
 assert!(is_valid);
 ```
 
-## Security Level
+## Security Levels
 
-| Variant | Security Level | Public Key Size | Private Key Size | Signature Size |
-|---------|----------------|-----------------|------------------|----------------|
+| Variant | Security Level | Public Key | Secret Key | Signature |
+|---------|----------------|------------|------------|-----------|
+| ML-DSA-44 | ~128 bits | 1,312 bytes | 2,560 bytes | 2,420 bytes |
+| ML-DSA-65 | ~192 bits | 1,952 bytes | 4,032 bytes | 3,309 bytes |
 | ML-DSA-87 | ~256 bits | 2,592 bytes | 4,896 bytes | 4,627 bytes |
-
-**Note**: This implementation only supports ML-DSA-87, the highest security variant. Other variants (ML-DSA-44, ML-DSA-65) are not implemented.
 
 ## API Reference
 
 ### Keypair Generation
 
 ```rust
-pub fn generate(entropy: &[u8]) -> Keypair
+pub fn generate(entropy: SensitiveBytes32) -> Keypair
 ```
 
-Generates a new keypair using the provided entropy. The entropy must be at least 32 bytes of cryptographically secure random data (e.g., from `getrandom::getrandom()`).
+Generates a new keypair using the provided entropy. The entropy must be 32 bytes of cryptographically secure random data (e.g., from `getrandom::getrandom()`).
 
-**⚠️ Security Warning**: Never use predictable or human-readable strings as entropy. This includes:
+**Security Warning**: Never use predictable or human-readable strings as entropy. This includes:
 - Hardcoded strings like `b"my_seed"`
 - User passwords or passphrases
 - Timestamps or counters
@@ -113,7 +118,7 @@ Always use a cryptographically secure random number generator.
 ### Signing
 
 ```rust
-pub fn sign(&self, msg: &[u8], ctx: Option<&[u8]>, hedge: Option<[u8; 32]>) -> Signature
+pub fn sign(&self, msg: &[u8], ctx: Option<&[u8]>, hedge: Option<[u8; 32]>) -> Result<Signature, SignatureError>
 ```
 
 - `msg`: The message to sign
@@ -135,7 +140,7 @@ pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool
 This implementation is not optimized for constrained environments and may not work with small stack sizes:
 
 - Key generation: ≤256KB stack
-- Signing: ≤256KB stack  
+- Signing: ≤256KB stack
 - Verification: ≤256KB stack
 
 See `examples/stack_usage_demo.rs` for detailed stack usage analysis.
@@ -143,20 +148,24 @@ See `examples/stack_usage_demo.rs` for detailed stack usage analysis.
 ## Testing
 
 ```bash
-cargo test
+# Default feature set (ML-DSA-87)
+cargo test -p qp-rusty-crystals-dilithium
+
+# All parameter sets (ACVP KATs for 44/65/87)
+cargo test -p qp-rusty-crystals-dilithium --all-features
 ```
 
 ## Benchmarks
 
 ```bash
-cargo bench
+cargo bench -p qp-rusty-crystals-dilithium --all-features
 ```
 
 ## Examples
 
 ```bash
 # Run the stack usage demonstration
-cargo run --example stack_usage_demo
+cargo run --example stack_usage_demo -p qp-rusty-crystals-dilithium
 ```
 
 ## License
