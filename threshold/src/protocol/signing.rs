@@ -1,4 +1,4 @@
-//! Core signing protocol logic for threshold ML-DSA-87.
+//! Core signing protocol logic for threshold ML-DSA.
 //!
 //! This module implements the cryptographic operations for the threshold signing
 //! protocol, including commitment generation, response computation, and signature
@@ -6,20 +6,18 @@
 
 use alloc::{collections::BTreeMap, string::ToString, vec, vec::Vec};
 
-use qp_rusty_crystals_dilithium::{
-	fips202,
-	params::{
-		BETA, C_DASH_BYTES, D, GAMMA1, GAMMA2, K, L, N, OMEGA, POLYW1_PACKEDBYTES,
-		POLYZ_PACKEDBYTES, Q, TAU,
-	},
-	poly, polyvec,
-};
+use qp_rusty_crystals_dilithium::{fips202, poly, polyvec};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey},
+	params::{
+		self, BETA, C_DASH_BYTES, D, GAMMA1, GAMMA2, K, L, N, OMEGA, POLY_Q_PACKEDBYTES,
+		POLYW1_PACKEDBYTES, POLYZ_PACKEDBYTES, Q, SINGLE_COMMITMENT_SIZE, SUITE_ID, TAU,
+		THRESHOLD_SSID_VERSION,
+	},
 	participants::{ParticipantId, ParticipantList},
 	protocol::{
 		primitives::{
@@ -90,8 +88,10 @@ pub const SSID_SIZE: usize = 32;
 ///
 /// ```text
 /// ssid = SHAKE256(
-///     "dilithium-threshold-ssid-v2" ||
-///     pubkey_bytes[2592] ||
+///     "dilithium-threshold-ssid-v3" ||
+///     ssid_version (u32 LE) ||
+///     suite_id (u32 LE) ||
+///     pubkey_bytes[PUBLICKEYBYTES] ||
 ///     threshold (u32 LE) ||
 ///     total_parties (u32 LE) ||
 ///     num_participants (u32 LE) ||
@@ -112,13 +112,15 @@ pub fn compute_ssid(
 	context: &[u8],
 	attempt_nonce: &[u8; 32],
 ) -> [u8; SSID_SIZE] {
-	const DOMAIN_SEPARATOR: &[u8] = b"dilithium-threshold-ssid-v2";
+	const DOMAIN_SEPARATOR: &[u8] = b"dilithium-threshold-ssid-v3";
 
 	let mut ssid = [0u8; SSID_SIZE];
 	let mut state = fips202::KeccakState::default();
 
 	// Domain separator
 	fips202::shake256_absorb(&mut state, DOMAIN_SEPARATOR);
+	fips202::shake256_absorb(&mut state, &THRESHOLD_SSID_VERSION.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &SUITE_ID.to_le_bytes());
 
 	// Public key bytes
 	fips202::shake256_absorb(&mut state, public_key.as_bytes());
@@ -251,8 +253,7 @@ pub(crate) fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretSha
 pub(crate) fn unpack_commitment_dilithium(
 	commitment: &[u8],
 ) -> ThresholdResult<polyvec::Polyvec<K>> {
-	let poly_q_size = ((N as usize) * 23).div_ceil(8); // 736 bytes per poly
-	let expected_len = K * poly_q_size;
+	let expected_len = SINGLE_COMMITMENT_SIZE;
 
 	if commitment.len() != expected_len {
 		return Err(ThresholdError::InvalidCommitmentSize {
@@ -385,8 +386,7 @@ pub(crate) fn generate_round1(
 	}
 
 	// Pack w for commitment hash using 23-bit packing
-	const POLY_Q_SIZE: usize = ((N as usize) * 23) / 8; // 736 bytes
-	let single_commitment_size = K * POLY_Q_SIZE;
+	let single_commitment_size = SINGLE_COMMITMENT_SIZE;
 	let w_packed_size = k_iterations * single_commitment_size;
 	let mut w_packed = vec![0u8; w_packed_size];
 
@@ -410,10 +410,9 @@ pub(crate) fn generate_round1(
 
 /// Pack w using 23-bit encoding.
 fn pack_w_dilithium(w: &polyvec::Polyvec<K>, buf: &mut [u8]) {
-	const POLY_Q_SIZE: usize = ((N as usize) * 23) / 8; // 736 bytes
 	for i in 0..K {
-		let offset = i * POLY_Q_SIZE;
-		poly_pack_w(&w.vec[i], &mut buf[offset..offset + POLY_Q_SIZE]);
+		let offset = i * POLY_Q_PACKEDBYTES;
+		poly_pack_w(&w.vec[i], &mut buf[offset..offset + POLY_Q_PACKEDBYTES]);
 	}
 }
 
@@ -427,55 +426,13 @@ fn pack_w_dilithium(w: &polyvec::Polyvec<K>, buf: &mut [u8]) {
 /// Returns `None` if the configuration doesn't have pre-computed parameters.
 /// Currently supports n ≤ 6.
 pub fn get_hyperball_params(threshold: u32, parties: u32) -> Option<(f64, f64, f64)> {
-	// Threshold parameters (r, r', nu) from the reference implementation
-	// nu = 7 for ML-DSA-87
-	match (threshold, parties) {
-		// Resharing-supported committees have radii enlarged by kappa so honest
-		// post-resharing recovered partials fit under the enlarged bound B'. The
-		// enlargement scales (r, r') and B together, leaving the per-sample
-		// rejection leakage eps invariant (scale-invariant radius condition). It
-		// does NOT preserve the query budget Q_s = 1/(K*eps): K grows (the larger
-		// radius nears ML-DSA's fixed verification ceilings), and Q_s falls by that
-		// K factor (e.g. (3,5) K 35->60 at kappa=1.15 => ~0.8 bits of Q_s). See
-		// scripts/compute_hyperball_params.py and partial_secret_norm_bound().
-		// Radii = kappa x base, kappa re-derived for the v5 mean-subtracted coset
-		// splitter from the measured honest overshoot (Rust
-		// test_recovered_partial_variance_*, fixed point over all signing sets):
-		// (2,2) 0.780x -> kappa 1.00, (2,3) 0.810x -> 1.00 (both reshare at base B),
-		// (2,4) 0.961x -> 1.10, (3,5) 1.012x -> 1.15, (4,6) 1.163x -> 1.25
-		// (K 350->1600, ~15 MB/sig; enabled for the near-mpc 4-of-6 shape). See
-		// scripts/compute_hyperball_params.py (compute_resharing_params).
-		// (2,2)/(2,3) reshare at kappa=1, i.e. with the *exact* base keygen radii (a
-		// reshared committee signs identically to a fresh one). Use the reference base
-		// values directly, not the resharing script's expo-recovered approximation
-		// (whose 0.005 expo-grid drift shrinks r enough to tip the tight K=5/K=4
-		// single-shot acceptance below 1 for some seeds).
-		(2, 2) => Some((503119.0, 503192.0, 7.0)),
-		(2, 3) => Some((631601.0, 631703.0, 7.0)),
-		(3, 3) => Some((483107.0, 483180.0, 7.0)),
-		(2, 4) => Some((696194.0, 696307.0, 7.0)),
-		(3, 4) => Some((551752.0, 551854.0, 7.0)),
-		(4, 4) => Some((487958.0, 488031.0, 7.0)),
-		(2, 5) => Some((607694.0, 607820.0, 7.0)),
-		// (3,5): base (577400, 577546) x 1.15.
-		(3, 5) => Some((664010.0, 664178.0, 7.0)),
-		(4, 5) => Some((518384.0, 518510.0, 7.0)),
-		(5, 5) => Some((468214.0, 468287.0, 7.0)),
-		(2, 6) => Some((665106.0, 665232.0, 7.0)),
-		(3, 6) => Some((577541.0, 577704.0, 7.0)),
-		// (4,6): base (517689, 517853) x 1.25 (overshoot 1.163x, enabled for near-mpc).
-		(4, 6) => Some((647112.0, 647317.0, 7.0)),
-		(5, 6) => Some((479692.0, 479819.0, 7.0)),
-		(6, 6) => Some((424124.0, 424197.0, 7.0)),
-		_ => None,
-	}
+	params::hyperball_params(threshold, parties)
 }
 
 /// Pack Round 1 commitment data for broadcast.
 pub(crate) fn pack_round1_commitment(round1: &Round1Data, config: &ThresholdConfig) -> Vec<u8> {
 	let k = config.k_iterations() as usize;
-	const POLY_Q_SIZE: usize = ((N as usize) * 23) / 8;
-	let single_commitment_size = K * POLY_Q_SIZE;
+	let single_commitment_size = SINGLE_COMMITMENT_SIZE;
 	let total_size = k * single_commitment_size;
 	let mut buf = vec![0u8; total_size];
 
@@ -741,7 +698,7 @@ pub(crate) fn unpack_responses(
 	config: &ThresholdConfig,
 ) -> ThresholdResult<Vec<polyvec::Polyvec<L>>> {
 	let k = config.k_iterations() as usize;
-	let single_response_size = L * 640; // L * POLY_LE_GAMMA1_SIZE
+	let single_response_size = L * POLYZ_PACKEDBYTES;
 	let expected_size = k * single_response_size;
 
 	// Validate input size upfront - never silently zero-pad malformed data
@@ -1051,10 +1008,9 @@ pub(crate) fn combine_signature(
 ///
 /// # Errors
 ///
-/// Returns `InvalidPublicKeySize` if `pk_bytes` is not the expected size (2592 bytes).
+/// Returns `InvalidPublicKeySize` if `pk_bytes` is not the expected size.
 fn unpack_t1(pk_bytes: &[u8]) -> ThresholdResult<polyvec::Polyvec<K>> {
-	// Validate size: 32 (rho) + K * 320 (t1) = 32 + 8 * 320 = 2592
-	const EXPECTED_SIZE: usize = 32 + K * 320;
+	const EXPECTED_SIZE: usize = crate::params::PUBLICKEYBYTES;
 	if pk_bytes.len() != EXPECTED_SIZE {
 		return Err(ThresholdError::InvalidPublicKeySize {
 			expected: EXPECTED_SIZE,

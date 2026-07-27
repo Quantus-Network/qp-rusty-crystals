@@ -5,13 +5,12 @@
 //! partial contributions and pack them into the canonical ML-DSA-87 public-key
 //! encoding (`rho || t1`).
 
-use qp_rusty_crystals_dilithium::{
-	packing,
-	params::{K, L, N, Q},
-	polyvec,
-};
+use qp_rusty_crystals_dilithium::{packing, polyvec};
 
-use crate::keys::{PublicKey, PUBLIC_KEY_SIZE};
+use crate::{
+	keys::{PublicKey, PUBLIC_KEY_SIZE},
+	params::{K, L, N, Q},
+};
 
 /// Compute the unrounded partial PK polynomial vector `t = A·s1 + s2 mod Q`.
 ///
@@ -125,8 +124,6 @@ where
 mod tests {
 	use super::*;
 	use alloc::vec;
-
-	const L: usize = 7;
 
 	#[test]
 	fn pack_combined_pk_is_additive() {
