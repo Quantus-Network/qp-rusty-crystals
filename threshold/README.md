@@ -1,16 +1,37 @@
-# Threshold ML-DSA-87 Signature Scheme
+# Threshold ML-DSA Signature Scheme
 
-A Rust implementation of threshold ML-DSA-87 (Dilithium) signatures for the NEAR MPC network, allowing multiple parties to collectively sign messages without any single party having access to the complete signing key.
+A Rust implementation of threshold ML-DSA (Dilithium) signatures for the NEAR MPC network, allowing multiple parties to collectively sign messages without any single party having access to the complete signing key.
+
+## Parameter Sets
+
+Build for **exactly one** FIPS 204 parameter set via Cargo feature (default `ml-dsa-87`):
+
+| Feature | NIST category | Notes |
+|---------|---------------|-------|
+| `ml-dsa-87` | 5 (~256-bit) | Default; production-calibrated hyperball / `k_iterations` |
+| `ml-dsa-65` | 3 (~192-bit) | Base signing tables from Monte Carlo; resharing κ pending |
+| `ml-dsa-44` | 2 (~128-bit) | Base signing tables from Monte Carlo; resharing κ pending |
+
+```bash
+cargo test -p qp-rusty-crystals-threshold --features ml-dsa-87
+cargo test -p qp-rusty-crystals-threshold --no-default-features --features 'ml-dsa-65,std'
+cargo test -p qp-rusty-crystals-threshold --no-default-features --features 'ml-dsa-44,std'
+```
+
+If multiple features are enabled (e.g. workspace `--all-features`), priority is **87 > 65 > 44**.
+
+Suite IDs (SSID / resharing): `1` = ML-DSA-87, `2` = ML-DSA-44, `3` = ML-DSA-65. Protocol SSID version is `THRESHOLD_SSID_VERSION = 3`.
 
 ## Security Status
 
 | Component | Audit Status |
 |-----------|--------------|
-| Threshold signing protocol | ✅ Audited |
+| Threshold signing protocol | ✅ Audited (ML-DSA-87 calibration) |
 | Distributed Key Generation (DKG) | ✅ Audited |
 | Resharing protocol | ⚠️ Not audited |
+| ML-DSA-44 / ML-DSA-65 tables | ⚠️ Provisional (MC-derived; resharing overshoot/κ not re-measured) |
 
-The threshold signing and DKG protocols have undergone security review. The resharing (committee handoff) protocol has not been audited and should be used with caution in production environments. See `src/resharing/README.md` for security analysis and empirical verification of the resharing protocol's safety properties.
+The threshold signing and DKG protocols have undergone security review for the ML-DSA-87 parameter set. The resharing (committee handoff) protocol has not been audited. See `src/resharing/README.md` for security analysis and empirical verification of the resharing protocol's safety properties.
 
 ## Overview
 
@@ -19,7 +40,7 @@ In a (t, n) threshold scheme:
 - Any **t** or more parties can cooperate to produce a valid signature
 - Fewer than **t** parties cannot sign or learn the secret key
 
-Signatures are fully compatible with standard ML-DSA-87 verification.
+Signatures are fully compatible with standard ML-DSA verification for the selected parameter set.
 
 ## Key Concepts for Dilithium Users
 
@@ -51,8 +72,8 @@ When all K iterations fail rejection sampling, a **leader** (lowest-ID participa
 
 ## Features
 
-- **ML-DSA-87**: NIST Level 5 post-quantum security (~256-bit)
-- **Flexible Thresholds**: Supports (t, n) configurations where 2 ≤ t ≤ n ≤ 7
+- **ML-DSA-44 / 65 / 87**: selectable FIPS 204 parameter sets
+- **Flexible Thresholds**: Supports (t, n) configurations where 2 ≤ t ≤ n ≤ 6
 - **4-Round Protocol**: Commitment, reveal, response, and leader decision phases
 - **Leader-Based Retry**: Automatic retry on rejection sampling failures
 - **Distributed Key Generation (DKG)**: Generate keys without a trusted dealer
@@ -111,31 +132,32 @@ let valid = verify_signature(&public_key, message, context, &signature);
 | 4 | 2, 3, 4 |
 | 5 | 2, 3, 4, 5 |
 | 6 | 2, 3, 4, 5, 6 |
-| 7 | 2, 3, 4, 5, 6, 7 |
-
-Note: n=7 configurations are experimental.
 
 ## Testing
 
 ```bash
-# Run all tests
-cargo test
+# Default (ML-DSA-87)
+cargo test -p qp-rusty-crystals-threshold
 
-# Run integration tests
-cargo test --test integration_tests -- --nocapture
+# Other parameter sets
+cargo test -p qp-rusty-crystals-threshold --no-default-features --features 'ml-dsa-44,std'
+cargo test -p qp-rusty-crystals-threshold --no-default-features --features 'ml-dsa-65,std'
 
-# Run benchmarks
-cargo bench
+# Integration tests
+cargo test -p qp-rusty-crystals-threshold --test integration_tests -- --nocapture
+
+# Benchmarks
+cargo bench -p qp-rusty-crystals-threshold
 ```
 
 ## Benchmarks
 
 ```bash
 # Compare threshold vs standard Dilithium
-cargo bench -- comparison
+cargo bench -p qp-rusty-crystals-threshold -- comparison
 
 # Benchmark all configurations
-cargo bench -- signing_4round
+cargo bench -p qp-rusty-crystals-threshold -- signing_4round
 ```
 
 ## License

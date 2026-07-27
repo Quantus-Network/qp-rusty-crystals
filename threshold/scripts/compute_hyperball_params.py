@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """
-Compute hyperball parameters (r, r') for threshold ML-DSA-87.
+Compute hyperball parameters (r, r') for threshold ML-DSA.
 
 Based on the SageMath script from Threshold-ML-DSA/params/hyperball.sage
 Converted to pure Python with NumPy for Monte Carlo simulation.
+
+Usage:
+  python compute_hyperball_params.py              # ML-DSA-87 (default)
+  python compute_hyperball_params.py --variant 44
+  python compute_hyperball_params.py --variant 65
+  python compute_hyperball_params.py --variant 87 --nbsamples 400
 """
 
+import argparse
 import numpy as np
 from math import comb, sqrt, ceil, log
 from dataclasses import dataclass, field
@@ -27,6 +34,7 @@ class MLDSAParams:
     omega: int  # max hint weight
     gamma1: int
     gamma2: int
+    name: str = "ML-DSA"
     
     beta: int = field(init=False)
     sigt: float = field(init=False)
@@ -36,23 +44,27 @@ class MLDSAParams:
         self.sigt = sqrt(((2 * self.eta + 1)**2 - 1) / 12)
 
 
-# ML-DSA-87 parameters
 Q = 8380417
+PARAMS_44 = MLDSAParams(
+    q=Q, n=256, k=4, ell=4, tau=39, eta=2, d=13, omega=80,
+    gamma1=2**17, gamma2=(Q - 1) // 88, name="ML-DSA-44",
+)
+PARAMS_65 = MLDSAParams(
+    q=Q, n=256, k=6, ell=5, tau=49, eta=4, d=13, omega=55,
+    gamma1=2**19, gamma2=(Q - 1) // 32, name="ML-DSA-65",
+)
 PARAMS_87 = MLDSAParams(
-    q=Q,
-    n=256,
-    k=8,
-    ell=7,
-    tau=60,
-    eta=2,
-    d=13,
-    omega=75,
-    gamma1=2**19,
-    gamma2=(Q - 1) // 32
+    q=Q, n=256, k=8, ell=7, tau=60, eta=2, d=13, omega=75,
+    gamma1=2**19, gamma2=(Q - 1) // 32, name="ML-DSA-87",
 )
 
-# eta parameter for rejection sampling bound
-ETA_87 = 9
+# Rejection-sampling eta (script parameter; distinct from secret-key η).
+ETA_RS = {44: 6, 65: 8, 87: 9}
+FACT_DEFAULT = {44: 6.0, 65: 7.0, 87: 7.0}
+VARIANT_PARAMS = {44: PARAMS_44, 65: PARAMS_65, 87: PARAMS_87}
+
+# Backward-compatible aliases
+ETA_87 = ETA_RS[87]
 
 
 def sample_ball_imbalanced(radius: float, fact: float, params: MLDSAParams) -> tuple[np.ndarray, np.ndarray]:
@@ -373,63 +385,71 @@ def compute_resharing_params(nbsamples: int = 8000):
         print(f"{f'{t}-{n}':>6} {OVERSHOOT[cfg]:>9.2f} {k:>6.2f} {B:>8.0f} {r:>9.0f} {rp:>9.0f} {K:>5} {SHIP_K[cfg]:>7}")
 
 
-def main():
-    print("=" * 70)
-    print("Computing hyperball parameters for ML-DSA-87 threshold signing")
-    print("=" * 70)
-    
-    params = PARAMS_87
-    eta = ETA_87
-    
-    # Number of Monte Carlo samples (more = more accurate but slower)
-    nbsamples = 500  # Use 2000+ for production
-    
-    print(f"\nUsing {nbsamples} Monte Carlo samples per configuration")
-    print("(Increase for more accurate results)\n")
-    
-    all_results = []
-    
-    # Compute for N=7
-    n = 7
-    print(f"\n{'='*70}")
-    print(f"Finding optimal parameters for N = {n}")
-    print(f"{'='*70}")
-    
-    for t in range(2, n + 1):
-        print(f"\nSearching for T={t}, N={n}...")
-        result = find_params(
-            t, n, eta, params,
-            nbsamples=nbsamples,
-            expo_range=(1.5, 12.0, 0.3),
-            fact_range=(6.0, 9.0, 1.0),
-            verbose=True
-        )
-        
-        all_results.append({
-            't': t,
-            'n': n,
-            **result
-        })
-        
-        print(f"  Best: expo={result['expo']:.1f}, fact={result['fact']:.0f}, "
-              f"r={result['r']:.0f}, r'={result['r_prime']:.0f}, K={result['k']}")
-    
-    # Print Rust code
+def emit_rust_tables(variant: int, results: list[dict], default_fact: float):
+    """Print tables suitable for params_tables_{variant}.rs."""
     print("\n" + "=" * 70)
-    print("Rust code for get_threshold_params (N=7):")
-    print("=" * 70)
-    for r in all_results:
-        print(f"\t\t({r['t']}, {r['n']}) => Ok(({r['r']:.1f}, {r['r_prime']:.1f}, 7.0)),")
-    
-    # Print K values for config.rs
-    print("\n" + "=" * 70)
-    print("K values for k_iterations (N=7):")
-    print("=" * 70)
-    for r in all_results:
-        print(f"  ({r['t']}, {r['n']}): K = {r['k']}")
+    print(f"// Auto-generated hyperball tables for ML-DSA-{variant}")
+    print("pub(super) const K_ITERATIONS: &[(u32, u32, u32)] = &[")
+    for r in results:
+        # 2x MC margin (same convention used for provisional 44/65 tables)
+        k = max(1, int(ceil(2 * r["k"]))) if r["k"] < 9999 else 9999
+        print(f"\t({r['t']}, {r['n']}, {k}),")
+    print("];")
+    print()
+    print("pub(super) const HYPERBALL: &[(u32, u32, f64, f64, f64)] = &[")
+    for r in results:
+        fact = r["fact"] if r["fact"] else default_fact
+        print(f"\t({r['t']}, {r['n']}, {r['r']:.1f}, {r['r_prime']:.1f}, {fact:.1f}),")
+    print("];")
 
-    # Resharing-enlarged params for the supported committees.
-    compute_resharing_params()
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--variant", type=int, choices=sorted(VARIANT_PARAMS), default=87)
+    parser.add_argument("--nbsamples", type=int, default=400,
+                        help="Monte Carlo samples per (t,n) (default 400)")
+    parser.add_argument("--n-max", type=int, default=6,
+                        help="Max n for (t,n) grid (default 6)")
+    parser.add_argument("--resharing", action="store_true",
+                        help="Also print ML-DSA-87 resharing-enlarged params")
+    args = parser.parse_args()
+
+    params = VARIANT_PARAMS[args.variant]
+    eta = ETA_RS[args.variant]
+    fact0 = FACT_DEFAULT[args.variant]
+
+    print("=" * 70)
+    print(f"Computing hyperball parameters for {params.name} threshold signing")
+    print("=" * 70)
+    print(f"\nUsing {args.nbsamples} Monte Carlo samples per configuration")
+    print("(Increase --nbsamples for more accurate results)\n")
+
+    all_results = []
+    for n in range(2, args.n_max + 1):
+        print(f"\n{'='*70}")
+        print(f"Finding optimal parameters for N = {n}")
+        print(f"{'='*70}")
+        for t in range(2, n + 1):
+            print(f"\nSearching for T={t}, N={n}...")
+            result = find_params(
+                t, n, eta, params,
+                nbsamples=args.nbsamples,
+                expo_range=(1.5, 12.0, 0.3),
+                fact_range=(max(5.0, fact0 - 1.0), fact0 + 2.0, 1.0),
+                verbose=True,
+            )
+            all_results.append({"t": t, "n": n, **result})
+            print(
+                f"  Best: expo={result['expo']:.1f}, fact={result['fact']:.0f}, "
+                f"r={result['r']:.0f}, r'={result['r_prime']:.0f}, K={result['k']}"
+            )
+
+    emit_rust_tables(args.variant, all_results, fact0)
+
+    if args.resharing:
+        if args.variant != 87:
+            print("\nNote: --resharing calibration is only shipped for ML-DSA-87.", file=sys.stderr)
+        compute_resharing_params()
 
 
 if __name__ == "__main__":
