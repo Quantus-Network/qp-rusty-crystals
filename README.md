@@ -129,18 +129,11 @@ cargo tarpaulin --workspace
 ACVP known-answer vectors for ML-DSA-44/65/87 live under
 `dilithium/tests/acvp_vectors/` (see `NIST_VALIDATION.md`).
 
-Additionally, `test_nist_kat` in `verify_integration_tests.rs` covers NIST KAT
-cases generated from PQCrystals for ML-DSA-87. We exported the test file from
-PQ-Crystals C code, and are importing and testing against it here. 
-
-To regenerate this file...
-```
-git clone https://github.com/pq-crystals/dilithium
-cd dilithium/ref
-make nistkat
-./nistkat/PQCgenKAT_sign5 
-cp ./nistkat/PQCsignKAT_Dilithium5.rsp ???
-```
+PQCrystals-style NIST KATs (`PQCsignKAT_Dilithium{2,3,5}.rsp`) cover
+ML-DSA-44/65/87 via `test_nist_kat_ml_dsa_{44,65,87}` in
+`tests/src/verify_integration_tests.rs` (keygen, verify, and hedged sign
+bit-exact against the C reference). See `test_vectors/README_TEST_VECTORS.md`
+for regeneration steps.
 
 ## Deep Wiki
 
