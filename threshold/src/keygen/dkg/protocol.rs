@@ -35,8 +35,9 @@ use super::{
 
 use crate::participants::ParticipantId;
 
-use qp_rusty_crystals_dilithium::{
-	fips202,
+use qp_rusty_crystals_dilithium::fips202;
+
+use crate::{
 	params::{K, L, N},
 };
 
@@ -2167,7 +2168,7 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use qp_rusty_crystals_dilithium::params::ETA;
+	use crate::params::ETA;
 
 	/// Test session nonce for DKG tests.
 	const TEST_SESSION_NONCE: [u8; 32] = [0xDEu8; 32];
@@ -2433,10 +2434,8 @@ mod tests {
 	/// a real post-quantum signature scheme.
 	#[test]
 	fn test_dkg_with_dilithium_signing() {
-		use qp_rusty_crystals_dilithium::{
-			ml_dsa_87::{Keypair, PublicKey, SecretKey, SIGNBYTES},
-			SensitiveBytes32,
-		};
+		use crate::mldsa::{Keypair, MlDsaPublicKey as PublicKey, SecretKey, SIGNBYTES};
+		use qp_rusty_crystals_dilithium::SensitiveBytes32;
 
 		/// Signer that wraps a Dilithium secret key.
 		/// Clone is implemented manually to explicitly copy the secret key bytes.

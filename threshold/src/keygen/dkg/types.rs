@@ -30,14 +30,14 @@ use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::fmt;
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use qp_rusty_crystals_dilithium::{fips202, poly};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	config::ThresholdConfig,
 	error::{MAX_PARTIES, MAX_SUBSETS},
+	params::{ETA, K, L, N},
 };
-
-use qp_rusty_crystals_dilithium::fips202;
 
 // ============================================================================
 // Transcript Signing Trait
@@ -142,12 +142,6 @@ pub const DOMAIN_DKG_SSID: &[u8] = b"THRESHOLD_DKG_SSID_V1";
 
 /// Size of the DKG session identifier in bytes.
 pub const DKG_SSID_SIZE: usize = 32;
-
-use qp_rusty_crystals_dilithium::{
-	params::{ETA, K, L, N},
-	poly,
-};
-
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -417,7 +411,7 @@ fn read_eta_bounded_polys<R: borsh::io::Read>(
 	reader: &mut R,
 	expected: usize,
 ) -> borsh::io::Result<Vec<[i32; N as usize]>> {
-	let eta = qp_rusty_crystals_dilithium::params::ETA as i32;
+	let eta = crate::params::ETA as i32;
 	let len = u32::deserialize_reader(reader)? as usize;
 	if len != expected {
 		return Err(borsh::io::Error::new(
@@ -896,7 +890,8 @@ pub fn compute_signing_message(
 
 /// Derive an η-bounded SubsetContribution from a seed.
 ///
-/// Uses ETA=2 (ML-DSA-87 parameter) via the dilithium crate's `uniform_eta`.
+/// Samples η-bounded shares via the dilithium crate's `uniform_eta` for the
+/// active parameter set (`ETA` from [`crate::params`]).
 pub fn derive_subset_contribution(combined_seed: &[u8; SUBSET_SEED_SIZE]) -> SubsetContribution {
 	let mut contribution = SubsetContribution::new();
 	let mut temp_poly = poly::Poly::default();
@@ -1060,7 +1055,7 @@ mod tests {
 	fn test_derive_contribution_bounded() {
 		let seed = [42u8; SUBSET_SEED_SIZE];
 		let contribution = derive_subset_contribution(&seed);
-		assert!(contribution.verify_bounds(2));
+		assert!(contribution.verify_bounds(ETA as i32));
 	}
 
 	/// A well-formed contribution must round-trip through Borsh.
@@ -1116,7 +1111,7 @@ mod tests {
 	/// NTT arithmetic whose bounds are a caller-enforced contract.
 	#[test]
 	fn test_subset_contribution_deserialize_rejects_out_of_range_coefficients() {
-		use qp_rusty_crystals_dilithium::params::ETA;
+		use crate::params::ETA;
 
 		let mut contribution = derive_subset_contribution(&[7u8; SUBSET_SEED_SIZE]);
 		contribution.s1[0][0] = ETA as i32 + 1;

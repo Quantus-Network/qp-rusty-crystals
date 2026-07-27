@@ -56,13 +56,13 @@
 
 use alloc::vec::Vec;
 
-use qp_rusty_crystals_dilithium::{
-	fips202,
-	params::{K, L, N},
-};
+use qp_rusty_crystals_dilithium::fips202;
 use zeroize::Zeroizing;
 
-use crate::keys::{PrivateKeyShare, PublicKey, TR_SIZE};
+use crate::{
+	keys::{PrivateKeyShare, PublicKey, TR_SIZE},
+	params::{K, L, N},
+};
 
 /// Domain separator for DKG contribution derivation.
 const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v2";
@@ -222,7 +222,10 @@ mod tests {
 		let mut shares = BTreeMap::new();
 		shares.insert(
 			0b011,
-			SecretShareData { s1: [[key_byte as i32; 256]; 7], s2: [[key_byte as i32; 256]; 8] },
+			SecretShareData {
+				s1: [[key_byte as i32; 256]; crate::params::L],
+				s2: [[key_byte as i32; 256]; crate::params::K],
+			},
 		);
 		PrivateKeyShare::new(
 			party_id,
@@ -303,7 +306,13 @@ mod tests {
 		// secret polynomial shares, not from `key`.
 		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
 		let mut shares = BTreeMap::new();
-		shares.insert(0b011, SecretShareData { s1: [[7i32; 256]; 7], s2: [[7i32; 256]; 8] });
+		shares.insert(
+			0b011,
+			SecretShareData {
+				s1: [[7i32; 256]; crate::params::L],
+				s2: [[7i32; 256]; crate::params::K],
+			},
+		);
 		let share_a = PrivateKeyShare::new(
 			0,
 			3,
