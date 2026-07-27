@@ -44,7 +44,7 @@ use alloc::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use qp_rusty_crystals_dilithium::polyvec;
+use qp_rusty_crystals_dilithium::{params::L, polyvec};
 
 use crate::{
 	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature},
@@ -60,7 +60,7 @@ use crate::{
 	},
 };
 
-/// Packed size in bytes of one commitment (one `Polyveck` of K polynomials,
+/// Packed size in bytes of one commitment (one `Polyvec<K>` of K polynomials,
 /// 736 bytes each in the 23-bit encoding). Round 2 commitment data is
 /// `k_iterations` of these, concatenated.
 pub(crate) const SINGLE_COMMITMENT_SIZE: usize = 8 * 736; // K * POLY_Q_SIZE
@@ -144,7 +144,7 @@ struct SignerState {
 	/// Context for the signature.
 	context: Option<Vec<u8>>,
 	/// Our computed responses (for Round 3).
-	my_responses: Option<Vec<polyvec::Polyvecl>>,
+	my_responses: Option<Vec<polyvec::Polyvec<L>>>,
 }
 
 impl SignerState {
@@ -188,7 +188,9 @@ impl SignerState {
 
 	/// Verify AfterRound3 phase and return (round2_data, my_responses, message, context).
 	#[allow(clippy::type_complexity)]
-	fn expect_round3(&self) -> ThresholdResult<(&Round2Data, &[polyvec::Polyvecl], &[u8], &[u8])> {
+	fn expect_round3(
+		&self,
+	) -> ThresholdResult<(&Round2Data, &[polyvec::Polyvec<L>], &[u8], &[u8])> {
 		if self.phase != SigningPhase::AfterRound3 {
 			return Err(ThresholdError::InvalidState {
 				current: self.phase_name(),
@@ -769,7 +771,7 @@ impl ThresholdSigner {
 	}
 
 	/// Validation pass of the aggregation: unpack every chunk of every reveal,
-	/// holding at most one transient `Polyveck` at a time, and discard the
+	/// holding at most one transient `Polyvec<K>` at a time, and discard the
 	/// results. No persistent state is touched, so a failure here is a clean
 	/// rejection.
 	///
@@ -834,10 +836,10 @@ impl ThresholdSigner {
 	/// to include only authorized participants before calling `combine()`.
 	fn collect_responses(
 		&self,
-		my_responses: &[polyvec::Polyvecl],
+		my_responses: &[polyvec::Polyvec<L>],
 		all_round3: &[Round3Broadcast],
-	) -> ThresholdResult<Vec<Vec<polyvec::Polyvecl>>> {
-		let mut all_responses: Vec<Vec<polyvec::Polyvecl>> = Vec::new();
+	) -> ThresholdResult<Vec<Vec<polyvec::Polyvec<L>>>> {
+		let mut all_responses: Vec<Vec<polyvec::Polyvec<L>>> = Vec::new();
 		let mut seen_parties: BTreeSet<u32> = BTreeSet::new();
 
 		// Add our own response first

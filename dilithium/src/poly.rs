@@ -669,9 +669,9 @@ pub fn uniform_gamma1<const GAMMA1: usize, const PZ: usize>(
 /// recover w1. No secret-key material flows into this function.
 pub fn challenge<const TAU: usize>(c: &mut Poly, seed: &[u8]) {
 	const {
-		// The sign bits are drawn from a single u64, and TAU indexes into the
-		// coefficient array; every FIPS 204 TAU (39/49/60) satisfies both.
-		assert!(TAU <= 64 && TAU <= N, "unsupported TAU parameter");
+		// Sign bits are drawn from a single u64. Every FIPS 204 TAU (39/49/60)
+		// also indexes within N=256 coefficients (implied by TAU <= 64).
+		assert!(TAU <= 64, "unsupported TAU parameter");
 	}
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, seed);

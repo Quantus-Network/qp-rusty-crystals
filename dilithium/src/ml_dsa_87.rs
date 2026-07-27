@@ -189,16 +189,20 @@ mod tests {
 	#[test]
 	fn secret_key_from_bytes_rejects_zero_t1() {
 		use super::{KeyParsingError, SecretKey, SECRETKEYBYTES};
-		use crate::{packing, params, polyvec};
+		use crate::{
+			packing,
+			params::{self, K, L},
+			polyvec,
+		};
 
 		// Craft a fully self-consistent secret key with s1 = s2 = 0:
 		// t = A·0 + 0 = 0, so t1 = 0 and t0 = 0, and tr = SHAKE256(pk).
 		let rho = [0x42u8; params::SEEDBYTES];
 		let key = [0x17u8; params::SEEDBYTES];
-		let s1 = polyvec::Polyvecl::default();
-		let s2 = polyvec::Polyveck::default();
-		let t0 = polyvec::Polyveck::default();
-		let t1 = polyvec::Polyveck::default();
+		let s1 = polyvec::Polyvec::<L>::default();
+		let s2 = polyvec::Polyvec::<K>::default();
+		let t0 = polyvec::Polyvec::<K>::default();
+		let t1 = polyvec::Polyvec::<K>::default();
 
 		let mut pk = [0u8; super::PUBLICKEYBYTES];
 		packing::pack_pk(&mut pk, &rho, &t1);
@@ -228,7 +232,11 @@ mod tests {
 		use super::{
 			KeyParsingError, Keypair, SecretKey, KEYPAIRBYTES, PUBLICKEYBYTES, SECRETKEYBYTES,
 		};
-		use crate::{fips202, packing, params, polyvec};
+		use crate::{
+			fips202, packing,
+			params::{self, K, L},
+			polyvec,
+		};
 
 		// Start from an honest key and re-derive everything after planting
 		// the out-of-range coefficient, so the forged blob is fully
@@ -239,9 +247,9 @@ mod tests {
 		let mut rho = [0u8; params::SEEDBYTES];
 		let mut tr = [0u8; params::TR_BYTES];
 		let mut key = [0u8; params::SEEDBYTES];
-		let mut t0 = polyvec::Polyveck::default();
-		let mut s1 = polyvec::Polyvecl::default();
-		let mut s2 = polyvec::Polyveck::default();
+		let mut t0 = polyvec::Polyvec::<K>::default();
+		let mut s1 = polyvec::Polyvec::<L>::default();
+		let mut s2 = polyvec::Polyvec::<K>::default();
 		assert!(
 			packing::unpack_sk::<{ params::K }, { params::L }, { params::ETA }, SECRETKEYBYTES>(
 				&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, &sk_bytes,
@@ -255,15 +263,15 @@ mod tests {
 
 		// Same derivation as keygen: t = A·s1 + s2, split into (t1, t0).
 		let mut s1hat = s1.clone();
-		polyvec::l_ntt(&mut s1hat);
-		let mut t1 = polyvec::Polyveck::default();
+		polyvec::ntt(&mut s1hat);
+		let mut t1 = polyvec::Polyvec::<K>::default();
 		polyvec::matrix_pointwise_montgomery_streamed(&mut t1, &rho, &s1hat);
-		polyvec::k_reduce(&mut t1);
-		polyvec::k_invntt_tomont(&mut t1);
-		polyvec::k_add(&mut t1, &s2);
-		polyvec::k_caddq(&mut t1);
-		let mut t0_forged = polyvec::Polyveck::default();
-		polyvec::k_power2round(&mut t1, &mut t0_forged);
+		polyvec::reduce(&mut t1);
+		polyvec::invntt_tomont(&mut t1);
+		polyvec::add(&mut t1, &s2);
+		polyvec::caddq(&mut t1);
+		let mut t0_forged = polyvec::Polyvec::<K>::default();
+		polyvec::power2round(&mut t1, &mut t0_forged);
 
 		let mut pk = [0u8; PUBLICKEYBYTES];
 		packing::pack_pk(&mut pk, &rho, &t1);

@@ -269,7 +269,7 @@ pub fn unpack_sig<
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::polyvec::{Polyveck, Polyvecl};
+	use crate::polyvec::Polyvec;
 
 	const K: usize = params::K;
 	const L: usize = params::L;
@@ -282,9 +282,9 @@ mod tests {
 		rho: &[u8; params::SEEDBYTES],
 		tr: &[u8; params::TR_BYTES],
 		key: &[u8; params::SEEDBYTES],
-		t0: &Polyveck,
-		s1: &Polyvecl,
-		s2: &Polyveck,
+		t0: &Polyvec<K>,
+		s1: &Polyvec<L>,
+		s2: &Polyvec<K>,
 	) {
 		super::pack_sk::<K, L, { params::ETA }, { params::SECRETKEYBYTES }>(
 			sk, rho, tr, key, t0, s1, s2,
@@ -296,9 +296,9 @@ mod tests {
 		rho: &mut [u8; params::SEEDBYTES],
 		tr: &mut [u8; params::TR_BYTES],
 		key: &mut [u8; params::SEEDBYTES],
-		t0: &mut Polyveck,
-		s1: &mut Polyvecl,
-		s2: &mut Polyveck,
+		t0: &mut Polyvec<K>,
+		s1: &mut Polyvec<L>,
+		s2: &mut Polyvec<K>,
 		sk: &[u8; params::SECRETKEYBYTES],
 	) -> bool {
 		super::unpack_sk::<K, L, { params::ETA }, { params::SECRETKEYBYTES }>(
@@ -309,8 +309,8 @@ mod tests {
 	fn pack_sig(
 		sig: &mut [u8; params::SIGNBYTES],
 		c: Option<&[u8; params::C_DASH_BYTES]>,
-		z: &Polyvecl,
-		h: &Polyveck,
+		z: &Polyvec<L>,
+		h: &Polyvec<K>,
 	) {
 		super::pack_sig::<
 			K,
@@ -325,8 +325,8 @@ mod tests {
 
 	fn unpack_sig(
 		c: &mut [u8; params::C_DASH_BYTES],
-		z: &mut Polyvecl,
-		h: &mut Polyveck,
+		z: &mut Polyvec<L>,
+		h: &mut Polyvec<K>,
 		sig: &[u8; params::SIGNBYTES],
 	) -> bool {
 		super::unpack_sig::<
@@ -343,7 +343,7 @@ mod tests {
 	#[test]
 	fn test_pack_unpack_pk_roundtrip() {
 		let rho = [0x42u8; params::SEEDBYTES];
-		let mut t1 = Polyveck::default();
+		let mut t1 = Polyvec::<K>::default();
 
 		// Initialize t1 with some test data
 		for i in 0..K {
@@ -356,7 +356,7 @@ mod tests {
 		pack_pk(&mut packed_pk, &rho, &t1);
 
 		let mut unpacked_rho = [0u8; params::SEEDBYTES];
-		let mut unpacked_t1 = Polyveck::default();
+		let mut unpacked_t1 = Polyvec::<K>::default();
 		unpack_pk(&mut unpacked_rho, &mut unpacked_t1, &packed_pk);
 
 		assert_eq!(rho, unpacked_rho);
@@ -384,9 +384,9 @@ mod tests {
 		let tr = [0x22u8; params::TR_BYTES];
 		let key = [0x33u8; params::SEEDBYTES];
 
-		let mut t0 = Polyveck::default();
-		let mut s1 = Polyvecl::default();
-		let mut s2 = Polyveck::default();
+		let mut t0 = Polyvec::<K>::default();
+		let mut s1 = Polyvec::<L>::default();
+		let mut s2 = Polyvec::<K>::default();
 
 		// Initialize with test data
 		for i in 0..K {
@@ -408,9 +408,9 @@ mod tests {
 		let mut unpacked_rho = [0u8; params::SEEDBYTES];
 		let mut unpacked_tr = [0u8; params::TR_BYTES];
 		let mut unpacked_key = [0u8; params::SEEDBYTES];
-		let mut unpacked_t0 = Polyveck::default();
-		let mut unpacked_s1 = Polyvecl::default();
-		let mut unpacked_s2 = Polyveck::default();
+		let mut unpacked_t0 = Polyvec::<K>::default();
+		let mut unpacked_s1 = Polyvec::<L>::default();
+		let mut unpacked_s2 = Polyvec::<K>::default();
 
 		assert!(
 			unpack_sk(
@@ -459,8 +459,8 @@ mod tests {
 	#[test]
 	fn test_pack_unpack_sig_valid() {
 		let c = [0x55u8; params::C_DASH_BYTES];
-		let mut z = Polyvecl::default();
-		let mut h = Polyveck::default();
+		let mut z = Polyvec::<L>::default();
+		let mut h = Polyvec::<K>::default();
 
 		// Initialize z with test data
 		for i in 0..L {
@@ -487,8 +487,8 @@ mod tests {
 		pack_sig(&mut packed_sig, Some(&c), &z, &h);
 
 		let mut unpacked_c = [0u8; params::C_DASH_BYTES];
-		let mut unpacked_z = Polyvecl::default();
-		let mut unpacked_h = Polyveck::default();
+		let mut unpacked_z = Polyvec::<L>::default();
+		let mut unpacked_h = Polyvec::<K>::default();
 
 		assert!(unpack_sig(&mut unpacked_c, &mut unpacked_z, &mut unpacked_h, &packed_sig));
 
@@ -531,8 +531,8 @@ mod tests {
 		}
 
 		let mut c = [0u8; params::C_DASH_BYTES];
-		let mut z = Polyvecl::default();
-		let mut h = Polyveck::default();
+		let mut z = Polyvec::<L>::default();
+		let mut h = Polyvec::<K>::default();
 
 		assert!(!unpack_sig(&mut c, &mut z, &mut h, &invalid_sig));
 	}
@@ -540,8 +540,8 @@ mod tests {
 	#[test]
 	fn test_empty_hint_signature() {
 		let c = [0x77u8; params::C_DASH_BYTES];
-		let mut z = Polyvecl::default();
-		let h = Polyveck::default(); // All zeros (empty hints)
+		let mut z = Polyvec::<L>::default();
+		let h = Polyvec::<K>::default(); // All zeros (empty hints)
 
 		// Initialize z with valid data
 		for i in 0..L {
@@ -554,8 +554,8 @@ mod tests {
 		pack_sig(&mut packed_sig, Some(&c), &z, &h);
 
 		let mut unpacked_c = [0u8; params::C_DASH_BYTES];
-		let mut unpacked_z = Polyvecl::default();
-		let mut unpacked_h = Polyveck::default();
+		let mut unpacked_z = Polyvec::<L>::default();
+		let mut unpacked_h = Polyvec::<K>::default();
 
 		assert!(unpack_sig(&mut unpacked_c, &mut unpacked_z, &mut unpacked_h, &packed_sig));
 
@@ -578,15 +578,15 @@ mod tests {
 	fn unpack_sig_clears_stale_hints_from_reused_buffer() {
 		// A syntactically valid signature with an empty hint vector.
 		let c = [0x99u8; params::C_DASH_BYTES];
-		let z = Polyvecl::default();
-		let h = Polyveck::default();
+		let z = Polyvec::<L>::default();
+		let h = Polyvec::<K>::default();
 		let mut packed_sig = [0u8; params::SIGNBYTES];
 		pack_sig(&mut packed_sig, Some(&c), &z, &h);
 
 		// Reuse output buffers that already hold hint bits from a "previous" parse.
 		let mut unpacked_c = [0u8; params::C_DASH_BYTES];
-		let mut unpacked_z = Polyvecl::default();
-		let mut unpacked_h = Polyveck::default();
+		let mut unpacked_z = Polyvec::<L>::default();
+		let mut unpacked_h = Polyvec::<K>::default();
 		unpacked_h.vec[0].coeffs[5] = 1;
 		unpacked_h.vec[K - 1].coeffs[N - 1] = 1;
 
@@ -607,8 +607,8 @@ mod tests {
 
 	#[test]
 	fn test_pack_sig_without_challenge() {
-		let mut z = Polyvecl::default();
-		let h = Polyveck::default();
+		let mut z = Polyvec::<L>::default();
+		let h = Polyvec::<K>::default();
 
 		// Initialize test data
 		for i in 0..L {

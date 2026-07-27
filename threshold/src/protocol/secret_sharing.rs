@@ -34,9 +34,9 @@ use crate::{
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SecretShare {
 	/// Share of the s1 polynomial vector.
-	pub(crate) s1_share: polyvec::Polyvecl,
+	pub(crate) s1_share: polyvec::Polyvec<L>,
 	/// Share of the s2 polynomial vector.
-	pub(crate) s2_share: polyvec::Polyveck,
+	pub(crate) s2_share: polyvec::Polyvec<K>,
 }
 
 /// Compute sharing patterns for a (threshold, parties) configuration.
@@ -242,7 +242,7 @@ pub fn recover_share(
 	threshold: u32,
 	parties: u32,
 	dkg_participants: &ParticipantList,
-) -> ThresholdResult<(polyvec::Polyvecl, polyvec::Polyveck)> {
+) -> ThresholdResult<(polyvec::Polyvec<L>, polyvec::Polyvec<K>)> {
 	// Get the DKG index for my party_id
 	let my_dkg_index = dkg_participants.index_of(party_id).ok_or_else(|| {
 		ThresholdError::InvalidConfiguration(format!(
@@ -300,8 +300,8 @@ pub fn recover_share(
 		}
 
 		// Accumulate in u64 to avoid overflow
-		s1_acc.add_polyvecl(&s1_ntt);
-		s2_acc.add_polyveck(&s2_ntt);
+		s1_acc.add_polyvec_l(&s1_ntt);
+		s2_acc.add_polyvec_k(&s2_ntt);
 	}
 
 	// Finalize accumulators (reduces mod Q)

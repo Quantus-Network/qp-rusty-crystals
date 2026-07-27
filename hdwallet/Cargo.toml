@@ -17,7 +17,9 @@ keywords = [
 categories = ["cryptography"]
 
 [dependencies]
-qp-rusty-crystals-dilithium.workspace = true
+# HD wallet is ML-DSA-87-only. Workspace pins dilithium with
+# default-features = false, so opt in explicitly.
+qp-rusty-crystals-dilithium = { workspace = true, features = ["ml-dsa-87"] }
 bip39.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true

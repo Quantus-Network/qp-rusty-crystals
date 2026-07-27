@@ -21,8 +21,9 @@ log = { workspace = true }
 # Serialization
 borsh = { workspace = true }
 
-# Local dependencies - reuse dilithium implementation
-qp-rusty-crystals-dilithium = { workspace = true }
+# Local dependencies - reuse dilithium implementation (threshold is ML-DSA-87-only).
+# Workspace pins dilithium with default-features = false, so opt in explicitly.
+qp-rusty-crystals-dilithium = { workspace = true, features = ["ml-dsa-87"] }
 
 # no_std math support
 libm = { workspace = true }

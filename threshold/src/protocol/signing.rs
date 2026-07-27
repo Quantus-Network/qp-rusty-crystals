@@ -23,8 +23,8 @@ use crate::{
 	participants::{ParticipantId, ParticipantList},
 	protocol::{
 		primitives::{
-			compute_dilithium_hint, compute_ntt_dot_product, decompose_polyveck, mod_q,
-			normalize_assuming_le2q, pack_signature, poly_pack_w, unpack_polyveck_w,
+			compute_dilithium_hint, compute_ntt_dot_product, decompose_polyvec, mod_q,
+			normalize_assuming_le2q, pack_signature, poly_pack_w, unpack_polyvec_w,
 			HyperballSampleVector,
 		},
 		secret_sharing::{recover_share, SecretShare},
@@ -39,7 +39,7 @@ use crate::{
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct Round1Data {
 	/// K different w commitments for canonical iterations.
-	pub(crate) w_commitments: Vec<polyvec::Polyveck>,
+	pub(crate) w_commitments: Vec<polyvec::Polyvec<K>>,
 	/// K different hyperball samples for reuse in Round 3.
 	pub(crate) hyperball_samples: Vec<HyperballSampleVector>,
 	/// The commitment hash that was broadcast.
@@ -54,7 +54,7 @@ pub(crate) struct Round2Data {
 	/// Message hash μ.
 	pub(crate) mu: [u8; 64],
 	/// Aggregated w values for all K iterations.
-	pub(crate) w_aggregated: Vec<polyvec::Polyveck>,
+	pub(crate) w_aggregated: Vec<polyvec::Polyvec<K>>,
 	/// Active participants in this signing session.
 	/// Stores the actual participant IDs (which can be arbitrary u32 values).
 	/// The ParticipantList provides index mapping for internal bitmask operations.
@@ -227,8 +227,8 @@ pub(crate) fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretSha
 	let mut shares: BTreeMap<u16, SecretShare> = BTreeMap::new();
 
 	for (subset_id, share_data) in share.shares() {
-		let mut s1_share = polyvec::Polyvecl::default();
-		let mut s2_share = polyvec::Polyveck::default();
+		let mut s1_share = polyvec::Polyvec::<L>::default();
+		let mut s2_share = polyvec::Polyvec::<K>::default();
 
 		for i in 0..L {
 			s1_share.vec[i].coeffs_mut().copy_from_slice(&share_data.s1[i]);
@@ -248,7 +248,9 @@ pub(crate) fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretSha
 ///
 /// Returns an error if the commitment has an invalid size or contains
 /// coefficients >= Q (which would indicate malicious input).
-pub(crate) fn unpack_commitment_dilithium(commitment: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
+pub(crate) fn unpack_commitment_dilithium(
+	commitment: &[u8],
+) -> ThresholdResult<polyvec::Polyvec<K>> {
 	let poly_q_size = ((N as usize) * 23).div_ceil(8); // 736 bytes per poly
 	let expected_len = K * poly_q_size;
 
@@ -259,7 +261,7 @@ pub(crate) fn unpack_commitment_dilithium(commitment: &[u8]) -> ThresholdResult<
 		});
 	}
 
-	unpack_polyveck_w(commitment).map_err(|e| ThresholdError::InvalidCommitmentData {
+	unpack_polyvec_w(commitment).map_err(|e| ThresholdError::InvalidCommitmentData {
 		party_id: 0, // Caller will provide the actual party_id in the error context
 		reason: e.to_string(),
 	})
@@ -267,8 +269,8 @@ pub(crate) fn unpack_commitment_dilithium(commitment: &[u8]) -> ThresholdResult<
 
 /// Aggregate commitment vectors.
 pub(crate) fn aggregate_commitments_dilithium(
-	w_final: &mut polyvec::Polyveck,
-	w_temp: &polyvec::Polyveck,
+	w_final: &mut polyvec::Polyvec<K>,
+	w_temp: &polyvec::Polyvec<K>,
 ) {
 	for (w_final_poly, w_temp_poly) in w_final.vec.iter_mut().zip(w_temp.vec.iter()).take(K) {
 		poly::add_ip(w_final_poly, w_temp_poly);
@@ -310,8 +312,8 @@ pub(crate) fn generate_round1(
 	let mut hyperball_samples = Vec::with_capacity(k_iterations);
 
 	// Initialize matrix A once for all computations
-	let mut a_matrix: [polyvec::Polyvecl; K] =
-		core::array::from_fn(|_| polyvec::Polyvecl::default());
+	let mut a_matrix: [polyvec::Polyvec<L>; K] =
+		core::array::from_fn(|_| polyvec::Polyvec::<L>::default());
 	polyvec::matrix_expand(&mut a_matrix, private_key.rho());
 
 	// Generate K different (w, y) pairs using different seeds
@@ -349,12 +351,12 @@ pub(crate) fn generate_round1(
 		hyperball_samples.push(hyperball_sample.clone());
 
 		// Round to integer polynomials
-		let mut y_k = polyvec::Polyvecl::default();
-		let mut e_k = polyvec::Polyveck::default();
+		let mut y_k = polyvec::Polyvec::<L>::default();
+		let mut e_k = polyvec::Polyvec::<K>::default();
 		hyperball_sample.round(&mut y_k, &mut e_k);
 
 		// Compute w_k = A·y_k using NTT
-		let mut w_k = polyvec::Polyveck::default();
+		let mut w_k = polyvec::Polyvec::<K>::default();
 		let mut y_k_ntt = y_k.clone();
 		for y_poly in y_k_ntt.vec.iter_mut().take(L) {
 			poly::ntt(y_poly);
@@ -407,7 +409,7 @@ pub(crate) fn generate_round1(
 }
 
 /// Pack w using 23-bit encoding.
-fn pack_w_dilithium(w: &polyvec::Polyveck, buf: &mut [u8]) {
+fn pack_w_dilithium(w: &polyvec::Polyvec<K>, buf: &mut [u8]) {
 	const POLY_Q_SIZE: usize = ((N as usize) * 23) / 8; // 736 bytes
 	for i in 0..K {
 		let offset = i * POLY_Q_SIZE;
@@ -517,11 +519,11 @@ pub(crate) fn process_round2(
 	let k = config.k_iterations() as usize;
 
 	// Start with our own w_commitments
-	let mut w_aggregated: Vec<polyvec::Polyveck> = round1.w_commitments.clone();
+	let mut w_aggregated: Vec<polyvec::Polyvec<K>> = round1.w_commitments.clone();
 
 	// Ensure we have k entries
 	while w_aggregated.len() < k {
-		w_aggregated.push(polyvec::Polyveck::default());
+		w_aggregated.push(polyvec::Polyvec::<K>::default());
 	}
 
 	// Build active participants list from our ID and other party IDs
@@ -564,7 +566,7 @@ pub(crate) fn generate_round3_response(
 	config: &ThresholdConfig,
 	round1: &Round1Data,
 	round2: &Round2Data,
-) -> ThresholdResult<Vec<polyvec::Polyvecl>> {
+) -> ThresholdResult<Vec<polyvec::Polyvec<L>>> {
 	// Convert shares
 	let shares = convert_shares(private_key);
 
@@ -601,7 +603,7 @@ pub(crate) fn generate_round3_response(
 		)));
 	}
 
-	let mut zs: Vec<polyvec::Polyvecl> = vec![polyvec::Polyvecl::default(); k];
+	let mut zs: Vec<polyvec::Polyvec<L>> = vec![polyvec::Polyvec::<L>::default(); k];
 
 	let (r, _, nu) =
 		get_hyperball_params(config.threshold(), config.total_parties()).ok_or_else(|| {
@@ -615,16 +617,16 @@ pub(crate) fn generate_round3_response(
 	// For each commitment iteration (lengths already validated above)
 	for (i, z_out_slot) in zs.iter_mut().enumerate().take(k) {
 		// Decompose w into w0 and w1
-		let mut w0 = polyvec::Polyveck::default();
-		let mut w1 = polyvec::Polyveck::default();
-		decompose_polyveck(&round2.w_aggregated[i], &mut w0, &mut w1);
+		let mut w0 = polyvec::Polyvec::<K>::default();
+		let mut w1 = polyvec::Polyvec::<K>::default();
+		decompose_polyvec(&round2.w_aggregated[i], &mut w0, &mut w1);
 
 		// Compute challenge: c~ = H(μ || w1)
 		// Note: SSID is NOT included in the challenge to maintain compatibility
 		// with standard ML-DSA verification. Cross-session replay protection is
 		// provided by SSID binding in commitment hashes and message validation.
 		let mut w1_packed = [0u8; K * POLYW1_PACKEDBYTES];
-		polyvec::k_pack_w1(&mut w1_packed, &w1);
+		polyvec::pack_w1::<K, { GAMMA2 }, { K * POLYW1_PACKEDBYTES }>(&mut w1_packed, &w1);
 
 		let mut challenge_bytes = [0u8; C_DASH_BYTES];
 		let mut keccak_state = fips202::KeccakState::default();
@@ -641,7 +643,7 @@ pub(crate) fn generate_round3_response(
 		// Compute z = c·s1 (challenge times secret share). Montgomery
 		// pointwise products are bounded by Q in absolute value, satisfying
 		// the inverse NTT's input contract directly.
-		let mut z = polyvec::Polyvecl::default();
+		let mut z = polyvec::Polyvec::<L>::default();
 		for j in 0..L {
 			poly::pointwise_montgomery(&mut z.vec[j], &challenge_ntt, &s1_ntt.vec[j]);
 			poly::invntt_tomont(&mut z.vec[j]);
@@ -656,7 +658,7 @@ pub(crate) fn generate_round3_response(
 		}
 
 		// Compute c·s2
-		let mut cs2 = polyvec::Polyveck::default();
+		let mut cs2 = polyvec::Polyvec::<K>::default();
 		for j in 0..K {
 			poly::pointwise_montgomery(&mut cs2.vec[j], &challenge_ntt, &s2_ntt.vec[j]);
 			poly::invntt_tomont(&mut cs2.vec[j]);
@@ -680,7 +682,7 @@ pub(crate) fn generate_round3_response(
 		}
 
 		// Round back to integers (only need z response, not the s2 component)
-		let mut z_out = polyvec::Polyvecl::default();
+		let mut z_out = polyvec::Polyvec::<L>::default();
 		response_float.round_z_response(&mut z_out);
 
 		// Convert from centered format to [0, Q) format
@@ -699,7 +701,7 @@ pub(crate) fn generate_round3_response(
 }
 
 /// Pack responses for broadcast.
-pub(crate) fn pack_responses(responses: &[polyvec::Polyvecl]) -> Vec<u8> {
+pub(crate) fn pack_responses(responses: &[polyvec::Polyvec<L>]) -> Vec<u8> {
 	let single_response_size = L * POLYZ_PACKEDBYTES;
 	let mut buf = vec![0u8; responses.len() * single_response_size];
 
@@ -737,7 +739,7 @@ pub(crate) fn pack_responses(responses: &[polyvec::Polyvecl]) -> Vec<u8> {
 pub(crate) fn unpack_responses(
 	data: &[u8],
 	config: &ThresholdConfig,
-) -> ThresholdResult<Vec<polyvec::Polyvecl>> {
+) -> ThresholdResult<Vec<polyvec::Polyvec<L>>> {
 	let k = config.k_iterations() as usize;
 	let single_response_size = L * 640; // L * POLY_LE_GAMMA1_SIZE
 	let expected_size = k * single_response_size;
@@ -754,7 +756,7 @@ pub(crate) fn unpack_responses(
 
 	for i in 0..k {
 		let start = i * single_response_size;
-		let mut z = polyvec::Polyvecl::default();
+		let mut z = polyvec::Polyvec::<L>::default();
 		// Size already validated above; `as_chunks` splits the per-response region
 		// into exact-size `&[u8; POLYZ_PACKEDBYTES]` arrays for `z_unpack`.
 		let (chunks, _) =
@@ -778,7 +780,7 @@ pub(crate) fn unpack_responses(
 /// Zero vectors must be excluded from aggregation because they would be counted as
 /// valid threshold contributions (they pass norm checks) but don't actually contain
 /// valid cryptographic data, breaking threshold linearity.
-fn is_zero_response(z_i: &polyvec::Polyvecl) -> bool {
+fn is_zero_response(z_i: &polyvec::Polyvec<L>) -> bool {
 	z_i.vec.iter().take(L).all(|poly| poly.coeffs().iter().all(|&c| c == 0))
 }
 
@@ -786,7 +788,7 @@ fn is_zero_response(z_i: &polyvec::Polyvecl) -> bool {
 /// Returns true if the response is valid (within bounds).
 ///
 /// Checks the norm bound on a party's response vector.
-fn check_party_z_norm(z_i: &polyvec::Polyvecl, gamma1_minus_beta: i32) -> bool {
+fn check_party_z_norm(z_i: &polyvec::Polyvec<L>, gamma1_minus_beta: i32) -> bool {
 	for z_poly in z_i.vec.iter().take(L) {
 		for coeff in z_poly.coeffs().iter() {
 			let centered = if *coeff > Q / 2 { *coeff - Q } else { *coeff };
@@ -811,8 +813,8 @@ pub(crate) fn combine_signature(
 	config: &ThresholdConfig,
 	message: &[u8],
 	context: &[u8],
-	w_aggregated: &[polyvec::Polyveck],
-	all_responses: &[Vec<polyvec::Polyvecl>],
+	w_aggregated: &[polyvec::Polyvec<K>],
+	all_responses: &[Vec<polyvec::Polyvec<L>>],
 ) -> ThresholdResult<Vec<u8>> {
 	// Enforce the ML-DSA size bounds before hashing the message into μ.
 	crate::error::validate_message(message)?;
@@ -832,8 +834,8 @@ pub(crate) fn combine_signature(
 	// Extract rho and build matrix A
 	let mut rho = [0u8; 32];
 	rho.copy_from_slice(&public_key.as_bytes()[..32]);
-	let mut a_matrix: [polyvec::Polyvecl; K] =
-		core::array::from_fn(|_| polyvec::Polyvecl::default());
+	let mut a_matrix: [polyvec::Polyvec<L>; K] =
+		core::array::from_fn(|_| polyvec::Polyvec::<L>::default());
 	polyvec::matrix_expand(&mut a_matrix, &rho);
 
 	// Extract t1 from public key
@@ -842,7 +844,7 @@ pub(crate) fn combine_signature(
 	// For each commitment iteration, try to find a valid signature
 	for i in 0..k_iterations.min(w_aggregated.len()) {
 		// M3: Per-iteration exclusion - filter parties with valid z-norms for this iteration
-		let mut z_aggregated = polyvec::Polyvecl::default();
+		let mut z_aggregated = polyvec::Polyvec::<L>::default();
 		let mut valid_party_count = 0usize;
 
 		for party_responses in all_responses.iter() {
@@ -878,9 +880,9 @@ pub(crate) fn combine_signature(
 		}
 
 		// Decompose w into w0 and w1
-		let mut w0 = polyvec::Polyveck::default();
-		let mut w1 = polyvec::Polyveck::default();
-		decompose_polyveck(&w_aggregated[i], &mut w0, &mut w1);
+		let mut w0 = polyvec::Polyvec::<K>::default();
+		let mut w1 = polyvec::Polyvec::<K>::default();
+		decompose_polyvec(&w_aggregated[i], &mut w0, &mut w1);
 
 		// Check aggregated z-norm (may still exceed due to sum of valid parties)
 		let mut z_exceeds = false;
@@ -908,7 +910,7 @@ pub(crate) fn combine_signature(
 			poly::ntt(zh_poly);
 		}
 
-		let mut az = polyvec::Polyveck::default();
+		let mut az = polyvec::Polyvec::<K>::default();
 		for (az_poly, a_row) in az.vec.iter_mut().zip(a_matrix.iter()).take(K) {
 			compute_ntt_dot_product(az_poly, a_row, &zh);
 		}
@@ -918,7 +920,7 @@ pub(crate) fn combine_signature(
 		// with standard ML-DSA verification. Cross-session replay protection is
 		// provided by SSID binding in commitment hashes and message validation.
 		let mut w1_packed = [0u8; K * POLYW1_PACKEDBYTES];
-		polyvec::k_pack_w1(&mut w1_packed, &w1);
+		polyvec::pack_w1::<K, { GAMMA2 }, { K * POLYW1_PACKEDBYTES }>(&mut w1_packed, &w1);
 
 		let mut challenge_bytes = [0u8; C_DASH_BYTES];
 		let mut keccak_state = fips202::KeccakState::default();
@@ -933,7 +935,7 @@ pub(crate) fn combine_signature(
 		poly::ntt(&mut challenge_ntt);
 
 		// Compute 2^d * c * t1 (scaled challenge times public key component)
-		let mut scaled_challenge_t1 = polyvec::Polyveck::default();
+		let mut scaled_challenge_t1 = polyvec::Polyvec::<K>::default();
 		for (scaled_poly, t1_poly) in scaled_challenge_t1.vec.iter_mut().zip(t1.vec.iter()).take(K)
 		{
 			for (scaled_coeff, t1_coeff) in
@@ -960,7 +962,7 @@ pub(crate) fn combine_signature(
 		}
 
 		// Compute difference: f = (Az - 2^d*c*t1) - w_aggregated
-		let mut difference = polyvec::Polyveck::default();
+		let mut difference = polyvec::Polyvec::<K>::default();
 		for (diff_poly, (scaled_poly, w_poly)) in difference
 			.vec
 			.iter_mut()
@@ -998,7 +1000,7 @@ pub(crate) fn combine_signature(
 		}
 
 		// Compute w0 + difference for hint computation
-		let mut w0_plus_diff = polyvec::Polyveck::default();
+		let mut w0_plus_diff = polyvec::Polyvec::<K>::default();
 		for (w0pd_poly, (w0_poly, diff_poly)) in w0_plus_diff
 			.vec
 			.iter_mut()
@@ -1020,7 +1022,7 @@ pub(crate) fn combine_signature(
 		}
 
 		// Compute hint for signature
-		let mut hint = polyvec::Polyveck::default();
+		let mut hint = polyvec::Polyvec::<K>::default();
 		let hint_pop = compute_dilithium_hint(&mut hint, &w0_plus_diff, &w1);
 
 		if hint_pop <= OMEGA {
@@ -1050,7 +1052,7 @@ pub(crate) fn combine_signature(
 /// # Errors
 ///
 /// Returns `InvalidPublicKeySize` if `pk_bytes` is not the expected size (2592 bytes).
-fn unpack_t1(pk_bytes: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
+fn unpack_t1(pk_bytes: &[u8]) -> ThresholdResult<polyvec::Polyvec<K>> {
 	// Validate size: 32 (rho) + K * 320 (t1) = 32 + 8 * 320 = 2592
 	const EXPECTED_SIZE: usize = 32 + K * 320;
 	if pk_bytes.len() != EXPECTED_SIZE {
@@ -1060,7 +1062,7 @@ fn unpack_t1(pk_bytes: &[u8]) -> ThresholdResult<polyvec::Polyveck> {
 		});
 	}
 
-	let mut t1 = polyvec::Polyveck::default();
+	let mut t1 = polyvec::Polyvec::<K>::default();
 	let t1_bytes = &pk_bytes[32..]; // Skip rho
 
 	// Unpack t1 (320 bytes per polynomial = 256 * 10 / 8)
@@ -1093,7 +1095,7 @@ mod tests {
 	#[test]
 	fn test_is_zero_response_detects_zeros() {
 		// All-zero response should be detected
-		let zero_response = polyvec::Polyvecl::default();
+		let zero_response = polyvec::Polyvec::<L>::default();
 		assert!(is_zero_response(&zero_response), "All-zero response should be detected as zero");
 	}
 
@@ -1101,7 +1103,7 @@ mod tests {
 	#[test]
 	fn test_is_zero_response_allows_nonzero() {
 		// Response with a single non-zero coefficient should not be zero
-		let mut nonzero_response = polyvec::Polyvecl::default();
+		let mut nonzero_response = polyvec::Polyvec::<L>::default();
 		nonzero_response.vec[0].coeffs_mut()[0] = 1;
 		assert!(
 			!is_zero_response(&nonzero_response),
@@ -1109,7 +1111,7 @@ mod tests {
 		);
 
 		// Response with non-zero in last position
-		let mut nonzero_response2 = polyvec::Polyvecl::default();
+		let mut nonzero_response2 = polyvec::Polyvec::<L>::default();
 		nonzero_response2.vec[L - 1].coeffs_mut()[N as usize - 1] = 42;
 		assert!(
 			!is_zero_response(&nonzero_response2),
@@ -1121,7 +1123,7 @@ mod tests {
 	/// This documents the behavior that necessitates the is_zero_response check.
 	#[test]
 	fn test_zero_vector_passes_norm_check() {
-		let zero_response = polyvec::Polyvecl::default();
+		let zero_response = polyvec::Polyvec::<L>::default();
 		let gamma1_minus_beta = (GAMMA1 - BETA) as i32;
 
 		// Zero vectors pass norm checks because 0 < gamma1_minus_beta
@@ -1136,7 +1138,7 @@ mod tests {
 	/// it passes check_party_z_norm.
 	#[test]
 	fn test_zero_response_filtered_before_norm_check() {
-		let zero_response = polyvec::Polyvecl::default();
+		let zero_response = polyvec::Polyvec::<L>::default();
 		let gamma1_minus_beta = (GAMMA1 - BETA) as i32;
 
 		// Simulate the check order in combine_signature:
@@ -1173,14 +1175,15 @@ mod tests {
 
 		// Create fake w_aggregated (doesn't need to be valid for this test -
 		// we're testing that party counting fails before signature construction)
-		let w_aggregated: Vec<polyvec::Polyveck> = vec![polyvec::Polyveck::default(); k_iterations];
+		let w_aggregated: Vec<polyvec::Polyvec<K>> =
+			vec![polyvec::Polyvec::<K>::default(); k_iterations];
 
 		// Scenario 1: All 3 parties submit zero responses
 		// Expected: CombinationFailed because valid_party_count (0) < threshold (2)
-		let all_zero_responses: Vec<Vec<polyvec::Polyvecl>> = vec![
-			vec![polyvec::Polyvecl::default(); k_iterations], // Party 1: zeros
-			vec![polyvec::Polyvecl::default(); k_iterations], // Party 2: zeros
-			vec![polyvec::Polyvecl::default(); k_iterations], // Party 3: zeros
+		let all_zero_responses: Vec<Vec<polyvec::Polyvec<L>>> = vec![
+			vec![polyvec::Polyvec::<L>::default(); k_iterations], // Party 1: zeros
+			vec![polyvec::Polyvec::<L>::default(); k_iterations], // Party 2: zeros
+			vec![polyvec::Polyvec::<L>::default(); k_iterations], // Party 3: zeros
 		];
 
 		let result = combine_signature(
@@ -1196,13 +1199,13 @@ mod tests {
 
 		// Scenario 2: Only 1 party has a non-zero response, below threshold
 		// Even though 3 parties "responded", only 1 is valid
-		let mut one_nonzero = polyvec::Polyvecl::default();
+		let mut one_nonzero = polyvec::Polyvec::<L>::default();
 		one_nonzero.vec[0].coeffs_mut()[0] = 1; // Small value within norm bounds
 
-		let mixed_responses: Vec<Vec<polyvec::Polyvecl>> = vec![
+		let mixed_responses: Vec<Vec<polyvec::Polyvec<L>>> = vec![
 			vec![one_nonzero.clone(); k_iterations], // Party 1: valid
-			vec![polyvec::Polyvecl::default(); k_iterations], // Party 2: zeros
-			vec![polyvec::Polyvecl::default(); k_iterations], // Party 3: zeros
+			vec![polyvec::Polyvec::<L>::default(); k_iterations], // Party 2: zeros
+			vec![polyvec::Polyvec::<L>::default(); k_iterations], // Party 3: zeros
 		];
 
 		let result = combine_signature(

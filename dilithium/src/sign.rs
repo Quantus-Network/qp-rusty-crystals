@@ -1,9 +1,5 @@
 use crate::{
-	fips202, packing, params, poly,
-	poly::Poly,
-	polyvec,
-	polyvec::Polyvec,
-	SensitiveBytes32,
+	fips202, packing, params, poly, poly::Poly, polyvec, polyvec::Polyvec, SensitiveBytes32,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -181,8 +177,9 @@ pub(crate) fn public_key_from_secret_var<
 	let mut t0 = Polyvec::<K>::default();
 	let mut s1 = Polyvec::<L>::default();
 	let mut s2 = Polyvec::<K>::default();
-	let s_in_range =
-		packing::unpack_sk::<K, L, ETA, SK>(&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk);
+	let s_in_range = packing::unpack_sk::<K, L, ETA, SK>(
+		&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk,
+	);
 
 	let (t1, mut t0_derived) = derive_public_components(&rho, &s1, &s2);
 
@@ -351,7 +348,12 @@ fn prepare_signing_context<const K: usize, const L: usize>(
 	SigningContext { public_seed_rho, message_hash_mu, signing_entropy_rho_prime }
 }
 
-fn compute_and_check_signature_z<const L: usize, const GAMMA1: usize, const TAU: usize, const ETA: usize>(
+fn compute_and_check_signature_z<
+	const L: usize,
+	const GAMMA1: usize,
+	const TAU: usize,
+	const ETA: usize,
+>(
 	signature_z: &mut Polyvec<L>,
 	masking_vector_y: &Polyvec<L>,
 	challenge_poly_c: &Poly,
@@ -755,11 +757,10 @@ fn verify(
 	>(sig, domain_prefix, m, pk)
 }
 
-
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::polyvec::{Polyveck, Polyvecl};
+	use crate::polyvec::Polyvec;
 	use alloc::{string::String, vec};
 	use rand::RngExt;
 
@@ -1022,10 +1023,10 @@ mod tests {
 	fn recover_masking_y(
 		sig: &[u8; params::SIGNBYTES],
 		sk: &[u8; params::SECRETKEYBYTES],
-	) -> Polyvecl {
+	) -> Polyvec<L> {
 		let mut challenge_seed = [0u8; params::C_DASH_BYTES];
-		let mut z = Polyvecl::default();
-		let mut h = Polyveck::default();
+		let mut z = Polyvec::<L>::default();
+		let mut h = Polyvec::<K>::default();
 		assert!(packing::unpack_sig::<
 			K,
 			L,
@@ -1036,23 +1037,15 @@ mod tests {
 			{ params::SIGNBYTES },
 		>(&mut challenge_seed, &mut z, &mut h, sig));
 
-		let unpacked = unpack_secret_key_for_signing::<
-			K,
-			L,
-			{ params::ETA },
-			{ params::SECRETKEYBYTES },
-		>(sk); // s1 already in NTT domain
+		let unpacked =
+			unpack_secret_key_for_signing::<K, L, { params::ETA }, { params::SECRETKEYBYTES }>(sk); // s1 already in NTT domain
 		let mut challenge_poly = Poly::default();
 		poly::challenge::<{ params::TAU }>(&mut challenge_poly, &challenge_seed);
 		poly::ntt(&mut challenge_poly);
 
-		let mut cs1 = Polyvecl::default();
-		polyvec::l_pointwise_poly_montgomery(
-			&mut cs1,
-			&challenge_poly,
-			&unpacked.secret_poly_s1_ntt,
-		);
-		polyvec::l_invntt_tomont(&mut cs1);
+		let mut cs1 = Polyvec::<L>::default();
+		polyvec::pointwise_poly_montgomery(&mut cs1, &challenge_poly, &unpacked.secret_poly_s1_ntt);
+		polyvec::invntt_tomont(&mut cs1);
 
 		// y ≡ z - c·s1 (mod q); normalise to the canonical [0, Q) representative for comparison.
 		for i in 0..L {
@@ -1063,7 +1056,7 @@ mod tests {
 		z
 	}
 
-	fn polyvecl_eq(a: &Polyvecl, b: &Polyvecl) -> bool {
+	fn polyvecl_eq(a: &Polyvec<L>, b: &Polyvec<L>) -> bool {
 		(0..L).all(|i| a.vec[i].coeffs == b.vec[i].coeffs)
 	}
 
@@ -1115,9 +1108,11 @@ mod tests {
 		fips202::shake256_squeeze(&mut mu, &mut state);
 
 		// With z = 0, h = 0 and t1 = 0 the verifier reconstructs w1 = 0.
-		let w1 = Polyveck::default();
+		let w1 = Polyvec::<K>::default();
 		let mut buf = [0u8; K * params::POLYW1_PACKEDBYTES];
-		polyvec::k_pack_w1(&mut buf, &w1);
+		polyvec::pack_w1::<K, { params::GAMMA2 }, { params::K * params::POLYW1_PACKEDBYTES }>(
+			&mut buf, &w1,
+		);
 
 		// Pick the challenge to equal the verifier's own recomputation: c = H(mu || w1Encode(0)).
 		let mut c = [0u8; params::C_DASH_BYTES];
@@ -1128,8 +1123,8 @@ mod tests {
 		fips202::shake256_squeeze(&mut c, &mut cstate);
 
 		// Assemble the forged signature (c, z = 0, empty hint).
-		let z = Polyvecl::default();
-		let h = Polyveck::default();
+		let z = Polyvec::<L>::default();
+		let h = Polyvec::<K>::default();
 		let mut sig = [0u8; params::SIGNBYTES];
 		packing::pack_sig::<
 			K,

@@ -111,7 +111,7 @@ const N_COEFFS: usize = N as usize;
 /// for poly in ntt_polys {
 ///     acc.add(&poly);
 /// }
-/// let result: Polyvecl = acc.finalize();
+/// let result: Polyvec<L> = acc.finalize();
 /// ```
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct NttAccumulator<const VECS: usize> {
@@ -159,24 +159,24 @@ impl<const VECS: usize> Default for NttAccumulator<VECS> {
 	}
 }
 
-/// Accumulator specialized for Polyvecl (L polynomials).
+/// Accumulator specialized for `Polyvec<L>` (L polynomials).
 pub type NttAccumulatorL = NttAccumulator<L>;
 
-/// Accumulator specialized for Polyveck (K polynomials).
+/// Accumulator specialized for `Polyvec<K>` (K polynomials).
 pub type NttAccumulatorK = NttAccumulator<K>;
 
 impl NttAccumulatorL {
-	/// Add all polynomials from a Polyvecl.
-	pub fn add_polyvecl(&mut self, vec: &polyvec::Polyvecl) {
+	/// Add all polynomials from a `Polyvec<L>`.
+	pub fn add_polyvec_l(&mut self, vec: &polyvec::Polyvec<L>) {
 		for (i, poly) in vec.vec.iter().enumerate().take(L) {
 			self.add_poly(i, poly);
 		}
 	}
 
-	/// Finalize to a Polyvecl.
-	pub fn finalize(self) -> polyvec::Polyvecl {
+	/// Finalize to a `Polyvec<L>`.
+	pub fn finalize(self) -> polyvec::Polyvec<L> {
 		let polys = self.finalize_to_polys();
-		let mut result = polyvec::Polyvecl::default();
+		let mut result = polyvec::Polyvec::<L>::default();
 		for (i, poly) in polys.into_iter().enumerate() {
 			result.vec[i] = poly;
 		}
@@ -185,17 +185,17 @@ impl NttAccumulatorL {
 }
 
 impl NttAccumulatorK {
-	/// Add all polynomials from a Polyveck.
-	pub fn add_polyveck(&mut self, vec: &polyvec::Polyveck) {
+	/// Add all polynomials from a `Polyvec<K>`.
+	pub fn add_polyvec_k(&mut self, vec: &polyvec::Polyvec<K>) {
 		for (i, poly) in vec.vec.iter().enumerate().take(K) {
 			self.add_poly(i, poly);
 		}
 	}
 
-	/// Finalize to a Polyveck.
-	pub fn finalize(self) -> polyvec::Polyveck {
+	/// Finalize to a `Polyvec<K>`.
+	pub fn finalize(self) -> polyvec::Polyvec<K> {
 		let polys = self.finalize_to_polys();
-		let mut result = polyvec::Polyveck::default();
+		let mut result = polyvec::Polyvec::<K>::default();
 		for (i, poly) in polys.into_iter().enumerate() {
 			result.vec[i] = poly;
 		}
@@ -242,10 +242,10 @@ pub(crate) fn decompose_coefficient(a: u32) -> (u32, u32) {
 /// Decompose a vector of K polynomials into low and high parts.
 ///
 /// Matches the reference implementation's rounding behavior for compatibility.
-pub(crate) fn decompose_polyveck(
-	input: &polyvec::Polyveck,
-	w0: &mut polyvec::Polyveck,
-	w1: &mut polyvec::Polyveck,
+pub(crate) fn decompose_polyvec(
+	input: &polyvec::Polyvec<K>,
+	w0: &mut polyvec::Polyvec<K>,
+	w1: &mut polyvec::Polyvec<K>,
 ) {
 	for i in 0..K {
 		for j in 0..N as usize {
@@ -272,8 +272,8 @@ pub(crate) fn decompose_polyveck(
 /// `i32` range and inside [`poly::reduce`]'s input contract.
 pub(crate) fn compute_ntt_dot_product(
 	result: &mut poly::Poly,
-	a: &polyvec::Polyvecl,
-	b: &polyvec::Polyvecl,
+	a: &polyvec::Polyvec<L>,
+	b: &polyvec::Polyvec<L>,
 ) {
 	// Zero out result
 	result.coeffs_mut().fill(0);
@@ -392,7 +392,7 @@ impl HyperballSampleVector {
 	/// Round the z response component (s1 portion) to integer polynomial.
 	/// Used in signing when only the z response is needed.
 	/// Keeps values in centered representation [-(Q-1)/2, (Q-1)/2].
-	pub fn round_z_response(&self, z: &mut polyvec::Polyvecl) {
+	pub fn round_z_response(&self, z: &mut polyvec::Polyvec<L>) {
 		for i in 0..L {
 			for j in 0..N as usize {
 				let idx = i * N as usize + j;
@@ -410,7 +410,7 @@ impl HyperballSampleVector {
 
 	/// Round floating-point values back to integer polynomials.
 	/// Keeps values in centered representation [-(Q-1)/2, (Q-1)/2].
-	pub fn round(&self, s1: &mut polyvec::Polyvecl, s2: &mut polyvec::Polyveck) {
+	pub fn round(&self, s1: &mut polyvec::Polyvec<L>, s2: &mut polyvec::Polyvec<K>) {
 		// Round s1 components - keep in centered range
 		for i in 0..L {
 			for j in 0..N as usize {
@@ -482,7 +482,7 @@ impl HyperballSampleVector {
 	}
 
 	/// Create a vector from polynomial vectors (s1, s2).
-	pub fn from_polyvecs(s1: &polyvec::Polyvecl, s2: &polyvec::Polyveck) -> Self {
+	pub fn from_polyvecs(s1: &polyvec::Polyvec<L>, s2: &polyvec::Polyvec<K>) -> Self {
 		let size = N as usize * (L + K);
 		let mut data = vec![0.0f64; size];
 
@@ -525,9 +525,9 @@ impl HyperballSampleVector {
 /// Compute Dilithium hint for signature.
 /// Returns the hint population count.
 pub(crate) fn compute_dilithium_hint(
-	hint: &mut polyvec::Polyveck,
-	w0pf: &polyvec::Polyveck,
-	w1: &polyvec::Polyveck,
+	hint: &mut polyvec::Polyvec<K>,
+	w0pf: &polyvec::Polyvec<K>,
+	w1: &polyvec::Polyvec<K>,
 ) -> usize {
 	let mut pop = 0;
 	for i in 0..K {
@@ -650,18 +650,18 @@ pub(crate) fn poly_unpack_w(buf: &[u8]) -> Result<poly::Poly, &'static str> {
 	Ok(p)
 }
 
-/// Unpack a Polyveck from 23-bit encoding.
+/// Unpack a `Polyvec<K>` from 23-bit encoding.
 ///
 /// Returns an error if the buffer is shorter than `K * 736` bytes or if any
 /// coefficient is >= Q. The length is validated up front so an undersized
 /// buffer is a recoverable `Err` rather than an out-of-bounds slice panic
 /// (which would abort the process in panic=abort deployments).
-pub(crate) fn unpack_polyveck_w(buf: &[u8]) -> Result<polyvec::Polyveck, &'static str> {
+pub(crate) fn unpack_polyvec_w(buf: &[u8]) -> Result<polyvec::Polyvec<K>, &'static str> {
 	const POLY_W_SIZE: usize = 736;
 	if buf.len() < K * POLY_W_SIZE {
-		return Err("buffer too short for unpack_polyveck_w");
+		return Err("buffer too short for unpack_polyvec_w");
 	}
-	let mut w = polyvec::Polyveck::default();
+	let mut w = polyvec::Polyvec::<K>::default();
 	for i in 0..K {
 		let offset = i * POLY_W_SIZE;
 		w.vec[i] = poly_unpack_w(&buf[offset..offset + POLY_W_SIZE])?;
@@ -679,8 +679,8 @@ pub(crate) fn unpack_polyveck_w(buf: &[u8]) -> Result<polyvec::Polyveck, &'stati
 /// is performed before calling this function.
 pub(crate) fn pack_signature(
 	c_tilde: &[u8],
-	z: &polyvec::Polyvecl,
-	hint: &polyvec::Polyveck,
+	z: &polyvec::Polyvec<L>,
+	hint: &polyvec::Polyvec<K>,
 ) -> Vec<u8> {
 	let mut sig = [0u8; SIGNBYTES];
 
@@ -775,7 +775,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_unpack_polyveck_w_rejects_short_buffer() {
+	fn test_unpack_polyvec_w_rejects_short_buffer() {
 		// Audit regression: an undersized buffer must be a recoverable Err,
 		// not an out-of-bounds slice panic. The function already returns
 		// Result for coefficient-range errors; a length violation must take
@@ -783,9 +783,9 @@ mod tests {
 		// deployments before the caller's error handling runs).
 		for len in [0usize, 100, 736, 8 * 736 - 1] {
 			let buf = vec![0u8; len];
-			let result = unpack_polyveck_w(&buf);
+			let result = unpack_polyvec_w(&buf);
 			assert!(
-				matches!(result, Err("buffer too short for unpack_polyveck_w")),
+				matches!(result, Err("buffer too short for unpack_polyvec_w")),
 				"len {} must be rejected with an error, got {:?}",
 				len,
 				result.is_ok()
@@ -794,7 +794,7 @@ mod tests {
 
 		// A correctly sized buffer still unpacks (all-zero coefficients are valid).
 		let buf = vec![0u8; 8 * 736];
-		assert!(unpack_polyveck_w(&buf).is_ok());
+		assert!(unpack_polyvec_w(&buf).is_ok());
 	}
 
 	#[test]
