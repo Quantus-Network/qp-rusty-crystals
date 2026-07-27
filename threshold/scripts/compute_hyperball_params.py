@@ -319,7 +319,39 @@ def recover_expo(t: int, n: int, fact: float, eta: int, params: MLDSAParams, r_t
     return best[1]
 
 
-def compute_resharing_params(nbsamples: int = 8000):
+# Per-variant resharing calibration inputs. `ref_r` are the *base* (kappa=1)
+# radii for each config; `overshoot` is the measured max honest-reshare
+# overshoot sqrt(tau)*||p||_nu / B_base at the repeated-reshare fixed point
+# (Rust test_recovered_partial_variance_*: 100 reshares for (2,*), 20 for
+# (3,5), 10 for (4,6); max over all signing sets), built with the variant's
+# cargo feature. ML-DSA-65 is intentionally absent: eta=4 keygen variance
+# (20/3) dwarfs the eta=2-tuned split noise, so its measured overshoots are
+# 0.62-0.92 (< 1 everywhere) and it reshares at kappa=1 with base tables.
+RESHARING_DATA = {
+    87: dict(
+        fact=7.0,
+        ref_r={(2, 2): 503119.0, (2, 3): 631601.0, (2, 4): 632903.0,
+               (3, 5): 577400.0, (4, 6): 517689.0},
+        overshoot={(2, 2): 0.780, (2, 3): 0.810, (2, 4): 0.961,
+                   (3, 5): 1.012, (4, 6): 1.163},
+        kappa={(2, 2): 1.00, (2, 3): 1.00, (2, 4): 1.10, (3, 5): 1.15, (4, 6): 1.25},
+        ship_k={(2, 2): 4, (2, 3): 5, (2, 4): 10, (3, 5): 60, (4, 6): 1600},
+    ),
+    44: dict(
+        fact=6.0,
+        ref_r={(2, 2): 164656.6, (2, 3): 175209.0, (2, 4): 175209.0,
+               (3, 5): 149931.1, (4, 6): 140270.0},
+        overshoot={(2, 2): 0.794, (2, 3): 0.827, (2, 4): 0.991,
+                   (3, 5): 1.023, (4, 6): 1.166},
+        # Same enlargements as ML-DSA-87: the measured overshoots are nearly
+        # identical (the splitter overshoot is a variance ratio, largely
+        # independent of the parameter set), giving ~7-11% margins.
+        kappa={(2, 2): 1.00, (2, 3): 1.00, (2, 4): 1.10, (3, 5): 1.15, (4, 6): 1.25},
+    ),
+}
+
+
+def compute_resharing_params(variant: int, nbsamples: int = 8000):
     """
     Enlarged hyperball params for resharing support.
 
@@ -347,31 +379,38 @@ def compute_resharing_params(nbsamples: int = 8000):
     across seeds) is enabled by enlargement at kappa=1.25 => K=1600 for the near-mpc
     4-of-6 shape. The path back to kappa=1/K=350 (budgeted per-reshare noise
     intensity, or a collaborative coset-Gaussian sample) is future work.
+
+    Per-variant data (`RESHARING_DATA`): the reference radii are the *base*
+    (kappa=1) radii for each config; the overshoots are measured by the Rust
+    `test_recovered_partial_variance_*` tests built with that variant's feature.
+    ML-DSA-65 measures below 1 everywhere (eta=4 keygen variance dwarfs the
+    eta=2-tuned split noise), so it reshares at kappa=1 and needs no enlargement.
     """
-    params, eta, fact = PARAMS_87, ETA_87, 7.0
-    # Reference (r, r') used to recover each config's expo.
-    REF_R = {(2, 2): 503119.0, (2, 3): 631601.0, (2, 4): 632903.0,
-             (3, 5): 577400.0, (4, 6): 517689.0}
-    # Measured max honest-reshare overshoot (sqrt(tau)*||p||_nu / B_base) for the v5
-    # mean-subtracted "coset" splitter, at the repeated-reshare fixed point (Rust
-    # test_recovered_partial_variance_*: 100 reshares for (2,*), 20 for (3,5), 10 for
-    # (4,6); max over all signing sets). v5 (uniform negative correlation) lowered
-    # every config vs v4 telescoping, dropping (2,2)/(2,3)/(2,4) below the base bound.
-    OVERSHOOT = {(2, 2): 0.780, (2, 3): 0.810, (2, 4): 0.961,
-                 (3, 5): 1.012, (4, 6): 1.163}
-    # Chosen enlargement factors. Configs whose overshoot is comfortably below 1 use
-    # kappa = 1 (base signing params, no Q_s cost); the rest carry a ~12-15% margin.
-    KAPPA = {(2, 2): 1.00, (2, 3): 1.00, (2, 4): 1.10, (3, 5): 1.15, (4, 6): 1.25}
+    if variant not in RESHARING_DATA:
+        print(f"\nML-DSA-{variant}: no resharing enlargement needed "
+              f"(measured overshoot < 1 for all supported committees; kappa = 1).")
+        return
+    data = RESHARING_DATA[variant]
+    params = VARIANT_PARAMS[variant]
+    eta = ETA_RS[variant]
+    fact = data["fact"]
+    REF_R = data["ref_r"]
+    OVERSHOOT = data["overshoot"]
+    KAPPA = data["kappa"]
+    SHIP_K = data.get("ship_k")
 
     print("\n" + "=" * 70)
-    print("Resharing-enlarged hyperball params (ML-DSA-87, v5 mean-subtracted coset splitter)")
+    print(f"Resharing-enlarged hyperball params (ML-DSA-{variant}, v5 mean-subtracted coset splitter)")
     print("=" * 70)
-    # K actually shipped in config.rs. The MC K below is a noisy lower-bound
-    # estimate (it targets ~50% per-attempt success, K = ceil(-1/log2(1-p))); for
-    # the small configs the shipped K carries completeness margin above it.
-    SHIP_K = {(2, 2): 4, (2, 3): 5, (2, 4): 10, (3, 5): 60, (4, 6): 1600}
-    print(f"{'cfg':>6} {'overshoot':>9} {'kappa':>6} {'B_prime':>8} {'r':>9} {'r_prime':>9} {'K_mc':>5} {'K_ship':>7}")
-    for cfg in [(2, 2), (2, 3), (2, 4), (3, 5), (4, 6)]:
+    # SHIP_K: K actually shipped in params tables (87). The MC K below is a noisy
+    # lower-bound estimate (it targets ~50% per-attempt success, K =
+    # ceil(-1/log2(1-p))); shipped K carries completeness margin above it
+    # (2x MC for the 44/65 tables).
+    header = f"{'cfg':>6} {'overshoot':>9} {'kappa':>6} {'B_prime':>8} {'r':>9} {'r_prime':>9} {'K_mc':>5} {'K_2x':>5}"
+    if SHIP_K:
+        header += f" {'K_ship':>7}"
+    print(header)
+    for cfg in sorted(KAPPA):
         t, n = cfg
         expo = recover_expo(t, n, fact, eta, params, REF_R[cfg])
         k = KAPPA[cfg]
@@ -382,7 +421,11 @@ def compute_resharing_params(nbsamples: int = 8000):
         p_final = p_accept * pr["checknorminf_r1"] * pr["checknorminf_r2mcto"] * pr["checkhint"]
         K = ceil(-1 / log(1 - p_final, 2)) if 0 < p_final < 1 else (1 if p_final >= 1 else 9999)
         B = beta_bound(t, n, fact, params) * k
-        print(f"{f'{t}-{n}':>6} {OVERSHOOT[cfg]:>9.2f} {k:>6.2f} {B:>8.0f} {r:>9.0f} {rp:>9.0f} {K:>5} {SHIP_K[cfg]:>7}")
+        line = (f"{f'{t}-{n}':>6} {OVERSHOOT[cfg]:>9.2f} {k:>6.2f} {B:>8.0f} "
+                f"{r:>9.0f} {rp:>9.0f} {K:>5} {2 * K:>5}")
+        if SHIP_K:
+            line += f" {SHIP_K[cfg]:>7}"
+        print(line)
 
 
 def emit_rust_tables(variant: int, results: list[dict], default_fact: float):
@@ -411,12 +454,19 @@ def main():
     parser.add_argument("--n-max", type=int, default=6,
                         help="Max n for (t,n) grid (default 6)")
     parser.add_argument("--resharing", action="store_true",
-                        help="Also print ML-DSA-87 resharing-enlarged params")
+                        help="Also print the variant's resharing-enlarged params")
+    parser.add_argument("--resharing-only", action="store_true",
+                        help="Skip the base grid search; only compute the "
+                             "variant's resharing-enlarged params")
     args = parser.parse_args()
 
     params = VARIANT_PARAMS[args.variant]
     eta = ETA_RS[args.variant]
     fact0 = FACT_DEFAULT[args.variant]
+
+    if args.resharing_only:
+        compute_resharing_params(args.variant, nbsamples=max(args.nbsamples, 8000))
+        return
 
     print("=" * 70)
     print(f"Computing hyperball parameters for {params.name} threshold signing")
@@ -447,9 +497,7 @@ def main():
     emit_rust_tables(args.variant, all_results, fact0)
 
     if args.resharing:
-        if args.variant != 87:
-            print("\nNote: --resharing calibration is only shipped for ML-DSA-87.", file=sys.stderr)
-        compute_resharing_params()
+        compute_resharing_params(args.variant, nbsamples=max(args.nbsamples, 8000))
 
 
 if __name__ == "__main__":
