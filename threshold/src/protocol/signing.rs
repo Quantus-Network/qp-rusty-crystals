@@ -10,7 +10,7 @@ use qp_rusty_crystals_dilithium::{
 	fips202,
 	params::{
 		BETA, C_DASH_BYTES, D, GAMMA1, GAMMA2, K, L, N, OMEGA, POLYW1_PACKEDBYTES,
-		POLYZ_PACKEDBYTES, Q,
+		POLYZ_PACKEDBYTES, Q, TAU,
 	},
 	poly, polyvec,
 };
@@ -635,7 +635,7 @@ pub(crate) fn generate_round3_response(
 
 		// Derive challenge polynomial and convert to NTT domain
 		let mut challenge_ntt = poly::Poly::default();
-		poly::challenge(&mut challenge_ntt, &challenge_bytes);
+		poly::challenge::<TAU>(&mut challenge_ntt, &challenge_bytes);
 		poly::ntt(&mut challenge_ntt);
 
 		// Compute z = c·s1 (challenge times secret share). Montgomery
@@ -720,7 +720,7 @@ pub(crate) fn pack_responses(responses: &[polyvec::Polyvecl]) -> Vec<u8> {
 		let (chunks, _) =
 			buf[offset..offset + single_response_size].as_chunks_mut::<POLYZ_PACKEDBYTES>();
 		for (chunk, zj) in chunks.iter_mut().zip(z_centered.vec.iter()).take(L) {
-			poly::z_pack(chunk, zj);
+			poly::z_pack::<GAMMA1, POLYZ_PACKEDBYTES>(chunk, zj);
 		}
 	}
 
@@ -760,7 +760,7 @@ pub(crate) fn unpack_responses(
 		let (chunks, _) =
 			data[start..start + single_response_size].as_chunks::<POLYZ_PACKEDBYTES>();
 		for (chunk, zj) in chunks.iter().zip(z.vec.iter_mut()).take(L) {
-			poly::z_unpack(zj, chunk);
+			poly::z_unpack::<GAMMA1, POLYZ_PACKEDBYTES>(zj, chunk);
 		}
 		responses.push(z);
 	}
@@ -929,7 +929,7 @@ pub(crate) fn combine_signature(
 
 		// Derive challenge polynomial and convert to NTT domain
 		let mut challenge_ntt = poly::Poly::default();
-		poly::challenge(&mut challenge_ntt, &challenge_bytes);
+		poly::challenge::<TAU>(&mut challenge_ntt, &challenge_bytes);
 		poly::ntt(&mut challenge_ntt);
 
 		// Compute 2^d * c * t1 (scaled challenge times public key component)

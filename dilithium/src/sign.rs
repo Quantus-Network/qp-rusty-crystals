@@ -452,7 +452,7 @@ fn generate_challenge_polynomial(
 	fips202::shake256_squeeze(&mut signature_buffer[..params::C_DASH_BYTES], &mut keccak_state);
 
 	let mut challenge_poly_c = Poly::default();
-	poly::challenge(&mut challenge_poly_c, &signature_buffer[..params::C_DASH_BYTES]);
+	poly::challenge::<{ params::TAU }>(&mut challenge_poly_c, &signature_buffer[..params::C_DASH_BYTES]);
 	poly::ntt(&mut challenge_poly_c);
 	challenge_poly_c
 }
@@ -625,7 +625,7 @@ pub(crate) fn verify(
 	fips202::shake256_squeeze(&mut mu, &mut state);
 
 	// Matrix-vector multiplication; compute Az - c2^dt1 (A streamed from rho)
-	poly::challenge(&mut cp, &c);
+	poly::challenge::<{ params::TAU }>(&mut cp, &c);
 
 	polyvec::l_ntt(&mut z);
 	polyvec::matrix_pointwise_montgomery_streamed(&mut w1, &rho, &z);
@@ -924,7 +924,7 @@ mod tests {
 
 		let unpacked = unpack_secret_key_for_signing(sk); // s1 already in NTT domain
 		let mut challenge_poly = Poly::default();
-		poly::challenge(&mut challenge_poly, &challenge_seed);
+		poly::challenge::<{ params::TAU }>(&mut challenge_poly, &challenge_seed);
 		poly::ntt(&mut challenge_poly);
 
 		let mut cs1 = Polyvecl::default();

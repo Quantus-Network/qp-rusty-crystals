@@ -171,7 +171,7 @@ fn rej_eta_one_block(runner: &mut CtRunner, rng: &mut BenchRng) {
 			for _ in 0..BATCH {
 				// Same shape as the call in `uniform_eta`.
 				let mut out = [0i32; 1000];
-				let accepted = poly::rej_eta(&mut out, black_box(&block));
+				let accepted = poly::rej_eta::<{ params::ETA }>(&mut out, black_box(&block));
 				black_box((accepted, &out));
 			}
 		});

@@ -144,7 +144,7 @@ pub const DOMAIN_DKG_SSID: &[u8] = b"THRESHOLD_DKG_SSID_V1";
 pub const DKG_SSID_SIZE: usize = 32;
 
 use qp_rusty_crystals_dilithium::{
-	params::{K, L, N},
+	params::{ETA, K, L, N},
 	poly,
 };
 
@@ -902,12 +902,12 @@ pub fn derive_subset_contribution(combined_seed: &[u8; SUBSET_SEED_SIZE]) -> Sub
 	let mut temp_poly = poly::Poly::default();
 
 	for i in 0..L {
-		poly::uniform_eta(&mut temp_poly, combined_seed, i as u16);
+		poly::uniform_eta::<ETA>(&mut temp_poly, combined_seed, i as u16);
 		contribution.s1[i].copy_from_slice(temp_poly.coeffs());
 	}
 
 	for i in 0..K {
-		poly::uniform_eta(&mut temp_poly, combined_seed, (L + i) as u16);
+		poly::uniform_eta::<ETA>(&mut temp_poly, combined_seed, (L + i) as u16);
 		contribution.s2[i].copy_from_slice(temp_poly.coeffs());
 	}
 

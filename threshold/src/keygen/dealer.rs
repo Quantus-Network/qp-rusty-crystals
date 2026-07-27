@@ -8,7 +8,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 
 use qp_rusty_crystals_dilithium::{
 	fips202, packing,
-	params::{K, L, Q},
+	params::{ETA, K, L, Q},
 	poly, polyvec,
 };
 
@@ -304,13 +304,13 @@ fn generate_threshold_shares(
 		// Create η-bounded shares for s1
 		let mut s1_share = polyvec::Polyvecl::default();
 		for (j, s1_poly) in s1_share.vec.iter_mut().enumerate().take(L) {
-			poly::uniform_eta(s1_poly, &share_seed, j as u16);
+			poly::uniform_eta::<ETA>(s1_poly, &share_seed, j as u16);
 		}
 
 		// Create η-bounded shares for s2
 		let mut s2_share = polyvec::Polyveck::default();
 		for (j, s2_poly) in s2_share.vec.iter_mut().enumerate().take(K) {
-			poly::uniform_eta(s2_poly, &share_seed, (L + j) as u16);
+			poly::uniform_eta::<ETA>(s2_poly, &share_seed, (L + j) as u16);
 		}
 
 		// The plaintext seed is no longer needed; wipe it rather than leaving it

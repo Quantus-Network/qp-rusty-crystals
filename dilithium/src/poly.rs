@@ -1,4 +1,9 @@
-//! Low-level polynomial arithmetic for ML-DSA-87.
+//! Low-level polynomial arithmetic for ML-DSA.
+//!
+//! Routines whose bit-level behaviour depends on a variant parameter (ETA,
+//! GAMMA1, GAMMA2, TAU) take it as a const generic and select the matching
+//! code path with a constant condition, which monomorphization folds away.
+//! Unsupported parameter values fail at compile time.
 //!
 //! # Coefficient-bound contract
 //!
@@ -465,7 +470,10 @@ pub(crate) fn t0_unpack(r: &mut Poly, a: &[u8]) {
 	}
 }
 
-const UNIFORM_GAMMA1_NBLOCKS: usize = params::POLYZ_PACKEDBYTES.div_ceil(fips202::SHAKE256_RATE);
+// Blocks squeezed per gamma1 mask polynomial: enough for the largest packed-z
+// size of any variant (640 bytes at GAMMA1 = 2^19; 576 at 2^17). Both round
+// up to the same block count, so this is not variant-dependent.
+const UNIFORM_GAMMA1_NBLOCKS: usize = 640usize.div_ceil(fips202::SHAKE256_RATE);
 
 /// For all coefficients c of the input polynomial, compute high and low bits c0, c1 such c mod Q =
 /// c1*ALPHA + c0 with -ALPHA/2 < c0 <= ALPHA/2 except c1 = (Q-1)/ALPHA where we set c1 = 0 and
@@ -476,9 +484,9 @@ const UNIFORM_GAMMA1_NBLOCKS: usize = params::POLYZ_PACKEDBYTES.div_ceil(fips202
 /// * 'a' - input polynomial
 ///
 /// Returns a touple of polynomials with coefficients c0, c1
-pub fn decompose(a1: &mut Poly, a0: &mut Poly) {
+pub fn decompose<const GAMMA2: usize>(a1: &mut Poly, a0: &mut Poly) {
 	for i in 0..N {
-		(a1.coeffs[i], a0.coeffs[i]) = rounding::decompose(a1.coeffs[i]);
+		(a1.coeffs[i], a0.coeffs[i]) = rounding::decompose::<GAMMA2>(a1.coeffs[i]);
 	}
 }
 
@@ -491,10 +499,10 @@ pub fn decompose(a1: &mut Poly, a0: &mut Poly) {
 /// * 'a1' - low part of input polynomial
 ///
 /// Returns the hint polynomial and the number of 1s
-pub fn make_hint(h: &mut Poly, a0: &Poly, a1: &Poly) -> i32 {
+pub fn make_hint<const GAMMA2: usize>(h: &mut Poly, a0: &Poly, a1: &Poly) -> i32 {
 	let mut s: i32 = 0;
 	for i in 0..N {
-		h.coeffs[i] = rounding::make_hint(a0.coeffs[i], a1.coeffs[i]);
+		h.coeffs[i] = rounding::make_hint::<GAMMA2>(a0.coeffs[i], a1.coeffs[i]);
 		s += h.coeffs[i];
 	}
 	s
@@ -506,21 +514,31 @@ pub fn make_hint(h: &mut Poly, a0: &Poly, a1: &Poly) -> i32 {
 ///
 /// * 'a' - input polynomial
 /// * 'hint' - hint polynomial
-pub fn use_hint(a: &mut Poly, hint: &Poly) {
+pub fn use_hint<const GAMMA2: usize>(a: &mut Poly, hint: &Poly) {
 	for i in 0..N {
-		a.coeffs[i] = rounding::use_hint(a.coeffs[i], hint.coeffs[i]);
+		a.coeffs[i] = rounding::use_hint::<GAMMA2>(a.coeffs[i], hint.coeffs[i]);
 	}
 }
 
 /// Sample uniformly random coefficients in [-ETA, ETA] by performing rejection sampling using array
 /// of random bytes.
 ///
+/// Each nibble of the input is an acceptance candidate. For `ETA = 2` a
+/// nibble `< 15` is accepted and folded mod 5 (fixed-point division by 5), so
+/// the acceptance probability is 15/16. For `ETA = 4` a nibble `< 9` is
+/// accepted and used directly, so the acceptance probability is 9/16; callers
+/// sizing their input for a target output count must account for the lower
+/// rate (see [`uniform_eta`]).
+///
 /// Returns number of sampled coefficients. Can be smaller than a.len() if not enough random bytes
 /// were given.
 ///
 /// Note: Returns immediately if output slice is empty. For non-empty output, always processes
 /// all input bytes to maintain constant-time behavior.
-pub fn rej_eta(a: &mut [i32], buf: &[u8]) -> usize {
+pub fn rej_eta<const ETA: usize>(a: &mut [i32], buf: &[u8]) -> usize {
+	const {
+		assert!(ETA == 2 || ETA == 4, "unsupported ETA parameter");
+	}
 	let alen = a.len();
 	let buflen = buf.len();
 
@@ -537,9 +555,14 @@ pub fn rej_eta(a: &mut [i32], buf: &[u8]) -> usize {
 		let upper_nibble = (buf[pos] >> 4) as u32;
 
 		for nibble in [lower_nibble, upper_nibble] {
-			let reduced = nibble - (205 * nibble >> 10) * 5;
-			let coeff = 2 - reduced as i32;
-			let nibble_valid = nibble < 15;
+			// Constant condition on the ETA parameter: the unused arm is
+			// eliminated at monomorphization.
+			let (coeff, nibble_valid) = if ETA == 2 {
+				let reduced = nibble - (205 * nibble >> 10) * 5;
+				(2 - reduced as i32, nibble < 15)
+			} else {
+				(4 - nibble as i32, nibble < 9)
+			};
 			let has_space = ctr < alen;
 			let inc_ctr = nibble_valid & has_space;
 			let store_mask = -(inc_ctr as i32);
@@ -559,31 +582,44 @@ pub fn rej_eta(a: &mut [i32], buf: &[u8]) -> usize {
 
 /// Sample polynomial with uniformly random coefficients in [-ETA,ETA] by performing rejection
 /// sampling using the output stream from SHAKE256(seed|nonce).
-pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8; params::CRHBYTES], nonce: u16) {
+pub fn uniform_eta<const ETA: usize>(
+	output_polynomial: &mut Poly,
+	seed: &[u8; params::CRHBYTES],
+	nonce: u16,
+) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
-	// Two blocks = 544 nibbles, each accepted with probability 15/16 (mean
-	// 510, sigma ~5.7), so collecting fewer than the N = 256 needed is a
-	// ~45-sigma event (< 2^-600): the retry branch below is never taken in
-	// practice and observed timing is constant. Even in principle, timing
-	// here depends only on rejection counts (nibble == 15), which are
-	// independent of the accepted values that form the key — the standard
-	// argument for rejection sampling from a seeded XOF. A fallback must
-	// still exist for exact sampling, hence the loop.
-	const FIXED_ROUNDS: usize = 2;
+	// The fixed round count is sized so a full pass collects the N = 256
+	// needed coefficients except with negligible probability, keeping the
+	// retry branch below effectively never taken and observed timing
+	// constant:
+	//
+	// - ETA = 2: two blocks = 544 nibbles, each accepted with probability 15/16 (mean 510, sigma
+	//   ~5.7) — falling short of 256 is a ~45-sigma event (< 2^-600).
+	// - ETA = 4: the acceptance probability drops to 9/16, so two blocks (mean 306, sigma ~11.6)
+	//   would fall short of 256 at a ~4.3-sigma rate (~1e-5) — an observable timing variation.
+	//   Three blocks = 816 nibbles (mean 459, sigma ~14.2) push the shortfall back out to ~14
+	//   sigma (< 2^-150).
+	//
+	// Even in principle, timing here depends only on rejection counts
+	// (nibble == 15 resp. nibble >= 9), which are independent of the accepted
+	// values that form the key — the standard argument for rejection sampling
+	// from a seeded XOF. A fallback must still exist for exact sampling,
+	// hence the loop.
+	let fixed_rounds: usize = if ETA == 2 { 2 } else { 3 };
 	let mut shake_output_buffer = [[0u8; fips202::SHAKE256_RATE]; 1];
 	let mut temporary_coefficient_storage = [0i32; 1000]; // Temp storage for all extracted coeffs
 	let mut total_coefficients_collected = 0usize;
 
 	while total_coefficients_collected < N {
-		// Always run exactly FIXED_ROUNDS iterations
-		for _round_number in 0..FIXED_ROUNDS {
+		// Always run exactly fixed_rounds iterations
+		for _round_number in 0..fixed_rounds {
 			// Squeeze one block at a time and collect
 			fips202::shake256_squeezeblocks(&mut shake_output_buffer, &mut state);
 
 			// Always call rej_eta with same parameters regardless of how many coeffs we have
-			let coefficients_extracted_this_round = rej_eta(
+			let coefficients_extracted_this_round = rej_eta::<ETA>(
 				&mut temporary_coefficient_storage[total_coefficients_collected..],
 				&shake_output_buffer[0],
 			);
@@ -597,19 +633,29 @@ pub fn uniform_eta(output_polynomial: &mut Poly, seed: &[u8; params::CRHBYTES], 
 
 /// Sample polynomial with uniformly random coefficients in [-(GAMMA1 - 1), GAMMA1] by
 /// performing rejection sampling on output stream of SHAKE256(seed|nonce).
-pub fn uniform_gamma1(a: &mut Poly, seed: &[u8; params::CRHBYTES], nonce: u16) {
+///
+/// `PZ` must equal the packed-z byte size for `GAMMA1` (checked at compile
+/// time); it is a separate parameter because stable Rust cannot derive one
+/// const generic array size from another.
+pub fn uniform_gamma1<const GAMMA1: usize, const PZ: usize>(
+	a: &mut Poly,
+	seed: &[u8; params::CRHBYTES],
+	nonce: u16,
+) {
+	const {
+		assert!(PZ == params::polyz_packedbytes(GAMMA1));
+		assert!(PZ <= UNIFORM_GAMMA1_NBLOCKS * fips202::SHAKE256_RATE);
+	}
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_stream_init(&mut state, seed, nonce);
 
 	let mut buf = [[0u8; fips202::SHAKE256_RATE]; UNIFORM_GAMMA1_NBLOCKS];
 	fips202::shake256_squeezeblocks(&mut buf, &mut state);
-	// The squeeze buffer is a multiple of the rate and always >= POLYZ_PACKEDBYTES,
-	// so `first_chunk` yields the exact prefix the codec consumes.
-	let z_bytes = buf
-		.as_flattened()
-		.first_chunk::<{ params::POLYZ_PACKEDBYTES }>()
-		.expect("gamma1 buffer covers POLYZ_PACKEDBYTES");
-	z_unpack(a, z_bytes);
+	// The squeeze buffer is a multiple of the rate and always >= PZ (checked
+	// above), so `first_chunk` yields the exact prefix the codec consumes.
+	let z_bytes =
+		buf.as_flattened().first_chunk::<PZ>().expect("gamma1 buffer covers the packed-z size");
+	z_unpack::<GAMMA1, PZ>(a, z_bytes);
 }
 
 /// Implementation of H. Samples polynomial with TAU nonzero coefficients in {-1,1} using the output
@@ -619,7 +665,12 @@ pub fn uniform_gamma1(a: &mut Poly, seed: &[u8; params::CRHBYTES], nonce: u16) {
 /// the bytes of `seed = c~ = H(mu, w1)`, a hash output. For an accepted attempt c~ is published
 /// in the signature; for rejected attempts it never leaves the device and cannot be inverted to
 /// recover w1. No secret-key material flows into this function.
-pub fn challenge(c: &mut Poly, seed: &[u8]) {
+pub fn challenge<const TAU: usize>(c: &mut Poly, seed: &[u8]) {
+	const {
+		// The sign bits are drawn from a single u64, and TAU indexes into the
+		// coefficient array; every FIPS 204 TAU (39/49/60) satisfies both.
+		assert!(TAU <= 64 && TAU <= N, "unsupported TAU parameter");
+	}
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, seed);
 	fips202::shake256_finalize(&mut state);
@@ -636,7 +687,7 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 	c.coeffs.fill(0);
 
 	// Fisher-Yates style: for each position, rejection-sample a valid index b <= i.
-	for i in (N - params::TAU)..N {
+	for i in (N - TAU)..N {
 		let b = loop {
 			if pos >= fips202::SHAKE256_RATE {
 				fips202::shake256_squeezeblocks(&mut buf, &mut state);
@@ -657,80 +708,140 @@ pub fn challenge(c: &mut Poly, seed: &[u8]) {
 
 /// Bit-pack polynomial with coefficients in [-ETA,ETA]. Input coefficients are assumed to lie in
 /// [Q-ETA,Q+ETA].
-pub(crate) fn eta_pack(r: &mut [u8], a: &Poly) {
-	let mut t = [0u8; 8];
-	for i in 0..N / 8 {
-		t[0] = (params::ETA as i32 - a.coeffs[8 * i + 0]) as u8;
-		t[1] = (params::ETA as i32 - a.coeffs[8 * i + 1]) as u8;
-		t[2] = (params::ETA as i32 - a.coeffs[8 * i + 2]) as u8;
-		t[3] = (params::ETA as i32 - a.coeffs[8 * i + 3]) as u8;
-		t[4] = (params::ETA as i32 - a.coeffs[8 * i + 4]) as u8;
-		t[5] = (params::ETA as i32 - a.coeffs[8 * i + 5]) as u8;
-		t[6] = (params::ETA as i32 - a.coeffs[8 * i + 6]) as u8;
-		t[7] = (params::ETA as i32 - a.coeffs[8 * i + 7]) as u8;
+///
+/// The packed encoding stores `ETA - coefficient` per slot: 3 bits (8
+/// coefficients per 3 bytes) for `ETA = 2`, 4 bits (2 coefficients per byte)
+/// for `ETA = 4`.
+pub(crate) fn eta_pack<const ETA: usize>(r: &mut [u8], a: &Poly) {
+	const {
+		assert!(ETA == 2 || ETA == 4, "unsupported ETA parameter");
+	}
+	if ETA == 2 {
+		let mut t = [0u8; 8];
+		for i in 0..N / 8 {
+			t[0] = (ETA as i32 - a.coeffs[8 * i + 0]) as u8;
+			t[1] = (ETA as i32 - a.coeffs[8 * i + 1]) as u8;
+			t[2] = (ETA as i32 - a.coeffs[8 * i + 2]) as u8;
+			t[3] = (ETA as i32 - a.coeffs[8 * i + 3]) as u8;
+			t[4] = (ETA as i32 - a.coeffs[8 * i + 4]) as u8;
+			t[5] = (ETA as i32 - a.coeffs[8 * i + 5]) as u8;
+			t[6] = (ETA as i32 - a.coeffs[8 * i + 6]) as u8;
+			t[7] = (ETA as i32 - a.coeffs[8 * i + 7]) as u8;
 
-		r[3 * i + 0] = t[0] | (t[1] << 3) | (t[2] << 6);
-		r[3 * i + 1] = (t[2] >> 2) | (t[3] << 1) | (t[4] << 4) | (t[5] << 7);
-		r[3 * i + 2] = (t[5] >> 1) | (t[6] << 2) | (t[7] << 5);
+			r[3 * i + 0] = t[0] | (t[1] << 3) | (t[2] << 6);
+			r[3 * i + 1] = (t[2] >> 2) | (t[3] << 1) | (t[4] << 4) | (t[5] << 7);
+			r[3 * i + 2] = (t[5] >> 1) | (t[6] << 2) | (t[7] << 5);
+		}
+	} else {
+		for i in 0..N / 2 {
+			let t0 = (ETA as i32 - a.coeffs[2 * i + 0]) as u8;
+			let t1 = (ETA as i32 - a.coeffs[2 * i + 1]) as u8;
+			r[i] = t0 | (t1 << 4);
+		}
 	}
 }
 
 /// Unpack polynomial with coefficients in [-ETA,ETA].
 ///
-/// The packed encoding stores `ETA - coefficient` in 3 bits per slot. With
-/// `ETA = 2` only slots 0..=4 are canonical; slots 5..=7 would decode to
-/// coefficients -3..-5, which key generation never emits and which lie
-/// outside the key distribution the `BETA = TAU * ETA` signing rejection
-/// margin is sized for. Returns `false` if any slot is non-canonical (the
-/// output polynomial is still fully written in that case; callers must
-/// treat it as invalid).
+/// The packed encoding stores `ETA - coefficient` per slot (3-bit slots for
+/// `ETA = 2`, 4-bit slots for `ETA = 4`). Not every slot value is canonical:
+/// with `ETA = 2`, slots 5..=7 would decode to coefficients -3..-5; with
+/// `ETA = 4`, slots 9..=15 would decode to -5..-11. Key generation never
+/// emits such encodings, and they lie outside the key distribution the
+/// `BETA = TAU * ETA` signing rejection margin is sized for. Returns `false`
+/// if any slot is non-canonical (the output polynomial is still fully
+/// written in that case; callers must treat it as invalid).
 #[must_use]
-pub(crate) fn eta_unpack(r: &mut Poly, a: &[u8]) -> bool {
-	for i in 0..N / 8 {
-		r.coeffs[8 * i + 0] = (a[3 * i + 0] & 0x07) as i32;
-		r.coeffs[8 * i + 1] = ((a[3 * i + 0] >> 3) & 0x07) as i32;
-		r.coeffs[8 * i + 2] = (((a[3 * i + 0] >> 6) | (a[3 * i + 1] << 2)) & 0x07) as i32;
-		r.coeffs[8 * i + 3] = ((a[3 * i + 1] >> 1) & 0x07) as i32;
-		r.coeffs[8 * i + 4] = ((a[3 * i + 1] >> 4) & 0x07) as i32;
-		r.coeffs[8 * i + 5] = (((a[3 * i + 1] >> 7) | (a[3 * i + 2] << 1)) & 0x07) as i32;
-		r.coeffs[8 * i + 6] = ((a[3 * i + 2] >> 2) & 0x07) as i32;
-		r.coeffs[8 * i + 7] = ((a[3 * i + 2] >> 5) & 0x07) as i32;
+pub(crate) fn eta_unpack<const ETA: usize>(r: &mut Poly, a: &[u8]) -> bool {
+	const {
+		assert!(ETA == 2 || ETA == 4, "unsupported ETA parameter");
+	}
+	if ETA == 2 {
+		for i in 0..N / 8 {
+			r.coeffs[8 * i + 0] = (a[3 * i + 0] & 0x07) as i32;
+			r.coeffs[8 * i + 1] = ((a[3 * i + 0] >> 3) & 0x07) as i32;
+			r.coeffs[8 * i + 2] = (((a[3 * i + 0] >> 6) | (a[3 * i + 1] << 2)) & 0x07) as i32;
+			r.coeffs[8 * i + 3] = ((a[3 * i + 1] >> 1) & 0x07) as i32;
+			r.coeffs[8 * i + 4] = ((a[3 * i + 1] >> 4) & 0x07) as i32;
+			r.coeffs[8 * i + 5] = (((a[3 * i + 1] >> 7) | (a[3 * i + 2] << 1)) & 0x07) as i32;
+			r.coeffs[8 * i + 6] = ((a[3 * i + 2] >> 2) & 0x07) as i32;
+			r.coeffs[8 * i + 7] = ((a[3 * i + 2] >> 5) & 0x07) as i32;
 
-		r.coeffs[8 * i + 0] = params::ETA as i32 - r.coeffs[8 * i + 0];
-		r.coeffs[8 * i + 1] = params::ETA as i32 - r.coeffs[8 * i + 1];
-		r.coeffs[8 * i + 2] = params::ETA as i32 - r.coeffs[8 * i + 2];
-		r.coeffs[8 * i + 3] = params::ETA as i32 - r.coeffs[8 * i + 3];
-		r.coeffs[8 * i + 4] = params::ETA as i32 - r.coeffs[8 * i + 4];
-		r.coeffs[8 * i + 5] = params::ETA as i32 - r.coeffs[8 * i + 5];
-		r.coeffs[8 * i + 6] = params::ETA as i32 - r.coeffs[8 * i + 6];
-		r.coeffs[8 * i + 7] = params::ETA as i32 - r.coeffs[8 * i + 7];
+			r.coeffs[8 * i + 0] = ETA as i32 - r.coeffs[8 * i + 0];
+			r.coeffs[8 * i + 1] = ETA as i32 - r.coeffs[8 * i + 1];
+			r.coeffs[8 * i + 2] = ETA as i32 - r.coeffs[8 * i + 2];
+			r.coeffs[8 * i + 3] = ETA as i32 - r.coeffs[8 * i + 3];
+			r.coeffs[8 * i + 4] = ETA as i32 - r.coeffs[8 * i + 4];
+			r.coeffs[8 * i + 5] = ETA as i32 - r.coeffs[8 * i + 5];
+			r.coeffs[8 * i + 6] = ETA as i32 - r.coeffs[8 * i + 6];
+			r.coeffs[8 * i + 7] = ETA as i32 - r.coeffs[8 * i + 7];
+		}
+	} else {
+		for i in 0..N / 2 {
+			r.coeffs[2 * i + 0] = ETA as i32 - (a[i] & 0x0F) as i32;
+			r.coeffs[2 * i + 1] = ETA as i32 - (a[i] >> 4) as i32;
+		}
 	}
 	// Canonicality sweep after the fact, accumulated with non-short-circuiting
 	// `&` (`Iterator::all` would exit at the first failure): the sweep always
 	// traverses the whole polynomial, so honest keys (which always pass) take
-	// a data-independent path through this function.
-	let eta = params::ETA as i32;
+	// a data-independent path through this function. The range check is
+	// ETA-agnostic: every non-canonical slot decodes to a coefficient below
+	// -ETA for both encodings, so it is caught here.
+	let eta = ETA as i32;
 	r.coeffs.iter().fold(true, |ok, &c| ok & (c >= -eta) & (c <= eta))
 }
 
 /// Bit-pack polynomial z with coefficients in [-(GAMMA1 - 1), GAMMA1 - 1].
 /// Input coefficients are assumed to be standard representatives.
 ///
-/// The output buffer is an exact-size array so a too-short destination is
+/// The encoding stores `GAMMA1 - coefficient`: 20 bits per coefficient (2
+/// coefficients per 5 bytes) for `GAMMA1 = 2^19`, 18 bits per coefficient (4
+/// coefficients per 9 bytes) for `GAMMA1 = 2^17`.
+///
+/// The output buffer is an exact-size array (`PZ` must equal the packed-z
+/// size for `GAMMA1`, checked at compile time) so a too-short destination is
 /// rejected at compile time rather than panicking on an out-of-bounds write.
-pub fn z_pack(r: &mut [u8; params::POLYZ_PACKEDBYTES], a: &Poly) {
-	let mut t = [0i32; 2];
+pub fn z_pack<const GAMMA1: usize, const PZ: usize>(r: &mut [u8; PZ], a: &Poly) {
+	const {
+		assert!(PZ == params::polyz_packedbytes(GAMMA1));
+	}
+	if GAMMA1 == 1 << 19 {
+		let mut t = [0i32; 2];
 
-	for i in 0..N / 2 {
-		t[0] = params::GAMMA1 as i32 - a.coeffs[2 * i + 0];
-		t[1] = params::GAMMA1 as i32 - a.coeffs[2 * i + 1];
+		for i in 0..N / 2 {
+			t[0] = GAMMA1 as i32 - a.coeffs[2 * i + 0];
+			t[1] = GAMMA1 as i32 - a.coeffs[2 * i + 1];
 
-		r[5 * i + 0] = t[0] as u8;
-		r[5 * i + 1] = (t[0] >> 8) as u8;
-		r[5 * i + 2] = (t[0] >> 16) as u8;
-		r[5 * i + 2] |= (t[1] << 4) as u8;
-		r[5 * i + 3] = (t[1] >> 4) as u8;
-		r[5 * i + 4] = (t[1] >> 12) as u8;
+			r[5 * i + 0] = t[0] as u8;
+			r[5 * i + 1] = (t[0] >> 8) as u8;
+			r[5 * i + 2] = (t[0] >> 16) as u8;
+			r[5 * i + 2] |= (t[1] << 4) as u8;
+			r[5 * i + 3] = (t[1] >> 4) as u8;
+			r[5 * i + 4] = (t[1] >> 12) as u8;
+		}
+	} else {
+		let mut t = [0i32; 4];
+
+		for i in 0..N / 4 {
+			t[0] = GAMMA1 as i32 - a.coeffs[4 * i + 0];
+			t[1] = GAMMA1 as i32 - a.coeffs[4 * i + 1];
+			t[2] = GAMMA1 as i32 - a.coeffs[4 * i + 2];
+			t[3] = GAMMA1 as i32 - a.coeffs[4 * i + 3];
+
+			r[9 * i + 0] = t[0] as u8;
+			r[9 * i + 1] = (t[0] >> 8) as u8;
+			r[9 * i + 2] = (t[0] >> 16) as u8;
+			r[9 * i + 2] |= (t[1] << 2) as u8;
+			r[9 * i + 3] = (t[1] >> 6) as u8;
+			r[9 * i + 4] = (t[1] >> 14) as u8;
+			r[9 * i + 4] |= (t[2] << 4) as u8;
+			r[9 * i + 5] = (t[2] >> 4) as u8;
+			r[9 * i + 6] = (t[2] >> 12) as u8;
+			r[9 * i + 6] |= (t[3] << 6) as u8;
+			r[9 * i + 7] = (t[3] >> 2) as u8;
+			r[9 * i + 8] = (t[3] >> 10) as u8;
+		}
 	}
 }
 
@@ -739,28 +850,75 @@ pub fn z_pack(r: &mut [u8; params::POLYZ_PACKEDBYTES], a: &Poly) {
 ///
 /// The input is an exact-size array so a truncated slice is rejected at compile
 /// time rather than panicking on an out-of-bounds read.
-pub fn z_unpack(r: &mut Poly, a: &[u8; params::POLYZ_PACKEDBYTES]) {
-	for i in 0..N / 2 {
-		r.coeffs[2 * i + 0] = a[5 * i + 0] as i32;
-		r.coeffs[2 * i + 0] |= (a[5 * i + 1] as i32) << 8;
-		r.coeffs[2 * i + 0] |= (a[5 * i + 2] as i32) << 16;
-		r.coeffs[2 * i + 0] &= 0xFFFFF;
+pub fn z_unpack<const GAMMA1: usize, const PZ: usize>(r: &mut Poly, a: &[u8; PZ]) {
+	const {
+		assert!(PZ == params::polyz_packedbytes(GAMMA1));
+	}
+	if GAMMA1 == 1 << 19 {
+		for i in 0..N / 2 {
+			r.coeffs[2 * i + 0] = a[5 * i + 0] as i32;
+			r.coeffs[2 * i + 0] |= (a[5 * i + 1] as i32) << 8;
+			r.coeffs[2 * i + 0] |= (a[5 * i + 2] as i32) << 16;
+			r.coeffs[2 * i + 0] &= 0xFFFFF;
 
-		r.coeffs[2 * i + 1] = (a[5 * i + 2] as i32) >> 4;
-		r.coeffs[2 * i + 1] |= (a[5 * i + 3] as i32) << 4;
-		r.coeffs[2 * i + 1] |= (a[5 * i + 4] as i32) << 12;
-		r.coeffs[2 * i + 1] &= 0xFFFFF;
+			r.coeffs[2 * i + 1] = (a[5 * i + 2] as i32) >> 4;
+			r.coeffs[2 * i + 1] |= (a[5 * i + 3] as i32) << 4;
+			r.coeffs[2 * i + 1] |= (a[5 * i + 4] as i32) << 12;
+			r.coeffs[2 * i + 1] &= 0xFFFFF;
 
-		r.coeffs[2 * i + 0] = params::GAMMA1 as i32 - r.coeffs[2 * i + 0];
-		r.coeffs[2 * i + 1] = params::GAMMA1 as i32 - r.coeffs[2 * i + 1];
+			r.coeffs[2 * i + 0] = GAMMA1 as i32 - r.coeffs[2 * i + 0];
+			r.coeffs[2 * i + 1] = GAMMA1 as i32 - r.coeffs[2 * i + 1];
+		}
+	} else {
+		for i in 0..N / 4 {
+			r.coeffs[4 * i + 0] = a[9 * i + 0] as i32;
+			r.coeffs[4 * i + 0] |= (a[9 * i + 1] as i32) << 8;
+			r.coeffs[4 * i + 0] |= (a[9 * i + 2] as i32) << 16;
+			r.coeffs[4 * i + 0] &= 0x3FFFF;
+
+			r.coeffs[4 * i + 1] = (a[9 * i + 2] as i32) >> 2;
+			r.coeffs[4 * i + 1] |= (a[9 * i + 3] as i32) << 6;
+			r.coeffs[4 * i + 1] |= (a[9 * i + 4] as i32) << 14;
+			r.coeffs[4 * i + 1] &= 0x3FFFF;
+
+			r.coeffs[4 * i + 2] = (a[9 * i + 4] as i32) >> 4;
+			r.coeffs[4 * i + 2] |= (a[9 * i + 5] as i32) << 4;
+			r.coeffs[4 * i + 2] |= (a[9 * i + 6] as i32) << 12;
+			r.coeffs[4 * i + 2] &= 0x3FFFF;
+
+			r.coeffs[4 * i + 3] = (a[9 * i + 6] as i32) >> 6;
+			r.coeffs[4 * i + 3] |= (a[9 * i + 7] as i32) << 2;
+			r.coeffs[4 * i + 3] |= (a[9 * i + 8] as i32) << 10;
+			r.coeffs[4 * i + 3] &= 0x3FFFF;
+
+			r.coeffs[4 * i + 0] = GAMMA1 as i32 - r.coeffs[4 * i + 0];
+			r.coeffs[4 * i + 1] = GAMMA1 as i32 - r.coeffs[4 * i + 1];
+			r.coeffs[4 * i + 2] = GAMMA1 as i32 - r.coeffs[4 * i + 2];
+			r.coeffs[4 * i + 3] = GAMMA1 as i32 - r.coeffs[4 * i + 3];
+		}
 	}
 }
 
-/// Bit-pack polynomial w1 with coefficients in [0, 15].
-/// Input coefficients are assumed to be standard representatives.
-pub(crate) fn w1_pack(r: &mut [u8], a: &Poly) {
-	for i in 0..N / 2 {
-		r[i] = (a.coeffs[2 * i + 0] | (a.coeffs[2 * i + 1] << 4)) as u8;
+/// Bit-pack polynomial w1 with coefficients in [0, 15] (`GAMMA2 = (Q-1)/32`,
+/// 4 bits per coefficient) or [0, 43] (`GAMMA2 = (Q-1)/88`, 6 bits per
+/// coefficient). Input coefficients are assumed to be standard
+/// representatives.
+pub(crate) fn w1_pack<const GAMMA2: usize>(r: &mut [u8], a: &Poly) {
+	const {
+		// Evaluating the packed-size helper rejects unsupported GAMMA2
+		// values at compile time.
+		let _ = params::polyw1_packedbytes(GAMMA2);
+	}
+	if GAMMA2 == (params::Q as usize - 1) / 32 {
+		for i in 0..N / 2 {
+			r[i] = (a.coeffs[2 * i + 0] | (a.coeffs[2 * i + 1] << 4)) as u8;
+		}
+	} else {
+		for i in 0..N / 4 {
+			r[3 * i + 0] = (a.coeffs[4 * i + 0] | (a.coeffs[4 * i + 1] << 6)) as u8;
+			r[3 * i + 1] = ((a.coeffs[4 * i + 1] >> 2) | (a.coeffs[4 * i + 2] << 4)) as u8;
+			r[3 * i + 2] = ((a.coeffs[4 * i + 2] >> 4) | (a.coeffs[4 * i + 3] << 2)) as u8;
+		}
 	}
 }
 
@@ -1068,7 +1226,7 @@ mod tests {
 			let nonce = rng.next_u32() as u16;
 
 			let mut poly = Poly::default();
-			uniform_eta(&mut poly, &seed, nonce);
+			uniform_eta::<{ params::ETA }>(&mut poly, &seed, nonce);
 
 			// All coefficients should be in the range [-ETA, ETA]
 			for i in 0..N {
@@ -1116,8 +1274,8 @@ mod tests {
 			let mut poly1 = Poly::default();
 			let mut poly2 = Poly::default();
 
-			uniform_eta(&mut poly1, &seed1, nonce);
-			uniform_eta(&mut poly2, &seed2, nonce);
+			uniform_eta::<{ params::ETA }>(&mut poly1, &seed1, nonce);
+			uniform_eta::<{ params::ETA }>(&mut poly2, &seed2, nonce);
 
 			// Different seeds should produce different polynomials
 			let mut different = false;
@@ -1151,8 +1309,8 @@ mod tests {
 			let mut poly1 = Poly::default();
 			let mut poly2 = Poly::default();
 
-			uniform_eta(&mut poly1, &seed, nonce);
-			uniform_eta(&mut poly2, &seed, nonce);
+			uniform_eta::<{ params::ETA }>(&mut poly1, &seed, nonce);
+			uniform_eta::<{ params::ETA }>(&mut poly2, &seed, nonce);
 
 			// Should produce identical results
 			for i in 0..N {
@@ -1187,8 +1345,8 @@ mod tests {
 			let mut poly1 = Poly::default();
 			let mut poly2 = Poly::default();
 
-			uniform_eta(&mut poly1, &seed, nonce1);
-			uniform_eta(&mut poly2, &seed, nonce2);
+			uniform_eta::<{ params::ETA }>(&mut poly1, &seed, nonce1);
+			uniform_eta::<{ params::ETA }>(&mut poly2, &seed, nonce2);
 
 			// Same seed but different nonces should produce different polynomials
 			let mut different = false;
@@ -1212,7 +1370,7 @@ mod tests {
 	fn test_rej_eta_empty_output() {
 		let mut output = [0i32; 0];
 		let buffer = [0x00u8, 0x11u8]; // Valid nibbles
-		let result = rej_eta(&mut output, &buffer);
+		let result = rej_eta::<{ params::ETA }>(&mut output, &buffer);
 		assert_eq!(result, 0); // No space for coefficients
 	}
 
@@ -1220,7 +1378,7 @@ mod tests {
 	fn test_rej_eta_empty_buffer() {
 		let mut output = [0i32; 10];
 		let buffer = [];
-		let result = rej_eta(&mut output[..5], &buffer);
+		let result = rej_eta::<{ params::ETA }>(&mut output[..5], &buffer);
 		assert_eq!(result, 0);
 		// All coefficients should remain unchanged (zero)
 		for coeff in &output {
@@ -1233,7 +1391,7 @@ mod tests {
 		let mut output = [0i32; 10];
 		// Create buffer with all nibbles = 15 (invalid)
 		let buffer = [0xFFu8; 4]; // 8 nibbles, all invalid
-		let result = rej_eta(&mut output, &buffer);
+		let result = rej_eta::<{ params::ETA }>(&mut output, &buffer);
 		assert_eq!(result, 0);
 		// All coefficients should remain unchanged (zero)
 		for coeff in &output {
@@ -1247,7 +1405,7 @@ mod tests {
 		let mut output = [0i32; 10];
 		// Create buffer with all nibbles < 15
 		let buffer = [0x00u8, 0x11u8, 0x22u8, 0x33u8]; // nibbles: 0,0,1,1,2,2,3,3
-		let result = rej_eta(&mut output, &buffer);
+		let result = rej_eta::<{ params::ETA }>(&mut output, &buffer);
 
 		// Should accept all 8 coefficients
 		assert_eq!(result, 8);
@@ -1276,7 +1434,7 @@ mod tests {
 		let mut output = [0i32; 10];
 		// Mix valid and invalid nibbles: 0xF0 = nibbles 0 (valid), 15 (invalid)
 		let buffer = [0xF0u8, 0x1Fu8]; // nibbles: 0,15,1,15
-		let result = rej_eta(&mut output, &buffer);
+		let result = rej_eta::<{ params::ETA }>(&mut output, &buffer);
 
 		// Should accept 2 coefficients (nibbles 0 and 1)
 		assert_eq!(result, 2);
@@ -1297,7 +1455,7 @@ mod tests {
 		let mut output = [0i32; 10];
 		// Create buffer with many valid nibbles
 		let buffer = [0x01u8, 0x23u8, 0x45u8]; // nibbles: 1,0,3,2,5,4
-		let result = rej_eta(&mut output[..3], &buffer); // Only space for 3 coefficients
+		let result = rej_eta::<{ params::ETA }>(&mut output[..3], &buffer); // Only space for 3 coefficients
 
 		// Should stop after accepting 3 coefficients
 		assert_eq!(result, 3);
@@ -1323,7 +1481,7 @@ mod tests {
 			0xDCu8, // nibbles: 12,13
 			0xEEu8, // nibbles: 14,14
 		];
-		let result = rej_eta(&mut output, &buffer);
+		let result = rej_eta::<{ params::ETA }>(&mut output, &buffer);
 
 		// Should accept 8 coefficients (all are < 15)
 		assert_eq!(result, 8);
@@ -1342,7 +1500,7 @@ mod tests {
 		let mut output = [0i32; 4];
 		// Test nibble 14 (valid) and 15 (invalid)
 		let buffer = [0xFEu8]; // nibbles: 14,15
-		let result = rej_eta(&mut output, &buffer);
+		let result = rej_eta::<{ params::ETA }>(&mut output, &buffer);
 
 		// Should accept 1 coefficient (nibble 14)
 		assert_eq!(result, 1);
@@ -1360,7 +1518,7 @@ mod tests {
 			0x10u8, 0x32u8, 0x54u8, 0x76u8, 0x98u8, 0xBAu8, 0xDCu8,
 			0xEEu8, // nibbles: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,14
 		];
-		let result = rej_eta(&mut output, &buffer);
+		let result = rej_eta::<{ params::ETA }>(&mut output, &buffer);
 
 		assert_eq!(result, 16); // Should accept 16 coefficients (all nibbles are < 15)
 
@@ -1405,7 +1563,7 @@ mod tests {
 			for _round_number in 0..FIXED_ROUNDS_FOR_CONSTANT_TIME {
 				fips202::shake256_squeezeblocks(&mut shake_output_buffer, &mut state);
 
-				let coefficients_extracted_this_round = rej_eta(
+				let coefficients_extracted_this_round = rej_eta::<{ params::ETA }>(
 					&mut temporary_coefficient_storage[total_coefficients_collected..],
 					&shake_output_buffer[0],
 				);
@@ -1463,7 +1621,7 @@ mod tests {
 		let nonce = 5678;
 		let mut poly = Poly::default();
 
-		uniform_gamma1(&mut poly, &seed, nonce);
+		uniform_gamma1::<{ params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(&mut poly, &seed, nonce);
 
 		// All coefficients should be in the range [-GAMMA1, GAMMA1]
 		for i in 0..N {
@@ -1492,7 +1650,7 @@ mod tests {
 			let nonce = rng.next_u32() as u16;
 
 			let mut poly = Poly::default();
-			uniform_gamma1(&mut poly, &seed, nonce);
+			uniform_gamma1::<{ params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(&mut poly, &seed, nonce);
 
 			let mut even_all_zero = true;
 			let mut odd_all_zero = true;
@@ -1534,7 +1692,7 @@ mod tests {
 		let seed = [0x77u8; params::C_DASH_BYTES];
 		let mut poly = Poly::default();
 
-		challenge(&mut poly, &seed);
+		challenge::<{ params::TAU }>(&mut poly, &seed);
 
 		// Challenge polynomial should have exactly TAU non-zero coefficients
 		let mut nonzero_count = 0;
@@ -1578,10 +1736,10 @@ mod tests {
 		}
 
 		let mut packed = [0u8; params::POLYETA_PACKEDBYTES];
-		eta_pack(&mut packed, &poly);
+		eta_pack::<{ params::ETA }>(&mut packed, &poly);
 
 		let mut unpacked = Poly::default();
-		assert!(eta_unpack(&mut unpacked, &packed), "canonical packing must unpack cleanly");
+		assert!(eta_unpack::<{ params::ETA }>(&mut unpacked, &packed), "canonical packing must unpack cleanly");
 
 		for i in 0..N {
 			assert_eq!(poly.coeffs[i], unpacked.coeffs[i], "ETA pack/unpack failed at index {}", i);
@@ -1595,12 +1753,12 @@ mod tests {
 		// must pass.
 		let mut packed = [0u8; params::POLYETA_PACKEDBYTES];
 		let mut unpacked = Poly::default();
-		assert!(eta_unpack(&mut unpacked, &packed), "all-zero slots are canonical");
+		assert!(eta_unpack::<{ params::ETA }>(&mut unpacked, &packed), "all-zero slots are canonical");
 
 		// First 3-bit slot = 5 -> coefficient ETA - 5 = -3.
 		packed[0] = 5;
 		assert!(
-			!eta_unpack(&mut unpacked, &packed),
+			!eta_unpack::<{ params::ETA }>(&mut unpacked, &packed),
 			"slot 5 decodes outside [-ETA, ETA] and must be flagged"
 		);
 	}
@@ -1615,10 +1773,10 @@ mod tests {
 		}
 
 		let mut packed = [0u8; params::POLYZ_PACKEDBYTES];
-		z_pack(&mut packed, &poly);
+		z_pack::<{ params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(&mut packed, &poly);
 
 		let mut unpacked = Poly::default();
-		z_unpack(&mut unpacked, &packed);
+		z_unpack::<{ params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(&mut unpacked, &packed);
 
 		for i in 0..N {
 			assert_eq!(poly.coeffs[i], unpacked.coeffs[i], "Z pack/unpack failed at index {}", i);
@@ -1635,10 +1793,187 @@ mod tests {
 		}
 
 		let mut packed = [0u8; params::POLYW1_PACKEDBYTES];
-		w1_pack(&mut packed, &poly);
+		w1_pack::<{ params::GAMMA2 }>(&mut packed, &poly);
 
 		// Note: There's no w1_unpack function in the visible code, so we can't test full roundtrip
 		// But we can verify the packing doesn't crash and produces expected size
 		assert_eq!(packed.len(), params::POLYW1_PACKEDBYTES);
+	}
+
+	// -----------------------------------------------------------------------
+	// Tests for the non-ML-DSA-87 parameter arms (ETA = 4 for ML-DSA-65;
+	// GAMMA1 = 2^17 and GAMMA2 = (Q-1)/88 for ML-DSA-44). The 87 arms above
+	// are additionally pinned by the ACVP known-answer tests; these arms get
+	// direct unit coverage here and end-to-end ACVP coverage via the
+	// ml_dsa_44/ml_dsa_65 frontends.
+	// -----------------------------------------------------------------------
+
+	const ETA4: usize = 4;
+	const GAMMA1_17: usize = 1 << 17;
+	const PZ_17: usize = params::polyz_packedbytes(GAMMA1_17);
+	const GAMMA2_88: usize = (params::Q as usize - 1) / 88;
+
+	#[test]
+	fn eta4_pack_unpack_roundtrip() {
+		let mut a = Poly::default();
+		// Cycle through every legal coefficient value in [-4, 4].
+		for j in 0..N {
+			a.coeffs[j] = ((j % 9) as i32) - 4;
+		}
+		let mut packed = [0u8; params::polyeta_packedbytes(ETA4)];
+		eta_pack::<ETA4>(&mut packed, &a);
+
+		let mut b = Poly::default();
+		assert!(eta_unpack::<ETA4>(&mut b, &packed), "canonical ETA=4 encoding must unpack");
+		assert_eq!(a.coeffs, b.coeffs, "ETA=4 pack/unpack roundtrip failed");
+	}
+
+	#[test]
+	fn eta4_unpack_rejects_noncanonical_slots() {
+		// 4-bit slots 9..=15 decode to coefficients -5..-11, outside [-4, 4]:
+		// encodings key generation never emits. Each must be flagged.
+		for bad_slot in 9..=15u8 {
+			let mut packed = [0u8; params::polyeta_packedbytes(ETA4)];
+			packed[0] = bad_slot; // low nibble of the first byte
+			let mut p = Poly::default();
+			assert!(
+				!eta_unpack::<ETA4>(&mut p, &packed),
+				"non-canonical ETA=4 slot {} must be rejected",
+				bad_slot
+			);
+		}
+		// Sanity: slot 8 (coefficient -4) is the largest canonical slot.
+		let mut packed = [0u8; params::polyeta_packedbytes(ETA4)];
+		packed[0] = 8;
+		let mut p = Poly::default();
+		assert!(eta_unpack::<ETA4>(&mut p, &packed));
+		assert_eq!(p.coeffs[0], -4);
+	}
+
+	#[test]
+	fn rej_eta4_matches_reference_mapping() {
+		// Feed every byte value once and compare against a direct transcription
+		// of the FIPS 204 CoeffFromHalfByte rule for ETA = 4: accept nibbles
+		// < 9, coefficient = 4 - nibble.
+		let buf: [u8; 256] = core::array::from_fn(|i| i as u8);
+		let mut out = [0i32; 512];
+		let n = rej_eta::<ETA4>(&mut out, &buf);
+
+		let mut expected = std::vec::Vec::new();
+		for &byte in buf.iter() {
+			for nibble in [byte & 0x0F, byte >> 4] {
+				if nibble < 9 {
+					expected.push(4 - nibble as i32);
+				}
+			}
+		}
+		assert_eq!(n, expected.len(), "ETA=4 acceptance count mismatch");
+		assert_eq!(&out[..n], &expected[..], "ETA=4 accepted values mismatch");
+	}
+
+	#[test]
+	fn uniform_eta4_produces_valid_coefficients() {
+		let seed = [0x24u8; params::CRHBYTES];
+		let mut poly = Poly::default();
+		uniform_eta::<ETA4>(&mut poly, &seed, 7);
+		for j in 0..N {
+			assert!(
+				poly.coeffs[j] >= -4 && poly.coeffs[j] <= 4,
+				"ETA=4 coefficient {} out of range at {}",
+				poly.coeffs[j],
+				j
+			);
+		}
+	}
+
+	#[test]
+	fn z_pack_unpack_roundtrip_gamma1_17() {
+		let g = GAMMA1_17 as i32;
+		let mut a = Poly::default();
+		// Exercise the boundary values and a spread of interior values of the
+		// legal coefficient range (-GAMMA1, GAMMA1].
+		for j in 0..N {
+			a.coeffs[j] = match j % 5 {
+				0 => g,
+				1 => -(g - 1),
+				2 => g - 1,
+				3 => (j as i32 * 12345) % g,
+				_ => -((j as i32 * 6789) % g),
+			};
+		}
+		let mut packed = [0u8; PZ_17];
+		z_pack::<GAMMA1_17, PZ_17>(&mut packed, &a);
+
+		let mut b = Poly::default();
+		z_unpack::<GAMMA1_17, PZ_17>(&mut b, &packed);
+		assert_eq!(a.coeffs, b.coeffs, "GAMMA1=2^17 z pack/unpack roundtrip failed");
+	}
+
+	#[test]
+	fn w1_pack_6bit_layout() {
+		// GAMMA2 = (Q-1)/88 gives w1 coefficients in [0, 43], packed 6 bits
+		// each (4 coefficients per 3 bytes). Verify the exact bit layout by
+		// unpacking manually.
+		let mut a = Poly::default();
+		for j in 0..N {
+			a.coeffs[j] = (j % 44) as i32;
+		}
+		let mut packed = [0u8; params::polyw1_packedbytes(GAMMA2_88)];
+		w1_pack::<GAMMA2_88>(&mut packed, &a);
+
+		for i in 0..N / 4 {
+			let b0 = packed[3 * i + 0] as i32;
+			let b1 = packed[3 * i + 1] as i32;
+			let b2 = packed[3 * i + 2] as i32;
+			assert_eq!(b0 & 0x3F, a.coeffs[4 * i + 0], "w1 6-bit slot 0 wrong at chunk {}", i);
+			assert_eq!(
+				((b0 >> 6) | (b1 << 2)) & 0x3F,
+				a.coeffs[4 * i + 1],
+				"w1 6-bit slot 1 wrong at chunk {}",
+				i
+			);
+			assert_eq!(
+				((b1 >> 4) | (b2 << 4)) & 0x3F,
+				a.coeffs[4 * i + 2],
+				"w1 6-bit slot 2 wrong at chunk {}",
+				i
+			);
+			assert_eq!((b2 >> 2) & 0x3F, a.coeffs[4 * i + 3], "w1 6-bit slot 3 wrong at chunk {}", i);
+		}
+	}
+
+	#[test]
+	fn uniform_gamma1_17_produces_valid_coefficients() {
+		let seed = [0x44u8; params::CRHBYTES];
+		let mut poly = Poly::default();
+		uniform_gamma1::<GAMMA1_17, PZ_17>(&mut poly, &seed, 3);
+		let g = GAMMA1_17 as i32;
+		for j in 0..N {
+			assert!(
+				poly.coeffs[j] > -g && poly.coeffs[j] <= g,
+				"GAMMA1=2^17 coefficient {} out of range at {}",
+				poly.coeffs[j],
+				j
+			);
+		}
+	}
+
+	#[test]
+	fn challenge_tau_39_and_49() {
+		// The 44/65 TAU values must yield exactly TAU nonzero coefficients,
+		// each in {-1, 1}.
+		fn check<const TAU: usize>(seed_byte: u8, seed_len: usize) {
+			let seed = std::vec![seed_byte; seed_len];
+			let mut c = Poly::default();
+			challenge::<TAU>(&mut c, &seed);
+			let mut nonzero = 0usize;
+			for &v in c.coeffs.iter() {
+				assert!(v == 0 || v == 1 || v == -1, "challenge coefficient {} invalid", v);
+				nonzero += (v != 0) as usize;
+			}
+			assert_eq!(nonzero, TAU, "challenge must have exactly TAU nonzero coefficients");
+		}
+		check::<39>(0xA1, 32); // ML-DSA-44: TAU = 39, c~ is 32 bytes
+		check::<49>(0xB2, 48); // ML-DSA-65: TAU = 49, c~ is 48 bytes
 	}
 }

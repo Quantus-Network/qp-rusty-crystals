@@ -126,13 +126,13 @@ pub fn matrix_pointwise_montgomery_streamed<const K: usize, const L: usize>(
 /// callers (keygen, using constant nonces) satisfy this by construction; the
 /// helper is deliberately not part of the public API so external callers cannot
 /// supply an out-of-range nonce.
-pub(crate) fn uniform_eta<const N: usize>(
+pub(crate) fn uniform_eta<const N: usize, const ETA: usize>(
 	v: &mut Polyvec<N>,
 	seed: &[u8; params::CRHBYTES],
 	base_nonce: u16,
 ) {
 	for i in 0..N {
-		poly::uniform_eta(&mut v.vec[i], seed, base_nonce + i as u16);
+		poly::uniform_eta::<ETA>(&mut v.vec[i], seed, base_nonce + i as u16);
 	}
 }
 
@@ -146,13 +146,13 @@ pub(crate) fn uniform_eta<const N: usize>(
 /// in-crate caller (the signer) enforces this with its `MAX_SAFE_ATTEMPT_NONCE`
 /// check before calling, and the helper is not exported, so an external caller
 /// cannot reach it with an unchecked nonce.
-pub(crate) fn uniform_gamma1<const N: usize>(
+pub(crate) fn uniform_gamma1<const N: usize, const GAMMA1: usize, const PZ: usize>(
 	v: &mut Polyvec<N>,
 	seed: &[u8; params::CRHBYTES],
 	nonce: u16,
 ) {
 	for i in 0..N {
-		poly::uniform_gamma1(&mut v.vec[i], seed, N as u16 * nonce + i as u16);
+		poly::uniform_gamma1::<GAMMA1, PZ>(&mut v.vec[i], seed, N as u16 * nonce + i as u16);
 	}
 }
 
@@ -247,38 +247,47 @@ pub fn power2round<const N: usize>(v1: &mut Polyvec<N>, v0: &mut Polyvec<N>) {
 	}
 }
 
-pub fn decompose<const N: usize>(v1: &mut Polyvec<N>, v0: &mut Polyvec<N>) {
+pub fn decompose<const N: usize, const GAMMA2: usize>(v1: &mut Polyvec<N>, v0: &mut Polyvec<N>) {
 	for i in 0..N {
-		poly::decompose(&mut v1.vec[i], &mut v0.vec[i]);
+		poly::decompose::<GAMMA2>(&mut v1.vec[i], &mut v0.vec[i]);
 	}
 	swap(v1, v0);
 }
 
-pub fn make_hint<const N: usize>(h: &mut Polyvec<N>, v0: &Polyvec<N>, v1: &Polyvec<N>) -> i32 {
+pub fn make_hint<const N: usize, const GAMMA2: usize>(
+	h: &mut Polyvec<N>,
+	v0: &Polyvec<N>,
+	v1: &Polyvec<N>,
+) -> i32 {
 	let mut s: i32 = 0;
 	for i in 0..N {
-		s += poly::make_hint(&mut h.vec[i], &v0.vec[i], &v1.vec[i]);
+		s += poly::make_hint::<GAMMA2>(&mut h.vec[i], &v0.vec[i], &v1.vec[i]);
 	}
 	s
 }
 
-pub fn use_hint<const N: usize>(a: &mut Polyvec<N>, hint: &Polyvec<N>) {
+pub fn use_hint<const N: usize, const GAMMA2: usize>(a: &mut Polyvec<N>, hint: &Polyvec<N>) {
 	for i in 0..N {
-		poly::use_hint(&mut a.vec[i], &hint.vec[i]);
+		poly::use_hint::<GAMMA2>(&mut a.vec[i], &hint.vec[i]);
 	}
 }
 
 /// Pack polynomial vector w1 into byte array.
 ///
-/// The output is an exact-size array (`N * POLYW1_PACKEDBYTES`, enforced by a
-/// compile-time assertion) so a too-short destination buffer is rejected at
-/// compile time rather than panicking on an out-of-bounds write.
-pub fn pack_w1<const N: usize, const W1BYTES: usize>(r: &mut [u8; W1BYTES], a: &Polyvec<N>) {
+/// The output is an exact-size array (`N` polynomials at the packed-w1 size
+/// for `GAMMA2`, enforced by a compile-time assertion) so a too-short
+/// destination buffer is rejected at compile time rather than panicking on an
+/// out-of-bounds write.
+pub fn pack_w1<const N: usize, const GAMMA2: usize, const W1BYTES: usize>(
+	r: &mut [u8; W1BYTES],
+	a: &Polyvec<N>,
+) {
 	const {
-		assert!(W1BYTES == N * params::POLYW1_PACKEDBYTES);
+		assert!(W1BYTES == N * params::polyw1_packedbytes(GAMMA2));
 	}
+	let stride = params::polyw1_packedbytes(GAMMA2);
 	for i in 0..N {
-		poly::w1_pack(&mut r[i * params::POLYW1_PACKEDBYTES..], &a.vec[i]);
+		poly::w1_pack::<GAMMA2>(&mut r[i * stride..], &a.vec[i]);
 	}
 }
 
@@ -293,12 +302,14 @@ pub fn pack_w1<const N: usize, const W1BYTES: usize>(r: &mut [u8; W1BYTES], a: &
 
 /// See [`uniform_eta`].
 pub(crate) fn l_uniform_eta(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], base_nonce: u16) {
-	uniform_eta(v, seed, base_nonce);
+	uniform_eta::<{ params::L }, { params::ETA }>(v, seed, base_nonce);
 }
 
 /// See [`uniform_gamma1`].
 pub(crate) fn l_uniform_gamma1(v: &mut Polyvecl, seed: &[u8; params::CRHBYTES], nonce: u16) {
-	uniform_gamma1(v, seed, nonce);
+	uniform_gamma1::<{ params::L }, { params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(
+		v, seed, nonce,
+	);
 }
 
 /// See [`reduce`].
@@ -345,7 +356,7 @@ pub fn polyvecl_is_norm_within_bound(v: &Polyvecl, bound: i32) -> bool {
 
 /// See [`uniform_eta`].
 pub(crate) fn k_uniform_eta(v: &mut Polyveck, seed: &[u8; params::CRHBYTES], base_nonce: u16) {
-	uniform_eta(v, seed, base_nonce);
+	uniform_eta::<{ params::K }, { params::ETA }>(v, seed, base_nonce);
 }
 
 /// See [`reduce`].
@@ -411,25 +422,25 @@ pub fn k_power2round(v1: &mut Polyveck, v0: &mut Polyveck) {
 /// See [`decompose`].
 #[inline]
 pub fn k_decompose(v1: &mut Polyveck, v0: &mut Polyveck) {
-	decompose(v1, v0);
+	decompose::<{ params::K }, { params::GAMMA2 }>(v1, v0);
 }
 
 /// See [`make_hint`].
 #[inline]
 pub fn k_make_hint(h: &mut Polyveck, v0: &Polyveck, v1: &Polyveck) -> i32 {
-	make_hint(h, v0, v1)
+	make_hint::<{ params::K }, { params::GAMMA2 }>(h, v0, v1)
 }
 
 /// See [`use_hint`].
 #[inline]
 pub fn k_use_hint(a: &mut Polyveck, hint: &Polyveck) {
-	use_hint(a, hint);
+	use_hint::<{ params::K }, { params::GAMMA2 }>(a, hint);
 }
 
 /// See [`pack_w1`].
 #[inline]
 pub fn k_pack_w1(r: &mut [u8; params::K * params::POLYW1_PACKEDBYTES], a: &Polyveck) {
-	pack_w1(r, a);
+	pack_w1::<{ params::K }, { params::GAMMA2 }, { params::K * params::POLYW1_PACKEDBYTES }>(r, a);
 }
 
 #[cfg(test)]

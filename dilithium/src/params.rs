@@ -33,3 +33,39 @@ pub const PUBLICKEYBYTES: usize = SEEDBYTES + K * POLYT1_PACKEDBYTES;
 pub const SECRETKEYBYTES: usize =
 	2 * SEEDBYTES + TR_BYTES + (K + L) * POLYETA_PACKEDBYTES + K * POLYT0_PACKEDBYTES;
 pub const SIGNBYTES: usize = C_DASH_BYTES + L * POLYZ_PACKEDBYTES + POLYVECH_PACKEDBYTES;
+
+// Packed-size helpers, derived from a variant's base parameters. These are
+// `const fn` so const-generic code can assert, at compile time, that the
+// buffer sizes it was instantiated with are consistent with the ETA / GAMMA1 /
+// GAMMA2 values it was given (the assertions are evaluated at
+// monomorphization). Each panics on a value not defined by FIPS 204, so an
+// unsupported instantiation fails to compile.
+
+/// Packed byte size of one eta-encoded secret polynomial (`s1`/`s2`).
+pub const fn polyeta_packedbytes(eta: usize) -> usize {
+	match eta {
+		2 => 3 * N as usize / 8, // 3 bits per coefficient (ML-DSA-44/87)
+		4 => 4 * N as usize / 8, // 4 bits per coefficient (ML-DSA-65)
+		_ => panic!("unsupported ETA parameter"),
+	}
+}
+
+/// Packed byte size of one mask polynomial (`z`).
+pub const fn polyz_packedbytes(gamma1: usize) -> usize {
+	match gamma1 {
+		0x20000 => 18 * N as usize / 8, // 18 bits per coefficient (ML-DSA-44)
+		0x80000 => 20 * N as usize / 8, // 20 bits per coefficient (ML-DSA-65/87)
+		_ => panic!("unsupported GAMMA1 parameter"),
+	}
+}
+
+/// Packed byte size of one commitment high-bits polynomial (`w1`).
+pub const fn polyw1_packedbytes(gamma2: usize) -> usize {
+	if gamma2 == (Q as usize - 1) / 88 {
+		6 * N as usize / 8 // 6 bits per coefficient, values in [0, 43] (ML-DSA-44)
+	} else if gamma2 == (Q as usize - 1) / 32 {
+		4 * N as usize / 8 // 4 bits per coefficient, values in [0, 15] (ML-DSA-65/87)
+	} else {
+		panic!("unsupported GAMMA2 parameter")
+	}
+}

@@ -62,12 +62,12 @@ pub fn pack_sk(
 	idx += params::TR_BYTES;
 
 	for i in 0..L {
-		poly::eta_pack(&mut sk[idx + i * params::POLYETA_PACKEDBYTES..], &s1.vec[i]);
+		poly::eta_pack::<{ params::ETA }>(&mut sk[idx + i * params::POLYETA_PACKEDBYTES..], &s1.vec[i]);
 	}
 	idx += L * params::POLYETA_PACKEDBYTES;
 
 	for i in 0..K {
-		poly::eta_pack(&mut sk[idx + i * params::POLYETA_PACKEDBYTES..], &s2.vec[i]);
+		poly::eta_pack::<{ params::ETA }>(&mut sk[idx + i * params::POLYETA_PACKEDBYTES..], &s2.vec[i]);
 	}
 	idx += K * params::POLYETA_PACKEDBYTES;
 
@@ -108,12 +108,18 @@ pub fn unpack_sk(
 	// control flow; honest keys always pass anyway).
 	let mut canonical = true;
 	for i in 0..L {
-		canonical &= poly::eta_unpack(&mut s1.vec[i], &sk[idx + i * params::POLYETA_PACKEDBYTES..]);
+		canonical &= poly::eta_unpack::<{ params::ETA }>(
+			&mut s1.vec[i],
+			&sk[idx + i * params::POLYETA_PACKEDBYTES..],
+		);
 	}
 	idx += L * params::POLYETA_PACKEDBYTES;
 
 	for i in 0..K {
-		canonical &= poly::eta_unpack(&mut s2.vec[i], &sk[idx + i * params::POLYETA_PACKEDBYTES..]);
+		canonical &= poly::eta_unpack::<{ params::ETA }>(
+			&mut s2.vec[i],
+			&sk[idx + i * params::POLYETA_PACKEDBYTES..],
+		);
 	}
 	idx += K * params::POLYETA_PACKEDBYTES;
 
@@ -140,7 +146,7 @@ pub fn pack_sig(
 	// arrays, so no per-polynomial length check or fallible conversion is needed.
 	let (z_chunks, _) = sig[idx..].as_chunks_mut::<{ params::POLYZ_PACKEDBYTES }>();
 	for (chunk, zi) in z_chunks.iter_mut().zip(z.vec.iter()).take(L) {
-		poly::z_pack(chunk, zi);
+		poly::z_pack::<{ params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(chunk, zi);
 	}
 
 	idx += L * params::POLYZ_PACKEDBYTES;
@@ -193,7 +199,7 @@ pub fn unpack_sig(
 	// so a truncated per-polynomial slice can't reach `z_unpack`.
 	let (z_chunks, _) = sig[idx..].as_chunks::<{ params::POLYZ_PACKEDBYTES }>();
 	for (chunk, zi) in z_chunks.iter().zip(z.vec.iter_mut()).take(L) {
-		poly::z_unpack(zi, chunk);
+		poly::z_unpack::<{ params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(zi, chunk);
 	}
 	idx += L * params::POLYZ_PACKEDBYTES;
 
