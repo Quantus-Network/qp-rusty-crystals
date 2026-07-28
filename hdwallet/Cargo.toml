@@ -1,6 +1,6 @@
 [package]
 name = "qp-rusty-crystals-hdwallet"
-version = "3.0.1"
+version = "3.1.0"
 edition = "2021"
 license = "GPL-3.0"
 description = "Pure Quantus RUST implementation of HD wallet functionality with post-quantum cryptography"
@@ -17,9 +17,9 @@ keywords = [
 categories = ["cryptography"]
 
 [dependencies]
-# HD wallet is ML-DSA-87-only. Workspace pins dilithium with
-# default-features = false, so opt in explicitly.
-qp-rusty-crystals-dilithium = { workspace = true, features = ["ml-dsa-87"] }
+# Parameter sets are selected through this crate's own ml-dsa-* features
+# (workspace pins dilithium with default-features = false).
+qp-rusty-crystals-dilithium = { workspace = true }
 bip39.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
@@ -43,9 +43,15 @@ rand.workspace = true
 rand_core.workspace = true
 
 [features]
-default = ["std"]
+default = ["std", "ml-dsa-87"]
 std = [
 	"serde/std",
 	"serde_json/std",
 	"thiserror/std",
 ]
+# ML-DSA parameter sets. Additive: enabling several exposes a key-derivation
+# module per variant (`ml_dsa_44` / `ml_dsa_65` / `ml_dsa_87`). The top-level
+# `derive_key_*` functions remain the ML-DSA-87 API and require `ml-dsa-87`.
+ml-dsa-44 = ["qp-rusty-crystals-dilithium/ml-dsa-44"]
+ml-dsa-65 = ["qp-rusty-crystals-dilithium/ml-dsa-65"]
+ml-dsa-87 = ["qp-rusty-crystals-dilithium/ml-dsa-87"]

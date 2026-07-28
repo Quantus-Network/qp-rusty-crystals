@@ -11,7 +11,7 @@ std = []
 [dev-dependencies]
 getrandom.workspace = true
 qp-rusty-crystals-dilithium = { workspace = true, features = ["ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
-qp-rusty-crystals-hdwallet = { workspace = true }
+qp-rusty-crystals-hdwallet = { workspace = true, features = ["ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
 rand = { workspace = true, features = ["std", "std_rng"] }
 aes = "0.8"
 cipher = "0.4"

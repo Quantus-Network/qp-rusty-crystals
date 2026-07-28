@@ -1,7 +1,25 @@
 //! # Quantus Network HD Wallet
 //!
 //! This crate provides hierarchical deterministic (HD) wallet functionality for post-quantum
-//! ML-DSA (Dilithium) keys, compatible
+//! ML-DSA (Dilithium) keys.
+//!
+//! ## Parameter sets
+//!
+//! ML-DSA parameter sets are selected with additive cargo features
+//! (`ml-dsa-44`, `ml-dsa-65`, `ml-dsa-87`; default: `ml-dsa-87`). Unlike the
+//! threshold crate, the features are not mutually prioritized: enabling
+//! several exposes one key-derivation module per variant ([`ml_dsa_44`],
+//! [`ml_dsa_65`], [`ml_dsa_87`]) so a wallet can hold keys at multiple
+//! security levels. The top-level [`derive_key_from_seed`] /
+//! [`derive_key_from_mnemonic`] functions remain the original ML-DSA-87 API.
+//!
+//! Deriving keys for different parameter sets from the *same* derivation path
+//! is cryptographically sound: FIPS 204 key generation absorbs the parameter
+//! set's `(k, ℓ)` into the seed expansion (`H(seed || k || ℓ)`), so the same
+//! 32 bytes of path-derived entropy yield independent keys per variant.
+//!
+//! Mnemonic handling and the wormhole module are parameter-set independent
+//! and available regardless of which (if any) ML-DSA features are enabled.
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 
@@ -12,15 +30,19 @@ use alloc::{
 };
 use bip39::{Language, Mnemonic};
 use core::str::FromStr;
+#[cfg(feature = "ml-dsa-87")]
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 use unicode_normalization::{is_nfkd_quick, IsNormalized, UnicodeNormalization};
 
 use zeroize::Zeroizing;
 
-#[cfg(test)]
+// The historical test suite and its vendored vectors are ML-DSA-87 keys.
+#[cfg(all(test, feature = "ml-dsa-87"))]
 mod test_vectors;
-#[cfg(test)]
+#[cfg(all(test, feature = "ml-dsa-87"))]
 mod tests;
+#[cfg(test)]
+mod tests_variants;
 
 pub mod hderive;
 pub mod wormhole;
@@ -165,12 +187,20 @@ fn parse_mnemonic_to_seed(
 	Ok(parsed_mnemonic.to_seed_normalized(passphrase))
 }
 
-/// Derive a Dilithium keypair from a seed at the given BIP44 path
+/// Derive the 32 bytes of keypair entropy at the given BIP44 path.
 ///
-/// # Security Note
-/// This function takes ownership of the seed for security (move semantics).
-/// The seed parameter is zeroized before returning.
-pub fn derive_key_from_seed(seed: SensitiveBytes64, path: &str) -> Result<Keypair, HDLatticeError> {
+/// This is the parameter-set-independent half of key derivation: path
+/// validation plus HMAC-SHA512 tree derivation. The returned entropy is what
+/// each variant's `Keypair::generate` consumes (FIPS 204 domain-separates the
+/// subsequent seed expansion by `(k, ℓ)`, so feeding the same entropy to
+/// different parameter sets yields independent keys).
+///
+/// The seed is taken by move and zeroized on drop; the returned entropy is
+/// itself a self-zeroizing type.
+fn derive_entropy_from_seed(
+	seed: SensitiveBytes64,
+	path: &str,
+) -> Result<SensitiveBytes32, HDLatticeError> {
 	// Validate the derivation path
 	check_derivation_path(path)?;
 
@@ -178,17 +208,83 @@ pub fn derive_key_from_seed(seed: SensitiveBytes64, path: &str) -> Result<Keypai
 	let xpriv = ExtendedPrivKey::derive(seed.as_bytes(), path)
 		.map_err(|_e| HDLatticeError::KeyDerivationFailed(path.to_string()))?;
 	let mut secret = xpriv.secret();
-	let derived_entropy = SensitiveBytes32::from(&mut secret);
+	Ok(SensitiveBytes32::from(&mut secret))
 
-	// Generate keypair from derived entropy
-	let keypair = Keypair::generate(derived_entropy);
-
-	// seed and derived_entropy are automatically zeroized when they drop
-
-	Ok(keypair)
+	// seed is automatically zeroized when it drops
 }
 
-/// Keypair derivation from mnemonic with passphrase.
+/// Stamp a per-variant key-derivation module mirroring the dilithium crate's
+/// frontend layout. Each module exposes the variant's `Keypair` plus
+/// `derive_key_from_seed` / `derive_key_from_mnemonic` with the same
+/// contract as the top-level (ML-DSA-87) functions.
+macro_rules! mldsa_variant_module {
+	($mod_name:ident, $feature:literal, $doc_name:literal) => {
+		#[cfg(feature = $feature)]
+		#[doc = concat!("HD key derivation for ", $doc_name, ".")]
+		pub mod $mod_name {
+			pub use qp_rusty_crystals_dilithium::$mod_name::Keypair;
+
+			use crate::{HDLatticeError, SensitiveBytes64};
+
+			#[doc = concat!("Derive an ", $doc_name, " keypair from a seed at the given BIP44 path.")]
+			///
+			/// # Security Note
+			/// This function takes ownership of the seed for security (move semantics).
+			/// The seed parameter is zeroized before returning.
+			pub fn derive_key_from_seed(
+				seed: SensitiveBytes64,
+				path: &str,
+			) -> Result<Keypair, HDLatticeError> {
+				let derived_entropy = crate::derive_entropy_from_seed(seed, path)?;
+				// derived_entropy is automatically zeroized when it drops
+				Ok(Keypair::generate(derived_entropy))
+			}
+
+			#[doc = concat!("Derive an ", $doc_name, " keypair from a mnemonic with passphrase.")]
+			///
+			/// The derivation path is validated *before* BIP39 seed stretching, so a
+			/// request that is guaranteed to fail path validation cannot force the
+			/// expensive PBKDF2 work.
+			///
+			/// # Security Note
+			/// Takes the mnemonic by reference and does not copy it into a heap buffer,
+			/// avoiding a redundant duplicate of the secret. The caller retains ownership
+			/// of the `&str` and is responsible for zeroizing the source buffer itself.
+			pub fn derive_key_from_mnemonic(
+				mnemonic: &str,
+				passphrase: Option<&str>,
+				path: &str,
+			) -> Result<Keypair, HDLatticeError> {
+				crate::check_derivation_path(path)?;
+				let mut seed = crate::parse_mnemonic_to_seed(mnemonic, passphrase)?;
+				derive_key_from_seed(SensitiveBytes64::from(&mut seed), path)
+			}
+		}
+	};
+}
+
+mldsa_variant_module!(ml_dsa_44, "ml-dsa-44", "ML-DSA-44");
+mldsa_variant_module!(ml_dsa_65, "ml-dsa-65", "ML-DSA-65");
+mldsa_variant_module!(ml_dsa_87, "ml-dsa-87", "ML-DSA-87");
+
+/// Derive a Dilithium (ML-DSA-87) keypair from a seed at the given BIP44 path
+///
+/// This is the original single-variant API and is equivalent to
+/// [`ml_dsa_87::derive_key_from_seed`]; the per-variant modules cover the
+/// other parameter sets.
+///
+/// # Security Note
+/// This function takes ownership of the seed for security (move semantics).
+/// The seed parameter is zeroized before returning.
+#[cfg(feature = "ml-dsa-87")]
+pub fn derive_key_from_seed(seed: SensitiveBytes64, path: &str) -> Result<Keypair, HDLatticeError> {
+	ml_dsa_87::derive_key_from_seed(seed, path)
+}
+
+/// Keypair (ML-DSA-87) derivation from mnemonic with passphrase.
+///
+/// Equivalent to [`ml_dsa_87::derive_key_from_mnemonic`]; the per-variant
+/// modules cover the other parameter sets.
 ///
 /// The derivation path is validated *before* BIP39 seed stretching, so a
 /// request that is guaranteed to fail path validation cannot force the
@@ -199,14 +295,13 @@ pub fn derive_key_from_seed(seed: SensitiveBytes64, path: &str) -> Result<Keypai
 /// Takes the mnemonic by reference and does not copy it into a heap buffer,
 /// avoiding a redundant duplicate of the secret. The caller retains ownership
 /// of the `&str` and is responsible for zeroizing the source buffer itself.
+#[cfg(feature = "ml-dsa-87")]
 pub fn derive_key_from_mnemonic(
 	mnemonic: &str,
 	passphrase: Option<&str>,
 	path: &str,
 ) -> Result<Keypair, HDLatticeError> {
-	check_derivation_path(path)?;
-	let mut seed = parse_mnemonic_to_seed(mnemonic, passphrase)?;
-	derive_key_from_seed(SensitiveBytes64::from(&mut seed), path)
+	ml_dsa_87::derive_key_from_mnemonic(mnemonic, passphrase, path)
 }
 
 /// Wormhole pair derivation from mnemonic with passphrase.
