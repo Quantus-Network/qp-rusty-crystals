@@ -41,6 +41,10 @@ use zeroize::Zeroizing;
 mod test_vectors;
 #[cfg(all(test, feature = "ml-dsa-87"))]
 mod tests;
+#[cfg(all(test, feature = "ml-dsa-44"))]
+mod test_vectors_44;
+#[cfg(all(test, feature = "ml-dsa-65"))]
+mod test_vectors_65;
 #[cfg(test)]
 mod tests_variants;
 
