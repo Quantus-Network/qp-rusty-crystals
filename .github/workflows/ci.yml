@@ -75,6 +75,17 @@ jobs:
       # default workspace tests only exercise ML-DSA-87.
       - name: Test dilithium (all parameter sets)
         run: cargo test --locked -p qp-rusty-crystals-dilithium --all-features
+      # Threshold selects one active parameter set (priority 87 > 65 > 44), so
+      # --all-features never exercises 44/65. HD wallet modules coexist, but
+      # default tests only enable 87. Exclusive-feature jobs cover both.
+      - name: Test threshold + hdwallet (ML-DSA-44)
+        run: |
+          cargo test --locked -p qp-rusty-crystals-threshold --no-default-features --features std,ml-dsa-44
+          cargo test --locked -p qp-rusty-crystals-hdwallet --no-default-features --features std,ml-dsa-44
+      - name: Test threshold + hdwallet (ML-DSA-65)
+        run: |
+          cargo test --locked -p qp-rusty-crystals-threshold --no-default-features --features std,ml-dsa-65
+          cargo test --locked -p qp-rusty-crystals-hdwallet --no-default-features --features std,ml-dsa-65
       # The stack-zeroization guard is gated to optimized builds
       # (#![cfg(not(debug_assertions))]): debug codegen materializes compiler
       # temporaries of the secret key that no source-level fix can wipe, so the
