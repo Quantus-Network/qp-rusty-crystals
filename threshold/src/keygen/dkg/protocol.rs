@@ -502,9 +502,10 @@ impl<S: TranscriptSigner> Dkg<S> {
 	///
 	/// # Session Identifier (SSID)
 	///
-	/// The SSID is computed from the threshold configuration, participant list, and session nonce.
-	/// It binds all protocol messages to this specific session, preventing cross-session replay
-	/// attacks (CVE-2022-47930 class vulnerabilities).
+	/// The SSID is computed from the protocol version, ML-DSA suite ID, threshold
+	/// configuration, participant list, and session nonce. It binds all protocol
+	/// messages to this specific session (and parameter set), preventing
+	/// cross-session / cross-suite replay attacks (CVE-2022-47930 class).
 	///
 	/// # Security Warning
 	///

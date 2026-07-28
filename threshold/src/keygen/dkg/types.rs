@@ -36,7 +36,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::{
 	config::ThresholdConfig,
 	error::{MAX_PARTIES, MAX_SUBSETS},
-	params::{ETA, K, L, N},
+	params::{ETA, K, L, N, SUITE_ID, THRESHOLD_SSID_VERSION},
 };
 
 // ============================================================================
@@ -138,7 +138,10 @@ pub const DOMAIN_PK_COMMIT: &[u8] = b"THRESHOLD_DKG_PK_COMMIT_V1";
 pub const DOMAIN_TRANSCRIPT: &[u8] = b"THRESHOLD_DKG_TRANSCRIPT_V1";
 
 /// Domain separator for DKG session identifier.
-pub const DOMAIN_DKG_SSID: &[u8] = b"THRESHOLD_DKG_SSID_V1";
+///
+/// Bumped to V2 when the SSID began absorbing [`THRESHOLD_SSID_VERSION`] and
+/// [`SUITE_ID`] so sessions on different parameter sets cannot collide.
+pub const DOMAIN_DKG_SSID: &[u8] = b"THRESHOLD_DKG_SSID_V2";
 
 /// Size of the DKG session identifier in bytes.
 pub const DKG_SSID_SIZE: usize = 32;
@@ -703,16 +706,21 @@ impl DkgMessage {
 /// Compute the DKG session identifier (SSID).
 ///
 /// The SSID binds:
+/// - Protocol version and ML-DSA suite (so sessions on different parameter sets cannot collide —
+///   same binding as signing / resharing SSIDs)
 /// - The threshold configuration (t, n)
 /// - All participant IDs (sorted)
 /// - A session nonce (caller-provided, e.g., from transport layer)
 ///
 /// This prevents cross-session replay attacks where messages from one DKG
-/// session could be replayed into another session with different parameters.
+/// session could be replayed into another session with different parameters
+/// or a different FIPS 204 parameter set.
 ///
 /// ```text
 /// ssid = SHAKE256(
-///     "THRESHOLD_DKG_SSID_V1" ||
+///     "THRESHOLD_DKG_SSID_V2" ||
+///     THRESHOLD_SSID_VERSION (u32 LE) ||
+///     SUITE_ID (u32 LE) ||
 ///     threshold (u32 LE) ||
 ///     total_parties (u32 LE) ||
 ///     num_participants (u32 LE) ||
@@ -729,8 +737,10 @@ pub fn compute_dkg_ssid(
 	let mut ssid = [0u8; DKG_SSID_SIZE];
 	let mut state = fips202::KeccakState::default();
 
-	// Domain separator
+	// Domain separator + protocol / suite binding (mirrors signing SSID).
 	fips202::shake256_absorb(&mut state, DOMAIN_DKG_SSID);
+	fips202::shake256_absorb(&mut state, &THRESHOLD_SSID_VERSION.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &SUITE_ID.to_le_bytes());
 
 	// Threshold configuration
 	fips202::shake256_absorb(&mut state, &threshold.to_le_bytes());
@@ -1114,6 +1124,33 @@ mod tests {
 		let hash1 = h_commit(&TEST_SSID, 42, b"test");
 		let hash2 = h_commit(&TEST_SSID, 42, b"test");
 		assert_eq!(hash1, hash2);
+	}
+
+	/// Version + suite must be in the absorb list: a hand-rolled hash that
+	/// substitutes a different suite ID must not collide with the real SSID.
+	#[test]
+	fn test_dkg_ssid_binds_suite() {
+		let participants = [0u32, 1, 2];
+		let nonce = [0xABu8; 32];
+		let real = compute_dkg_ssid(2, 3, &participants, &nonce);
+
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, DOMAIN_DKG_SSID);
+		fips202::shake256_absorb(&mut state, &THRESHOLD_SSID_VERSION.to_le_bytes());
+		fips202::shake256_absorb(&mut state, &(SUITE_ID ^ 0xDEAD).to_le_bytes());
+		fips202::shake256_absorb(&mut state, &2u32.to_le_bytes());
+		fips202::shake256_absorb(&mut state, &3u32.to_le_bytes());
+		fips202::shake256_absorb(&mut state, &3u32.to_le_bytes());
+		for id in &participants {
+			fips202::shake256_absorb(&mut state, &id.to_le_bytes());
+		}
+		fips202::shake256_absorb(&mut state, &nonce);
+		fips202::shake256_finalize(&mut state);
+		let mut other_suite = [0u8; DKG_SSID_SIZE];
+		fips202::shake256_squeeze(&mut other_suite, &mut state);
+
+		assert_ne!(real, other_suite, "SSID must change when SUITE_ID changes");
+		assert_eq!(real, compute_dkg_ssid(2, 3, &participants, &nonce));
 	}
 
 	#[test]

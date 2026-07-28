@@ -61,11 +61,15 @@ use zeroize::Zeroizing;
 
 use crate::{
 	keys::{PrivateKeyShare, PublicKey, TR_SIZE},
-	params::{K, L, N},
+	params::{K, L, N, SUITE_ID, THRESHOLD_SSID_VERSION},
 };
 
 /// Domain separator for DKG contribution derivation.
-const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v2";
+///
+/// Bumped to v3 when the absorb list gained [`THRESHOLD_SSID_VERSION`] and
+/// [`SUITE_ID`], so contributions on different parameter sets diverge even
+/// when the underlying share bytes happen to collide in length.
+const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v3";
 
 /// Derive a DKG contribution from a master share and tweak.
 ///
@@ -98,18 +102,21 @@ const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v2"
 /// # Security
 ///
 /// The contribution is computed as
-/// `SHAKE256(domain || party_id || tweak || H(secret_shares))`,
+/// `SHAKE256(domain || version || suite || party_id || tweak || H(secret_shares))`,
 /// where `secret_shares` is the canonical serialization of every `(subset_mask, s1, s2)`
 /// triple in the share. The shares are the actual cryptographic secret of the threshold
 /// scheme, so an attacker who does not hold a valid `PrivateKeyShare` cannot compute
 /// `derive_dkg_contribution` for any party — even though `party_id`, `tweak`, and
-/// `rho` are public.
+/// `rho` are public. Version and suite bind the digest to the active ML-DSA
+/// parameter set (same discipline as the DKG / signing / resharing SSIDs).
 pub fn derive_dkg_contribution(master_share: &PrivateKeyShare, tweak: &[u8; 32]) -> [u8; 32] {
 	let party_id_bytes = master_share.party_id().to_le_bytes();
 	let shares_digest = hash_secret_shares(master_share);
 
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, DKG_CONTRIBUTION_DOMAIN);
+	fips202::shake256_absorb(&mut state, &THRESHOLD_SSID_VERSION.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &SUITE_ID.to_le_bytes());
 	fips202::shake256_absorb(&mut state, &party_id_bytes);
 	fips202::shake256_absorb(&mut state, tweak);
 	fips202::shake256_absorb(&mut state, &shares_digest);
@@ -261,6 +268,29 @@ mod tests {
 		let contribution1 = derive_dkg_contribution(&share, &tweak);
 		let contribution2 = derive_dkg_contribution(&share, &tweak);
 		assert_eq!(contribution1, contribution2);
+	}
+
+	/// Contribution digest must bind the active suite: a hand-rolled hash that
+	/// swaps in a different `SUITE_ID` must not collide with the real output.
+	#[test]
+	fn test_derive_dkg_contribution_binds_suite() {
+		let share = create_test_share(0, 42);
+		let tweak = [0x11u8; 32];
+		let real = derive_dkg_contribution(&share, &tweak);
+		let shares_digest = hash_secret_shares(&share);
+
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, DKG_CONTRIBUTION_DOMAIN);
+		fips202::shake256_absorb(&mut state, &THRESHOLD_SSID_VERSION.to_le_bytes());
+		fips202::shake256_absorb(&mut state, &(SUITE_ID ^ 0xDEAD).to_le_bytes());
+		fips202::shake256_absorb(&mut state, &share.party_id().to_le_bytes());
+		fips202::shake256_absorb(&mut state, &tweak);
+		fips202::shake256_absorb(&mut state, &shares_digest);
+		fips202::shake256_finalize(&mut state);
+		let mut other_suite = [0u8; 32];
+		fips202::shake256_squeeze(&mut other_suite, &mut state);
+
+		assert_ne!(real, other_suite, "contribution must change when SUITE_ID changes");
 	}
 
 	#[test]
