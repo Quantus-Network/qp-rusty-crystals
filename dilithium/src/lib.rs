@@ -102,7 +102,7 @@ pub mod params;
 pub mod poly;
 pub mod polyvec;
 pub(crate) mod reduce;
-pub(crate) mod rounding;
+pub mod rounding;
 pub(crate) mod sign;
 
 #[cfg(feature = "ml-dsa-44")]

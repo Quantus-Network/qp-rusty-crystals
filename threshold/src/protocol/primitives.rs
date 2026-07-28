@@ -34,15 +34,13 @@
 
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::f64::consts::PI;
-use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec};
+use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec, rounding};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::params::{C_DASH_BYTES, GAMMA1, GAMMA2, K, L, N, POLY_Q_PACKEDBYTES, Q, SIGNBYTES};
 
 const Q_U32: u32 = Q as u32;
 const ALPHA: u32 = 2 * GAMMA2 as u32;
-const GAMMA2_32: usize = (Q as usize - 1) / 32;
-const GAMMA2_88: usize = (Q as usize - 1) / 88;
 
 // ============================================================================
 // Modular Arithmetic Helpers
@@ -207,31 +205,17 @@ impl NttAccumulatorK {
 
 /// Decompose a coefficient into low and high parts for ML-DSA rounding.
 ///
-/// Splits 0 ≤ a < q into (a₀, a₁) where a = a₁*α + a₀ with -α/2 < a₀ ≤ α/2,
-/// except when a₁ would equal (q-1)/α, in which case a₁=0 and -α/2 ≤ a₀ < 0.
-/// Returns (a₀ + q, a₁) where a₁ is the high part.
-///
-/// Uses the same high-bits extraction as dilithium's `rounding::decompose` for
-/// both GAMMA2 variants, then converts to the threshold wire convention
-/// (unsigned a₀ + q).
+/// Splits `0 ≤ a < q` into `(a₀_pq, a₁)` where `a ≡ a₁·α + a₀ (mod q)` with
+/// `-α/2 < a₀ ≤ α/2` (except the FIPS wrap case `a₁ = 0`, `-α/2 ≤ a₀ < 0`),
+/// and `a₀_pq = a₀ mod q` — i.e. `a₀ + q` when `a₀` is negative, otherwise
+/// `a₀`. High-bits extraction is delegated to
+/// [`rounding::decompose`](qp_rusty_crystals_dilithium::rounding::decompose);
+/// this wrapper only converts the signed low part to the threshold wire
+/// convention.
 pub(crate) fn decompose_coefficient(a: u32) -> (u32, u32) {
-	const {
-		assert!(GAMMA2 == GAMMA2_32 || GAMMA2 == GAMMA2_88, "unsupported GAMMA2");
-	}
-	let a_i = a as i32;
-	let gamma2 = GAMMA2 as i32;
-	let mut a1: i32 = (a_i + 127) >> 7;
-	if GAMMA2 == GAMMA2_32 {
-		a1 = (a1 * 1025 + (1 << 21)) >> 22;
-		a1 &= 15;
-	} else {
-		a1 = (a1 * 11275 + (1 << 23)) >> 24;
-		a1 ^= ((43 - a1) >> 31) & a1;
-	}
-	let mut a0: i32 = a_i - a1 * 2 * gamma2;
-	a0 -= (((Q - 1) / 2 - a0) >> 31) & Q;
-	let a0_plus_q = if a0 < 0 { (a0 + Q) as u32 } else { a0 as u32 };
-	(a0_plus_q, a1 as u32)
+	let (a0, a1) = rounding::decompose::<GAMMA2>(a as i32);
+	let a0_pq = if a0 < 0 { (a0 + Q) as u32 } else { a0 as u32 };
+	(a0_pq, a1 as u32)
 }
 
 /// Decompose a vector of K polynomials into low and high parts.
@@ -726,7 +710,7 @@ mod tests {
 	#[test]
 	fn test_decompose_coefficient() {
 		// High-bits range: 16 values for γ₂=(Q-1)/32, 44 for γ₂=(Q-1)/88.
-		let a1_mod = if GAMMA2 == GAMMA2_32 { 16u32 } else { 44u32 };
+		let a1_mod = (Q as u32 - 1) / ALPHA;
 		let (_a0, a1) = decompose_coefficient(0);
 		assert!(a1 < a1_mod);
 
@@ -754,21 +738,25 @@ mod tests {
 		(a0_plus_q, a1)
 	}
 
-	/// Exhaustive check of `decompose_coefficient` over the full input domain
-	/// `[0, Q)` against the FIPS 204 Decompose contract, and — for
-	/// γ₂ = (Q−1)/32 — against the original audited 87 implementation.
-	///
-	/// Contract: `a ≡ a₁·α + a₀ (mod q)` with `|a₀| ≤ γ₂` and
-	/// `0 ≤ a₁ < (q−1)/α`, where `a₀` is the centered representative of the
-	/// returned low part. The returned low part may differ from the audited
-	/// original by exactly `q` (the original always returned `a₀ + q`; the
-	/// current code returns `a₀ mod q`), which every consumer normalizes away.
+	/// Exhaustive check of `decompose_coefficient` over `[0, Q)`:
+	/// 1. thin-wrapper equivalence with [`rounding::decompose`],
+	/// 2. the FIPS 204 Decompose contract on the centered low part,
+	/// 3. for γ₂ = (Q−1)/32, mod-q equivalence with the audited 87 original.
 	#[test]
 	fn test_decompose_coefficient_exhaustive() {
 		let m = (Q as u32 - 1) / ALPHA;
 		let gamma2 = GAMMA2 as i64;
+		let gamma2_32 = (Q as usize - 1) / 32;
 		for a in 0..Q_U32 {
+			let (a0_signed, a1_dil) = rounding::decompose::<GAMMA2>(a as i32);
 			let (a0_pq, a1) = decompose_coefficient(a);
+			assert_eq!(a1, a1_dil as u32, "a={a}: high part diverges from rounding::decompose");
+			let expected_pq = if a0_signed < 0 { (a0_signed + Q) as u32 } else { a0_signed as u32 };
+			assert_eq!(
+				a0_pq, expected_pq,
+				"a={a}: wire low part is not a0 mod q from rounding::decompose"
+			);
+
 			assert!(a1 < m, "a={a}: a1={a1} out of range (m={m})");
 
 			// Centered low part.
@@ -781,7 +769,7 @@ mod tests {
 
 			// Equivalence with the audited ML-DSA-87 original (mod q on the
 			// low part; identical high part).
-			if GAMMA2 == GAMMA2_32 {
+			if GAMMA2 == gamma2_32 {
 				let (ref_a0_pq, ref_a1) = decompose_coefficient_87_reference(a);
 				assert_eq!(a1, ref_a1, "a={a}: a1 diverges from audited 87 reference");
 				assert_eq!(
