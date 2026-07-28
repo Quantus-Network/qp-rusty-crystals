@@ -1,59 +1,270 @@
-# Security review round 4: secret hygiene, bounded deserialization, and protocol atomicity
+# Multi-variant ML-DSA support (44 / 65 / 87) across dilithium, threshold, and hdwallet
 
-This PR addresses the fourth round of security review findings across the `dilithium`, `hdwallet`, and `threshold` crates. Every fix follows the same discipline: the finding was first reproduced with a failing regression test, then fixed, then re-verified (test red on the old code, green with the fix). 19 commits, 28 files, ~2600 insertions.
+## Summary
 
-## Secret hygiene (zeroization)
+This PR extends the workspace from ML-DSA-87-only to all three FIPS 204 parameter
+sets, selected at compile time via additive cargo features. It lands in three parts:
 
-**Heap intermediates are wiped before their memory is freed.** A new `threshold/tests/heap_zeroization.rs` suite installs a scanning global allocator that inspects every freed block for the scenario's secret pattern at `dealloc` time. It caught, and now guards, six scenarios:
+1. **`qp-rusty-crystals-dilithium`** — the core implementation is genericized
+   over the parameter set (const generics for K/L, variant-parameterized
+   primitives), with per-variant frontends `ml_dsa_44` / `ml_dsa_65` /
+   `ml_dsa_87` behind matching cargo features, validated against ACVP and
+   PQCrystals NIST KATs for every variant.
+2. **`qp-rusty-crystals-threshold`** (bumped to **2.0.0**) — the threshold
+   signing, DKG, derivation, and resharing protocols are driven by a new
+   `params` module that re-exports the active variant's constants and ships
+   per-variant Monte-Carlo calibration tables (hyperball radii, `k_iterations`,
+   and resharing enlargement κ).
+3. **`qp-rusty-crystals-hdwallet`** (bumped to **3.1.0**) — HD key derivation
+   gains per-variant modules (`ml_dsa_44` / `ml_dsa_65` / `ml_dsa_87`) that can
+   coexist in one build; the top-level API stays the ML-DSA-87 one.
 
-- `derive_dkg_contribution`'s share-digest linearization buffer, incoming DKG Round 1 private frames carrying K_S, and the hyperball sampling scratch buffer (`7d63cf9`);
-- the resharing protocol's `party_key` derivation buffer, Round 4 transport frames (both directions — `Action::SendPrivate` now carries `Zeroizing<Vec<u8>>`), sub-share derivation output, and per-polynomial hashing scratch buffers (`ce8175f`);
-- DKG K_S relocation out of Copy-typed containers: `transition_to_round2` freed the `received_shared_secrets` map nodes with the secrets still in them (the state zeroizer runs too late — the field is already `None`), `pending_privates.pop()` left queued `Round1Private` bytes beyond the `Vec`'s shrunken length, and the buffered-privates drain consumed its map the same way (`4e6cb6d`);
-- the wormhole Poseidon preimage (`preimage_felts`) was `clear()`ed but never wiped; covered by a dedicated allocator-instrumented test in `hdwallet/tests/wormhole_zeroization.rs` (`7d63cf9`).
+Nothing in the threshold crate has been deployed, so **no wire-format
+compatibility is preserved**: the SSID version is bumped to 3, the suite ID is
+bound into the SSID, and one deprecated constant is removed.
 
-**Stack copies of the ML-DSA-87 secret key are wiped in import/serialize paths.** `Keypair::from_bytes`, `SecretKey::from_bytes`, and `Keypair::to_bytes` left plaintext `[u8; SECRETKEYBYTES]` copies in dead stack frames because `[u8; N]` is `Copy`. All three now stage the secret in `Zeroizing` locals, and the secret-bearing `to_bytes` methods return `Zeroizing<[u8; N]>` so the caller's copy self-wipes too (semver-breaking; a caller who simply drops the result leaks nothing). A painted-stack probe test (`dilithium/tests/import_stack_zeroization.rs`, release-mode only — debug builds create compiler temporaries no source fix can wipe) verifies no copy survives, and CI runs it in release mode with a zero-tests-ran guard.
+Signatures remain byte-compatible with standard ML-DSA verification for the
+active parameter set on all three variants (pinned by a direct cross-crate test).
 
-Known residual: the DKG private-send path (`pop_pending_private` → `poke` → `serialize_round1_private`) moves a `Round1Private` by value, and intermediate move temporaries holding K_S in dead stack frames are compiler-managed — the same class the dilithium probe pins. Heap copies on that path are covered; the stack side is noted in the code as follow-up.
+26 commits, 67 files, +5,708/−2,062. Each commit builds standalone (see
+"Commit guide" for one caveat about test targets on intermediate commits).
 
-**Debug output no longer leaks key material.** The resharing `Action::SendPrivate` payload (serialized sub-shares) is redacted from the manual `Debug` impl (`df8dee3`).
+---
 
-## Bounded, validating deserialization
+## Feature selection
 
-- `ResharingActProposal::active_set` length is bounded at deserialize; a hostile length prefix can no longer drive unbounded allocation (`62f736e`).
-- `PrivateKeyShare` metadata (threshold, party counts, participant list, share-map shape) is cross-checked at Borsh import and at `ThresholdSigner` construction (`345c7aa`).
-- ML-DSA-87 secret keys whose `s1`/`s2` coefficients decode outside `[-ETA, ETA]` are rejected at import: `eta_unpack` and `unpack_sk` now return a canonicality flag (`#[must_use]`) that `public_key_from_secret` enforces, so non-canonical 3-bit slots (5–7) can no longer cross the boundary (`19e2bf0`).
-- `SubsetContribution` (exported, previously derive-deserialized into unbounded `Vec<[i32; N]>`) now has a manual deserializer enforcing exactly `L`/`K` polynomials — length prefix checked before any allocation — and η-bounded coefficients, mirroring `SecretShareData` (`3ec5b15`).
-- Invalid `DkgConfig` values are unconstructible: fields are private with accessors, and `all_broadcasts_received` uses total quorum arithmetic that cannot underflow on an empty participant list (`e1df0ca`). The predicate is now `pub(crate)` (no longer re-exported): its empty-list-is-complete reading is only sound for config-validated participant lists, so raw external inputs can no longer reach it — pinned by a `compile_fail` doctest on `DkgConfig`.
+Dilithium and threshold expose additive features with priority **87 > 65 > 44**
+when several are enabled (so a workspace `--all-features` build gets ML-DSA-87).
+The hdwallet crate is the exception: its features are additive-coexisting — each
+enabled variant gets its own module, since a wallet may hold keys at several
+security levels at once.
 
-## DoS hardening (no work before validation)
+| Feature | NIST category | Status |
+|---|---|---|
+| `ml-dsa-87` (default) | 5 (~256-bit) | Production-calibrated threshold tables (pre-existing) |
+| `ml-dsa-65` | 3 (~192-bit) | Provisional threshold tables; reshares at κ = 1 everywhere |
+| `ml-dsa-44` | 2 (~128-bit) | Provisional threshold tables; reshare into (4,6) fails closed |
 
-- The signing protocol checks the fixed-header SSID and a **per-config** frame budget (`k_iterations`-derived, ~23 KB for a (2,2) session instead of the global 12 MiB) before deserializing anything (`0428526`).
-- `ExtendedPrivKey::derive` parses and validates the derivation path first and bounds the seed to the BIP32 master-seed range (16..=64 bytes, new `Error::InvalidSeedLength`) before doing any HMAC work (`bf9b646`).
-- Round 2 reveals are rejected on the exact per-config length **before** the SHAKE256 commitment hash runs, so a peer who pre-committed to an oversized blob (up to the 10.5 MB global deserializer bound) cannot force megabytes of hashing in a session whose legitimate reveal is kilobytes; protocol intake drops hash-bound but mis-sized reveals in O(1) (`36e1079`).
+Suite IDs (bound into the threshold SSID and the resharing SSID): `1` = ML-DSA-87,
+`2` = ML-DSA-44, `3` = ML-DSA-65. `THRESHOLD_SSID_VERSION = 3`.
 
-## Protocol state-machine correctness
+---
 
-- Aborted resharing sessions no longer strand the old share: recovery restores it so the party can rejoin a retried session (`5e5c7ef`).
-- `round3_respond` failures **after** the peers' reveals were folded into the commitment aggregate now reset the session instead of leaving a poisoned aggregate in the "cleanly retryable" `AfterRound2` state, where a retry would double-count every peer's commitment. Pre-commit-point failures still leave the session clean for corrected retries (`243bb0d`). The trigger for the reset — a Round 1 broadcast from a party outside the DKG participant set, previously only detected inside `recover_share` — is now rejected by `round2_reveal` before the commit point, so the failure is early and recoverable and the round-3 reset is defense in depth.
-- `DerivedKeyId` is bound to the DKG output public key, preventing cross-key derivation-ID collisions (`5599c69`).
+## Part 1 — dilithium crate
 
-## API contract enforcement
+- **Const-generic core**: `Polyveck`/`Polyvecl` collapsed into a single
+  `Polyvec<N>`; the k_*/l_* function shims are removed. Packing, the signing
+  driver, and the variant-dependent primitives (`ETA`, `GAMMA1`, `GAMMA2`,
+  `TAU`, rounding/decompose/hints) are parameterized over the variant's
+  constants rather than hardcoded to 87.
+- **Per-variant frontends**: `ml_dsa_44`, `ml_dsa_65`, `ml_dsa_87` modules
+  (Keypair/PublicKey/SecretKey, sizes, `MAX_MESSAGE_SIZE`) behind their cargo
+  features. The legacy top-level re-exports (`params::K`, etc.) keep their
+  ML-DSA-87 values so existing call sites are unaffected.
+- **Validation**: vendored ACVP keygen/siggen/sigver vectors for 44/65 with a
+  generalized harness (87 coverage unchanged), plus PQCrystals NIST KATs for
+  44/65. CI runs the ACVP suites with `--all-features`.
+- **Benchmarks** for all three variants behind their features.
 
-- `poly::shiftl`'s unchecked left shift is no longer reachable through public API with out-of-contract coefficients: it is crate-private and the `k_shiftl` docs state the real `2^(31-D)` bound (`6fe967c`).
-- `KeccakState` encodes the SHAKE rate as a const-generic parameter, making the absorb/squeeze phase-and-rate mismatches flagged by review unrepresentable, and squeeze chunking canonical (`225e629`).
-- `uniform_eta`'s rejection-sampling retry loop is documented as not a timing channel: two fixed blocks yield 544 nibbles at 15/16 acceptance, so a third block is a < 2^-600 event, and rejection counts are independent of the accepted values under standard XOF assumptions (`ec388fe`).
+## Part 2 — threshold crate (2.0.0)
 
-## Compatibility notes
+- **`threshold/src/params.rs`**: single source of truth for the active
+  parameter set. Re-exports the active variant's constants (K, L, ETA, GAMMA1,
+  GAMMA2, TAU, sizes…), defines `SUITE_ID`, `THRESHOLD_SSID_VERSION`, derived
+  size bounds (`SINGLE_COMMITMENT_SIZE`, `MAX_COMMITMENT_DATA_SIZE`, …), and
+  per-variant calibration tables:
+  - `K_ITERATIONS` — parallel signing attempts per `(t, n)`
+  - `HYPERBALL` — rejection-sampling radii `(r, r', ν)` per `(t, n)`
+  - `RESHARING_KAPPA` — resharing enlargement κ per `(t, n)` (see Part 3)
 
-Behavioral tightenings downstream consumers may notice:
+  87's tables are inline (unchanged values); 44/65 tables live in
+  `params_tables_44.rs` / `params_tables_65.rs`, generated by
+  `scripts/compute_hyperball_params.py --variant {44,65}`.
+- **`threshold/src/mldsa.rs`**: feature-selected frontend types
+  (`MlDsaPublicKey`, `MAX_MESSAGE_SIZE`, test-only `Keypair`/`SecretKey`).
+- **Protocol parameterization**: signing, config, keys, broadcasts, signer
+  buffer sizes, DKG (dealer and distributed), derivation, and resharing all
+  read from `params` instead of hardcoded 87 values. `decompose_coefficient`
+  is γ₂-aware (16 high-bit values for γ₂ = (Q−1)/32, 44 for (Q−1)/88).
+- **Domain separation**: SSID computation now absorbs
+  `THRESHOLD_SSID_VERSION = 3` and the suite ID, so sessions on different
+  parameter sets can never be confused. The resharing suite ID follows the
+  active set; the deprecated `RESHARING_SUITE_ML_DSA_87` alias is removed.
 
-- `hdwallet`: seeds outside 16..=64 bytes are now rejected by `ExtendedPrivKey::derive` (new `Error::InvalidSeedLength` variant). The Quantus SDK's `derive_hd_path` passes 64-byte BIP39 seeds and is unaffected.
-- `threshold`: resharing `Action::SendPrivate` now carries `Zeroizing<Vec<u8>>`; `DkgConfig` fields are private (use the accessors); `SubsetContribution` and secret-key/share imports reject blobs that previously deserialized; `ThresholdSigner::round2_reveal` rejects Round 1 broadcasts from parties outside the DKG set (previously deferred to Round 3); `ResharingProtocol::take_existing_share` is renamed `abort_and_take_existing_share` (the name now carries its abort side effect); `all_broadcasts_received` is no longer exported.
-- `dilithium`: `packing::unpack_sk` returns a `bool` canonicality flag; `poly::shiftl` is crate-private; `Keypair::to_bytes` and `SecretKey::to_bytes` return `Zeroizing` buffers (deref or `as_slice()` for access).
+## Part 3 — review hardening and resharing calibration
 
-## Test plan
+A commit-by-commit review of Parts 1–2 surfaced and fixed the following.
 
-- [x] Each finding reproduced red before the fix and green after (error-variant or allocator/stack-probe assertions pin the mechanism, not just the outcome)
-- [x] `cargo test --workspace` green (dilithium, hdwallet, threshold; unit + integration + e2e suites)
-- [x] New regression suites: `threshold/tests/heap_zeroization.rs` (scanning allocator, 6 scenarios), `dilithium/tests/import_stack_zeroization.rs` (painted-stack probe, release builds), `hdwallet/tests/wormhole_zeroization.rs`
-- [x] Release-mode runs for the stack-zeroization suite
+### Correctness fixes
+
+- **Test targets didn't build on 44/65**: `resharing_tests.rs`, the round2
+  input-validation DoS test, and the comparison benchmark had hardcoded
+  K=8/L=7 fixtures or imported `ml_dsa_87` directly. All test/bench targets now
+  compile and pass on all three variants. The crate publicly re-exports
+  `MAX_MESSAGE_SIZE` for callers that need the bound.
+- **Overshoot regression math was 87-only**: the resharing variance tests
+  computed the Mithril §3.4 base bound `B` with hardcoded `k=8, ℓ=7, τ=60,
+  Var=2`, silently invalidating the `overshoot ≤ κ` regression assertion on
+  other variants. Now computed from the active params.
+- **Decompose pinned exhaustively**: the multi-variant decompose rewrite
+  changed the low-bits convention from "always `a₀ + q`" to "`a₀ mod q`"
+  (every consumer normalizes mod q). A new exhaustive test over the full
+  `[0, Q)` domain asserts the FIPS 204 Decompose contract for both γ₂
+  variants **and** bit-for-bit (mod q) equivalence with the original audited
+  ML-DSA-87 implementation, kept verbatim in the test as an oracle.
+- **Standard-verifier compatibility pinned directly**: a new test verifies a
+  threshold signature using `qp_rusty_crystals_dilithium`'s `PublicKey::verify`
+  on raw bytes (not via `threshold::verify_signature`, which happens to
+  delegate to it), including tampered-message and context-binding rejections,
+  on all three variants.
+
+### Resharing parameters (the main security fix)
+
+The resharing Round-5 guard accepts recovered partials up to `κ·B`, where the
+security argument requires the hyperball radii `(r, r')` to be enlarged by the
+**same** κ (the radius condition `r'² = r² + B² + 2rB/φ` is scale-invariant, so
+per-sample leakage ε is preserved). Before this PR's review pass,
+`resharing_norm_enlargement()` returned the 87-measured κ (1.10/1.15/1.25) on
+**every** variant while the 44/65 tables shipped base (κ = 1) radii — i.e. the
+guard on 44/65 was **fail-open** relative to the proof.
+
+Fix: κ moved into the per-variant params tables with the invariant that any
+κ > 1 entry has its radii/K derived at the enlarged radius. Honest-reshare
+overshoots were measured per variant (`test_recovered_partial_variance_*` built
+with each feature; fixed point over all signing sets):
+
+| Config | 87 (shipped κ) | 44 (new κ) | 65 (new κ) |
+|--------|----------------|------------|------------|
+| 2-of-2 | 0.780 (1.00) | 0.794 (1.00) | 0.620 (1.00) |
+| 2-of-3 | 0.810 (1.00) | 0.827 (1.00) | 0.672 (1.00) |
+| 2-of-4 | 0.961 (1.10) | 0.991 (1.10) | 0.869 (1.00) |
+| 3-of-5 | 1.012 (1.15) | 1.023 (1.15) | 0.809 (1.00) |
+| 4-of-6 | 1.163 (1.25) | 1.166 (**1.00, fail-closed**) | 0.917 (1.00) |
+
+- **ML-DSA-87**: unchanged.
+- **ML-DSA-44**: overshoots track 87 almost exactly, so (2,4)/(3,5) ship the
+  same κ with radii scaled and `K` re-derived by Monte Carlo
+  (`--resharing-only`, 8,000 samples): (2,4) K 6 → 16, (3,5) K 56 → **696**
+  (44's tight verification ceilings — γ₁ = 2¹⁷, γ₂ = (Q−1)/88 — make
+  enlargement far more expensive than 87's K = 60). **(4,6) cannot be
+  enlarged**: at κ = 1.25 the MC estimate is K ≈ 5.8·10⁵, which is infeasible.
+  It ships κ = 1 and base signing radii, so reshares *into* a 4-of-6 committee
+  are rejected by the Round-5 guard — fail closed, never fail open. Freshly
+  dealt/DKG 4-of-6 committees sign normally. A dedicated test pins the
+  rejection.
+- **ML-DSA-65**: overshoots are below 1 everywhere because its η = 4 keygen
+  variance (20/3) dwarfs the η = 2-tuned split noise, so every committee
+  reshares at κ = 1 with base tables. The flip side — documented at
+  `SPLIT_NOISE_NUM_X256` and in the security proof — is that the aggregated
+  split noise is ~3.3× below keygen variance, so the a-posteriori
+  "reshared shares look like a fresh keygen sharing" hiding argument is
+  quantitatively weaker on 65 than on the η = 2 sets. Re-tuning the intensity
+  for η = 4 (which would raise overshoots and require κ > 1 radii
+  re-derivation) is flagged as future calibration work.
+
+### Documentation
+
+- `resharing/SECURITY_PROOF.md` gains a **"Parameter-Set Scope"** section
+  (structural argument is variant-independent; calibration is per variant;
+  measured overshoot tables; reproduction commands).
+- `resharing/README.md` and the crate README carry matching per-variant status
+  notes; the hyperball script's resharing computation is generalized to any
+  variant (`RESHARING_DATA`, `--resharing-only`).
+
+---
+
+## Part 4 — hdwallet crate (3.1.0)
+
+The wallet's ML-DSA surface was one call: `Keypair::generate` on path-derived
+entropy. That call is now available per variant.
+
+- **Per-variant modules**: features `ml-dsa-44` / `ml-dsa-65` / `ml-dsa-87`
+  (default: 87) each expose a module with `derive_key_from_seed` /
+  `derive_key_from_mnemonic` returning that variant's `Keypair`. Unlike
+  threshold, the modules **coexist** — no priority selection — so one build can
+  derive keys at multiple security levels.
+- **Shared core factored out**: path validation + HMAC-SHA512 tree derivation
+  live in one internal `derive_entropy_from_seed`; the variant modules are thin
+  macro-stamped wrappers over it. Mnemonic handling and the wormhole module are
+  parameter-set independent and build with no ML-DSA feature at all.
+- **Key separation is by construction**: FIPS 204 keygen absorbs `(k, ℓ)` into
+  the seed expansion (`H(seed ‖ k ‖ ℓ)`), so the same path-derived entropy
+  yields independent keys per variant. Deriving several variants from one path
+  is sound; a test pins that the resulting keys diverge.
+- **Backward compatible**: the top-level `derive_key_from_seed` /
+  `derive_key_from_mnemonic` keep their signatures and remain byte-identical to
+  `ml_dsa_87::*` (pinned by test). The historical test suite and its vendored
+  vectors are 87-only and are gated on that feature; a new multi-variant suite
+  covers determinism, sign/verify round-trips, and cross-variant independence.
+- The `tests` integration crate now opts into all three hdwallet variants
+  (the workspace pin uses `default-features = false`).
+
+## Notes for reviewers / auditors
+
+- **Trust boundary of the numbers**: the 87 tables and κ are the pre-existing
+  audited/production values, unchanged. The 44/65 signing tables are
+  **provisional** (400-sample MC grid, 2× K margin); the 44 resharing
+  enlargement used 8,000 samples. Regeneration is reproducible via
+  `threshold/scripts/compute_hyperball_params.py`.
+- **Invariant to check**: any `RESHARING_KAPPA` entry with κ > 1 must have its
+  `HYPERBALL`/`K_ITERATIONS` entries derived at the enlarged radius. The
+  variance regression tests assert measured overshoot ≤ κ from the same table
+  the guard reads, so a κ lowered below the real overshoot (or a splitter
+  regression) fails CI.
+- **Decompose convention change** (low bits `a₀ mod q` vs the old `a₀ + q`) is
+  intentional; both consumers (`w0_plus_diff` renormalization, hint
+  computation) reduce mod q before use, and the exhaustive oracle test pins
+  equivalence.
+- **`(3,5)` on ML-DSA-44 costs K = 696** (~2 MB of commitment data per party
+  per signature). This is the price of κ = 1.15 under 44's ceilings; if that
+  committee shape matters on 44, budget accordingly or revisit the margin.
+
+## Testing
+
+All run for each of `ml-dsa-44`, `ml-dsa-65`, `ml-dsa-87` (feature-exclusive
+builds):
+
+- `cargo test --lib`: 255/255.
+- All integration suites (integration, coverage, derivation, error display,
+  round2 DoS, resharing round5 DoS, resharing): green. Resharing suite: 66
+  tests on 87/65; 64 on 44, where the (4,6) reshare suites are gated off by
+  design and a dedicated fail-closed rejection test runs instead.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- Every commit in the series builds standalone with the default feature; all
+  targets on all variants build from "Calibrate ML-DSA-44 resharing…" onward.
+- Dilithium ACVP + NIST KAT suites for all variants (run in CI with
+  `--all-features`).
+
+hdwallet matrix (all green, clippy `-D warnings` clean):
+
+- default (`std` + `ml-dsa-87`): full historical suite (49 tests) + variant suite.
+- `std,ml-dsa-44` / `std,ml-dsa-65` exclusive: variant + shared suites (19 each).
+- all three variants together: 58 tests incl. cross-variant independence.
+- `std` only (no ML-DSA): wormhole/mnemonic surface builds and passes (15 tests).
+
+The wasm32v1-none no_std CI job now passes `--features ml-dsa-44,ml-dsa-65,ml-dsa-87`
+explicitly for both dilithium and hdwallet: with the frontends feature-gated, a bare
+`--no-default-features` build compiles only the generic core and would mask a no_std
+regression in the public signing API (verified locally against the exact CI commands).
+
+## Commit guide
+
+**dilithium genericization** (`815d6e5..12fa431`): const-generic `Polyvec`,
+parameterized primitives/packing/signing, per-variant params modules and
+frontends.
+
+**dilithium validation** (`3fb57da..28278e1`): ACVP vendoring + harness,
+benchmarks, CI, docs, alias removal, NIST KATs.
+
+**threshold multi-variant** (`440c7f3..5261a48`): 2.0.0 + features, params
+module + frontend, γ₂-aware decompose, signing/config/keys/DKG/derivation/
+resharing parameterization, README + script.
+
+**review hardening + calibration** (`485e871..f398b46`): 44/65 test-target
+fixes, exhaustive decompose oracle test, per-variant κ (fail-open fix),
+ML-DSA-44 resharing calibration + (4,6) fail-closed, scope docs, direct
+standard-verifier compatibility test.
+
+Intermediate-commit caveat: `resharing_tests.rs` fails to compile under 44/65
+between `440c7f3` and `c553cea` (inherited hardcoded fixtures, fixed within the
+series); the default 87 build compiles all targets at every commit.
