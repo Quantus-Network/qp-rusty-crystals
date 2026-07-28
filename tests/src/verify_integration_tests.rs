@@ -21,29 +21,20 @@ macro_rules! nist_kat_for {
 			let test_vectors = parse_test_vectors(kat_data);
 			assert!(!test_vectors.is_empty(), "KAT file must contain vectors");
 			for test in &test_vectors {
-				verify_test_vector(test, PUBLICKEYBYTES, |entropy| Keypair::generate(entropy), |bytes| {
-					Keypair::from_bytes(bytes).expect("KAT keypair bytes must deserialize")
-				});
+				verify_test_vector(
+					test,
+					PUBLICKEYBYTES,
+					|entropy| Keypair::generate(entropy),
+					|bytes| Keypair::from_bytes(bytes).expect("KAT keypair bytes must deserialize"),
+				);
 			}
 		}
 	};
 }
 
-nist_kat_for!(
-	test_nist_kat_ml_dsa_44,
-	ml_dsa_44,
-	"../../test_vectors/PQCsignKAT_Dilithium2.rsp"
-);
-nist_kat_for!(
-	test_nist_kat_ml_dsa_65,
-	ml_dsa_65,
-	"../../test_vectors/PQCsignKAT_Dilithium3.rsp"
-);
-nist_kat_for!(
-	test_nist_kat_ml_dsa_87,
-	ml_dsa_87,
-	"../../test_vectors/PQCsignKAT_Dilithium5.rsp"
-);
+nist_kat_for!(test_nist_kat_ml_dsa_44, ml_dsa_44, "../../test_vectors/PQCsignKAT_Dilithium2.rsp");
+nist_kat_for!(test_nist_kat_ml_dsa_65, ml_dsa_65, "../../test_vectors/PQCsignKAT_Dilithium3.rsp");
+nist_kat_for!(test_nist_kat_ml_dsa_87, ml_dsa_87, "../../test_vectors/PQCsignKAT_Dilithium5.rsp");
 
 fn get_random_bytes() -> SensitiveBytes32 {
 	let mut rng = rand::rng();

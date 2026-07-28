@@ -132,19 +132,18 @@ pub(crate) fn keypair_var<
 /// [`keypair_var`] does, and packs `pk = (rho, t1)`. In addition to re-deriving
 /// the public key, this checks the remaining packed-SK invariants:
 ///
-/// - the unpacked `s1` and `s2` coefficients must lie in `[-ETA, ETA]`. Non-canonical
-///   packed slots decode outside that range — encodings key generation never emits.
-///   They cannot be caught by the algebraic checks below (an attacker recomputes
-///   `t0`/`tr`/pk *from* the oversized coefficients), yet such a key lies outside
-///   the key distribution that the `BETA = TAU * ETA` rejection margin in
-///   [`signature_var`] is sized for,
+/// - the unpacked `s1` and `s2` coefficients must lie in `[-ETA, ETA]`. Non-canonical packed slots
+///   decode outside that range — encodings key generation never emits. They cannot be caught by the
+///   algebraic checks below (an attacker recomputes `t0`/`tr`/pk *from* the oversized
+///   coefficients), yet such a key lies outside the key distribution that the `BETA = TAU * ETA`
+///   rejection margin in [`signature_var`] is sized for,
 /// - the stored `t0` must equal the re-derived low bits of `A·s1 + s2`,
 /// - the stored `tr` must equal `SHAKE256(pk)`, and
-/// - the derived `t1` must not be all-zero, matching the degenerate-key rejection in
-///   [`verify_var`] and the public frontend `PublicKey::from_bytes`. A blob with
-///   `s1 = s2 = 0` derives `t1 = t0 = 0` and passes the two consistency checks by
-///   construction, but its public key is exactly the forgeable class the verifier
-///   rejects, so signing with it can only produce unverifiable signatures.
+/// - the derived `t1` must not be all-zero, matching the degenerate-key rejection in [`verify_var`]
+///   and the public frontend `PublicKey::from_bytes`. A blob with `s1 = s2 = 0` derives `t1 = t0 =
+///   0` and passes the two consistency checks by construction, but its public key is exactly the
+///   forgeable class the verifier rejects, so signing with it can only produce unverifiable
+///   signatures.
 ///
 /// Signing uses the stored `tr` (bound into the message digest) and `t0`
 /// (hint computation), so a blob with a corrupted `tr`/`t0` region would

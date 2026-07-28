@@ -68,15 +68,17 @@ pub const MAX_COMMITMENT_DATA_SIZE: usize =
 	MAX_K_ITERATIONS as usize * SINGLE_COMMITMENT_SIZE + 600_000;
 
 /// Upper bound on Round 3 response payload size (with margin).
-pub const MAX_RESPONSE_SIZE: usize =
-	MAX_K_ITERATIONS as usize * L * POLYZ_PACKEDBYTES + 800_000;
+pub const MAX_RESPONSE_SIZE: usize = MAX_K_ITERATIONS as usize * L * POLYZ_PACKEDBYTES + 800_000;
 
 /// Domain-separation / SSID protocol version (bumped for multi-variant suites).
 pub const THRESHOLD_SSID_VERSION: u32 = 3;
 
 /// Look up `k_iterations` for a supported `(t, n)` on this parameter set.
 pub fn k_iterations(t: u32, n: u32) -> Option<u32> {
-	tables::K_ITERATIONS.iter().find(|(tt, nn, _)| *tt == t && *nn == n).map(|(_, _, k)| *k)
+	tables::K_ITERATIONS
+		.iter()
+		.find(|(tt, nn, _)| *tt == t && *nn == n)
+		.map(|(_, _, k)| *k)
 }
 
 /// Look up hyperball `(r, r', nu)` for a supported `(t, n)`.

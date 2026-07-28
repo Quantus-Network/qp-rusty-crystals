@@ -146,10 +146,10 @@ use zeroize::Zeroize;
 
 use crate::{
 	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature, SSID_SIZE},
+	params::SINGLE_COMMITMENT_SIZE,
 	participants::{ParticipantId, ParticipantList},
 	protocol::signing::compute_ssid,
 	signer::ThresholdSigner,
-	params::SINGLE_COMMITMENT_SIZE,
 };
 
 // ============================================================================

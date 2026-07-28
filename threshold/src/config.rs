@@ -126,10 +126,7 @@ mod tests {
 		let config = ThresholdConfig::new(2, 3).unwrap();
 		assert_eq!(config.threshold(), 2);
 		assert_eq!(config.total_parties(), 3);
-		assert_eq!(
-			config.k_iterations(),
-			crate::params::k_iterations(2, 3).unwrap()
-		);
+		assert_eq!(config.k_iterations(), crate::params::k_iterations(2, 3).unwrap());
 	}
 
 	#[test]

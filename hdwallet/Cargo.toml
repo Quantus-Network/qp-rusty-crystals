@@ -43,7 +43,7 @@ rand.workspace = true
 rand_core.workspace = true
 
 [features]
-default = ["std", "ml-dsa-87"]
+default = ["ml-dsa-87", "std"]
 std = [
 	"serde/std",
 	"serde_json/std",

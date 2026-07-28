@@ -42,8 +42,8 @@ macro_rules! variant_tests {
 
 			#[test]
 			fn different_paths_derive_different_keys() {
-				let other = derive_key_from_mnemonic(MNEMONIC, None, "m/44'/189189'/1'/0'/0'")
-					.unwrap();
+				let other =
+					derive_key_from_mnemonic(MNEMONIC, None, "m/44'/189189'/1'/0'/0'").unwrap();
 				let base = derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
 				assert_ne!(base.public.bytes.to_vec(), other.public.bytes.to_vec());
 			}
@@ -94,17 +94,12 @@ fn top_level_api_is_ml_dsa_87() {
 #[test]
 fn variant_independent_surface_available() {
 	let mut seed = crate::mnemonic_to_seed(MNEMONIC.to_string(), None).unwrap();
-	let pair = crate::generate_wormhole_from_seed(
-		(&mut seed).into(),
-		"m/44'/189189189'/0'/0'/0'",
-	)
-	.unwrap();
+	let pair = crate::generate_wormhole_from_seed((&mut seed).into(), "m/44'/189189189'/0'/0'/0'")
+		.unwrap();
 	// Determinism of the variant-independent path.
 	let mut seed2 = crate::mnemonic_to_seed(MNEMONIC.to_string(), None).unwrap();
-	let pair2 = crate::generate_wormhole_from_seed(
-		(&mut seed2).into(),
-		"m/44'/189189189'/0'/0'/0'",
-	)
-	.unwrap();
+	let pair2 =
+		crate::generate_wormhole_from_seed((&mut seed2).into(), "m/44'/189189189'/0'/0'/0'")
+			.unwrap();
 	assert_eq!(pair.address, pair2.address);
 }

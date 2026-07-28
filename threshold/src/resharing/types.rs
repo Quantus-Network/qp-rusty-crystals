@@ -2213,8 +2213,11 @@ mod tests {
 	#[test]
 	fn test_resharing_accept_rejects_truncated_signature() {
 		// Honest round-trip still works.
-		let accept =
-			ResharingAccept { ssid: TEST_SSID, party_id: 3, signature: alloc::vec![0xAAu8; SIGNBYTES] };
+		let accept = ResharingAccept {
+			ssid: TEST_SSID,
+			party_id: 3,
+			signature: alloc::vec![0xAAu8; SIGNBYTES],
+		};
 		let bytes = borsh::to_vec(&accept).unwrap();
 		let back: ResharingAccept = borsh::from_slice(&bytes).unwrap();
 		assert_eq!(back.party_id, accept.party_id);

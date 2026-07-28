@@ -18,8 +18,8 @@
 //! Mapping to FIPS 204 / this crate:
 //!
 //! - keyGen: `seed` (xi) -> `keypair_var`, then checks `pk`, `sk`.
-//! - sigGen: `signature_var` runs `Sign_internal(sk, message, rnd)` (`rnd = 0^32` when the
-//!   group is `deterministic`, else the vector's `rnd`), then checks `signature`.
+//! - sigGen: `signature_var` runs `Sign_internal(sk, message, rnd)` (`rnd = 0^32` when the group is
+//!   `deterministic`, else the vector's `rnd`), then checks `signature`.
 //! - sigVer: `verify_var` runs `Verify_internal(pk, message, sig)` (includes
 //!   intentionally-corrupted cases), then checks `testPassed`.
 

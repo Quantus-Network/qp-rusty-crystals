@@ -34,7 +34,7 @@ hex-literal = { workspace = true }
 rand = { workspace = true }
 
 [features]
-default = ["std", "ml-dsa-87"]
+default = ["ml-dsa-87", "std"]
 std = ["zeroize/std"]
 ml-dsa-44 = ["qp-rusty-crystals-dilithium/ml-dsa-44"]
 ml-dsa-65 = ["qp-rusty-crystals-dilithium/ml-dsa-65"]

@@ -18,11 +18,13 @@ macro_rules! define_ml_dsa {
 	($params:path) => {
 		use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+		use core::fmt;
 		use $crate::{
 			errors::{KeyParsingError, KeyParsingError::BadSecretKey, SignatureError},
-			params::SEEDBYTES, polyvec::Polyvec, SensitiveBytes32,
+			params::SEEDBYTES,
+			polyvec::Polyvec,
+			SensitiveBytes32,
 		};
-		use core::fmt;
 
 		use $params::{
 			C_DASH_BYTES, ETA, GAMMA1, GAMMA2, K, L, OMEGA, POLYW1_PACKEDBYTES, POLYZ_PACKEDBYTES,
@@ -58,9 +60,11 @@ macro_rules! define_ml_dsa {
 			///
 			/// # Arguments
 			///
-			/// * 'entropy' - bytes for determining the generation process (must be at least 32 bytes)
+			/// * 'entropy' - bytes for determining the generation process (must be at least 32
+			///   bytes)
 			///
-			/// Note: The entropy is moved here and zeroized after use, along with the derived secret key.
+			/// Note: The entropy is moved here and zeroized after use, along with the derived
+			/// secret key.
 			pub fn generate(entropy: SensitiveBytes32) -> Keypair {
 				let mut pk = [0u8; PUBLICKEYBYTES];
 				let mut sk = [0u8; SECRETKEYBYTES];
@@ -169,9 +173,9 @@ macro_rules! define_ml_dsa {
 				let mut sk = Zeroizing::new([0u8; SECRETKEYBYTES]);
 				sk.copy_from_slice(bytes);
 				$crate::sign::public_key_from_secret_var::<K, L, ETA, PUBLICKEYBYTES, SECRETKEYBYTES>(
-					&sk,
-				)
-				.ok_or(BadSecretKey)?;
+							&sk,
+						)
+						.ok_or(BadSecretKey)?;
 				Ok(SecretKey { bytes: *sk })
 			}
 

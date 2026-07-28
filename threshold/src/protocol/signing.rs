@@ -14,8 +14,8 @@ use crate::{
 	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey},
 	params::{
-		self, BETA, C_DASH_BYTES, D, GAMMA1, GAMMA2, K, L, N, OMEGA, POLY_Q_PACKEDBYTES,
-		POLYW1_PACKEDBYTES, POLYZ_PACKEDBYTES, Q, SINGLE_COMMITMENT_SIZE, SUITE_ID, TAU,
+		self, BETA, C_DASH_BYTES, D, GAMMA1, GAMMA2, K, L, N, OMEGA, POLYW1_PACKEDBYTES,
+		POLYZ_PACKEDBYTES, POLY_Q_PACKEDBYTES, Q, SINGLE_COMMITMENT_SIZE, SUITE_ID, TAU,
 		THRESHOLD_SSID_VERSION,
 	},
 	participants::{ParticipantId, ParticipantList},

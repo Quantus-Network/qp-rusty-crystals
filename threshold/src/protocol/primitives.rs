@@ -37,9 +37,7 @@ use core::f64::consts::PI;
 use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::params::{
-	C_DASH_BYTES, GAMMA1, GAMMA2, K, L, N, POLY_Q_PACKEDBYTES, Q, SIGNBYTES,
-};
+use crate::params::{C_DASH_BYTES, GAMMA1, GAMMA2, K, L, N, POLY_Q_PACKEDBYTES, Q, SIGNBYTES};
 
 const Q_U32: u32 = Q as u32;
 const ALPHA: u32 = 2 * GAMMA2 as u32;

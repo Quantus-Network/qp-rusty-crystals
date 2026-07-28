@@ -18,5 +18,10 @@ pub use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, SecretKey, SIGNBYTES};
 #[cfg(all(test, feature = "ml-dsa-65", not(feature = "ml-dsa-87")))]
 pub use qp_rusty_crystals_dilithium::ml_dsa_65::{Keypair, SecretKey, SIGNBYTES};
 
-#[cfg(all(test, feature = "ml-dsa-44", not(feature = "ml-dsa-87"), not(feature = "ml-dsa-65")))]
+#[cfg(all(
+	test,
+	feature = "ml-dsa-44",
+	not(feature = "ml-dsa-87"),
+	not(feature = "ml-dsa-65")
+))]
 pub use qp_rusty_crystals_dilithium::ml_dsa_44::{Keypair, SecretKey, SIGNBYTES};

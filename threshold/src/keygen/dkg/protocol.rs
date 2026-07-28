@@ -37,9 +37,7 @@ use crate::participants::ParticipantId;
 
 use qp_rusty_crystals_dilithium::fips202;
 
-use crate::{
-	params::{K, L, N},
-};
+use crate::params::{K, L, N};
 
 /// Maximum DKG message size in bytes (256 KB).
 /// Maximum size of a serialized DKG message (256 KB).
