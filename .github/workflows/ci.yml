@@ -112,10 +112,14 @@ jobs:
       # wasm32v1-none is the target used by Substrate runtimes (chain, chain-update2512,
       # libp2p-identity-pqc, qp-libp2p-identity) which depend on these crates as no_std.
       # A regression here breaks the entire downstream stack.
+      # The ml-dsa-* features must be listed explicitly: the frontends are
+      # feature-gated, so a bare --no-default-features build compiles only the
+      # generic core and would let a no_std regression in the public signing
+      # API slip through. All three variants are built to cover every frontend.
       - name: Build dilithium for wasm32v1-none (no_std)
-        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-dilithium --no-default-features
+        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-dilithium --no-default-features --features ml-dsa-44,ml-dsa-65,ml-dsa-87
       - name: Build hdwallet for wasm32v1-none (no_std)
-        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-hdwallet --no-default-features
+        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-hdwallet --no-default-features --features ml-dsa-44,ml-dsa-65,ml-dsa-87
 
   analysis:
     name: 🤖 Analysis (Clippy & Doc)
