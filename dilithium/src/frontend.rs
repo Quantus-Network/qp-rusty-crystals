@@ -173,9 +173,9 @@ macro_rules! define_ml_dsa {
 				let mut sk = Zeroizing::new([0u8; SECRETKEYBYTES]);
 				sk.copy_from_slice(bytes);
 				$crate::sign::public_key_from_secret_var::<K, L, ETA, PUBLICKEYBYTES, SECRETKEYBYTES>(
-							&sk,
-						)
-						.ok_or(BadSecretKey)?;
+									&sk,
+								)
+								.ok_or(BadSecretKey)?;
 				Ok(SecretKey { bytes: *sk })
 			}
 
