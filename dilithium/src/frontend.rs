@@ -64,24 +64,24 @@ macro_rules! define_ml_dsa {
 		/// directly; all three rely on this invariant. A mismatched keypair does not
 		/// compile:
 		#[doc = concat!(
-							"```compile_fail\n",
-							"use qp_rusty_crystals_dilithium::", stringify!($mod_name),
-							"::{Keypair, PublicKey, SecretKey};\n",
-							"\n",
-							"fn forge(secret: SecretKey, public: PublicKey) -> Keypair {\n",
-							"    Keypair { secret, public } // ERROR: fields are private\n",
-							"}\n",
-							"```\n",
-							"\n",
-							"```compile_fail\n",
-							"use qp_rusty_crystals_dilithium::", stringify!($mod_name),
-							"::{Keypair, PublicKey};\n",
-							"\n",
-							"fn swap_public(kp: &mut Keypair, other: PublicKey) {\n",
-							"    kp.public = other; // ERROR: field is private\n",
-							"}\n",
-							"```",
-						)]
+									"```compile_fail\n",
+									"use qp_rusty_crystals_dilithium::", stringify!($mod_name),
+									"::{Keypair, PublicKey, SecretKey};\n",
+									"\n",
+									"fn forge(secret: SecretKey, public: PublicKey) -> Keypair {\n",
+									"    Keypair { secret, public } // ERROR: fields are private\n",
+									"}\n",
+									"```\n",
+									"\n",
+									"```compile_fail\n",
+									"use qp_rusty_crystals_dilithium::", stringify!($mod_name),
+									"::{Keypair, PublicKey};\n",
+									"\n",
+									"fn swap_public(kp: &mut Keypair, other: PublicKey) {\n",
+									"    kp.public = other; // ERROR: field is private\n",
+									"}\n",
+									"```",
+								)]
 		pub struct Keypair {
 			secret: SecretKey,
 			public: PublicKey,
@@ -289,9 +289,9 @@ macro_rules! define_ml_dsa {
 				let mut sk = Zeroizing::new([0u8; SECRETKEYBYTES]);
 				sk.copy_from_slice(bytes);
 				$crate::sign::public_key_from_secret_var::<K, L, ETA, PUBLICKEYBYTES, SECRETKEYBYTES>(
-													&sk,
-												)
-												.ok_or(BadSecretKey)?;
+															&sk,
+														)
+														.ok_or(BadSecretKey)?;
 				Ok(SecretKey { bytes: *sk })
 			}
 
