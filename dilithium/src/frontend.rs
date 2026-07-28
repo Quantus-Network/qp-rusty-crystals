@@ -9,15 +9,13 @@
 
 /// Define the public ML-DSA API for one parameter-set module.
 ///
-/// `$mod_name` is the identifier of the invoking module (used to render the
-/// doc examples with the correct path). `$params` must be a path to a module
-/// exposing the FIPS 204 constants
+/// `$params` must be a path to a module exposing the FIPS 204 constants
 /// (`K`, `L`, `ETA`, `TAU`, `GAMMA1`, `GAMMA2`, `OMEGA`, `C_DASH_BYTES`,
 /// `POLYZ_PACKEDBYTES`, `POLYW1_PACKEDBYTES`, `PUBLICKEYBYTES`,
 /// `SECRETKEYBYTES`, `SIGNBYTES`) — i.e. one of [`crate::params::ml_dsa_44`],
 /// [`crate::params::ml_dsa_65`], or [`crate::params::ml_dsa_87`].
 macro_rules! define_ml_dsa {
-	($mod_name:ident, $params:path) => {
+	($params:path) => {
 		use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 		use core::fmt;
@@ -62,26 +60,24 @@ macro_rules! define_ml_dsa {
 		/// independently. [`sign`](Self::sign) and [`verify`](Self::verify) delegate
 		/// to the respective halves, and [`to_bytes`](Self::to_bytes) serializes them
 		/// directly; all three rely on this invariant. A mismatched keypair does not
-		/// compile:
-		#[doc = concat!(
-											"```compile_fail\n",
-											"use qp_rusty_crystals_dilithium::", stringify!($mod_name),
-											"::{Keypair, PublicKey, SecretKey};\n",
-											"\n",
-											"fn forge(secret: SecretKey, public: PublicKey) -> Keypair {\n",
-											"    Keypair { secret, public } // ERROR: fields are private\n",
-											"}\n",
-											"```\n",
-											"\n",
-											"```compile_fail\n",
-											"use qp_rusty_crystals_dilithium::", stringify!($mod_name),
-											"::{Keypair, PublicKey};\n",
-											"\n",
-											"fn swap_public(kp: &mut Keypair, other: PublicKey) {\n",
-											"    kp.public = other; // ERROR: field is private\n",
-											"}\n",
-											"```",
-										)]
+		/// compile (illustrated with `ml_dsa_87`; the same privacy holds on every
+		/// parameter-set module):
+		///
+		/// ```compile_fail
+		/// use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, PublicKey, SecretKey};
+		///
+		/// fn forge(secret: SecretKey, public: PublicKey) -> Keypair {
+		///     Keypair { secret, public } // ERROR: fields are private
+		/// }
+		/// ```
+		///
+		/// ```compile_fail
+		/// use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, PublicKey};
+		///
+		/// fn swap_public(kp: &mut Keypair, other: PublicKey) {
+		///     kp.public = other; // ERROR: field is private
+		/// }
+		/// ```
 		pub struct Keypair {
 			secret: SecretKey,
 			public: PublicKey,
@@ -288,10 +284,14 @@ macro_rules! define_ml_dsa {
 				}
 				let mut sk = Zeroizing::new([0u8; SECRETKEYBYTES]);
 				sk.copy_from_slice(bytes);
-				$crate::sign::public_key_from_secret_var::<K, L, ETA, PUBLICKEYBYTES, SECRETKEYBYTES>(
-																	&sk,
-																)
-																.ok_or(BadSecretKey)?;
+				let pk_ok = $crate::sign::public_key_from_secret_var::<
+					K,
+					L,
+					ETA,
+					PUBLICKEYBYTES,
+					SECRETKEYBYTES,
+				>(&sk);
+				pk_ok.ok_or(BadSecretKey)?;
 				Ok(SecretKey { bytes: *sk })
 			}
 

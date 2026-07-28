@@ -82,7 +82,7 @@ jobs:
       - name: Install Rust toolchain (from rust-toolchain file)
         run: |
           rustup toolchain install
-          rustup component add rustfmt --toolchain nightly
+          rustup toolchain install nightly-2026-03-31 --profile minimal -c rustfmt
 
       - name: Install taplo
         run: cargo install taplo-cli --locked
@@ -90,7 +90,7 @@ jobs:
       - name: Run format checks
         run: |
           taplo format --check --config taplo.toml
-          cargo +nightly fmt --all -- --check
+          cargo +nightly-2026-03-31 fmt --all -- --check
 
   build-and-test:
     name: Build & Test Threshold

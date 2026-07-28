@@ -3,7 +3,7 @@
 //! Thin frontend over the const-generic signing core, instantiated at the
 //! [`crate::params::ml_dsa_87`] parameter set.
 
-crate::frontend::define_ml_dsa!(ml_dsa_87, crate::params::ml_dsa_87);
+crate::frontend::define_ml_dsa!(crate::params::ml_dsa_87);
 
 #[cfg(test)]
 mod tests {
