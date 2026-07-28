@@ -7,7 +7,7 @@ This module implements resharing for threshold ML-DSA, allowing the participant 
 > variant. The concrete numbers in this document (`τ = 60`, `ν = 7`, the `B`/κ/`K`
 > tables) are for **ML-DSA-87**, the fully analyzed default. Per-variant status:
 > 87 supports all documented committees; 44 supports resharing with κ-enlarged
-> params for (2,4)/(3,5) (K = 16/696) but **fails closed for reshares into (4,6)**
+> params for (2,4)/(3,5) (K = 14/488) but **fails closed for reshares into (4,6)**
 > (κ-enlargement is infeasible under its verification ceilings); 65 reshares at
 > κ = 1 everywhere (measured overshoots 0.62–0.92) with a weaker quantitative
 > hiding margin because its η = 4 keygen variance exceeds the η = 2-tuned split

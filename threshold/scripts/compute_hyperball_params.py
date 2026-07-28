@@ -125,20 +125,31 @@ def make_hint(z: int, r: int, alpha: int, q: int) -> int:
     return int(r1 != v1)
 
 
+def highbits_vec(r: np.ndarray, alpha: int, q: int) -> np.ndarray:
+    """Vectorized [`highbits`] over an int64 array (identical semantics)."""
+    r = r % q  # numpy % matches Python % for positive modulus
+    r0 = r % alpha
+    r0 = np.where(r0 > alpha // 2, r0 - alpha, r0)
+    hb = (r - r0) // alpha
+    return np.where(r - r0 == q - 1, 0, hb)
+
+
+def make_hint_count(z: np.ndarray, r: np.ndarray, alpha: int, q: int) -> int:
+    """Vectorized sum of [`make_hint`] over coefficient arrays."""
+    return int(np.count_nonzero(highbits_vec(r, alpha, q) != highbits_vec(r + z, alpha, q)))
+
+
 def poly_mul_mod(a: np.ndarray, b: np.ndarray, n: int = 256) -> np.ndarray:
     """
     Multiply two polynomials mod X^n + 1.
     
     Uses convolution and reduction.
     """
-    # Full convolution
+    # Full convolution (length 2n-1)
     c = np.convolve(a, b)
-    # Reduce mod X^n + 1: coefficients at degree >= n get subtracted from degree - n
-    result = np.zeros(n, dtype=np.int64)
-    for i, coef in enumerate(c):
-        idx = i % n
-        sign = 1 if (i // n) % 2 == 0 else -1
-        result[idx] += sign * coef
+    # Reduce mod X^n + 1: degree n+i wraps to degree i with sign -1.
+    result = c[:n].astype(np.int64, copy=True)
+    result[: c.shape[0] - n] -= c[n:]
     return result
 
 
@@ -198,9 +209,8 @@ def evaluate_proba_success(
             # Check norm
             max_norm_v = max(max_norm_v, np.max(np.abs(v_j)))
             
-            # Compute hints
-            for i in range(params.n):
-                total_hints += make_hint(int(v_j[i]), int(w_j[i]), alpha, params.q)
+            # Compute hints (vectorized make_hint over the polynomial)
+            total_hints += make_hint_count(v_j, w_j, alpha, params.q)
         
         # Check 2: ||v||_∞ ≤ γ2
         if max_norm_v <= params.gamma2:
@@ -338,9 +348,9 @@ RESHARING_DATA = {
         ship_k={(2, 2): 4, (2, 3): 5, (2, 4): 10, (3, 5): 60, (4, 6): 1600},
     ),
     44: dict(
-        fact=6.0,
-        ref_r={(2, 2): 164656.6, (2, 3): 175209.0, (2, 4): 175209.0,
-               (3, 5): 149931.1, (4, 6): 140270.0},
+        fact=5.0,
+        ref_r={(2, 2): 206062.2, (2, 3): 218932.3, (2, 4): 218932.3,
+               (3, 5): 186602.5, (4, 6): 174241.4},
         overshoot={(2, 2): 0.794, (2, 3): 0.827, (2, 4): 0.991,
                    (3, 5): 1.023, (4, 6): 1.166},
         # Same enlargements as ML-DSA-87: the measured overshoots are nearly
@@ -434,7 +444,7 @@ def emit_rust_tables(variant: int, results: list[dict], default_fact: float):
     print(f"// Auto-generated hyperball tables for ML-DSA-{variant}")
     print("pub(super) const K_ITERATIONS: &[(u32, u32, u32)] = &[")
     for r in results:
-        # 2x MC margin (same convention used for provisional 44/65 tables)
+        # 2x MC margin (same convention as the shipped 44/65 tables)
         k = max(1, int(ceil(2 * r["k"]))) if r["k"] < 9999 else 9999
         print(f"\t({r['t']}, {r['n']}, {k}),")
     print("];")
@@ -443,6 +453,118 @@ def emit_rust_tables(variant: int, results: list[dict], default_fact: float):
     for r in results:
         fact = r["fact"] if r["fact"] else default_fact
         print(f"\t({r['t']}, {r['n']}, {r['r']:.1f}, {r['r_prime']:.1f}, {fact:.1f}),")
+    print("];")
+
+
+# Shipped (t, n, r, r', fact, k_shipped, kappa) for refine-shipped. Radii stay
+# fixed; only K is re-estimated at higher sample counts. Keep in sync with
+# params_tables_{44,65}.rs (including kappa-enlarged radii on 44).
+#
+# Radii come from the vectorized full grid search at 2000 MC samples
+# (`--variant {44,65} --nbsamples 2000`); kappa-enlarged entries are the base
+# grid radii scaled by the config's resharing kappa. `kappa` is recorded so the
+# refine recovers the acceptance exponent from the *base* radius r/kappa
+# (scaling (B, r, r') jointly leaves the rejection factor unchanged) while the
+# Monte Carlo runs at the enlarged radius.
+SHIPPED_TABLES = {
+    44: [
+        # (t, n, r, r', fact, k_shipped, kappa)
+        (2, 2, 206062.2, 206125.0, 5.0, 6, 1.0),
+        (2, 3, 218932.3, 219021.2, 5.0, 10, 1.0),
+        (3, 3, 185560.8, 185623.7, 5.0, 16, 1.0),
+        (2, 4, 240825.5, 240923.3, 5.0, 14, 1.10),  # kappa-enlarged
+        (3, 4, 187867.2, 187956.2, 5.0, 38, 1.0),
+        (4, 4, 154808.5, 154871.4, 5.0, 48, 1.0),
+        (2, 5, 214870.5, 214979.6, 5.0, 14, 1.0),
+        (3, 5, 214592.9, 214738.1, 5.0, 488, 1.15),  # kappa-enlarged
+        (4, 5, 165700.1, 165809.5, 5.0, 494, 1.0),
+        (5, 5, 147486.4, 147549.4, 5.0, 170, 1.0),
+        (2, 6, 214870.5, 214979.6, 5.0, 14, 1.0),
+        (3, 6, 189871.9, 190013.3, 5.0, 210, 1.0),
+        (4, 6, 174241.4, 174383.0, 5.0, 2450, 1.0),  # base; reshare into (4,6) fails closed
+        (5, 6, 149764.6, 149874.1, 5.0, 4196, 1.0),
+        (6, 6, 137723.6, 137786.6, 5.0, 684, 1.0),
+    ],
+    65: [
+        (2, 2, 529159.1, 529276.3, 6.0, 6, 1.0),
+        (2, 3, 560822.1, 560987.7, 7.0, 10, 1.0),
+        (3, 3, 475166.1, 475283.1, 7.0, 18, 1.0),
+        (2, 4, 559722.0, 559887.3, 8.0, 12, 1.0),
+        (3, 4, 519627.5, 519793.8, 6.0, 40, 1.0),
+        (4, 4, 454072.6, 454189.9, 6.0, 52, 1.0),
+        (2, 5, 550711.2, 550914.6, 7.0, 16, 1.0),
+        (3, 5, 563613.5, 563849.4, 6.0, 128, 1.0),
+        (4, 5, 501199.2, 501402.8, 7.0, 432, 1.0),
+        (5, 5, 418504.7, 418622.2, 6.0, 160, 1.0),
+        (2, 6, 549630.9, 549833.9, 8.0, 16, 1.0),
+        (3, 6, 564634.4, 564898.5, 6.0, 192, 1.0),
+        (4, 6, 530263.4, 530527.7, 6.0, 1546, 1.0),
+        (5, 6, 493841.9, 494046.2, 6.0, 2444, 1.0),
+        (6, 6, 414896.4, 415013.8, 6.0, 538, 1.0),
+    ],
+}
+
+
+def refine_shipped_tables(variant: int, nbsamples: int = 4000):
+    """
+    Re-estimate K at the *shipped* radii with a high sample count.
+
+    Refining the already-chosen (r, r', fact) points is one Monte Carlo run
+    per committee and is what raises confidence in the shipped K values. Radii
+    are kept unchanged. K := max(k_shipped, 2×K_mc); with k_shipped = 0 the
+    refine output *defines* K (used when the radii come from a fresh grid
+    search and no prior K needs preserving).
+    """
+    if variant not in SHIPPED_TABLES:
+        raise SystemExit(f"--refine-shipped unsupported for variant {variant}")
+
+    params = VARIANT_PARAMS[variant]
+    eta = ETA_RS[variant]
+    print("=" * 70)
+    print(f"Refining shipped K for ML-DSA-{variant} at {nbsamples} MC samples")
+    print("(radii fixed; K := max(shipped, 2×K_mc))")
+    print("=" * 70)
+    header = f"{'cfg':>6} {'fact':>5} {'r':>10} {'p_final':>9} {'K_mc':>6} {'K_2x':>6} {'K_old':>6} {'K_new':>6} {'delta':>7}"
+    print(header)
+
+    results = []
+    for t, n, r, r_prime, fact, k_old, kappa in SHIPPED_TABLES[variant]:
+        # Kappa-enlarged entries keep the base radius' acceptance exponent:
+        # (B, r, r') scale jointly, which is invariant in the radius condition.
+        expo = recover_expo(t, n, fact, eta, params, r / kappa)
+        p_accept = 1.0 / (2 ** expo)
+        pr = evaluate_proba_success(
+            lambda r=r, f=fact: sample_t_parties(t, r, f, params),
+            nbsamples,
+            params,
+        )
+        p_final = p_accept * pr["checknorminf_r1"] * pr["checknorminf_r2mcto"] * pr["checkhint"]
+        k_mc = ceil(-1 / log(1 - p_final, 2)) if 0 < p_final < 1 else (1 if p_final >= 1 else 9999)
+        k_2x = max(1, 2 * k_mc) if k_mc < 9999 else 9999
+        k_new = max(k_old, k_2x)
+        delta = k_new - k_old
+        print(
+            f"{f'{t}-{n}':>6} {fact:>5.1f} {r:>10.1f} {p_final:>9.5f} "
+            f"{k_mc:>6} {k_2x:>6} {k_old:>6} {k_new:>6} {delta:>+7}"
+        )
+        results.append({
+            "t": t, "n": n, "r": r, "r_prime": r_prime,
+            "fact": fact, "k": k_new / 2.0,  # emit_rust_tables applies 2×
+            "k_new": k_new,
+        })
+
+    # Emit with the already-margined K (skip the extra 2× in emit_rust_tables).
+    print("\n" + "=" * 70)
+    print(f"// Refined hyperball tables for ML-DSA-{variant}")
+    print(f"// (radii from prior grid search; K re-estimated at {nbsamples} MC samples, 2× margin)")
+    print("pub(super) const K_ITERATIONS: &[(u32, u32, u32)] = &[")
+    for r in results:
+        print(f"\t({r['t']}, {r['n']}, {r['k_new']}),")
+    print("];")
+    print()
+    print("pub(super) const HYPERBALL: &[(u32, u32, f64, f64, f64)] = &[")
+    for r in results:
+        print(f"\t({r['t']}, {r['n']}, {r['r']:.1f}, {r['r_prime']:.1f}, {r['fact']:.1f}),")
     print("];")
 
 
@@ -458,11 +580,21 @@ def main():
     parser.add_argument("--resharing-only", action="store_true",
                         help="Skip the base grid search; only compute the "
                              "variant's resharing-enlarged params")
+    parser.add_argument("--refine-shipped", action="store_true",
+                        help="Re-estimate K at the shipped radii (no grid search); "
+                             "default samples raised to 4000")
     args = parser.parse_args()
 
     params = VARIANT_PARAMS[args.variant]
     eta = ETA_RS[args.variant]
     fact0 = FACT_DEFAULT[args.variant]
+
+    if args.refine_shipped:
+        nbs = args.nbsamples if args.nbsamples != 400 else 4000
+        refine_shipped_tables(args.variant, nbsamples=nbs)
+        if args.resharing or args.resharing_only:
+            compute_resharing_params(args.variant, nbsamples=max(nbs, 8000))
+        return
 
     if args.resharing_only:
         compute_resharing_params(args.variant, nbsamples=max(args.nbsamples, 8000))

@@ -24,10 +24,10 @@ is per variant:
 - **ML-DSA-44**: measured overshoots are nearly identical to 87 — (2,2) 0.794,
   (2,3) 0.827, (2,4) 0.991, (3,5) 1.023, (4,6) 1.166. (2,4) and (3,5) ship the
   same κ = 1.10/1.15 with radii and `K` re-derived at the enlarged radius
-  (K = 16 and 696; the tighter 44 verification ceilings, γ₁ = 2¹⁷ and
+  (K = 14 and 488; the tighter 44 verification ceilings, γ₁ = 2¹⁷ and
   γ₂ = (Q−1)/88, make enlargement much more expensive than on 87).
   **(4,6) is not reshare-supported on 44**: at κ = 1.25 the Monte-Carlo `K` is
-  ≈ 5.8·10⁵ (infeasible), so the table ships κ = 1 and the Round-5 guard
+  ≈ 10⁶ (infeasible), so the table ships κ = 1 and the Round-5 guard
   rejects honest reshares into 4-of-6 — fail closed, never fail open. Freshly
   dealt/DKG 4-of-6 committees sign normally at base parameters.
 - **ML-DSA-65**: measured overshoots are below 1 everywhere — (2,2) 0.620,
@@ -41,11 +41,12 @@ is per variant:
   re-deriving κ and the radii, since overshoots would rise) is future
   calibration work.
 
-The 44/65 signing tables themselves remain provisional (400-sample Monte Carlo
-with 2× K margin; see the crate README). Overshoots above were measured with
-the Rust `test_recovered_partial_variance_*` tests built with the respective
-feature; the enlarged 44 entries were derived with
-`scripts/compute_hyperball_params.py --variant 44 --resharing-only`.
+The 44/65 signing tables were calibrated with a full grid search at 2,000
+Monte-Carlo samples per point, with `K` then re-estimated at the chosen radii
+with 8,000 samples and a 2× margin (see the crate README). Overshoots above
+were measured with the Rust `test_recovered_partial_variance_*` tests built
+with the respective feature; the enlarged 44 entries were derived with
+`scripts/compute_hyperball_params.py --variant 44 --refine-shipped`.
 
 ## Protocol Summary
 
