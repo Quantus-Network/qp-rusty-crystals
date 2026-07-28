@@ -191,7 +191,7 @@ fn sign_sk_expansion(runner: &mut CtRunner, rng: &mut BenchRng) {
 		rng.fill_bytes(&mut entropy);
 		let keypair = Keypair::generate((&mut entropy).into());
 		// Bench-only throwaway keys: copy out of the self-wiping buffer.
-		*keypair.secret.to_bytes()
+		*keypair.secret().to_bytes()
 	};
 
 	let fixed = gen_sk(rng);

@@ -22,13 +22,13 @@ macro_rules! variant_tests {
 			fn derivation_is_deterministic_and_matches_seed_entrypoint() {
 				let key1 = derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
 				let key2 = derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
-				assert_eq!(key1.secret.to_bytes(), key2.secret.to_bytes());
-				assert_eq!(key1.public.bytes, key2.public.bytes);
+				assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
+				assert_eq!(key1.public().bytes, key2.public().bytes);
 
 				let mut seed = mnemonic_to_seed(MNEMONIC.to_string(), None).unwrap();
 				let key3 =
 					crate::$mod_name::derive_key_from_seed((&mut seed).into(), PATH).unwrap();
-				assert_eq!(key1.secret.to_bytes(), key3.secret.to_bytes());
+				assert_eq!(key1.secret().to_bytes(), key3.secret().to_bytes());
 			}
 
 			#[test]
@@ -45,7 +45,7 @@ macro_rules! variant_tests {
 				let other =
 					derive_key_from_mnemonic(MNEMONIC, None, "m/44'/189189'/1'/0'/0'").unwrap();
 				let base = derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
-				assert_ne!(base.public.bytes.to_vec(), other.public.bytes.to_vec());
+				assert_ne!(base.public().bytes.to_vec(), other.public().bytes.to_vec());
 			}
 
 			#[test]
@@ -73,9 +73,9 @@ fn same_path_yields_independent_keys_per_variant() {
 	// Sizes differ per variant; compare the leading bytes of the packed keys
 	// (rho, the first 32 bytes, is derived from H(seed || k || l) and must
 	// already diverge).
-	assert_ne!(k44.public.bytes[..32], k65.public.bytes[..32]);
-	assert_ne!(k44.public.bytes[..32], k87.public.bytes[..32]);
-	assert_ne!(k65.public.bytes[..32], k87.public.bytes[..32]);
+	assert_ne!(k44.public().bytes[..32], k65.public().bytes[..32]);
+	assert_ne!(k44.public().bytes[..32], k87.public().bytes[..32]);
+	assert_ne!(k65.public().bytes[..32], k87.public().bytes[..32]);
 }
 
 /// The top-level (historical) API must remain byte-identical to the
@@ -85,8 +85,8 @@ fn same_path_yields_independent_keys_per_variant() {
 fn top_level_api_is_ml_dsa_87() {
 	let via_top = crate::derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
 	let via_module = crate::ml_dsa_87::derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
-	assert_eq!(via_top.secret.to_bytes(), via_module.secret.to_bytes());
-	assert_eq!(via_top.public.bytes, via_module.public.bytes);
+	assert_eq!(via_top.secret().to_bytes(), via_module.secret().to_bytes());
+	assert_eq!(via_top.public().bytes, via_module.public().bytes);
 }
 
 /// Wormhole and mnemonic handling are parameter-set independent and must work

@@ -78,7 +78,7 @@ fn sk_pattern(sk_bytes: &[u8; SECRETKEYBYTES]) -> [u8; 32] {
 fn key_import_and_serialize_leave_no_secret_copies_on_the_stack() {
 	let keypair = Keypair::generate((&mut [0x5Au8; 32]).into());
 	let kp_bytes = keypair.to_bytes();
-	let sk_bytes = keypair.secret.to_bytes();
+	let sk_bytes = keypair.secret().to_bytes();
 	let pattern = sk_pattern(&sk_bytes);
 
 	// Sanity: the technique detects an unwiped copy. A closure that
@@ -98,7 +98,7 @@ fn key_import_and_serialize_leave_no_secret_copies_on_the_stack() {
 	let keypair_import_leaked = probe_stack_for(&pattern, || {
 		let mut imported = Keypair::from_bytes(kp_bytes.as_slice());
 		if let Ok(kp) = imported.as_mut() {
-			kp.secret.zeroize();
+			kp.zeroize();
 		}
 	});
 
@@ -122,7 +122,7 @@ fn key_import_and_serialize_leave_no_secret_copies_on_the_stack() {
 
 	// Scenario D: SecretKey::to_bytes, same contract as C.
 	let sk_serialize_leaked = probe_stack_for(&pattern, || {
-		let serialized = keypair.secret.to_bytes();
+		let serialized = keypair.secret().to_bytes();
 		core::hint::black_box(&serialized);
 	});
 

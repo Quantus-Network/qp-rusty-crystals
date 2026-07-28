@@ -152,6 +152,22 @@ pub(crate) fn keypair_var<
 /// avoids ever signing with an inconsistent key (corrupted-key signing is the
 /// setup for fault-style analyses on Dilithium).
 ///
+/// # What this validation cannot cover: the nonce seed `K`
+///
+/// The packed key's `K` field (the seed for the signing mask `ρ' =
+/// H(K || rnd || μ)`) is unpacked but deliberately not checked — it *cannot*
+/// be. `K` is independent entropy squeezed from the keygen seed alongside
+/// `rho`/`rhoprime`, and the seed itself is not stored, so no stored field
+/// can re-derive or commit to it; under FIPS 204 every 32-byte `K` forms a
+/// valid key. Consequence: an attacker with write access to a stored key
+/// blob can silently replace `K` — every check here still passes, and
+/// signatures still verify under the unchanged public key — and *known-K
+/// deterministic* signatures become known-mask signatures, from which the
+/// secret vector can be recovered. Callers must integrity-protect secret-key
+/// storage (this crate keeps the standard FIPS 204 encoding, which has no
+/// slot for an integrity tag), or use hedged signing (`hedge: Some(fresh
+/// randomness)`), which keeps `ρ'` unpredictable even for a known `K`.
+///
 /// Returns `None` if either invariant is violated. The comparisons are not
 /// constant-time; timing can only differ for an already-corrupted blob, and
 /// the honest path compares all-equal data.
@@ -471,7 +487,10 @@ fn generate_challenge_polynomial<
 	fips202::shake256_squeeze(&mut signature_buffer[..CD], &mut keccak_state);
 
 	let mut challenge_poly_c = Poly::default();
-	poly::challenge::<TAU>(&mut challenge_poly_c, &signature_buffer[..CD]);
+	let challenge_seed = signature_buffer
+		.first_chunk::<CD>()
+		.expect("signature buffer covers the challenge seed");
+	poly::challenge::<TAU, CD>(&mut challenge_poly_c, challenge_seed);
 	poly::ntt(&mut challenge_poly_c);
 	challenge_poly_c
 }
@@ -655,7 +674,7 @@ pub(crate) fn verify_var<
 	fips202::shake256_finalize(&mut state);
 	fips202::shake256_squeeze(&mut mu, &mut state);
 
-	poly::challenge::<TAU>(&mut cp, &c);
+	poly::challenge::<TAU, CD>(&mut cp, &c);
 
 	polyvec::ntt(&mut z);
 	polyvec::matrix_pointwise_montgomery_streamed(&mut w1, &rho, &z);
@@ -1039,7 +1058,10 @@ mod tests {
 		let unpacked =
 			unpack_secret_key_for_signing::<K, L, { params::ETA }, { params::SECRETKEYBYTES }>(sk); // s1 already in NTT domain
 		let mut challenge_poly = Poly::default();
-		poly::challenge::<{ params::TAU }>(&mut challenge_poly, &challenge_seed);
+		poly::challenge::<{ params::TAU }, { params::C_DASH_BYTES }>(
+			&mut challenge_poly,
+			&challenge_seed,
+		);
 		poly::ntt(&mut challenge_poly);
 
 		let mut cs1 = Polyvec::<L>::default();

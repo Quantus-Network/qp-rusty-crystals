@@ -165,11 +165,11 @@ macro_rules! impl_has_nist_kat_api {
 	($module:ident) => {
 		impl HasNistKatApi for qp_rusty_crystals_dilithium::$module::Keypair {
 			fn public_bytes(&self) -> Vec<u8> {
-				self.public.to_bytes().to_vec()
+				self.public().to_bytes().to_vec()
 			}
 
 			fn secret_bytes(&self) -> Vec<u8> {
-				self.secret.to_bytes().to_vec()
+				self.secret().to_bytes().to_vec()
 			}
 
 			fn verify_msg(&self, msg: &[u8], sig: &[u8]) -> bool {

@@ -9,13 +9,15 @@
 
 /// Define the public ML-DSA API for one parameter-set module.
 ///
-/// `$params` must be a path to a module exposing the FIPS 204 constants
+/// `$mod_name` is the identifier of the invoking module (used to render the
+/// doc examples with the correct path). `$params` must be a path to a module
+/// exposing the FIPS 204 constants
 /// (`K`, `L`, `ETA`, `TAU`, `GAMMA1`, `GAMMA2`, `OMEGA`, `C_DASH_BYTES`,
 /// `POLYZ_PACKEDBYTES`, `POLYW1_PACKEDBYTES`, `PUBLICKEYBYTES`,
 /// `SECRETKEYBYTES`, `SIGNBYTES`) — i.e. one of [`crate::params::ml_dsa_44`],
 /// [`crate::params::ml_dsa_65`], or [`crate::params::ml_dsa_87`].
 macro_rules! define_ml_dsa {
-	($params:path) => {
+	($mod_name:ident, $params:path) => {
 		use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 		use core::fmt;
@@ -48,11 +50,42 @@ macro_rules! define_ml_dsa {
 		///
 		/// `Clone` is intentionally not derived because the embedded `SecretKey` is sensitive.
 		/// To explicitly copy a keypair (e.g. to move it into a closure), serialize and
-		/// reconstruct: `Keypair::from_bytes(&keypair.to_bytes())?`. This forces the
-		/// duplication of secret material to be visible at every call site.
+		/// reconstruct: `Keypair::from_bytes(keypair.to_bytes().as_slice())?`. This forces
+		/// the duplication of secret material to be visible at every call site.
+		///
+		/// # Invariant
+		///
+		/// The public half always corresponds to the secret half. Every constructor
+		/// enforces it — [`Keypair::generate`] by construction, [`Keypair::from_bytes`]
+		/// and [`Keypair::from_parts`] by re-deriving the public key from the secret —
+		/// and the fields are private, so the halves cannot be assembled or swapped
+		/// independently. [`sign`](Self::sign) and [`verify`](Self::verify) delegate
+		/// to the respective halves, and [`to_bytes`](Self::to_bytes) serializes them
+		/// directly; all three rely on this invariant. A mismatched keypair does not
+		/// compile:
+		///
+		#[doc = concat!(
+			"```compile_fail\n",
+			"use qp_rusty_crystals_dilithium::", stringify!($mod_name),
+			"::{Keypair, PublicKey, SecretKey};\n",
+			"\n",
+			"fn forge(secret: SecretKey, public: PublicKey) -> Keypair {\n",
+			"    Keypair { secret, public } // ERROR: fields are private\n",
+			"}\n",
+			"```\n",
+			"\n",
+			"```compile_fail\n",
+			"use qp_rusty_crystals_dilithium::", stringify!($mod_name),
+			"::{Keypair, PublicKey};\n",
+			"\n",
+			"fn swap_public(kp: &mut Keypair, other: PublicKey) {\n",
+			"    kp.public = other; // ERROR: field is private\n",
+			"}\n",
+			"```",
+		)]
 		pub struct Keypair {
-			pub secret: SecretKey,
-			pub public: PublicKey,
+			secret: SecretKey,
+			public: PublicKey,
 		}
 
 		impl Keypair {
@@ -82,6 +115,43 @@ macro_rules! define_ml_dsa {
 				keypair
 			}
 
+			/// The secret half.
+			pub fn secret(&self) -> &SecretKey {
+				&self.secret
+			}
+
+			/// The public half.
+			pub fn public(&self) -> &PublicKey {
+				&self.public
+			}
+
+			/// Assemble a keypair from an already-imported secret and public key.
+			///
+			/// Enforces the same correspondence invariant as [`Keypair::from_bytes`]:
+			/// the public key is re-derived from the secret half (a keygen-scale
+			/// computation) and must match `public` exactly, otherwise
+			/// [`KeyParsingError::BadKeypair`] is returned and the secret is wiped by
+			/// its own drop. This is the only way to build a `Keypair` from parts —
+			/// the fields are private precisely so a mismatched pair (signing under
+			/// one key while advertising another) is unrepresentable.
+			pub fn from_parts(
+				secret: SecretKey,
+				public: PublicKey,
+			) -> Result<Keypair, KeyParsingError> {
+				let derived_public = $crate::sign::public_key_from_secret_var::<
+					K,
+					L,
+					ETA,
+					PUBLICKEYBYTES,
+					SECRETKEYBYTES,
+				>(&secret.bytes)
+				.ok_or(KeyParsingError::BadKeypair)?;
+				if derived_public != public.bytes {
+					return Err(KeyParsingError::BadKeypair);
+				}
+				Ok(Keypair { secret, public })
+			}
+
 			/// Convert a Keypair to a bytes array.
 			///
 			/// Returns a self-wiping buffer containing private and public key bytes.
@@ -97,8 +167,24 @@ macro_rules! define_ml_dsa {
 
 			/// Create a Keypair from bytes.
 			///
-			/// See the ML-DSA-87 module docs for the consistency-check contract; the
-			/// same invariants are enforced for every parameter set.
+			/// # Consistency check
+			///
+			/// The public half is re-derived from the secret half and must match the
+			/// supplied public-key bytes exactly; otherwise this returns
+			/// [`KeyParsingError::BadKeypair`]. The secret key's internal invariants
+			/// (stored `t0` and `tr`) are checked as well; see
+			/// [`SecretKey::from_bytes`].
+			///
+			/// The fields are private and [`Keypair::from_parts`] performs the same
+			/// correspondence check, so the invariant established here holds for the
+			/// lifetime of every `Keypair` value.
+			///
+			/// One packed field is *not* (and cannot be) validated: the nonce seed
+			/// `K`, which is independent entropy with no stored commitment. A blob
+			/// whose `K` was tampered imports cleanly and signs verifiably, but
+			/// known-K **deterministic** signatures leak the secret key. Store key
+			/// blobs with integrity protection, or pass fresh `hedge` randomness to
+			/// [`sign`](Self::sign) when storage integrity cannot be guaranteed.
 			pub fn from_bytes(bytes: &[u8]) -> Result<Keypair, KeyParsingError> {
 				if bytes.len() != SECRETKEYBYTES + PUBLICKEYBYTES {
 					return Err(KeyParsingError::BadKeypair);
@@ -125,6 +211,17 @@ macro_rules! define_ml_dsa {
 			}
 
 			/// Compute a signature for a given message.
+			///
+			/// # Arguments
+			///
+			/// * 'msg' - message to sign (max 64 MiB)
+			/// * 'ctx' - optional context string (max 255 bytes)
+			/// * 'hedge' - optional random bytes for hedged signing. `None` selects deterministic
+			///   mode (`ρ' = H(K || 0 || μ)`), whose masks are a pure function of the stored nonce
+			///   seed `K` and the message — prefer `Some(fresh randomness)` unless
+			///   byte-reproducible signatures are required, especially when key-blob storage
+			///   integrity cannot be guaranteed (see [`SecretKey::from_bytes`] on the
+			///   unvalidatable `K`).
 			pub fn sign(
 				&self,
 				msg: &[u8],
@@ -143,6 +240,16 @@ macro_rules! define_ml_dsa {
 		impl fmt::Debug for Keypair {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 				f.debug_struct("Keypair").field("public", &self.public).finish()
+			}
+		}
+
+		/// Wipes the secret half in place (the public half is public data and is
+		/// left intact). With the fields private, this is the supported way for
+		/// callers to erase an imported keypair's secret material on demand; the
+		/// same wipe runs automatically when the `Keypair` drops.
+		impl Zeroize for Keypair {
+			fn zeroize(&mut self) {
+				self.secret.zeroize();
 			}
 		}
 
@@ -165,7 +272,17 @@ macro_rules! define_ml_dsa {
 				Zeroizing::new(self.bytes)
 			}
 
-			/// Create a SecretKey from bytes, validating packed-key invariants.
+			/// Create a SecretKey from bytes, validating packed-key invariants
+			/// (stored `t0` must match the low bits re-derived from `(rho, s1, s2)`,
+			/// stored `tr` must equal `SHAKE256(pk)`, and secret coefficients must
+			/// lie in `[-ETA, ETA]`).
+			///
+			/// The nonce seed `K` is *not* (and cannot be) validated: it is
+			/// independent entropy with no stored commitment. A blob whose `K` was
+			/// tampered imports cleanly and signs verifiably, but known-K
+			/// **deterministic** signatures leak the secret key. Store key blobs
+			/// with integrity protection, or pass fresh `hedge` randomness to
+			/// [`sign`](Self::sign) when storage integrity cannot be guaranteed.
 			pub fn from_bytes(bytes: &[u8]) -> Result<SecretKey, KeyParsingError> {
 				if bytes.len() != SECRETKEYBYTES {
 					return Err(BadSecretKey);
@@ -180,6 +297,9 @@ macro_rules! define_ml_dsa {
 			}
 
 			/// Compute a signature for a given message.
+			///
+			/// See [`Keypair::sign`] for the argument contract, in particular the
+			/// deterministic-vs-hedged trade-off of `hedge`.
 			pub fn sign(
 				&self,
 				msg: &[u8],

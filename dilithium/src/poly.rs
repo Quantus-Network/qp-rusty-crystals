@@ -247,7 +247,23 @@ pub fn invntt_tomont(a: &mut Poly) {
 /// * 'b' - 2nd input polynomial
 ///
 /// Returns resulting polynomial
+///
+/// # Preconditions
+///
+/// For every index `i`, the product `a[i] * b[i]` must lie in
+/// [`reduce::montgomery_reduce`]'s input domain `[-2^31 * Q, 2^31 * Q]`;
+/// outside it the reduction returns a silently wrong residue (no overflow,
+/// no panic). NTT-domain values satisfy this comfortably (forward-NTT
+/// output is below `8*Q`, and `(8*Q)^2 < 2^31 * Q`). Checked with
+/// `debug_assert!`, matching the module's other bounded helpers.
 pub fn pointwise_montgomery(c: &mut Poly, a: &Poly, b: &Poly) {
+	debug_assert!(
+		(0..N).all(|i| {
+			(a.coeffs[i] as i64 * b.coeffs[i] as i64).abs() <= (1i64 << 31) * params::Q as i64
+		}),
+		"poly::pointwise_montgomery precondition violated: |a[i] * b[i]| > 2^31 * Q \
+		 (outside montgomery_reduce's domain)"
+	);
 	for i in 0..N {
 		c.coeffs[i] = reduce::montgomery_reduce(a.coeffs[i] as i64 * b.coeffs[i] as i64);
 	}
@@ -483,10 +499,14 @@ const UNIFORM_GAMMA1_NBLOCKS: usize = 640usize.div_ceil(fips202::SHAKE256_RATE);
 ///
 /// * 'a' - input polynomial
 ///
-/// Returns a touple of polynomials with coefficients c0, c1
+/// On return `a1` holds the high parts (c1) and `a0` the low parts (c0) —
+/// the same output-parameter convention as [`power2round`]. (The
+/// destructuring order historically inverted this, silently handing an
+/// external caller swapped halves; `polyvec::decompose` compensated with a
+/// `swap`.)
 pub fn decompose<const GAMMA2: usize>(a1: &mut Poly, a0: &mut Poly) {
 	for i in 0..N {
-		(a1.coeffs[i], a0.coeffs[i]) = rounding::decompose::<GAMMA2>(a1.coeffs[i]);
+		(a0.coeffs[i], a1.coeffs[i]) = rounding::decompose::<GAMMA2>(a1.coeffs[i]);
 	}
 }
 
@@ -667,7 +687,12 @@ pub fn uniform_gamma1<const GAMMA1: usize, const PZ: usize>(
 /// the bytes of `seed = c~ = H(mu, w1)`, a hash output. For an accepted attempt c~ is published
 /// in the signature; for rejected attempts it never leaves the device and cannot be inverted to
 /// recover w1. No secret-key material flows into this function.
-pub fn challenge<const TAU: usize>(c: &mut Poly, seed: &[u8]) {
+///
+/// The seed length is fixed by the type: FIPS 204 defines the challenge seed
+/// as exactly `C_DASH_BYTES` (λ/4) bytes for the active parameter set, and a
+/// wrong-length seed would not fail — it would silently derive a different,
+/// off-domain challenge. `CD` must equal the variant's `C_DASH_BYTES`.
+pub fn challenge<const TAU: usize, const CD: usize>(c: &mut Poly, seed: &[u8; CD]) {
 	const {
 		// Sign bits are drawn from a single u64. Every FIPS 204 TAU (39/49/60)
 		// also indexes within N=256 coefficients (implied by TAU <= 64).
@@ -1108,6 +1133,45 @@ mod tests {
 		for i in 0..N {
 			assert!(c.coeffs[i].abs() < params::Q);
 		}
+	}
+
+	/// `montgomery_reduce` only guarantees a result in `(-Q, Q)` for inputs
+	/// in `[-2^31*Q, 2^31*Q]`; two arbitrary `i32` coefficients can produce
+	/// a product far outside that domain, yielding a silently wrong residue
+	/// (no overflow, no panic — just corrupt output). The contract must fail
+	/// fast in debug builds like the module's other bounded helpers
+	/// (`invntt_tomont`, `shiftl`).
+	#[cfg(debug_assertions)]
+	#[test]
+	#[should_panic(expected = "pointwise_montgomery")]
+	fn test_pointwise_montgomery_rejects_out_of_domain_product() {
+		let mut a = Poly::default();
+		let mut b = Poly::default();
+		// |a*b| = (2^30)^2 = 2^60, far above montgomery_reduce's 2^31*Q
+		// (~2^54) domain bound.
+		a.coeffs[0] = 1 << 30;
+		b.coeffs[0] = 1 << 30;
+		let mut c = Poly::default();
+		pointwise_montgomery(&mut c, &a, &b);
+	}
+
+	/// Both `decompose` and `power2round` document the same output-parameter
+	/// convention: the first parameter (`a1`) receives the high part, the
+	/// second (`a0`) the low part. `power2round` honors it; `decompose`
+	/// historically destructured the rounding tuple in the opposite order
+	/// (patched up downstream by an ad-hoc `swap` in `k_decompose`), so an
+	/// external caller following the documented convention got swapped halves.
+	#[test]
+	fn decompose_parameter_order_matches_power2round_convention() {
+		let value = 1_234_567i32;
+		let (low, high) = rounding::decompose::<{ params::GAMMA2 }>(value);
+		assert_ne!(low, high, "test value must distinguish the two halves");
+		let mut a1 = Poly::default();
+		a1.coeffs[0] = value;
+		let mut a0 = Poly::default();
+		decompose::<{ params::GAMMA2 }>(&mut a1, &mut a0);
+		assert_eq!(a1.coeffs[0], high, "a1 must receive the high part c1");
+		assert_eq!(a0.coeffs[0], low, "a0 must receive the low part c0");
 	}
 
 	#[test]
@@ -1698,7 +1762,7 @@ mod tests {
 		let seed = [0x77u8; params::C_DASH_BYTES];
 		let mut poly = Poly::default();
 
-		challenge::<{ params::TAU }>(&mut poly, &seed);
+		challenge::<{ params::TAU }, { params::C_DASH_BYTES }>(&mut poly, &seed);
 
 		// Challenge polynomial should have exactly TAU non-zero coefficients
 		let mut nonzero_count = 0;
@@ -1979,10 +2043,10 @@ mod tests {
 	fn challenge_tau_39_and_49() {
 		// The 44/65 TAU values must yield exactly TAU nonzero coefficients,
 		// each in {-1, 1}.
-		fn check<const TAU: usize>(seed_byte: u8, seed_len: usize) {
-			let seed = std::vec![seed_byte; seed_len];
+		fn check<const TAU: usize, const CD: usize>(seed_byte: u8) {
+			let seed = [seed_byte; CD];
 			let mut c = Poly::default();
-			challenge::<TAU>(&mut c, &seed);
+			challenge::<TAU, CD>(&mut c, &seed);
 			let mut nonzero = 0usize;
 			for &v in c.coeffs.iter() {
 				assert!(v == 0 || v == 1 || v == -1, "challenge coefficient {} invalid", v);
@@ -1990,7 +2054,7 @@ mod tests {
 			}
 			assert_eq!(nonzero, TAU, "challenge must have exactly TAU nonzero coefficients");
 		}
-		check::<39>(0xA1, 32); // ML-DSA-44: TAU = 39, c~ is 32 bytes
-		check::<49>(0xB2, 48); // ML-DSA-65: TAU = 49, c~ is 48 bytes
+		check::<39, 32>(0xA1); // ML-DSA-44: TAU = 39, c~ is 32 bytes
+		check::<49, 48>(0xB2); // ML-DSA-65: TAU = 49, c~ is 48 bytes
 	}
 }

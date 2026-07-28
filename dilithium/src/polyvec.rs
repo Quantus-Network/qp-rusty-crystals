@@ -1,5 +1,5 @@
 use crate::{params, poly, poly::Poly};
-use core::{array, mem::swap};
+use core::array;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Unstable accessors for the crate-internal secret samplers, used only by the
@@ -256,7 +256,6 @@ pub fn decompose<const N: usize, const GAMMA2: usize>(v1: &mut Polyvec<N>, v0: &
 	for i in 0..N {
 		poly::decompose::<GAMMA2>(&mut v1.vec[i], &mut v0.vec[i]);
 	}
-	swap(v1, v0);
 }
 
 pub fn make_hint<const N: usize, const GAMMA2: usize>(

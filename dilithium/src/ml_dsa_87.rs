@@ -3,7 +3,7 @@
 //! Thin frontend over the const-generic signing core, instantiated at the
 //! [`crate::params::ml_dsa_87`] parameter set.
 
-crate::frontend::define_ml_dsa!(crate::params::ml_dsa_87);
+crate::frontend::define_ml_dsa!(ml_dsa_87, crate::params::ml_dsa_87);
 
 #[cfg(test)]
 mod tests {
@@ -103,6 +103,32 @@ mod tests {
 			matches!(Keypair::from_bytes(&forged), Err(KeyParsingError::BadKeypair)),
 			"public key not derived from the secret key must be rejected"
 		);
+	}
+
+	// `from_parts` is the only way to assemble a `Keypair` from separately
+	// imported halves (the fields are private), so it must enforce the same
+	// secret/public correspondence as `from_bytes`: a keypair that signs
+	// under one key while advertising another must be unrepresentable.
+	#[test]
+	fn from_parts_enforces_secret_public_correspondence() {
+		use super::{KeyParsingError, Keypair, SecretKey};
+
+		let keys_a = Keypair::generate(get_random_bytes());
+		let keys_b = Keypair::generate(get_random_bytes());
+
+		let secret_a = SecretKey::from_bytes(keys_a.secret.to_bytes().as_slice()).unwrap();
+		assert!(
+			matches!(
+				Keypair::from_parts(secret_a, keys_b.public.clone()),
+				Err(KeyParsingError::BadKeypair)
+			),
+			"unrelated halves must be rejected"
+		);
+
+		let secret_a = SecretKey::from_bytes(keys_a.secret.to_bytes().as_slice()).unwrap();
+		let assembled = Keypair::from_parts(secret_a, keys_a.public.clone())
+			.expect("matching halves must be accepted");
+		assert_eq!(*assembled.to_bytes(), *keys_a.to_bytes());
 	}
 
 	// The packed secret key stores tr = SHAKE256(pk) and t0 (low bits of

@@ -4791,3 +4791,145 @@ fn test_set_expected_active_set_validation() {
 	// Valid (duplicates tolerated).
 	assert!(leader.set_expected_active_set(&[2, 1, 2]).is_ok());
 }
+
+/// Liveness regression test: a new-only member must not advance past
+/// `Round4Waiting` while it is still missing a Round 3 broadcast from an
+/// *active non-dealer* old member.
+///
+/// The Combining transcript requires a Round 3 broadcast from every active
+/// member — non-dealers included (theirs commit to an empty map) — but the
+/// Round 3 buffering window closes when the party leaves `Round4Waiting`.
+/// New-only members never pass through `Round3Waiting`'s
+/// `have_enough_round3` gate, so before the fix they advanced as soon as
+/// every designated *dealer*'s Round 4 arrived. A benign reordering (or a
+/// transport adversary) that delays one non-dealer's Round 3 past that
+/// transition made the broadcast get dropped forever, and the session died
+/// in Combining with "Missing Round 3 broadcast from active party".
+///
+/// Setup: old committee {0,1,2} at t_old = 2, so the designated dealers are
+/// min(I ∩ Act) over the three 2-member old subsets = {0, 1}, and party 2
+/// is active but never a dealer. The harness withholds party 2's Round 3
+/// broadcast from new-only member 3 until the network goes quiescent, then
+/// delivers it — a correct party 3 is still waiting in `Round4Waiting` with
+/// its buffering window open and completes; a buggy one has already failed.
+#[test]
+fn test_new_member_waits_for_nondealer_round3() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let keygen_seed = [17u8; 32];
+	let (public_key, shares) = generate_with_dealer(&keygen_seed, config).expect("keygen");
+	let mut old_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in shares {
+		old_shares.insert(share.party_id(), share);
+	}
+
+	let old_participants = vec![0u32, 1, 2];
+	let new_participants = vec![3u32, 4, 5];
+	let delayed_sender = 2u32; // active non-dealer
+	let victim = 3u32; // new-only member
+
+	let session_nonce = [0x77u8; 32];
+	let all_parties: Vec<u32> = vec![0, 1, 2, 3, 4, 5];
+	let mut protocols: HashMap<u32, ResharingProtocol<TestSigner>> = HashMap::new();
+	for &party_id in &all_parties {
+		let config = ResharingConfig::new(
+			old_shares.get(&party_id).cloned(),
+			2,
+			old_participants.clone(),
+			2,
+			new_participants.clone(),
+			party_id,
+			public_key.clone(),
+		)
+		.expect("valid resharing config");
+		let mut seed = [0u8; 32];
+		seed[0..4].copy_from_slice(&party_id.to_le_bytes());
+		protocols.insert(party_id, new_test_protocol(config, seed, &session_nonce));
+	}
+
+	let mut queues: HashMap<u32, Vec<(u32, Vec<u8>)>> =
+		all_parties.iter().map(|&p| (p, Vec::new())).collect();
+	let mut held_round3: Option<(u32, Vec<u8>)> = None;
+	let mut held_delivered = false;
+
+	for _iteration in 0..1000 {
+		if protocols.values().all(|p| p.is_done() || p.is_failed()) {
+			break;
+		}
+		let mut any_activity = false;
+		for &party_id in &all_parties {
+			let protocol = protocols.get_mut(&party_id).unwrap();
+			if protocol.is_done() || protocol.is_failed() {
+				continue;
+			}
+			for (from, data) in std::mem::take(queues.get_mut(&party_id).unwrap()) {
+				any_activity = true;
+				protocol.message(from, data).unwrap();
+			}
+			match protocol.poke() {
+				Ok(Action::Wait) => {},
+				Ok(Action::SendMany(data)) => {
+					any_activity = true;
+					for &other in &all_parties {
+						if other == party_id {
+							continue;
+						}
+						// Withhold the non-dealer's Round 3 broadcast from
+						// the victim; every other recipient gets it now.
+						if party_id == delayed_sender &&
+							other == victim && matches!(
+							borsh::from_slice::<ResharingMessage>(&data),
+							Ok(ResharingMessage::Round3(_))
+						) {
+							assert!(
+								held_round3.is_none(),
+								"expected a single Round 3 from the delayed sender"
+							);
+							held_round3 = Some((party_id, data.clone()));
+							continue;
+						}
+						queues.get_mut(&other).unwrap().push((party_id, data.clone()));
+					}
+				},
+				Ok(Action::SendPrivate(to, mut data)) => {
+					any_activity = true;
+					let raw = std::mem::take(&mut *data);
+					queues.get_mut(&to).unwrap().push((party_id, raw));
+				},
+				Ok(Action::Return(_)) => {
+					any_activity = true;
+				},
+				Err(e) => panic!(
+					"party {party_id} failed after the non-dealer's Round 3 was delayed: {e}"
+				),
+			}
+		}
+		if !any_activity {
+			// The network went quiet with the Round 3 still in flight: the
+			// victim must be parked in Round4Waiting (buffering window still
+			// open), everyone else in Round5Waiting for the victim's Round 5.
+			// Delivering the delayed broadcast now must unblock the session.
+			match held_round3.take() {
+				Some((from, data)) => {
+					held_delivered = true;
+					queues.get_mut(&victim).unwrap().push((from, data));
+				},
+				None => panic!("protocol deadlocked after the delayed Round 3 was delivered"),
+			}
+		}
+	}
+
+	assert!(
+		held_delivered,
+		"the delayed Round 3 was never released — the session never went quiescent \
+		 waiting for it, so the scenario did not exercise the late-delivery path"
+	);
+	for &party_id in &all_parties {
+		let protocol = protocols.get(&party_id).unwrap();
+		assert!(
+			protocol.is_done(),
+			"party {party_id} did not complete after the delayed Round 3 arrived \
+			 (state: {:?})",
+			protocol.state()
+		);
+	}
+}
