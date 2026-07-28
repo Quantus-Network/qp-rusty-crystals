@@ -25,7 +25,7 @@ use crate::{
 		primitives::{
 			compute_dilithium_hint, compute_ntt_dot_product, decompose_polyveck, mod_q,
 			normalize_assuming_le2q, pack_signature, poly_pack_w, unpack_polyveck_w,
-			HyperballSampleVector,
+			HyperballSampleVector, POLY_Q_SIZE, SINGLE_COMMITMENT_SIZE,
 		},
 		secret_sharing::{recover_share, SecretShare},
 	},
@@ -383,20 +383,10 @@ pub(crate) fn generate_round1(
 	}
 
 	// Pack w for commitment hash using 23-bit packing
-	const POLY_Q_SIZE: usize = ((N as usize) * 23) / 8; // 736 bytes
-	let single_commitment_size = K * POLY_Q_SIZE;
-	let w_packed_size = k_iterations * single_commitment_size;
-	let mut w_packed = vec![0u8; w_packed_size];
-
-	let mut offset = 0;
-	for k_idx in 0..k_iterations {
-		if k_idx < w_commitments.len() && offset + single_commitment_size <= w_packed.len() {
-			pack_w_dilithium(
-				&w_commitments[k_idx],
-				&mut w_packed[offset..offset + single_commitment_size],
-			);
-			offset += single_commitment_size;
-		}
+	let mut w_packed = vec![0u8; k_iterations * SINGLE_COMMITMENT_SIZE];
+	let (chunks, _) = w_packed.as_chunks_mut::<SINGLE_COMMITMENT_SIZE>();
+	for (chunk, w_k) in chunks.iter_mut().zip(&w_commitments) {
+		pack_w_dilithium(w_k, chunk);
 	}
 
 	// Generate commitment hash using the shared function to ensure consistency with verification
@@ -407,11 +397,14 @@ pub(crate) fn generate_round1(
 }
 
 /// Pack w using 23-bit encoding.
-fn pack_w_dilithium(w: &polyvec::Polyveck, buf: &mut [u8]) {
-	const POLY_Q_SIZE: usize = ((N as usize) * 23) / 8; // 736 bytes
-	for i in 0..K {
-		let offset = i * POLY_Q_SIZE;
-		poly_pack_w(&w.vec[i], &mut buf[offset..offset + POLY_Q_SIZE]);
+///
+/// The buffer length is enforced by the type; callers carve exact
+/// [`SINGLE_COMMITMENT_SIZE`] chunks with `as_chunks_mut`, so this path has
+/// no release-mode panic and no length arithmetic to get wrong.
+fn pack_w_dilithium(w: &polyvec::Polyveck, buf: &mut [u8; SINGLE_COMMITMENT_SIZE]) {
+	let (chunks, _) = buf.as_chunks_mut::<POLY_Q_SIZE>();
+	for (chunk, p) in chunks.iter_mut().zip(&w.vec) {
+		poly_pack_w(p, chunk);
 	}
 }
 
@@ -472,17 +465,11 @@ pub fn get_hyperball_params(threshold: u32, parties: u32) -> Option<(f64, f64, f
 /// Pack Round 1 commitment data for broadcast.
 pub(crate) fn pack_round1_commitment(round1: &Round1Data, config: &ThresholdConfig) -> Vec<u8> {
 	let k = config.k_iterations() as usize;
-	const POLY_Q_SIZE: usize = ((N as usize) * 23) / 8;
-	let single_commitment_size = K * POLY_Q_SIZE;
-	let total_size = k * single_commitment_size;
-	let mut buf = vec![0u8; total_size];
+	let mut buf = vec![0u8; k * SINGLE_COMMITMENT_SIZE];
 
-	for k_idx in 0..k.min(round1.w_commitments.len()) {
-		let offset = k_idx * single_commitment_size;
-		pack_w_dilithium(
-			&round1.w_commitments[k_idx],
-			&mut buf[offset..offset + single_commitment_size],
-		);
+	let (chunks, _) = buf.as_chunks_mut::<SINGLE_COMMITMENT_SIZE>();
+	for (chunk, w_k) in chunks.iter_mut().zip(&round1.w_commitments) {
+		pack_w_dilithium(w_k, chunk);
 	}
 
 	buf

@@ -1372,6 +1372,19 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			return self.send_next_round4_message();
 		}
 
+		// No party may leave Round4Waiting without a Round 3 broadcast from
+		// *every* active member: the Combining transcript requires them all —
+		// non-dealers included (theirs commit to an empty map) — and the
+		// Round 3 buffering window (`handle_round3_message`) closes at this
+		// transition, so a late arrival would be dropped forever and the
+		// session would die in Combining. Active old members already passed
+		// this gate in Round3Waiting; it binds the parties that skipped that
+		// state (new-only members and non-active old members), whose
+		// advancement below is otherwise gated only on dealer traffic.
+		if !self.have_enough_round3() {
+			return Ok(Action::Wait);
+		}
+
 		// New committee members proceed to Round 5 once they have received from every
 		// expected dealer.
 		if self.config.role().is_new_committee() && self.have_all_expected_round4() {

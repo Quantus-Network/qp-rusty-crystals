@@ -50,8 +50,8 @@ fn verify_test_vector(test: &TestVector) {
 	let entropy_s = SensitiveBytes32::new(&mut entropy);
 	assert!(res.is_ok());
 	let generated_keypair = Keypair::generate(entropy_s);
-	let generated_pk = generated_keypair.public.to_bytes();
-	let generated_sk = generated_keypair.secret.to_bytes();
+	let generated_pk = generated_keypair.public().to_bytes();
+	let generated_sk = generated_keypair.secret().to_bytes();
 	assert_eq!(
 		&generated_pk[..],
 		&test.pk[..],

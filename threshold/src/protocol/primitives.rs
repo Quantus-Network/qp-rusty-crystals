@@ -561,15 +561,33 @@ fn make_hint_single(z0: i32, r1: i32) -> i32 {
 // Packing Functions
 // ============================================================================
 
-/// Pack a polynomial with coefficients < Q using 23-bit encoding.
+/// Packed size in bytes of one polynomial in the 23-bit `w` encoding:
+/// 256 coefficients × 23 bits = 736 bytes.
+pub(crate) const POLY_Q_SIZE: usize = (N as usize * 23) / 8;
+
+/// Packed size in bytes of one commitment (one `Polyveck` of `K` polynomials
+/// in the 23-bit encoding). Round 2 commitment data is `k_iterations` of
+/// these, concatenated.
+pub(crate) const SINGLE_COMMITMENT_SIZE: usize = K * POLY_Q_SIZE;
+
+/// Pack a polynomial with coefficients in `[0, Q)` using 23-bit encoding.
+///
+/// The buffer length is enforced by the type (fixed-size array reference)
+/// rather than a runtime assert, so there is no release-mode panic path;
+/// callers carve exact chunks with `as_chunks_mut`.
 ///
 /// # Panics
 ///
-/// Debug builds will panic if any coefficient is >= Q, indicating a bug
-/// in the calling code's reduction logic.
-pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8]) {
-	// 23 bits per coefficient, 256 coefficients = 736 bytes
-	assert!(buf.len() >= 736);
+/// Debug builds will panic if any coefficient is outside `[0, Q)`,
+/// indicating a bug in the calling code's reduction logic.
+pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8; POLY_Q_SIZE]) {
+	// Enforce the documented contract: a coefficient >= Q would be silently
+	// truncated to its low 23 bits, and a negative one wraps via `as u32`
+	// into 23 bits of garbage — either way a corrupt commitment.
+	debug_assert!(
+		p.coeffs().iter().all(|&c| (0..Q).contains(&c)),
+		"poly_pack_w precondition violated: coefficient outside [0, Q)"
+	);
 
 	let mut bit_pos = 0usize;
 	for i in 0..N as usize {
@@ -756,7 +774,7 @@ mod tests {
 			p.coeffs_mut()[i] = (i * 12345) as i32 % Q;
 		}
 
-		let mut buf = vec![0u8; 736];
+		let mut buf = [0u8; POLY_Q_SIZE];
 		poly_pack_w(&p, &mut buf);
 
 		let p2 = poly_unpack_w(&buf).expect("valid coefficients should unpack");
@@ -764,6 +782,32 @@ mod tests {
 		for i in 0..N as usize {
 			assert_eq!(p.coeffs()[i], p2.coeffs()[i], "Mismatch at index {}", i);
 		}
+	}
+
+	/// `poly_pack_w`'s docs promise a debug-build panic on any coefficient
+	/// `>= Q`; without it, the cast to `u32` silently truncates to 23 bits
+	/// and packs a corrupt commitment.
+	#[cfg(debug_assertions)]
+	#[test]
+	#[should_panic(expected = "poly_pack_w")]
+	fn test_poly_pack_w_rejects_coefficient_at_q() {
+		let mut p = poly::Poly::default();
+		p.coeffs_mut()[0] = Q;
+		let mut buf = [0u8; POLY_Q_SIZE];
+		poly_pack_w(&p, &mut buf);
+	}
+
+	/// A negative coefficient is worse than a `>= Q` one: `as u32` wraps it
+	/// to a huge value whose low 23 bits are garbage. It must hit the same
+	/// debug assert.
+	#[cfg(debug_assertions)]
+	#[test]
+	#[should_panic(expected = "poly_pack_w")]
+	fn test_poly_pack_w_rejects_negative_coefficient() {
+		let mut p = poly::Poly::default();
+		p.coeffs_mut()[0] = -1;
+		let mut buf = [0u8; POLY_Q_SIZE];
+		poly_pack_w(&p, &mut buf);
 	}
 
 	#[test]

@@ -47,9 +47,19 @@ const NROUNDS: usize = 24;
 /// # Security
 ///
 /// This struct implements `Zeroize` and `ZeroizeOnDrop` to ensure sensitive
-/// state is cleared from memory when no longer needed. The `Copy` trait is
-/// intentionally NOT implemented to prevent accidental copies that could
-/// leave sensitive data in memory (HQ8).
+/// state is cleared from memory when no longer needed. Neither `Copy` nor
+/// `Clone` is implemented: a copy of a state that has absorbed secret
+/// material (the signing path absorbs the private key seed `K` to derive
+/// the mask seed ρ') is a second live instance of that secret, invisible to
+/// the original's zeroization. Reuse a state via [`KeccakState::init`] or
+/// start from `default()` instead of duplicating it (HQ8).
+///
+/// ```compile_fail
+/// use qp_rusty_crystals_dilithium::fips202::{self, Shake256State};
+/// let mut st = Shake256State::default();
+/// fips202::shake256_absorb(&mut st, b"secret key seed");
+/// let second_copy = st.clone(); // must not compile: no Clone on sponge state
+/// ```
 ///
 /// The fields are private. This is deliberate: `pos` must satisfy the
 /// invariant `pos <= R`, and the squeeze/absorb routines rely on it to make
@@ -57,7 +67,7 @@ const NROUNDS: usize = 24;
 /// fields would let a caller (for example one that restores a state from
 /// untrusted bytes) construct a state with `pos > R`, which previously caused
 /// `keccak_squeeze` to loop forever.
-#[derive(Clone, Default, Zeroize, ZeroizeOnDrop)]
+#[derive(Default, Zeroize, ZeroizeOnDrop)]
 pub struct KeccakState<const R: usize> {
 	s: [u64; 25],
 	pos: usize,

@@ -202,13 +202,14 @@ mod types;
 
 // Re-export public types.
 //
-// The quorum predicate `all_broadcasts_received` is deliberately not
-// re-exported: it takes a raw participant slice and returns "complete" for an
-// empty list (vacuous truth), which is only sound because every in-crate
-// caller passes a `DkgConfig`-validated, non-empty list. See the invariants
-// section of `DkgConfig`'s docs, which pins this with a compile_fail test.
+// The completion predicates `all_broadcasts_received` and
+// `all_private_messages_received` are deliberately not re-exported: both
+// take raw slices and return "complete" for an empty one (vacuous truth),
+// which is only sound because every in-crate caller passes
+// `DkgConfig`-validated inputs. See the invariants section of `DkgConfig`'s
+// docs, which pins both with compile_fail tests.
 pub use protocol::{run_local_dkg, Dkg, DkgAction, DkgError};
-pub use state::{all_private_messages_received, DkgOutput, DkgPhase, DkgState};
+pub use state::{DkgOutput, DkgPhase, DkgState};
 pub use types::{
 	compute_dkg_ssid,
 	compute_partial_output_hash,
@@ -244,6 +245,7 @@ pub use types::{
 	DOMAIN_PK_COMMIT,
 	DOMAIN_SEED,
 	DOMAIN_TRANSCRIPT,
+	MAX_TRANSCRIPT_SIGNATURE_SIZE,
 	RANDOMNESS_SIZE,
 	SHARED_SECRET_SIZE,
 	SUBSET_SEED_SIZE,

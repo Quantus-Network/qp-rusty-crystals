@@ -67,5 +67,5 @@ fn keypair_never_frees_heap_memory_containing_the_seed() {
 	// Sanity: generation still produces a working keypair.
 	let message = b"zeroization regression";
 	let signature = keypair.sign(message, None, None).expect("signing succeeds");
-	assert!(keypair.public.verify(message, &signature, None));
+	assert!(keypair.public().verify(message, &signature, None));
 }

@@ -1,5 +1,5 @@
 use crate::{params, poly, poly::Poly};
-use core::{array, mem::swap};
+use core::array;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const K: usize = params::K;
@@ -299,7 +299,6 @@ pub fn k_decompose(v1: &mut Polyveck, v0: &mut Polyveck) {
 	for i in 0..K {
 		poly::decompose(&mut v1.vec[i], &mut v0.vec[i]);
 	}
-	swap(v1, v0);
 }
 
 pub fn k_make_hint(h: &mut Polyveck, v0: &Polyveck, v1: &Polyveck) -> i32 {

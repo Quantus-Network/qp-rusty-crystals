@@ -44,7 +44,7 @@ mod hdwallet_tests {
 		// Should be able to derive same keys from same seed
 		let key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0'/0'").unwrap();
 		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
-		assert_eq!(key1.secret.to_bytes(), key2.secret.to_bytes());
+		assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
 	}
 
 	#[test]
@@ -72,15 +72,15 @@ mod hdwallet_tests {
 
 		// Keys from same seed should be identical
 		assert_eq!(
-			master_key1.secret.to_bytes(),
-			master_key2.secret.to_bytes(),
+			master_key1.secret().to_bytes(),
+			master_key2.secret().to_bytes(),
 			"keys are not deterministic"
 		);
 
 		// Keys from different seeds should be different
 		assert_ne!(
-			master_key1.secret.to_bytes(),
-			master_key3.secret.to_bytes(),
+			master_key1.secret().to_bytes(),
+			master_key3.secret().to_bytes(),
 			"password has no effect"
 		);
 
@@ -89,8 +89,8 @@ mod hdwallet_tests {
 		let derived_key =
 			derive_key_from_seed((&mut seed_for_derive).into(), "m/0'/2147483647'/1'").unwrap();
 		assert_ne!(
-			master_key1.secret.to_bytes(),
-			derived_key.secret.to_bytes(),
+			master_key1.secret().to_bytes(),
+			derived_key.secret().to_bytes(),
 			"derived key not derived"
 		);
 
@@ -119,8 +119,8 @@ mod hdwallet_tests {
 			let k1 = derive_key_from_seed((&mut seed1).into(), p).unwrap();
 			let k2 = derive_key_from_seed((&mut seed2).into(), p).unwrap();
 
-			assert_eq!(k1.secret.to_bytes(), k2.secret.to_bytes());
-			assert_eq!(k1.public.bytes, k2.public.bytes);
+			assert_eq!(k1.secret().to_bytes(), k2.secret().to_bytes());
+			assert_eq!(k1.public().to_bytes(), k2.public().to_bytes());
 		}
 	}
 
@@ -153,14 +153,15 @@ mod hdwallet_tests {
 
 			// Compare secret keys
 			assert_eq!(
-				generated_keys.secret.to_bytes(),
-				expected_keys.secret.to_bytes(),
+				generated_keys.secret().to_bytes(),
+				expected_keys.secret().to_bytes(),
 				"Secret key mismatch for path: {derivation_path}"
 			);
 
 			// Compare public keys
 			assert_eq!(
-				generated_keys.public.bytes, expected_keys.public.bytes,
+				generated_keys.public().to_bytes(),
+				expected_keys.public().to_bytes(),
 				"Public key mismatch for path: {derivation_path}"
 			);
 		}
@@ -282,8 +283,8 @@ mod hdwallet_tests {
 
 		// Keys derived from same path should be identical
 		assert_eq!(
-			key1.secret.to_bytes(),
-			key2.secret.to_bytes(),
+			key1.secret().to_bytes(),
+			key2.secret().to_bytes(),
 			"Keys derived from same path should be identical"
 		);
 	}
@@ -373,8 +374,8 @@ mod hdwallet_tests {
 		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
 
 		assert_eq!(
-			key1.secret.to_bytes(),
-			key2.secret.to_bytes(),
+			key1.secret().to_bytes(),
+			key2.secret().to_bytes(),
 			"Master key derivation should be deterministic"
 		);
 	}
@@ -432,7 +433,7 @@ mod hdwallet_tests {
 		let key_decomposed =
 			crate::derive_key_from_mnemonic(mnemonic, Some(decomposed), "m/44'/189189'/0'/0'/0'")
 				.unwrap();
-		assert_eq!(key_composed.secret.to_bytes(), key_decomposed.secret.to_bytes());
+		assert_eq!(key_composed.secret().to_bytes(), key_decomposed.secret().to_bytes());
 	}
 
 	#[test]
@@ -467,8 +468,8 @@ mod hdwallet_tests {
 		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/1'").unwrap();
 
 		// Keys should be different
-		assert_ne!(key1.secret.to_bytes(), key2.secret.to_bytes());
-		assert_ne!(key1.public.bytes, key2.public.bytes);
+		assert_ne!(key1.secret().to_bytes(), key2.secret().to_bytes());
+		assert_ne!(key1.public().to_bytes(), key2.public().to_bytes());
 	}
 
 	#[test]
@@ -487,8 +488,8 @@ mod hdwallet_tests {
 		let key2 = derive_key_from_seed((&mut seed2).into(), path).unwrap();
 
 		// Same seed and path should produce same keys
-		assert_eq!(key1.secret.to_bytes(), key2.secret.to_bytes());
-		assert_eq!(key1.public.bytes, key2.public.bytes);
+		assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
+		assert_eq!(key1.public().to_bytes(), key2.public().to_bytes());
 	}
 
 	#[test]
@@ -552,8 +553,8 @@ mod hdwallet_tests {
 		let key2 = derive_key_from_seed((&mut seed2).into(), path).unwrap();
 
 		// Should produce identical results
-		assert_eq!(key1.secret.to_bytes(), key2.secret.to_bytes());
-		assert_eq!(key1.public.bytes, key2.public.bytes);
+		assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
+		assert_eq!(key1.public().to_bytes(), key2.public().to_bytes());
 	}
 
 	#[test]
