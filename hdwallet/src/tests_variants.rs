@@ -163,7 +163,8 @@ golden_vector_tests!(golden_44, ml_dsa_44, "ml-dsa-44", test_vectors_44);
 golden_vector_tests!(golden_65, ml_dsa_65, "ml-dsa-65", test_vectors_65);
 
 /// Regenerate `test_vectors_{44,65}.rs`. Run with:
-/// `cargo test -p qp-rusty-crystals-hdwallet --features ml-dsa-44,ml-dsa-65 -- --ignored regenerate_variant_golden_vectors --nocapture`
+/// `cargo test -p qp-rusty-crystals-hdwallet --features ml-dsa-44,ml-dsa-65 -- --ignored
+/// regenerate_variant_golden_vectors --nocapture`
 #[cfg(all(feature = "ml-dsa-44", feature = "ml-dsa-65"))]
 #[test]
 #[ignore]
@@ -171,11 +172,7 @@ fn regenerate_variant_golden_vectors() {
 	extern crate std;
 	use std::{fs::File, io::Write, path::PathBuf};
 
-	fn emit(
-		filename: &str,
-		label: &str,
-		derive: impl Fn(&str, &str) -> alloc::vec::Vec<u8>,
-	) {
+	fn emit(filename: &str, label: &str, derive: impl Fn(&str, &str) -> alloc::vec::Vec<u8>) {
 		let mut out = String::new();
 		out.push_str("//! Golden HD-derivation vectors for ");
 		out.push_str(label);
