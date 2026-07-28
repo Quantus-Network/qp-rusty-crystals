@@ -203,12 +203,11 @@ impl Keypair {
 	///
 	/// * 'msg' - message to sign (max 64 MiB)
 	/// * 'ctx' - optional context string (max 255 bytes)
-	/// * 'hedge' - optional random bytes for hedged signing. `None` selects
-	///   deterministic mode (`ρ' = H(K || 0 || μ)`), whose masks are a pure
-	///   function of the stored nonce seed `K` and the message — prefer
-	///   `Some(fresh randomness)` unless byte-reproducible signatures are
-	///   required, especially when key-blob storage integrity cannot be
-	///   guaranteed (see [`SecretKey::from_bytes`] on the unvalidatable `K`).
+	/// * 'hedge' - optional random bytes for hedged signing. `None` selects deterministic mode (`ρ'
+	///   = H(K || 0 || μ)`), whose masks are a pure function of the stored nonce seed `K` and the
+	///   message — prefer `Some(fresh randomness)` unless byte-reproducible signatures are
+	///   required, especially when key-blob storage integrity cannot be guaranteed (see
+	///   [`SecretKey::from_bytes`] on the unvalidatable `K`).
 	///
 	/// # Errors
 	///
@@ -327,12 +326,11 @@ impl SecretKey {
 	///
 	/// * 'msg' - message to sign (max 64 MiB)
 	/// * 'ctx' - context string (max 255 bytes)
-	/// * 'hedge' - optional random bytes for hedged signing. `None` selects
-	///   deterministic mode (`ρ' = H(K || 0 || μ)`), whose masks are a pure
-	///   function of the stored nonce seed `K` and the message — prefer
-	///   `Some(fresh randomness)` unless byte-reproducible signatures are
-	///   required, especially when key-blob storage integrity cannot be
-	///   guaranteed (see [`SecretKey::from_bytes`] on the unvalidatable `K`).
+	/// * 'hedge' - optional random bytes for hedged signing. `None` selects deterministic mode (`ρ'
+	///   = H(K || 0 || μ)`), whose masks are a pure function of the stored nonce seed `K` and the
+	///   message — prefer `Some(fresh randomness)` unless byte-reproducible signatures are
+	///   required, especially when key-blob storage integrity cannot be guaranteed (see
+	///   [`SecretKey::from_bytes`] on the unvalidatable `K`).
 	///
 	/// # Errors
 	///

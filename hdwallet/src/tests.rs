@@ -160,7 +160,8 @@ mod hdwallet_tests {
 
 			// Compare public keys
 			assert_eq!(
-				generated_keys.public().to_bytes(), expected_keys.public().to_bytes(),
+				generated_keys.public().to_bytes(),
+				expected_keys.public().to_bytes(),
 				"Public key mismatch for path: {derivation_path}"
 			);
 		}

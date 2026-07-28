@@ -4860,8 +4860,7 @@ fn test_new_member_waits_for_nondealer_round3() {
 					held_delivered = true;
 					queues.get_mut(&victim).unwrap().push((from, data));
 				},
-				None =>
-					panic!("protocol deadlocked after the delayed Round 3 was delivered"),
+				None => panic!("protocol deadlocked after the delayed Round 3 was delivered"),
 			}
 		}
 	}
