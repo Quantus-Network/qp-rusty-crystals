@@ -7,7 +7,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::{
 	error::{validate_threshold_params, ThresholdError, ThresholdResult},
-	params::{self, VARIANT_NAME},
+	params::{self, UNSUPPORTED_CONFIG_REASON},
 };
 
 /// Configuration for a threshold signing scheme.
@@ -62,7 +62,7 @@ impl ThresholdConfig {
 		let k_iterations = params::k_iterations(t, n).ok_or(ThresholdError::InvalidParameters {
 			threshold: t,
 			parties: n,
-			reason: unsupported_config_reason(),
+			reason: UNSUPPORTED_CONFIG_REASON,
 		})?;
 
 		Ok(Self { t, n, k_iterations })
@@ -84,14 +84,6 @@ impl ThresholdConfig {
 	#[inline]
 	pub fn k_iterations(&self) -> u32 {
 		self.k_iterations
-	}
-}
-
-fn unsupported_config_reason() -> &'static str {
-	match VARIANT_NAME {
-		"ML-DSA-44" => "unsupported threshold configuration for ML-DSA-44",
-		"ML-DSA-65" => "unsupported threshold configuration for ML-DSA-65",
-		_ => "unsupported threshold configuration for ML-DSA-87",
 	}
 }
 

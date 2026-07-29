@@ -15,14 +15,15 @@ use crate::{
 	keys::{PrivateKeyShare, PublicKey},
 	params::{
 		self, BETA, C_DASH_BYTES, D, GAMMA1, GAMMA2, K, L, N, OMEGA, POLYW1_PACKEDBYTES,
-		POLYZ_PACKEDBYTES, Q, SINGLE_COMMITMENT_SIZE, SUITE_ID, TAU, THRESHOLD_SSID_VERSION,
+		POLYZ_PACKEDBYTES, POLY_Q_PACKEDBYTES, Q, SINGLE_COMMITMENT_SIZE, SUITE_ID, TAU,
+		THRESHOLD_SSID_VERSION,
 	},
 	participants::{ParticipantId, ParticipantList},
 	protocol::{
 		primitives::{
 			compute_dilithium_hint, compute_ntt_dot_product, decompose_polyvec, mod_q,
 			normalize_assuming_le2q, pack_signature, poly_pack_w, unpack_polyvec_w,
-			HyperballSampleVector, POLY_Q_SIZE,
+			HyperballSampleVector,
 		},
 		secret_sharing::{recover_share, SecretShare},
 	},
@@ -404,7 +405,7 @@ pub(crate) fn generate_round1(
 /// [`SINGLE_COMMITMENT_SIZE`] chunks with `as_chunks_mut`, so this path has
 /// no release-mode panic and no length arithmetic to get wrong.
 fn pack_w_dilithium(w: &polyvec::Polyvec<K>, buf: &mut [u8; SINGLE_COMMITMENT_SIZE]) {
-	let (chunks, _) = buf.as_chunks_mut::<POLY_Q_SIZE>();
+	let (chunks, _) = buf.as_chunks_mut::<POLY_Q_PACKEDBYTES>();
 	for (chunk, p) in chunks.iter_mut().zip(&w.vec) {
 		poly_pack_w(p, chunk);
 	}
@@ -563,7 +564,10 @@ pub(crate) fn generate_round3_response(
 
 	// For each commitment iteration (lengths already validated above)
 	for (i, z_out_slot) in zs.iter_mut().enumerate().take(k) {
-		// Decompose w into w0 and w1
+		// Decompose w to obtain w1 (the challenge input). w0 is only a
+		// required output slot of the shared decompose helper here — the low
+		// bits are consumed by the *combine* path (hint computation), not by
+		// response generation.
 		let mut w0 = polyvec::Polyvec::<K>::default();
 		let mut w1 = polyvec::Polyvec::<K>::default();
 		decompose_polyvec(&round2.w_aggregated[i], &mut w0, &mut w1);

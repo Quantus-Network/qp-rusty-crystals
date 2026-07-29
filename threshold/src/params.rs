@@ -28,6 +28,10 @@ macro_rules! define_active_variant {
 			pub const SUITE_ID: u32 = $suite_id;
 			/// Human-readable label for errors and docs.
 			pub const VARIANT_NAME: &str = $variant_name;
+			/// Reason string for `InvalidParameters` when a `(t, n)` has no
+			/// calibrated tables on this parameter set.
+			pub const UNSUPPORTED_CONFIG_REASON: &str =
+				concat!("unsupported threshold configuration for ", $variant_name);
 		}
 
 		/// The dilithium *frontend* module (`Keypair`, `PublicKey`, …) for the

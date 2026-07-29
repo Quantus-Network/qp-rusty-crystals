@@ -539,11 +539,6 @@ fn make_hint_single(z0: i32, r1: i32) -> i32 {
 // Packing Functions
 // ============================================================================
 
-/// Packed size in bytes of one polynomial in the 23-bit `w` encoding:
-/// 256 coefficients × 23 bits = 736 bytes. Alias of [`POLY_Q_PACKEDBYTES`]
-/// kept for the typed packing helpers below.
-pub(crate) const POLY_Q_SIZE: usize = POLY_Q_PACKEDBYTES;
-
 /// Pack a polynomial with coefficients in `[0, Q)` using 23-bit encoding.
 ///
 /// The buffer length is enforced by the type (fixed-size array reference)
@@ -554,7 +549,7 @@ pub(crate) const POLY_Q_SIZE: usize = POLY_Q_PACKEDBYTES;
 ///
 /// Debug builds will panic if any coefficient is outside `[0, Q)`,
 /// indicating a bug in the calling code's reduction logic.
-pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8; POLY_Q_SIZE]) {
+pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8; POLY_Q_PACKEDBYTES]) {
 	// Enforce the documented contract: a coefficient >= Q would be silently
 	// truncated to its low 23 bits, and a negative one wraps via `as u32`
 	// into 23 bits of garbage — either way a corrupt commitment.
@@ -813,7 +808,7 @@ mod tests {
 			p.coeffs_mut()[i] = (i * 12345) as i32 % Q;
 		}
 
-		let mut buf = [0u8; POLY_Q_SIZE];
+		let mut buf = [0u8; POLY_Q_PACKEDBYTES];
 		poly_pack_w(&p, &mut buf);
 
 		let p2 = poly_unpack_w(&buf).expect("valid coefficients should unpack");
@@ -832,7 +827,7 @@ mod tests {
 	fn test_poly_pack_w_rejects_coefficient_at_q() {
 		let mut p = poly::Poly::default();
 		p.coeffs_mut()[0] = Q;
-		let mut buf = [0u8; POLY_Q_SIZE];
+		let mut buf = [0u8; POLY_Q_PACKEDBYTES];
 		poly_pack_w(&p, &mut buf);
 	}
 
@@ -845,7 +840,7 @@ mod tests {
 	fn test_poly_pack_w_rejects_negative_coefficient() {
 		let mut p = poly::Poly::default();
 		p.coeffs_mut()[0] = -1;
-		let mut buf = [0u8; POLY_Q_SIZE];
+		let mut buf = [0u8; POLY_Q_PACKEDBYTES];
 		poly_pack_w(&p, &mut buf);
 	}
 

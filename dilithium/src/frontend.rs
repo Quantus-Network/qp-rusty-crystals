@@ -14,6 +14,8 @@
 /// this lives outside [`define_ml_dsa!`] and is shared by every variant's
 /// sign and verify paths.
 pub(crate) fn ctx_prefix(ctx: Option<&[u8]>, buf: &mut [u8; 2 + 255]) -> Option<usize> {
+	buf[0] = 0; // FIPS 204 "pure" domain byte; don't rely on the caller zeroing the buffer
+	buf[1] = 0;
 	match ctx {
 		Some(x) if x.len() > 255 => None,
 		Some(x) => {
