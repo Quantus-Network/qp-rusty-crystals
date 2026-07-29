@@ -172,11 +172,18 @@ pub enum Action<T> {
 
 /// Maximum signing message size in bytes (12 MiB).
 /// This limits the size of serialized signing protocol messages. It must exceed the largest
-/// per-round payload, which is the Round 2 commitment broadcast: k_iterations × (k × POLY_Q_SIZE).
-/// The 4-of-6 resharing-hardened config uses k=1600, giving a ~9.42 MB commitment broadcast, so the
-/// 4 MiB limit no longer fits; 12 MiB leaves headroom above `MAX_COMMITMENT_DATA_SIZE`.
-/// near-mpc's transport frames up to 100 MiB (`MAX_MESSAGE_SIZE_BYTES`), so this is well within the
-/// network layer's budget.
+/// *legitimate* per-round frame, which is the Round 2 commitment broadcast: a small header plus
+/// k_iterations × `SINGLE_COMMITMENT_SIZE`. The worst case per parameter set is ML-DSA-87's
+/// resharing-hardened 4-of-6 config (k=1600, ~9.42 MB frame) and ML-DSA-44's 5-of-6 config
+/// (k=4196, 12,353,065-byte frame — ~1.8% under this cap; the fit is pinned by the const
+/// assert at [`FRAME_HEADER_LEN`]).
+///
+/// Note this cap can be *smaller* than [`MAX_COMMITMENT_DATA_SIZE`]: that bound adds a 600 kB
+/// slack margin on top of the worst-case payload, which on ML-DSA-44 pushes it to ~12.95 MB.
+/// The effective deserialization limit is the smaller of the two — this global check runs
+/// first, then the per-config `max_frame_size` check tightens it further for small sessions.
+/// near-mpc's transport frames up to 100 MiB (`MAX_MESSAGE_SIZE_BYTES`), so this is well within
+/// the network layer's budget.
 pub const MAX_SIGNING_MESSAGE_SIZE: usize = 12 * 1024 * 1024;
 
 /// Fixed header of every serialized [`SigningMessage`]: the 1-byte Borsh enum
@@ -186,6 +193,16 @@ pub const MAX_SIGNING_MESSAGE_SIZE: usize = 12 * 1024 * 1024;
 /// frames be discarded from the header alone, before deserializing their
 /// (attacker-controlled) variable-length payloads.
 const FRAME_HEADER_LEN: usize = 1 + SSID_SIZE;
+
+// The largest legitimate frame on the active parameter set — the Round 2
+// commitment broadcast of the worst-case config (header, party_id, length
+// prefix, k_iterations packed commitments) — must fit under the global
+// message cap, otherwise `deserialize_message` would reject honest traffic.
+const _: () = assert!(
+	FRAME_HEADER_LEN + 4 + 4 + crate::params::MAX_K_ITERATIONS as usize * SINGLE_COMMITMENT_SIZE <=
+		MAX_SIGNING_MESSAGE_SIZE,
+	"worst-case Round 2 commitment frame exceeds MAX_SIGNING_MESSAGE_SIZE"
+);
 
 // ============================================================================
 // Error Types

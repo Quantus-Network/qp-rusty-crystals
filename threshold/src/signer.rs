@@ -1250,7 +1250,8 @@ mod tests {
 	/// commitment hash is verified, so a peer cannot force SHAKE256 work over
 	/// a payload far larger than the session's configuration can legitimately
 	/// produce (the bounded deserializer admits up to the global
-	/// `MAX_COMMITMENT_DATA_SIZE`, ~10.5 MB, sized for the largest config).
+	/// `MAX_COMMITMENT_DATA_SIZE`, ~10–13 MB depending on the parameter set,
+	/// sized for the largest config).
 	///
 	/// The ordering is pinned through the error variant: an oversized reveal
 	/// whose hash does NOT match the frozen commitment must fail as
