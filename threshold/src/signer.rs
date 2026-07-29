@@ -409,10 +409,11 @@ impl ThresholdSigner {
 		//
 		// The ML-DSA message/context bounds must be enforced *before*
 		// `pack_round1_commitment` below: packing allocates and serializes
-		// k_iterations * SINGLE_COMMITMENT_SIZE bytes (~9.4 MB for 4-of-6),
-		// and a request that can never yield a verifiable signature must not
-		// be able to force that work. `process_round2` re-checks these bounds
-		// as defense in depth.
+		// k_iterations * SINGLE_COMMITMENT_SIZE bytes (multiple MB for deep
+		// committees — ~9.4 MB for 87's 4-of-6, up to ~12.4 MB for 44's
+		// 5-of-6), and a request that can never yield a verifiable signature
+		// must not be able to force that work. `process_round2` re-checks
+		// these bounds as defense in depth.
 		crate::error::validate_message(message)?;
 		crate::error::validate_context(context)?;
 

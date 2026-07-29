@@ -415,7 +415,8 @@ fn pack_w_dilithium(w: &polyvec::Polyvec<K>, buf: &mut [u8; SINGLE_COMMITMENT_SI
 /// Returns `Some((r, r_prime, nu))` where:
 /// - `r` is the rejection sampling radius
 /// - `r_prime` is the hyperball sampling radius
-/// - `nu` is the scaling factor (7 for ML-DSA-87)
+/// - `nu` is the scaling factor from the active parameter set's table (7 everywhere on ML-DSA-87, 5
+///   on ML-DSA-44; ML-DSA-65 ships per-config values in 6–8)
 ///
 /// Returns `None` if the configuration doesn't have pre-computed parameters.
 /// Currently supports n ≤ 6.

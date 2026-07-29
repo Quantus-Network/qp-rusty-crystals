@@ -2612,11 +2612,14 @@ fn single_share_weighted_norm(share: &NewShareData, nu: f64) -> f64 {
 /// below 1 keep κ = 1 and pay nothing. See `config.rs` for `K` and SECURITY_PROOF.md
 /// ("Bound `B` … and `Q_s`") for the bit-loss table.
 ///
-/// This is only possible while the enlarged radius stays under ML-DSA-87's fixed
-/// verification ceiling (`‖z₁‖∞ < γ1 − β`), which caps κ at ≈1.5×. The κ below were
-/// re-derived for the **v5 mean-subtracted ("coset") splitter** from the *measured*
-/// honest overshoot (Rust `test_recovered_partial_variance_*`, fixed point over all
-/// signing sets). v5's uniform negative correlation lowered every overshoot vs v4:
+/// This is only possible while the enlarged radius stays under the active
+/// parameter set's fixed verification ceiling (`‖z₁‖∞ < γ1 − β`); on ML-DSA-87
+/// that caps κ at ≈1.5×, while ML-DSA-44's tighter ceilings (γ₁ = 2¹⁷,
+/// γ₂ = (Q−1)/88) rule the `(4,6)` enlargement out entirely (see below). All κ
+/// were re-derived for the **v5 mean-subtracted ("coset") splitter** from the
+/// *measured* honest overshoot (Rust `test_recovered_partial_variance_*`, fixed
+/// point over all signing sets). Worked example — **ML-DSA-87's** shipped values
+/// (v5's uniform negative correlation lowered every overshoot vs v4):
 ///
 /// - `(2,2)`: overshoot 0.780× → κ = 1.00, K = 4.   (reshare within base `B`: a
 /// - `(2,3)`: overshoot 0.810× → κ = 1.00, K = 5.    reshared committee signs with exactly the same
@@ -2647,6 +2650,12 @@ fn single_share_weighted_norm(share: &NewShareData, nu: f64) -> f64 {
 /// - ML-DSA-87: (2,2) 0.780, (2,3) 0.810, (2,4) 0.961, (3,5) 1.012, (4,6) 1.163
 /// - ML-DSA-44: (2,2) 0.794, (2,3) 0.827, (2,4) 0.991, (3,5) 1.023, (4,6) 1.166
 /// - ML-DSA-65: (2,2) 0.620, (2,3) 0.672, (2,4) 0.869, (3,5) 0.809, (4,6) 0.917
+///
+/// ML-DSA-44 ships the same (2,4)/(3,5) enlargements as 87 (its overshoots are
+/// nearly identical) but *no* `(4,6)` entry: κ = 1.25 collapses the
+/// per-iteration acceptance under its verification ceilings, so `(4,6)` keeps
+/// base parameters and reshares into a 4-of-6 committee fail closed at the
+/// Round-5 guard (overshoot 1.166 > κ = 1).
 ///
 /// ML-DSA-65's overshoots sit below 1 everywhere because its keygen secrets use
 /// η = 4 (per-coefficient variance 20/3) while the split noise intensity is

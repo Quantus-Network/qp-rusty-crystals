@@ -1,4 +1,5 @@
-//! Low-level primitives for threshold ML-DSA-87.
+//! Low-level primitives for threshold ML-DSA (the active parameter set is
+//! selected in [`crate::params`]).
 //!
 //! This module provides the basic types and functions needed by the threshold protocol,
 //! including hyperball sampling, matrix operations, and modular arithmetic helpers.
