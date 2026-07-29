@@ -152,6 +152,14 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Run clippy (workspace)
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # --all-features never exercises the intentional "no ML-DSA frontend"
+      # build: without an ml-dsa-* feature the signing core is unused, and a
+      # regression that makes that configuration fail clippy (as this PR once
+      # did) stays green under --all-features alone.
+      - name: Run clippy (dilithium, no ML-DSA features)
+        run: cargo clippy --locked -p qp-rusty-crystals-dilithium --no-default-features -- -D warnings
+      - name: Run clippy (hdwallet, std only / no ML-DSA)
+        run: cargo clippy --locked -p qp-rusty-crystals-hdwallet --no-default-features --features std -- -D warnings
       - name: Generate documentation
         run: cargo doc --workspace --locked --no-deps --all-features
       - name: Check documentation
