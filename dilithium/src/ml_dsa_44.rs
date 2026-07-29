@@ -7,7 +7,7 @@ crate::frontend::define_ml_dsa!(crate::params::ml_dsa_44);
 
 #[cfg(test)]
 mod tests {
-	use super::{Keypair, PublicKey, MAX_MESSAGE_SIZE, SIGNBYTES};
+	use super::{Keypair, MAX_MESSAGE_SIZE, SIGNBYTES};
 	use crate::{errors::SignatureError, SensitiveBytes32};
 	use alloc::vec;
 	use rand::RngExt;
@@ -52,14 +52,5 @@ mod tests {
 		assert!(!keys.verify(&big, &[0u8; SIGNBYTES], None));
 	}
 
-	#[test]
-	fn rejects_zero_t1_public_key() {
-		use crate::params;
-		let mut pk = [0u8; super::PUBLICKEYBYTES];
-		pk[..params::SEEDBYTES].copy_from_slice(&[0x42u8; params::SEEDBYTES]);
-		assert!(matches!(
-			PublicKey::from_bytes(&pk),
-			Err(crate::errors::KeyParsingError::BadPublicKey)
-		));
-	}
+	crate::frontend::adversarial_import_tests!();
 }
