@@ -138,6 +138,34 @@ macro_rules! define_ml_dsa {
 				&self.public
 			}
 
+			/// The correspondence check shared by [`Keypair::from_parts`] and
+			/// [`Keypair::from_bytes`]: re-derive the public key from the
+			/// secret bytes (a keygen-scale computation that also validates
+			/// the packed secret-key invariants) and compare it to `public`.
+			///
+			/// Borrow-only on purpose: taking the secret by value would move
+			/// it through this frame and leave a dead stack copy that no drop
+			/// can wipe (a regression the release-mode
+			/// `import_stack_zeroization` probes catch). Callers keep the
+			/// bytes wherever they already are and control their cleanup.
+			fn check_correspondence(
+				secret_bytes: &[u8; SECRETKEYBYTES],
+				public: &PublicKey,
+			) -> Result<(), KeyParsingError> {
+				let derived_public = $crate::sign::public_key_from_secret_var::<
+					K,
+					L,
+					ETA,
+					PUBLICKEYBYTES,
+					SECRETKEYBYTES,
+				>(secret_bytes)
+				.ok_or(KeyParsingError::BadKeypair)?;
+				if derived_public != public.bytes {
+					return Err(KeyParsingError::BadKeypair);
+				}
+				Ok(())
+			}
+
 			/// Assemble a keypair from an already-imported secret and public key.
 			///
 			/// Enforces the same correspondence invariant as [`Keypair::from_bytes`]:
@@ -151,17 +179,7 @@ macro_rules! define_ml_dsa {
 				secret: SecretKey,
 				public: PublicKey,
 			) -> Result<Keypair, KeyParsingError> {
-				let derived_public = $crate::sign::public_key_from_secret_var::<
-					K,
-					L,
-					ETA,
-					PUBLICKEYBYTES,
-					SECRETKEYBYTES,
-				>(&secret.bytes)
-				.ok_or(KeyParsingError::BadKeypair)?;
-				if derived_public != public.bytes {
-					return Err(KeyParsingError::BadKeypair);
-				}
+				Self::check_correspondence(&secret.bytes, &public)?;
 				Ok(Keypair { secret, public })
 			}
 
@@ -208,13 +226,16 @@ macro_rules! define_ml_dsa {
 				let public =
 					PublicKey::from_bytes(public_bytes).map_err(|_| KeyParsingError::BadKeypair)?;
 
-				// The SecretKey is constructed directly (not via
-				// `SecretKey::from_bytes`) because `from_parts` performs the
-				// same validation — both run the packed-invariant checks
-				// inside `public_key_from_secret_var` — and going through the
-				// import path first would redo that keygen-scale derivation.
-				// On failure the secret is wiped by its own drop.
-				Self::from_parts(SecretKey { bytes: *secret_bytes }, public)
+				// Validate by borrowing the self-wiping buffer, then construct
+				// the Keypair directly. Building a `SecretKey` first and
+				// passing it to `from_parts` by value would move the array
+				// through an extra stack frame and leave a dead plaintext
+				// copy behind (caught by the release-mode
+				// `import_stack_zeroization` probes). Going through
+				// `SecretKey::from_bytes` instead would redo the keygen-scale
+				// derivation that `check_correspondence` already performs.
+				Self::check_correspondence(&secret_bytes, &public)?;
+				Ok(Keypair { secret: SecretKey { bytes: *secret_bytes }, public })
 			}
 
 			/// Compute a signature for a given message.
