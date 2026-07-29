@@ -17,6 +17,10 @@ macro_rules! variant_tests {
 		mod $mod_name {
 			use super::{MNEMONIC, PATH};
 			use crate::{mnemonic_to_seed, $mod_name::derive_key_from_mnemonic};
+			// Not inherited from the parent module: `use` items don't
+			// propagate into child modules, and this file must build without
+			// `std` (CI always enables it, so the breakage was latent).
+			use alloc::string::ToString;
 
 			#[test]
 			fn derivation_is_deterministic_and_matches_seed_entrypoint() {
@@ -170,6 +174,7 @@ golden_vector_tests!(golden_65, ml_dsa_65, "ml-dsa-65", test_vectors_65);
 #[ignore]
 fn regenerate_variant_golden_vectors() {
 	extern crate std;
+	use alloc::string::String;
 	use std::{fs::File, io::Write, path::PathBuf};
 
 	fn emit(filename: &str, label: &str, derive: impl Fn(&str, &str) -> alloc::vec::Vec<u8>) {
