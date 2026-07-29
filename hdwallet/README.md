@@ -19,7 +19,7 @@ ML-DSA parameter sets are selected with additive cargo features (default: `ml-ds
 qp-rusty-crystals-hdwallet = "3.1"
 
 # Multiple parameter sets side by side
-qp-rusty-crystals-hdwallet = { version = "3.1", features = ["ml-dsa-44", "ml-dsa-65"] }
+qp-rusty-crystals-hdwallet = { version = "3.0", features = ["ml-dsa-44", "ml-dsa-65"] }
 ```
 
 Each enabled feature exposes a key-derivation module (`ml_dsa_44`, `ml_dsa_65`,
