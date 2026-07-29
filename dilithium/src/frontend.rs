@@ -7,6 +7,24 @@
 //! variant-specific tests). Expanding the macro yields the same code that
 //! previously lived only in `ml_dsa_87.rs`.
 
+/// Build the FIPS 204 "pure" ML-DSA domain-separator prefix
+/// `[0, |ctx|, ctx…]` into `buf`, returning the prefix length. An absent
+/// context encodes as `[0, 0]`; a context longer than 255 bytes is invalid
+/// and returns `None`. The prefix bytes are parameter-set independent, so
+/// this lives outside [`define_ml_dsa!`] and is shared by every variant's
+/// sign and verify paths.
+pub(crate) fn ctx_prefix(ctx: Option<&[u8]>, buf: &mut [u8; 2 + 255]) -> Option<usize> {
+	match ctx {
+		Some(x) if x.len() > 255 => None,
+		Some(x) => {
+			buf[1] = x.len() as u8;
+			buf[2..2 + x.len()].copy_from_slice(x);
+			Some(2 + x.len())
+		},
+		None => Some(2),
+	}
+}
+
 /// Define the public ML-DSA API for one parameter-set module.
 ///
 /// `$params` must be a path to a module exposing the FIPS 204 constants
@@ -181,7 +199,7 @@ macro_rules! define_ml_dsa {
 			/// blobs with integrity protection, or pass fresh `hedge` randomness to
 			/// [`sign`](Self::sign) when storage integrity cannot be guaranteed.
 			pub fn from_bytes(bytes: &[u8]) -> Result<Keypair, KeyParsingError> {
-				if bytes.len() != SECRETKEYBYTES + PUBLICKEYBYTES {
+				if bytes.len() != KEYPAIRBYTES {
 					return Err(KeyParsingError::BadKeypair);
 				}
 				let (secret_slice, public_bytes) = bytes.split_at(SECRETKEYBYTES);
@@ -190,19 +208,13 @@ macro_rules! define_ml_dsa {
 				let public =
 					PublicKey::from_bytes(public_bytes).map_err(|_| KeyParsingError::BadKeypair)?;
 
-				let derived_public = $crate::sign::public_key_from_secret_var::<
-					K,
-					L,
-					ETA,
-					PUBLICKEYBYTES,
-					SECRETKEYBYTES,
-				>(&secret_bytes)
-				.ok_or(KeyParsingError::BadKeypair)?;
-				if derived_public != public.bytes {
-					return Err(KeyParsingError::BadKeypair);
-				}
-
-				Ok(Keypair { secret: SecretKey { bytes: *secret_bytes }, public })
+				// The SecretKey is constructed directly (not via
+				// `SecretKey::from_bytes`) because `from_parts` performs the
+				// same validation — both run the packed-invariant checks
+				// inside `public_key_from_secret_var` — and going through the
+				// import path first would redo that keygen-scale derivation.
+				// On failure the secret is wiped by its own drop.
+				Self::from_parts(SecretKey { bytes: *secret_bytes }, public)
 			}
 
 			/// Compute a signature for a given message.
@@ -308,55 +320,27 @@ macro_rules! define_ml_dsa {
 				if msg.len() > MAX_MESSAGE_SIZE {
 					return Err(SignatureError::MessageTooLong);
 				}
-				match ctx {
-					Some(x) => {
-						if x.len() > 255 {
-							return Err(SignatureError::ContextTooLong);
-						}
-						let x_len = x.len();
-						let mut prefix = [0u8; 2 + 255];
-						prefix[1] = x_len as u8;
-						prefix[2..2 + x_len].copy_from_slice(x);
-						let mut sig: Signature = [0u8; SIGNBYTES];
-						$crate::sign::signature_var::<
-							K,
-							L,
-							ETA,
-							TAU,
-							GAMMA1,
-							GAMMA2,
-							OMEGA,
-							C_DASH_BYTES,
-							POLYZ_PACKEDBYTES,
-							POLYW1_PACKEDBYTES,
-							{ K * POLYW1_PACKEDBYTES },
-							PUBLICKEYBYTES,
-							SECRETKEYBYTES,
-							SIGNBYTES,
-						>(&mut sig, &prefix[..2 + x_len], msg, &self.bytes, hedge);
-						Ok(sig)
-					},
-					None => {
-						let mut sig: Signature = [0u8; SIGNBYTES];
-						$crate::sign::signature_var::<
-							K,
-							L,
-							ETA,
-							TAU,
-							GAMMA1,
-							GAMMA2,
-							OMEGA,
-							C_DASH_BYTES,
-							POLYZ_PACKEDBYTES,
-							POLYW1_PACKEDBYTES,
-							{ K * POLYW1_PACKEDBYTES },
-							PUBLICKEYBYTES,
-							SECRETKEYBYTES,
-							SIGNBYTES,
-						>(&mut sig, &[0u8, 0u8], msg, &self.bytes, hedge);
-						Ok(sig)
-					},
-				}
+				let mut prefix = [0u8; 2 + 255];
+				let prefix_len = $crate::frontend::ctx_prefix(ctx, &mut prefix)
+					.ok_or(SignatureError::ContextTooLong)?;
+				let mut sig: Signature = [0u8; SIGNBYTES];
+				$crate::sign::signature_var::<
+					K,
+					L,
+					ETA,
+					TAU,
+					GAMMA1,
+					GAMMA2,
+					OMEGA,
+					C_DASH_BYTES,
+					POLYZ_PACKEDBYTES,
+					POLYW1_PACKEDBYTES,
+					{ K * POLYW1_PACKEDBYTES },
+					PUBLICKEYBYTES,
+					SECRETKEYBYTES,
+					SIGNBYTES,
+				>(&mut sig, &prefix[..prefix_len], msg, &self.bytes, hedge);
+				Ok(sig)
 			}
 		}
 
@@ -396,49 +380,26 @@ macro_rules! define_ml_dsa {
 				if msg.len() > MAX_MESSAGE_SIZE {
 					return false;
 				}
-				match ctx {
-					Some(x) => {
-						if x.len() > 255 {
-							return false;
-						}
-						let x_len = x.len();
-						let mut prefix = [0u8; 2 + 255];
-						prefix[1] = x_len as u8;
-						prefix[2..2 + x_len].copy_from_slice(x);
-						$crate::sign::verify_var::<
-							K,
-							L,
-							ETA,
-							TAU,
-							GAMMA1,
-							GAMMA2,
-							OMEGA,
-							C_DASH_BYTES,
-							POLYZ_PACKEDBYTES,
-							POLYW1_PACKEDBYTES,
-							{ K * POLYW1_PACKEDBYTES },
-							PUBLICKEYBYTES,
-							SECRETKEYBYTES,
-							SIGNBYTES,
-						>(sig, &prefix[..2 + x_len], msg, &self.bytes)
-					},
-					None => $crate::sign::verify_var::<
-						K,
-						L,
-						ETA,
-						TAU,
-						GAMMA1,
-						GAMMA2,
-						OMEGA,
-						C_DASH_BYTES,
-						POLYZ_PACKEDBYTES,
-						POLYW1_PACKEDBYTES,
-						{ K * POLYW1_PACKEDBYTES },
-						PUBLICKEYBYTES,
-						SECRETKEYBYTES,
-						SIGNBYTES,
-					>(sig, &[0u8, 0u8], msg, &self.bytes),
-				}
+				let mut prefix = [0u8; 2 + 255];
+				let Some(prefix_len) = $crate::frontend::ctx_prefix(ctx, &mut prefix) else {
+					return false;
+				};
+				$crate::sign::verify_var::<
+					K,
+					L,
+					ETA,
+					TAU,
+					GAMMA1,
+					GAMMA2,
+					OMEGA,
+					C_DASH_BYTES,
+					POLYZ_PACKEDBYTES,
+					POLYW1_PACKEDBYTES,
+					{ K * POLYW1_PACKEDBYTES },
+					PUBLICKEYBYTES,
+					SECRETKEYBYTES,
+					SIGNBYTES,
+				>(sig, &prefix[..prefix_len], msg, &self.bytes)
 			}
 		}
 	};
