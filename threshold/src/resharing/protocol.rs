@@ -70,8 +70,8 @@ const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
 
 /// Domain separator for bounded conditional splitting noise.
 /// v5: "coset" hiding noise — per dealer, per coefficient, sample `m` i.i.d.
-/// sparse-ternary deltas (intensity `≈ 0.49 / S_old`) and subtract the *balanced
-/// split of their sum* (`add_mean_subtracted_noise`). This integer zero-sum noise
+/// sparse-ternary deltas (intensity scaled to η's keygen variance / `S_old`) and subtract the
+/// *balanced split of their sum* (`add_mean_subtracted_noise`). This integer zero-sum noise
 /// has the uniform negative correlation `Cov(N_j,N_k) = −σ²/m` of the a-posteriori
 /// coset Gaussian, so recovered-partial variance tracks keygen for *every* recovery
 /// pattern.
@@ -83,9 +83,11 @@ const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
 const BOUNDED_SPLIT_DOMAIN: &[u8] = b"resharing-bounded-split-v5";
 
 /// Per-coefficient probability scale for the sparse-ternary split noise, as a
-/// 256-denominator numerator: a single dealer draws `±1` with probability
-/// `≈ 0.49 / S_old` each (and `0` otherwise) for each of the `m` deltas, before
-/// the balanced mean subtraction in `add_mean_subtracted_noise`.
+/// 256-denominator numerator targeting aggregated Var ≈ `η(η+1)/3`.
+///
+/// A single dealer contributes expected `±1`-mass `≈ NUM / (256 · S_old)` across
+/// `num_draws` independent sparse-ternary samples (see [`split_noise_params`]),
+/// before the balanced mean subtraction in `add_mean_subtracted_noise`.
 ///
 /// # Why `1/S_old`
 ///
@@ -97,22 +99,53 @@ const BOUNDED_SPLIT_DOMAIN: &[u8] = b"resharing-bounded-split-v5";
 /// Gaussian over the sum-`s` coset). This keeps the recovered-partial norm under
 /// the keygen envelope `B` while preserving keygen-level key hiding.
 ///
-/// The `0.49` constant (= `(0.7)²`, i.e. `σ_split = 0.7·σ_keygen/√S_old`) is
-/// tuned by Monte-Carlo (`scripts/compute_hyperball_params.py`) so the
-/// aggregated hiding σ stays ≈ `σ_keygen = √2` across supported committees.
+/// # η dependence
 ///
-/// # η dependence (ML-DSA-65 caveat)
+/// The η = 2 calibration is `NUM = 125 = round(0.49 · 256)`, where
+/// `0.49 = (0.7)²` so `σ_split = 0.7 · σ_keygen / √S_old` and the aggregated
+/// hiding σ stays ≈ `σ_keygen = √2`. That flat numerator reaches keygen
+/// parity at η = 2 because the *fixed-point* conditional variance of a
+/// reshared share also receives an O(1) contribution from the balanced-split
+/// remainder randomization (the ±1 rotation pieces), which is a large
+/// fraction of `Var(2) = 2` — measured 1.00–1.25 × keygen for every
+/// committee (`scripts/keyhiding_conditional.py --eta 2`).
 ///
-/// The tuning targets `σ_keygen = √(η(η+1)/3) = √2` for η = 2 (ML-DSA-44/87).
-/// ML-DSA-65 uses η = 4 (keygen variance 20/3 ≈ 6.67), so on that parameter
-/// set the aggregated split noise is ~3.3× *below* keygen variance. This is
-/// norm-safe — measured honest overshoots stay below the base bound `B`
-/// everywhere (0.62–0.92, so 65 reshares at κ = 1) — but the "new shares are
-/// distributed like a fresh keygen sharing" hiding claim is weaker than on
-/// η = 2 sets. Scaling the intensity to η = 4 keygen level is future
-/// calibration work (it would raise the overshoots and require κ > 1 radii
-/// re-derivation for 65). See SECURITY_PROOF.md, "Parameter-set scope".
-const SPLIT_NOISE_NUM_X256: u32 = 125; // round(0.49 * 256)
+/// # η = 4: per-committee numerator
+///
+/// At η = 4 (`Var(4) = 20/3`) that remainder floor is relatively small, so
+/// scaling by the variance ratio alone (`round(125 · 10/3) = 417`) leaves
+/// the fixed-point conditional variance at only 0.76–0.85 × keygen, and the
+/// response to extra noise is sublinear and *committee-dependent* (shallow
+/// committees, small `S_old`, lag the most). The numerator is therefore
+/// calibrated per `S_old` — the smallest value whose measured fixed-point
+/// conditional variance is ≥ 1.02 × keygen variance
+/// (`scripts/keyhiding_conditional.py --eta 4`, R = 20, 200k samples):
+///
+/// | `S_old` | 2 | 3 | 4 | 5 | 6 | 10 | 15 | 20 |
+/// |---------|---|---|---|---|---|----|----|----|
+/// | NUM     |780|740|700|640|620|575 |555 |550 |
+///
+/// Supported committees produce exactly these `S_old = C(n, n-t+1)` values;
+/// the fallback arms round *down* to the next calibrated `S_old` (more
+/// noise, hiding-safe). Raising 65's intensity to keygen level also raises
+/// its honest overshoots, so its hyperball tables ship κ > 1 enlargements
+/// (see `params_tables_65.rs` and SECURITY_PROOF.md, "Parameter-set scope").
+const fn split_noise_num_x256(s_old: usize) -> u32 {
+	match crate::params::ETA {
+		2 => 125, // round(0.49 * 256), σ²_keygen = 2; flat — parity measured at every S_old
+		4 => match s_old {
+			0..=2 => 780,
+			3 => 740,
+			4 => 700,
+			5 => 640,
+			6..=9 => 620,
+			10..=14 => 575,
+			15..=19 => 555,
+			_ => 550,
+		},
+		_ => panic!("unsupported ETA"),
+	}
+}
 
 const COMMIT_DOMAIN: &[u8] = b"resharing-commit-v3";
 
@@ -2649,18 +2682,16 @@ fn single_share_weighted_norm(share: &NewShareData, nu: f64) -> f64 {
 ///
 /// - ML-DSA-87: (2,2) 0.780, (2,3) 0.810, (2,4) 0.961, (3,5) 1.012, (4,6) 1.163
 /// - ML-DSA-44: (2,2) 0.794, (2,3) 0.827, (2,4) 0.991, (3,5) 1.023, (4,6) 1.166
-/// - ML-DSA-65: (2,2) 0.620, (2,3) 0.672, (2,4) 0.869, (3,5) 0.809, (4,6) 0.917
+/// - ML-DSA-65: (2,2) 0.774, (2,3) 0.789, (2,4) 0.980, (3,5) 0.961, (4,6) 1.131 (worst of 6 keygen
+///   seeds) — the per-committee split-noise intensity is calibrated to full keygen-parity hiding,
+///   so overshoots track the η = 2 sets. Ships κ = 1.10/1.10/1.18 for (2,4)/(3,5)/(4,6) under the
+///   same margin policy as 87 (see `params_tables_65.rs`).
 ///
 /// ML-DSA-44 ships the same (2,4)/(3,5) enlargements as 87 (its overshoots are
 /// nearly identical) but *no* `(4,6)` entry: κ = 1.25 collapses the
 /// per-iteration acceptance under its verification ceilings, so `(4,6)` keeps
 /// base parameters and reshares into a 4-of-6 committee fail closed at the
 /// Round-5 guard (overshoot 1.166 > κ = 1).
-///
-/// ML-DSA-65's overshoots sit below 1 everywhere because its keygen secrets use
-/// η = 4 (per-coefficient variance 20/3) while the split noise intensity is
-/// tuned to η = 2 keygen variance — so it reshares at κ = 1 with base signing
-/// parameters (see `split_noise_threshold` for the hiding-side caveat).
 pub fn resharing_norm_enlargement(threshold: u32, parties: u32) -> f64 {
 	crate::params::resharing_kappa(threshold, parties)
 }
@@ -2701,13 +2732,14 @@ fn generate_subset_masks(n: usize, k: usize) -> Vec<SubsetMask> {
 ///
 /// # Fresh re-sharing (noise intensity)
 ///
-/// The deltas are sparse-ternary with intensity `≈ 0.49 / S_old` (see
-/// `split_noise_threshold`). Because each new share `s_J^new = Σ_I r_{I→J}` sums
-/// contributions from all `S_old = num_old_subsets` old subsets, scaling each
-/// dealer's noise as `1/S_old` makes the *aggregated* new-share noise land at the
-/// keygen level. The new shares are then distributed like a fresh keygen secret
-/// sharing (Mithril §3.3 *a posteriori* sharing), so recovered signing partials
-/// stay under the keygen norm envelope `B` instead of growing with the committee.
+/// The deltas are sparse-ternary with intensity scaled to the active η's
+/// keygen variance (`split_noise_params` / `split_noise_num_x256`). Because
+/// each new share `s_J^new = Σ_I r_{I→J}` sums contributions from all
+/// `S_old = num_old_subsets` old subsets, scaling each dealer's noise as
+/// `1/S_old` makes the *aggregated* new-share noise land at the keygen level.
+/// The new shares are then distributed like a fresh keygen secret sharing
+/// (Mithril §3.3 *a posteriori* sharing), so recovered signing partials stay
+/// under the keygen norm envelope `B` instead of growing with the committee.
 fn derive_subshares_with_session_seed(
 	i_mask: SubsetMask,
 	s_i: &SecretShareData,
@@ -2770,16 +2802,16 @@ fn derive_subshares_with_session_seed(
 	// longer depends on the (arbitrary) subset ordering. Hiding holds because the
 	// noise is PRF-derived and keyed to `(session_seed, i_mask, s_i)`.
 	//
-	// The per-subset deltas are sparse-ternary with intensity `≈ 0.49/S_old`
-	// (`split_noise_threshold`): each dealer injects only `1/S_old` of the keygen
-	// noise, so the aggregated noise across the `S_old` dealers in
-	// `s_J^new = Σ_I r_{I→J}` reaches the keygen level.
-	let noise_t = split_noise_threshold(num_old_subsets);
+	// The per-subset deltas are sparse-ternary with intensity scaled to the
+	// active η's keygen variance (`split_noise_params`): each dealer injects
+	// only `1/S_old` of the keygen noise, so the aggregated noise across the
+	// `S_old` dealers in `s_J^new = Σ_I r_{I→J}` reaches the keygen level.
+	let (noise_t, noise_draws) = split_noise_params(num_old_subsets);
 	let mut deltas = vec![0i32; m];
 	for poly_idx in 0..L {
 		for coeff_idx in 0..N as usize {
 			for d in deltas.iter_mut() {
-				*d = sample_split_noise_coeff(&mut state, noise_t);
+				*d = sample_split_noise_coeff(&mut state, noise_t, noise_draws);
 			}
 			add_mean_subtracted_noise(&deltas, &mut out, true, poly_idx, coeff_idx, &mut state);
 		}
@@ -2787,7 +2819,7 @@ fn derive_subshares_with_session_seed(
 	for poly_idx in 0..K {
 		for coeff_idx in 0..N as usize {
 			for d in deltas.iter_mut() {
-				*d = sample_split_noise_coeff(&mut state, noise_t);
+				*d = sample_split_noise_coeff(&mut state, noise_t, noise_draws);
 			}
 			add_mean_subtracted_noise(&deltas, &mut out, false, poly_idx, coeff_idx, &mut state);
 		}
@@ -2865,35 +2897,51 @@ fn center_mod_q(coeff: i32) -> i32 {
 	}
 }
 
-/// Byte threshold `T` for the sparse-ternary split-noise sampler, given the
-/// number of old RSS subsets `S_old`. Each delta is `+1` for PRF byte `< T`,
-/// `-1` for `< 2T`, else `0`, so `P(±1) = T/256 ≈ 0.49 / S_old` each.
+/// `(threshold_per_draw, num_draws)` for the sparse-ternary split-noise
+/// sampler at a given `S_old`.
 ///
-/// Computed with integer arithmetic (no float, `no_std`-friendly) as
-/// `round(SPLIT_NOISE_NUM_X256 / S_old)`, clamped to `[1, 127]` so the three
-/// bands always fit in a byte and noise never fully vanishes.
-fn split_noise_threshold(num_old_subsets: usize) -> u32 {
+/// The desired per-dealer `±1`-mass is `round(split_noise_num_x256(S_old) / S_old)`.
+/// A single PRF byte can only encode threshold `T ≤ 127` (so the `+1` / `-1` /
+/// `0` bands fit), so when the desired mass exceeds 127 — which happens for
+/// η = 4 on small committees — the mass is split across `num_draws`
+/// independent unit draws whose thresholds sum (in expectation) to the
+/// desired total. For η = 2, `num_draws` is always 1.
+///
+/// Deterministic in `(ETA, S_old)` only, so every member of an old subset
+/// consumes the same number of PRF bytes and derives identical sub-shares.
+fn split_noise_params(num_old_subsets: usize) -> (u32, u32) {
 	let s = num_old_subsets.max(1) as u32;
-	// round(125 / s) = (125 + s/2) / s
-	let t = (SPLIT_NOISE_NUM_X256 + s / 2) / s;
-	t.clamp(1, 127)
+	let desired = (split_noise_num_x256(num_old_subsets) + s / 2) / s; // round(NUM(s) / s)
+	let desired = desired.max(1);
+	let num_draws = desired.div_ceil(127).max(1);
+	let t_each = ((desired + num_draws / 2) / num_draws).clamp(1, 127);
+	(t_each, num_draws)
 }
 
-/// Sample one sparse-ternary split-noise delta in `{-1, 0, +1}` from the PRF
-/// stream, with `P(+1) = P(-1) = threshold / 256`. Consumes exactly one PRF byte
-/// per coefficient, so it is deterministic and stream-aligned across all parties
-/// (every member of an old subset derives identical sub-shares).
-fn sample_split_noise_coeff(state: &mut fips202::Shake256State, threshold: u32) -> i32 {
+/// Sample one split-noise delta as the sum of `num_draws` independent
+/// sparse-ternary draws in `{-1, 0, +1}`, each with
+/// `P(+1) = P(-1) = threshold / 256`. Consumes exactly `num_draws` PRF bytes
+/// per coefficient, so it is deterministic and stream-aligned across all
+/// parties (every member of an old subset derives identical sub-shares).
+fn sample_split_noise_coeff(
+	state: &mut fips202::Shake256State,
+	threshold: u32,
+	num_draws: u32,
+) -> i32 {
+	let mut acc = 0i32;
 	let mut buf = [0u8; 1];
-	fips202::shake256_squeeze(&mut buf, state);
-	let b = buf[0] as u32;
-	if b < threshold {
-		1
-	} else if b < 2 * threshold {
-		-1
-	} else {
-		0
+	for _ in 0..num_draws {
+		fips202::shake256_squeeze(&mut buf, state);
+		let b = buf[0] as u32;
+		acc += if b < threshold {
+			1
+		} else if b < 2 * threshold {
+			-1
+		} else {
+			0
+		};
 	}
+	acc
 }
 
 fn sample_uniform_usize(state: &mut fips202::Shake256State, upper: usize) -> usize {

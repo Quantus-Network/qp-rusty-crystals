@@ -9,7 +9,7 @@ Build for **exactly one** FIPS 204 parameter set via Cargo feature (default `ml-
 | Feature | NIST category | Notes |
 |---------|---------------|-------|
 | `ml-dsa-87` | 5 (~256-bit) | Default; audited production calibration (hyperball / `k_iterations`) |
-| `ml-dsa-65` | 3 (~192-bit) | Calibrated tables (2k-sample grid, 8k-sample K refine); reshares at κ=1 everywhere (measured overshoots 0.62–0.92) |
+| `ml-dsa-65` | 3 (~192-bit) | Calibrated tables (2k-sample grid, 8k-sample K refine); keygen-parity reshare hiding, κ=1.10/1.10/1.18 for (2,4)/(3,5)/(4,6) |
 | `ml-dsa-44` | 2 (~128-bit) | Calibrated tables (2k-sample grid, 8k-sample K refine); reshare κ-enlarged for (2,4)/(3,5); reshare into (4,6) fails closed |
 
 ```bash

@@ -3651,6 +3651,19 @@ fn generate_signing_sets(parties: &[u32], threshold: usize) -> Vec<Vec<u32>> {
 
 /// Analyze recovered partial variance for a given configuration.
 fn analyze_recovered_partials(threshold: u32, parties: u32, num_resharings: usize) {
+	analyze_recovered_partials_with_seed(threshold, parties, num_resharings, [0x42u8; 32]);
+}
+
+/// Like [`analyze_recovered_partials`] but with a caller-chosen keygen seed
+/// (the split-noise PRF is keyed to the shares, so varying the keygen seed
+/// decorrelates the whole reshare trajectory). Returns the measured guard
+/// overshoot so multi-seed stability checks can aggregate it.
+fn analyze_recovered_partials_with_seed(
+	threshold: u32,
+	parties: u32,
+	num_resharings: usize,
+	seed: [u8; 32],
+) -> f64 {
 	println!("\n======================================================================");
 	println!(
 		"RECOVERED PARTIAL ANALYSIS: {}-of-{} ({} resharings)",
@@ -3662,7 +3675,6 @@ fn analyze_recovered_partials(threshold: u32, parties: u32, num_resharings: usiz
 
 	// Generate initial keys
 	let config = ThresholdConfig::new(threshold, parties).expect("valid config");
-	let seed = [0x42u8; 32];
 	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
 
 	let mut current_shares: HashMap<u32, PrivateKeyShare> =
@@ -3870,6 +3882,8 @@ fn analyze_recovered_partials(threshold: u32, parties: u32, num_resharings: usiz
 	// The norm should have reasonable margin (at least 10%)
 	let margin_ratio = (r_prime - max_combined_norm) / r_prime;
 	println!("\nSafety check: margin ratio = {:.1}% (want > 10%)", margin_ratio * 100.0);
+
+	guard_overshoot
 }
 
 /// Compute binomial coefficient C(n, k).
@@ -3904,14 +3918,59 @@ fn test_recovered_partial_variance_3_of_5() {
 	analyze_recovered_partials(3, 5, 20);
 }
 
-// (4,6) carries the thinnest κ margin (~7.5%: measured 1.163× vs κ=1.25); its
-// overshoot ≤ κ assertion runs in the default suite alongside the cheaper configs.
-// On ML-DSA-44 the config fails closed instead (κ = 1); see the dedicated
-// fail-closed test below.
+// (4,6) carries the thinnest κ margin (ML-DSA-87: measured 1.163× vs κ = 1.25;
+// ML-DSA-65: measured 1.124× fixed-seed / 1.131× worst-of-6-seeds vs κ = 1.18);
+// its overshoot ≤ κ assertion runs in the default suite alongside the cheaper
+// configs. On ML-DSA-44 the config fails closed instead (κ = 1); see the
+// dedicated fail-closed test below.
 #[cfg(any(feature = "ml-dsa-87", feature = "ml-dsa-65"))]
 #[test]
 fn test_recovered_partial_variance_4_of_6() {
 	analyze_recovered_partials(4, 6, 10);
+}
+
+/// Multi-seed stability check for the thin-margin overshoots: the default
+/// tests above use one fixed keygen seed; this one re-measures the honest
+/// guard overshoot across several independent keygen seeds (each of which
+/// re-keys the split-noise PRF for the entire reshare trajectory) and asserts
+/// every run stays under the shipped κ for every config whose fixed-seed
+/// overshoot sits near its κ. `#[ignore]`d (it repeats the default tests 6×);
+/// run with `cargo test --release -- --ignored multi_seed`.
+#[cfg(any(feature = "ml-dsa-87", feature = "ml-dsa-65"))]
+#[test]
+#[ignore]
+fn test_recovered_partial_overshoot_multi_seed() {
+	// (t, n, reshare count) for the configs with the thinnest κ margins.
+	let configs: &[(u32, u32, usize)] = &[(2, 4, 100), (3, 5, 20), (4, 6, 10)];
+	for &(t, n, reshares) in configs {
+		let kappa = resharing_norm_enlargement(t, n);
+		let mut worst: f64 = 0.0;
+		for s in 0u8..6 {
+			let seed = [0x40 + s; 32];
+			let overshoot = analyze_recovered_partials_with_seed(t, n, reshares, seed);
+			println!(
+				">>> {}-of-{} seed 0x{:02x}: overshoot = {:.3}x (kappa = {:.2})",
+				t,
+				n,
+				0x40 + s,
+				overshoot,
+				kappa
+			);
+			worst = worst.max(overshoot);
+		}
+		println!(
+			"\n>>> {}-of-{} worst overshoot over 6 seeds: {:.3}x (kappa = {:.2})\n",
+			t, n, worst, kappa
+		);
+		assert!(
+			worst <= kappa,
+			"{}-of-{}: worst multi-seed overshoot {:.3}x exceeds kappa {:.2}",
+			t,
+			n,
+			worst,
+			kappa
+		);
+	}
 }
 
 /// ML-DSA-44 cannot support resharing into a 4-of-6 committee: the measured

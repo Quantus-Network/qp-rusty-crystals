@@ -30,23 +30,38 @@ is per variant:
   ≈ 10⁶ (infeasible), so the table ships κ = 1 and the Round-5 guard
   rejects honest reshares into 4-of-6 — fail closed, never fail open. Freshly
   dealt/DKG 4-of-6 committees sign normally at base parameters.
-- **ML-DSA-65**: measured overshoots are below 1 everywhere — (2,2) 0.620,
-  (2,3) 0.672, (2,4) 0.869, (3,5) 0.809, (4,6) 0.917 — because keygen uses
-  η = 4 (per-coefficient variance 20/3) while the split-noise intensity is
-  tuned to η = 2 keygen variance. Every committee reshares at κ = 1 with base
-  signing parameters. The flip side: the aggregated split noise is ~3.3× below
-  keygen variance, so the a-posteriori "reshared shares are distributed like a
-  fresh keygen sharing" hiding argument (§ Privacy) is quantitatively weaker
-  on 65 than on the η = 2 sets. Re-tuning the intensity to η = 4 (and
-  re-deriving κ and the radii, since overshoots would rise) is future
-  calibration work.
+- **ML-DSA-65**: keygen uses η = 4 (per-coefficient variance 20/3). Scaling
+  the split-noise intensity by the keygen-variance ratio alone
+  (`round(125 · 10/3) = 417`) measures *below* parity (conditional variance
+  0.76–0.85 × keygen), because the fixed-point conditional variance also
+  receives an O(1) contribution from the balanced-split remainder
+  randomization — large relative to Var(2) = 2, small relative to
+  Var(4) = 20/3 — and the response to extra noise is sublinear and
+  committee-dependent. The numerator is therefore **calibrated per
+  committee** (`split_noise_num_x256(S_old)`: 780/740/700/640/620/575/555/550
+  for S_old = 2/3/4/5/6/10/15/20, multi-draw ternary sampling), the smallest
+  values whose measured fixed-point conditional variance is ≥ 1.02 × keygen.
+  Measured hiding (`keyhiding_conditional.py --eta 4`, R = 20, 400k samples):
+  conditional variance 6.85–7.01 vs the keygen baseline 6.67, i.e.
+  **1.028–1.051 × keygen for every supported committee** — the same parity
+  the η = 2 sets have (1.00–1.25×). The cost is honest overshoots at η = 2
+  levels (fixed seed / worst of 6 keygen seeds): (2,2) 0.774, (2,3) 0.789,
+  (2,4) 0.973/0.980, (3,5) 0.934/0.961, (4,6) 1.124/1.131. Following 87's
+  margin policy, (2,4)/(3,5) ship κ = 1.10 and (4,6) ships κ = 1.18 (~4.1%
+  over the worst seed; pinned by the multi-seed overshoot test in
+  `resharing_tests.rs`), with radii and `K` re-derived at the enlarged radii
+  (K = 14 / 208 / 7560; (4,6)'s K from a dedicated 400,000-sample MC run).
+  The resulting ~31.8 MiB worst-case Round-2 frame is what sizes the 36 MiB
+  `MAX_SIGNING_MESSAGE_SIZE` — still well under near-mpc's 100 MiB transport
+  cap, but deep-committee resharing support on 65 is materially more
+  expensive than on 87 (K = 7560 vs 1600).
 
 The 44/65 signing tables were calibrated with a full grid search at 2,000
 Monte-Carlo samples per point, with `K` then re-estimated at the chosen radii
 with 8,000 samples and a 2× margin (see the crate README). Overshoots above
 were measured with the Rust `test_recovered_partial_variance_*` tests built
-with the respective feature; the enlarged 44 entries were derived with
-`scripts/compute_hyperball_params.py --variant 44 --refine-shipped`.
+with the respective feature; the enlarged 44/65 entries were derived with
+`scripts/compute_hyperball_params.py --variant {44,65} --refine-shipped`.
 
 ## Protocol Summary
 

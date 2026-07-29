@@ -170,21 +170,21 @@ pub enum Action<T> {
 	Return(T),
 }
 
-/// Maximum signing message size in bytes (12 MiB).
+/// Maximum signing message size in bytes (36 MiB).
 /// This limits the size of serialized signing protocol messages. It must exceed the largest
 /// *legitimate* per-round frame, which is the Round 2 commitment broadcast: a small header plus
-/// k_iterations × `SINGLE_COMMITMENT_SIZE`. The worst case per parameter set is ML-DSA-87's
-/// resharing-hardened 4-of-6 config (k=1600, ~9.42 MB frame) and ML-DSA-44's 5-of-6 config
-/// (k=4196, 12,353,065-byte frame — ~1.8% under this cap; the fit is pinned by the const
-/// assert at [`FRAME_HEADER_LEN`]).
+/// k_iterations × `SINGLE_COMMITMENT_SIZE`. The worst case per parameter set is ML-DSA-65's
+/// resharing-hardened 4-of-6 config (k=7560, 33,385,001-byte frame — ~11.5% under this cap),
+/// followed by ML-DSA-44's 5-of-6 config (k=4196, 12,353,065-byte frame) and ML-DSA-87's
+/// 4-of-6 config (k=1600, ~9.42 MB frame). The fit is pinned by the const assert at
+/// [`FRAME_HEADER_LEN`].
 ///
-/// Note this cap can be *smaller* than [`MAX_COMMITMENT_DATA_SIZE`]: that bound adds a 600 kB
-/// slack margin on top of the worst-case payload, which on ML-DSA-44 pushes it to ~12.95 MB.
-/// The effective deserialization limit is the smaller of the two — this global check runs
-/// first, then the per-config `max_frame_size` check tightens it further for small sessions.
-/// near-mpc's transport frames up to 100 MiB (`MAX_MESSAGE_SIZE_BYTES`), so this is well within
-/// the network layer's budget.
-pub const MAX_SIGNING_MESSAGE_SIZE: usize = 12 * 1024 * 1024;
+/// The effective deserialization limit is the smaller of this cap and
+/// [`MAX_COMMITMENT_DATA_SIZE`] (worst-case payload plus a 600 kB slack margin) — this global
+/// check runs first, then the per-config `max_frame_size` check tightens it further for small
+/// sessions. near-mpc's transport frames up to 100 MiB (`MAX_MESSAGE_SIZE_BYTES`), so this is
+/// well within the network layer's budget.
+pub const MAX_SIGNING_MESSAGE_SIZE: usize = 36 * 1024 * 1024;
 
 /// Fixed header of every serialized [`SigningMessage`]: the 1-byte Borsh enum
 /// variant tag followed by the [`SSID_SIZE`]-byte session identifier (every
@@ -2649,7 +2649,8 @@ mod tests {
 
 	/// A frame larger than any legitimate message for *this session's*
 	/// configuration must be rejected before parsing. The global cap is sized
-	/// for the (4,6) worst case (k=1600, ~12 MiB); a 2-of-3 session (k=5,
+	/// for the worst resharing-hardened (4,6)/(5,6) configs across parameter
+	/// sets (up to ~31.8 MiB, 36 MiB cap); a 2-of-3 session (k=5,
 	/// largest honest frame ~29 KB) must not accept and buffer megabytes of
 	/// junk that only fails at combine-time length validation.
 	#[test]

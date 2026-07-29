@@ -334,9 +334,10 @@ def recover_expo(t: int, n: int, fact: float, eta: int, params: MLDSAParams, r_t
 # overshoot sqrt(tau)*||p||_nu / B_base at the repeated-reshare fixed point
 # (Rust test_recovered_partial_variance_*: 100 reshares for (2,*), 20 for
 # (3,5), 10 for (4,6); max over all signing sets), built with the variant's
-# cargo feature. ML-DSA-65 is intentionally absent: eta=4 keygen variance
-# (20/3) dwarfs the eta=2-tuned split noise, so its measured overshoots are
-# 0.62-0.92 (< 1 everywhere) and it reshares at kappa=1 with base tables.
+# cargo feature. Split-noise intensity: flat NUM=125 for η=2; per-committee
+# NUM(S_old) for η=4, calibrated to keygen-parity conditional variance
+# (see protocol.rs::split_noise_num_x256 and keyhiding_conditional.py). 65's
+# overshoots therefore sit near the η=2 sets rather than artificially below 1.
 RESHARING_DATA = {
     87: dict(
         fact=7.0,
@@ -365,6 +366,22 @@ RESHARING_DATA = {
         # enlargement params_tables_44.rs declares infeasible (pinned by
         # `generator_script_agrees_on_44_fail_closed_4_of_6` in src/params.rs).
         kappa={(2, 2): 1.00, (2, 3): 1.00, (2, 4): 1.10, (3, 5): 1.15},
+    ),
+    65: dict(
+        fact=6.0,  # (4,6) ships nu=6; used for the enlarged-config printout
+        ref_r={(2, 2): 529159.1, (2, 3): 560822.1, (2, 4): 559722.0,
+               (3, 5): 563613.5, (4, 6): 530263.4},
+        # Post per-committee keygen-parity noise calibration; worst of 6 keygen
+        # seeds, measured by the multi-seed test under --features ml-dsa-65
+        # (fixed-seed values: 0.774 / 0.789 / 0.973 / 0.934 / 1.124).
+        overshoot={(2, 2): 0.774, (2, 3): 0.789, (2, 4): 0.980,
+                   (3, 5): 0.961, (4, 6): 1.131},
+        # 87 margin policy: near-1 configs take kappa=1.10 (~12-14% margin),
+        # the deep (4,6) takes kappa=1.18 (~4.1% over the worst seed).
+        kappa={(2, 2): 1.00, (2, 3): 1.00, (2, 4): 1.10, (3, 5): 1.10, (4, 6): 1.18},
+        # (2,4)/(3,5) K from 50k-sample MC at the enlarged radii; (4,6) K is
+        # pinned by a dedicated 400k-sample MC run (2x margin throughout).
+        ship_k={(2, 2): 6, (2, 3): 10, (2, 4): 14, (3, 5): 208, (4, 6): 7560},
     ),
 }
 
@@ -401,11 +418,9 @@ def compute_resharing_params(variant: int, nbsamples: int = 8000):
     Per-variant data (`RESHARING_DATA`): the reference radii are the *base*
     (kappa=1) radii for each config; the overshoots are measured by the Rust
     `test_recovered_partial_variance_*` tests built with that variant's feature.
-    ML-DSA-65 measures below 1 everywhere (eta=4 keygen variance dwarfs the
-    eta=2-tuned split noise), so it reshares at kappa=1 and needs no enlargement.
     """
     if variant not in RESHARING_DATA:
-        print(f"\nML-DSA-{variant}: no resharing enlargement needed "
+        print(f"\nML-DSA-{variant}: no resharing enlargement table "
               f"(measured overshoot < 1 for all supported committees; kappa = 1).")
         return
     data = RESHARING_DATA[variant]
@@ -507,16 +522,16 @@ SHIPPED_TABLES = {
         (2, 2, 529159.1, 529276.3, 6.0, 6, 1.0),
         (2, 3, 560822.1, 560987.7, 7.0, 10, 1.0),
         (3, 3, 475166.1, 475283.1, 7.0, 18, 1.0),
-        (2, 4, 559722.0, 559887.3, 8.0, 12, 1.0),
+        (2, 4, 615694.2, 615876.0, 8.0, 14, 1.10),  # kappa-enlarged
         (3, 4, 519627.5, 519793.8, 6.0, 40, 1.0),
         (4, 4, 454072.6, 454189.9, 6.0, 52, 1.0),
         (2, 5, 550711.2, 550914.6, 7.0, 16, 1.0),
-        (3, 5, 563613.5, 563849.4, 6.0, 128, 1.0),
+        (3, 5, 619974.9, 620234.3, 6.0, 208, 1.10),  # kappa-enlarged
         (4, 5, 501199.2, 501402.8, 7.0, 432, 1.0),
         (5, 5, 418504.7, 418622.2, 6.0, 160, 1.0),
         (2, 6, 549630.9, 549833.9, 8.0, 16, 1.0),
         (3, 6, 564634.4, 564898.5, 6.0, 192, 1.0),
-        (4, 6, 530263.4, 530527.7, 6.0, 1546, 1.0),
+        (4, 6, 625710.8, 626022.7, 6.0, 7560, 1.18),  # kappa-enlarged; K pinned at 400k MC samples
         (5, 6, 493841.9, 494046.2, 6.0, 2444, 1.0),
         (6, 6, 414896.4, 415013.8, 6.0, 538, 1.0),
     ],
