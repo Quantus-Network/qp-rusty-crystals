@@ -13,12 +13,14 @@
 //! pattern at `dealloc` time (the block is still valid inside the hook, so
 //! the scan is sound) and asserts that no seed-bearing block is ever freed
 //! while key generation runs. This file contains exactly one test so no
-//! unrelated concurrent allocations can race the scanner.
+//! unrelated concurrent allocations can race the scanner; the allocation
+//! behavior under scrutiny is per-monomorphization, so that one test runs
+//! key generation for every enabled ML-DSA variant back to back.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::alloc::{GlobalAlloc, Layout, System};
 
-use qp_rusty_crystals_dilithium::{ml_dsa_87::Keypair, SensitiveBytes32};
+use qp_rusty_crystals_dilithium::SensitiveBytes32;
 
 /// Distinctive 32-byte pattern; a repeated single byte could false-positive
 /// against unrelated allocator noise.
@@ -48,24 +50,44 @@ unsafe impl GlobalAlloc for SeedScanningAllocator {
 #[global_allocator]
 static ALLOCATOR: SeedScanningAllocator = SeedScanningAllocator;
 
+/// Run one variant's key generation under the scanning allocator and assert
+/// no seed-bearing heap block was freed uncleared, then sanity-check the
+/// generated keypair by a sign/verify round trip.
+macro_rules! check_variant {
+	($mod_name:ident) => {{
+		use qp_rusty_crystals_dilithium::$mod_name::Keypair;
+
+		let mut seed = SEED_PATTERN;
+		let sensitive = SensitiveBytes32::new(&mut seed);
+
+		SEED_FREED_UNCLEARED.store(false, Ordering::SeqCst);
+		SCANNING.store(true, Ordering::SeqCst);
+		let keypair = Keypair::generate(sensitive);
+		SCANNING.store(false, Ordering::SeqCst);
+
+		assert!(
+			!SEED_FREED_UNCLEARED.load(Ordering::SeqCst),
+			concat!(
+				stringify!($mod_name),
+				": key generation freed a heap block still containing the raw seed; \
+				 the seed deterministically derives the private key, so it must be \
+				 zeroized before its memory is released"
+			)
+		);
+
+		// Sanity: generation still produces a working keypair.
+		let message = b"zeroization regression";
+		let signature = keypair.sign(message, None, None).expect("signing succeeds");
+		assert!(keypair.public().verify(message, &signature, None));
+	}};
+}
+
 #[test]
 fn keypair_never_frees_heap_memory_containing_the_seed() {
-	let mut seed = SEED_PATTERN;
-	let sensitive = SensitiveBytes32::new(&mut seed);
-
-	SCANNING.store(true, Ordering::SeqCst);
-	let keypair = Keypair::generate(sensitive);
-	SCANNING.store(false, Ordering::SeqCst);
-
-	assert!(
-		!SEED_FREED_UNCLEARED.load(Ordering::SeqCst),
-		"key generation freed a heap block still containing the raw seed; \
-		 the seed deterministically derives the private key, so it must be \
-		 zeroized before its memory is released"
-	);
-
-	// Sanity: generation still produces a working keypair.
-	let message = b"zeroization regression";
-	let signature = keypair.sign(message, None, None).expect("signing succeeds");
-	assert!(keypair.public().verify(message, &signature, None));
+	#[cfg(feature = "ml-dsa-44")]
+	check_variant!(ml_dsa_44);
+	#[cfg(feature = "ml-dsa-65")]
+	check_variant!(ml_dsa_65);
+	#[cfg(feature = "ml-dsa-87")]
+	check_variant!(ml_dsa_87);
 }

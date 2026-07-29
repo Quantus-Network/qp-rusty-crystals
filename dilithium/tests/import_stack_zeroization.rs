@@ -25,15 +25,19 @@
 //! so a match cannot come from the legitimate, separately-zeroized unpacked
 //! intermediates.
 //!
+//! The assertion is about codegen (move elision, which temporaries get
+//! wiped), so it is per-monomorphization: each parameter set has different
+//! key-struct frame sizes and can spill differently. The scenario suite is
+//! therefore stamped once per enabled ML-DSA variant rather than only
+//! binding the ML-DSA-87 instantiation.
+//!
 //! Only compiled for optimized builds (`cargo test --release`): unoptimized
 //! codegen materializes additional compiler-generated move temporaries for
 //! the large by-value key structs which no source-level fix can wipe, so a
 //! zero-copy assertion is only meaningful once those are elided.
 #![cfg(not(debug_assertions))]
 
-use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, SecretKey, SECRETKEYBYTES};
 use std::alloc::{alloc, dealloc, Layout};
-use zeroize::Zeroize;
 
 const PAINT: u8 = 0xAA;
 // 4 MiB: comfortably above the keygen-scale derivation the import paths run.
@@ -66,80 +70,99 @@ fn probe_stack_for<F: FnOnce()>(pattern: &[u8; 32], f: F) -> bool {
 }
 
 /// A distinctive 32-byte window from the packed s1 region of the secret key.
-/// SK layout: rho (32) || key (32) || tr (64) || s1 || s2 || t0; s1 starts at
-/// offset 128 and is high-entropy packed data for a random key.
-fn sk_pattern(sk_bytes: &[u8; SECRETKEYBYTES]) -> [u8; 32] {
+/// SK layout (identical prefix for every parameter set): rho (32) || key (32)
+/// || tr (64) || s1 || s2 || t0; s1 starts at offset 128 and is high-entropy
+/// packed data for a random key.
+fn sk_pattern(sk_bytes: &[u8]) -> [u8; 32] {
 	let mut pattern = [0u8; 32];
 	pattern.copy_from_slice(&sk_bytes[128..160]);
 	pattern
 }
 
-#[test]
-fn key_import_and_serialize_leave_no_secret_copies_on_the_stack() {
-	let keypair = Keypair::generate((&mut [0x5Au8; 32]).into());
-	let kp_bytes = keypair.to_bytes();
-	let sk_bytes = keypair.secret().to_bytes();
-	let pattern = sk_pattern(&sk_bytes);
+macro_rules! import_stack_zeroization_tests {
+	($mod_name:ident, $feature:literal) => {
+		#[cfg(feature = $feature)]
+		mod $mod_name {
+			use super::{probe_stack_for, sk_pattern};
+			use qp_rusty_crystals_dilithium::$mod_name::{Keypair, SecretKey, SECRETKEYBYTES};
+			use zeroize::Zeroize;
 
-	// Sanity: the technique detects an unwiped copy. A closure that
-	// deliberately leaves the secret key in a dead stack frame must be seen.
-	assert!(
-		probe_stack_for(&pattern, || {
-			let leaked: [u8; SECRETKEYBYTES] = *sk_bytes;
-			core::hint::black_box(&leaked);
-		}),
-		"probe self-check: a deliberately leaked stack copy was not detected"
-	);
+			#[test]
+			fn key_import_and_serialize_leave_no_secret_copies_on_the_stack() {
+				let keypair = Keypair::generate((&mut [0x5Au8; 32]).into());
+				let kp_bytes = keypair.to_bytes();
+				let sk_bytes = keypair.secret().to_bytes();
+				let pattern = sk_pattern(sk_bytes.as_slice());
 
-	// Scenario A: Keypair::from_bytes. The imported keypair is wiped in place
-	// (through a reference, so the probe itself never moves the secret and
-	// cannot smear its own copies around); anything left afterwards is a copy
-	// the import path failed to wipe.
-	let keypair_import_leaked = probe_stack_for(&pattern, || {
-		let mut imported = Keypair::from_bytes(kp_bytes.as_slice());
-		if let Ok(kp) = imported.as_mut() {
-			kp.zeroize();
+				// Sanity: the technique detects an unwiped copy. A closure that
+				// deliberately leaves the secret key in a dead stack frame must
+				// be seen.
+				assert!(
+					probe_stack_for(&pattern, || {
+						let leaked: [u8; SECRETKEYBYTES] = *sk_bytes;
+						core::hint::black_box(&leaked);
+					}),
+					"probe self-check: a deliberately leaked stack copy was not detected"
+				);
+
+				// Scenario A: Keypair::from_bytes. The imported keypair is
+				// wiped in place (through a reference, so the probe itself
+				// never moves the secret and cannot smear its own copies
+				// around); anything left afterwards is a copy the import path
+				// failed to wipe.
+				let keypair_import_leaked = probe_stack_for(&pattern, || {
+					let mut imported = Keypair::from_bytes(kp_bytes.as_slice());
+					if let Ok(kp) = imported.as_mut() {
+						kp.zeroize();
+					}
+				});
+
+				// Scenario B: SecretKey::from_bytes, same contract.
+				let secret_key_import_leaked = probe_stack_for(&pattern, || {
+					let mut imported = SecretKey::from_bytes(sk_bytes.as_slice());
+					if let Ok(sk) = imported.as_mut() {
+						sk.zeroize();
+					}
+				});
+
+				// Scenario C: Keypair::to_bytes. The returned serialization
+				// necessarily contains the secret key, but it is `Zeroizing`,
+				// so simply dropping it — as a caller who forgets manual
+				// hygiene would — must leave nothing. Any surviving match is
+				// either an internal temporary the library dropped unwiped or
+				// a caller-side copy the API failed to self-wipe.
+				let serialize_leaked = probe_stack_for(&pattern, || {
+					let serialized = keypair.to_bytes();
+					core::hint::black_box(&serialized);
+				});
+
+				// Scenario D: SecretKey::to_bytes, same contract as C.
+				let sk_serialize_leaked = probe_stack_for(&pattern, || {
+					let serialized = keypair.secret().to_bytes();
+					core::hint::black_box(&serialized);
+				});
+
+				assert!(
+					!keypair_import_leaked,
+					"Keypair::from_bytes left a plaintext secret key copy in stack memory"
+				);
+				assert!(
+					!secret_key_import_leaked,
+					"SecretKey::from_bytes left a plaintext secret key copy in stack memory"
+				);
+				assert!(
+					!serialize_leaked,
+					"Keypair::to_bytes left a plaintext secret key copy in stack memory"
+				);
+				assert!(
+					!sk_serialize_leaked,
+					"SecretKey::to_bytes left a plaintext secret key copy in stack memory"
+				);
+			}
 		}
-	});
-
-	// Scenario B: SecretKey::from_bytes, same contract.
-	let secret_key_import_leaked = probe_stack_for(&pattern, || {
-		let mut imported = SecretKey::from_bytes(sk_bytes.as_slice());
-		if let Ok(sk) = imported.as_mut() {
-			sk.zeroize();
-		}
-	});
-
-	// Scenario C: Keypair::to_bytes. The returned serialization necessarily
-	// contains the secret key, but it is `Zeroizing`, so simply dropping it
-	// — as a caller who forgets manual hygiene would — must leave nothing.
-	// Any surviving match is either an internal temporary the library
-	// dropped unwiped or a caller-side copy the API failed to self-wipe.
-	let serialize_leaked = probe_stack_for(&pattern, || {
-		let serialized = keypair.to_bytes();
-		core::hint::black_box(&serialized);
-	});
-
-	// Scenario D: SecretKey::to_bytes, same contract as C.
-	let sk_serialize_leaked = probe_stack_for(&pattern, || {
-		let serialized = keypair.secret().to_bytes();
-		core::hint::black_box(&serialized);
-	});
-
-	assert!(
-		!keypair_import_leaked,
-		"Keypair::from_bytes left a plaintext secret key copy in stack memory"
-	);
-	assert!(
-		!secret_key_import_leaked,
-		"SecretKey::from_bytes left a plaintext secret key copy in stack memory"
-	);
-	assert!(
-		!serialize_leaked,
-		"Keypair::to_bytes left a plaintext secret key copy in stack memory"
-	);
-	assert!(
-		!sk_serialize_leaked,
-		"SecretKey::to_bytes left a plaintext secret key copy in stack memory"
-	);
+	};
 }
+
+import_stack_zeroization_tests!(ml_dsa_44, "ml-dsa-44");
+import_stack_zeroization_tests!(ml_dsa_65, "ml-dsa-65");
+import_stack_zeroization_tests!(ml_dsa_87, "ml-dsa-87");

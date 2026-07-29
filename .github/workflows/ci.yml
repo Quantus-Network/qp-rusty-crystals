@@ -97,7 +97,7 @@ jobs:
       - name: Optimized-build regression tests (stack zeroization)
         run: |
           set -o pipefail
-          cargo test --release --locked -p qp-rusty-crystals-dilithium \
+          cargo test --release --locked -p qp-rusty-crystals-dilithium --all-features \
             --test import_stack_zeroization 2>&1 | tee stack-zeroization.log
           grep -Eq "test result: ok\. [1-9][0-9]* passed" stack-zeroization.log || {
             echo "::error::stack-zeroization tests were filtered out (0 tests ran)"
