@@ -39,25 +39,9 @@ pub use crate::params::SUITE_ID as RESHARING_SUITE_ID;
 
 /// Maximum absolute value for sub-share coefficients in resharing.
 ///
-/// This bound defends against malicious dealers who might inject arbitrarily large
-/// coefficients into `r_{I→J}` sub-shares. While the PK preservation check ensures
-/// `Σ_J r_{I→J} ≡ s_I^old (mod Q)`, it does not prevent large individual coefficients
-/// that could push recovered signing partials beyond hyperball bounds.
-///
-/// The bound is derived from honest behavior analysis, where η is the active
-/// parameter set's secret-coefficient bound (η = 2 for ML-DSA-44/87, η = 4 for
-/// ML-DSA-65):
-/// - For input coefficient `c` split across `m` new subsets: base = `|c|/m`
-/// - Plus pairwise noise: `(m-1) * η`
-/// - Post-resharing coefficients typically |coeff| < 150 at η = 2 (4σ bound for 4-of-6); η = 4
-///   keygen variance (20/3 vs 2) widens the 4σ bound by √(10/3) ≈ 1.83× to ~275
-/// - For m=20 (4-of-6): max honest sub-share ≈ 150/20 + 19·2 ≈ 46 at η = 2, and ≈ 275/20 + 19·4 ≈
-///   90 at η = 4
-///
-/// Bound of 500 provides ~10x margin over expected honest behavior at η = 2
-/// (~5x at η = 4) while catching attacks that could compromise hyperball
-/// security (e.g., injecting Q/2 ≈ 4.2M).
-pub const SUBSHARE_COEFF_BOUND: i32 = 500;
+/// Derived from the active parameter set's η (10× the honest 4-of-6 estimate).
+/// See [`crate::params::subshare_coeff_bound`] for the formula.
+pub use crate::params::SUBSHARE_COEFF_BOUND;
 
 /// Domain separator for SSID computation (V2 includes version, suite, epoch).
 const DOMAIN_RESHARING_SSID: &[u8] = b"RESHARING_SSID_V2";

@@ -97,6 +97,42 @@ pub fn hyperball_params(t: u32, n: u32) -> Option<(f64, f64, f64)> {
 		.map(|(_, _, r, rp, nu)| (*r, *rp, *nu))
 }
 
+/// Round-4 sub-share coefficient sanity bound, derived from the active η.
+///
+/// See [`subshare_coeff_bound`]. Re-exported at
+/// [`crate::resharing::SUBSHARE_COEFF_BOUND`] for the protocol API.
+pub const SUBSHARE_COEFF_BOUND: i32 = subshare_coeff_bound(ETA);
+
+/// Derive the Round-4 sub-share coefficient sanity bound from η.
+///
+/// This is a coarse delivery check (catch Q-scale injections from a malicious
+/// dealer), not a calibrated security parameter like κ. Honest worst case is a
+/// 4-of-6 reshare (`m = C(6, 3) = 20` RSS subsets):
+///
+/// ```text
+/// max_honest ≈ ⌊post_4σ / m⌋ + (m − 1)·η
+/// ```
+///
+/// where `post_4σ` is the 4σ bound on post-resharing coefficients (~150 at
+/// η = 2; ~275 at η = 4 from the √(10/3) keygen-variance ratio). The result is
+/// multiplied by a fixed 10× margin so the check stays well above honest
+/// traffic on every parameter set while still rejecting Q/2-scale attacks.
+///
+/// # Panics
+///
+/// Panics at const-eval time if `eta` is not a FIPS 204 value (2 or 4).
+pub const fn subshare_coeff_bound(eta: usize) -> i32 {
+	const M: i32 = 20; // C(6, 3) — most RSS subsets among supported committees
+	const MARGIN: i32 = 10;
+	let post_4sigma: i32 = match eta {
+		2 => 150,
+		4 => 275,
+		_ => panic!("unsupported ETA"),
+	};
+	let max_honest = post_4sigma / M + (M - 1) * (eta as i32);
+	MARGIN * max_honest
+}
+
 /// Resharing enlargement factor `κ` for `(t, n)` on this parameter set.
 ///
 /// `κ` is the factor by which the Round-5 recovered-partial guard bound `B`
@@ -118,6 +154,15 @@ pub fn resharing_kappa(t: u32, n: u32) -> f64 {
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn subshare_coeff_bound_tracks_eta() {
+		// 10 × (⌊150/20⌋ + 19·2) = 10 × 45 = 450
+		assert_eq!(super::subshare_coeff_bound(2), 450);
+		// 10 × (⌊275/20⌋ + 19·4) = 10 × 89 = 890
+		assert_eq!(super::subshare_coeff_bound(4), 890);
+		assert_eq!(super::SUBSHARE_COEFF_BOUND, super::subshare_coeff_bound(super::ETA));
+	}
+
 	/// The generator script duplicates the shipped 44/65 tables in its
 	/// `SHIPPED_TABLES` structure (used by `--refine-shipped`). A drifted copy
 	/// would let a regeneration silently ship different radii or K than the

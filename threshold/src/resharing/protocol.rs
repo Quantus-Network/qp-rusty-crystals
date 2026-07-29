@@ -3629,17 +3629,20 @@ mod tests {
 		// subset and -delta on another preserves the aggregate public key, and each
 		// individual subset is still within SUBSHARE_COEFF_BOUND. It nevertheless
 		// makes some recovered signing partials too large for the existing hyperball
-		// proof envelope.
+		// proof envelope. `delta` is a large-but-legal fraction of the η-derived
+		// bound so the setup stays valid across parameter sets.
+		let delta = SUBSHARE_COEFF_BOUND - 50;
+		assert!(delta > 0);
 		let mut plus = NewShareData::new();
 		let mut minus = NewShareData::new();
 		for poly in plus.s2.iter_mut() {
 			for coeff in poly.iter_mut() {
-				*coeff = 450;
+				*coeff = delta;
 			}
 		}
 		for poly in minus.s2.iter_mut() {
 			for coeff in poly.iter_mut() {
-				*coeff = -450;
+				*coeff = -delta;
 			}
 		}
 		assert!(plus.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
@@ -4030,7 +4033,7 @@ mod tests {
 				SUBSHARE_COEFF_BOUND
 			);
 			// For input coefficients of ~100 and m=3, expected max is ~35 + noise ≈ 40
-			// Should be well under 100, let alone 500
+			// — well under 100, let alone the η-derived SUBSHARE_COEFF_BOUND.
 			assert!(
 				max_coeff < 100,
 				"Subshare {} has unexpectedly large max coeff {}",
