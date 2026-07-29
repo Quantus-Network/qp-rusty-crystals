@@ -113,14 +113,9 @@ fn run_threshold_protocol_4_round(
 // Standard (non-threshold) verifier compatibility
 // ============================================================================
 
-// Feature-priority selection of the active dilithium frontend (87 > 65 > 44),
-// mirroring the crate's `mldsa` module.
-#[cfg(all(feature = "ml-dsa-44", not(feature = "ml-dsa-87"), not(feature = "ml-dsa-65")))]
-use qp_rusty_crystals_dilithium::ml_dsa_44 as active_mldsa;
-#[cfg(all(feature = "ml-dsa-65", not(feature = "ml-dsa-87")))]
-use qp_rusty_crystals_dilithium::ml_dsa_65 as active_mldsa;
-#[cfg(feature = "ml-dsa-87")]
-use qp_rusty_crystals_dilithium::ml_dsa_87 as active_mldsa;
+// The active dilithium frontend; the 87 > 65 > 44 feature-priority selection
+// is pinned in one place, `threshold::params::define_active_variant!`.
+use qp_rusty_crystals_threshold::params::active_frontend as active_mldsa;
 
 /// A threshold signature must verify under the *standard* ML-DSA verifier of
 /// the active parameter set, using only the dilithium crate's public API on

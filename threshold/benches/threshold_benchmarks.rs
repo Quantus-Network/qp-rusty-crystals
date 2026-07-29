@@ -290,13 +290,9 @@ fn bench_round1(c: &mut Criterion) {
 
 /// Benchmark comparison: threshold vs standard Dilithium.
 fn bench_comparison(c: &mut Criterion) {
-	// Same feature-priority selection as the crate's `mldsa` module (87 > 65 > 44).
-	#[cfg(all(feature = "ml-dsa-44", not(feature = "ml-dsa-87"), not(feature = "ml-dsa-65")))]
-	use qp_rusty_crystals_dilithium::ml_dsa_44::Keypair;
-	#[cfg(all(feature = "ml-dsa-65", not(feature = "ml-dsa-87")))]
-	use qp_rusty_crystals_dilithium::ml_dsa_65::Keypair;
-	#[cfg(feature = "ml-dsa-87")]
-	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
+	// The active dilithium frontend; the 87 > 65 > 44 feature-priority
+	// selection is pinned in one place, `params::define_active_variant!`.
+	use qp_rusty_crystals_threshold::params::active_frontend::Keypair;
 
 	let mut group = c.benchmark_group("comparison");
 	group.measurement_time(Duration::from_secs(10));

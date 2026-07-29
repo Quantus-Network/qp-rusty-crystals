@@ -1,27 +1,10 @@
-//! Feature-selected ML-DSA frontend types for the active parameter set.
+//! ML-DSA frontend types for the active parameter set.
 //!
-//! Priority matches [`crate::params`]: 87 > 65 > 44 when multiple features
-//! are enabled (e.g. workspace `--all-features`).
+//! The 87 > 65 > 44 feature-priority selection lives in one place —
+//! [`crate::params`]'s `define_active_variant!` — and this module only
+//! re-exports from its [`crate::params::active_frontend`] alias.
 
-#[cfg(feature = "ml-dsa-87")]
-pub use qp_rusty_crystals_dilithium::ml_dsa_87::{PublicKey as MlDsaPublicKey, MAX_MESSAGE_SIZE};
+pub use crate::params::active_frontend::{PublicKey as MlDsaPublicKey, MAX_MESSAGE_SIZE};
 
-#[cfg(all(feature = "ml-dsa-65", not(feature = "ml-dsa-87")))]
-pub use qp_rusty_crystals_dilithium::ml_dsa_65::{PublicKey as MlDsaPublicKey, MAX_MESSAGE_SIZE};
-
-#[cfg(all(feature = "ml-dsa-44", not(feature = "ml-dsa-87"), not(feature = "ml-dsa-65")))]
-pub use qp_rusty_crystals_dilithium::ml_dsa_44::{PublicKey as MlDsaPublicKey, MAX_MESSAGE_SIZE};
-
-#[cfg(all(test, feature = "ml-dsa-87"))]
-pub use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, SecretKey, SIGNBYTES};
-
-#[cfg(all(test, feature = "ml-dsa-65", not(feature = "ml-dsa-87")))]
-pub use qp_rusty_crystals_dilithium::ml_dsa_65::{Keypair, SecretKey, SIGNBYTES};
-
-#[cfg(all(
-	test,
-	feature = "ml-dsa-44",
-	not(feature = "ml-dsa-87"),
-	not(feature = "ml-dsa-65")
-))]
-pub use qp_rusty_crystals_dilithium::ml_dsa_44::{Keypair, SecretKey, SIGNBYTES};
+#[cfg(test)]
+pub use crate::params::active_frontend::{Keypair, SecretKey, SIGNBYTES};

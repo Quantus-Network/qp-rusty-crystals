@@ -14,32 +14,40 @@ compile_error!("enable one of: ml-dsa-44, ml-dsa-65, ml-dsa-87");
 // Shared ring constants (identical across FIPS 204 parameter sets).
 pub use qp_rusty_crystals_dilithium::params::{D, N, Q, SEEDBYTES, TR_BYTES};
 
-#[cfg(feature = "ml-dsa-87")]
-mod active {
-	pub use qp_rusty_crystals_dilithium::params::ml_dsa_87::*;
-	/// SSID / resharing suite identifier for this parameter set.
-	pub const SUITE_ID: u32 = 1;
-	/// Human-readable label for errors and docs.
-	pub const VARIANT_NAME: &str = "ML-DSA-87";
+/// Bind everything that depends on the active parameter set: the dilithium
+/// constants and frontend module, the suite identifier, and the calibrated
+/// hyperball tables. This macro is the *single* place the 87 > 65 > 44
+/// feature-priority selection is written; everything else in the workspace
+/// (the `mldsa` module, benches, integration tests) derives the active
+/// variant from these re-exports.
+macro_rules! define_active_variant {
+	($mod_name:ident, $suite_id:expr, $variant_name:literal, $tables_file:literal) => {
+		mod active {
+			pub use qp_rusty_crystals_dilithium::params::$mod_name::*;
+			/// SSID / resharing suite identifier for this parameter set.
+			pub const SUITE_ID: u32 = $suite_id;
+			/// Human-readable label for errors and docs.
+			pub const VARIANT_NAME: &str = $variant_name;
+		}
+
+		/// The dilithium *frontend* module (`Keypair`, `PublicKey`, …) for the
+		/// active parameter set.
+		pub use qp_rusty_crystals_dilithium::$mod_name as active_frontend;
+
+		mod tables {
+			include!($tables_file);
+		}
+	};
 }
+
+#[cfg(feature = "ml-dsa-87")]
+define_active_variant!(ml_dsa_87, 1, "ML-DSA-87", "params_tables_87.rs");
 
 #[cfg(all(feature = "ml-dsa-65", not(feature = "ml-dsa-87")))]
-mod active {
-	pub use qp_rusty_crystals_dilithium::params::ml_dsa_65::*;
-	/// SSID / resharing suite identifier for this parameter set.
-	pub const SUITE_ID: u32 = 3;
-	/// Human-readable label for errors and docs.
-	pub const VARIANT_NAME: &str = "ML-DSA-65";
-}
+define_active_variant!(ml_dsa_65, 3, "ML-DSA-65", "params_tables_65.rs");
 
 #[cfg(all(feature = "ml-dsa-44", not(feature = "ml-dsa-87"), not(feature = "ml-dsa-65")))]
-mod active {
-	pub use qp_rusty_crystals_dilithium::params::ml_dsa_44::*;
-	/// SSID / resharing suite identifier for this parameter set.
-	pub const SUITE_ID: u32 = 2;
-	/// Human-readable label for errors and docs.
-	pub const VARIANT_NAME: &str = "ML-DSA-44";
-}
+define_active_variant!(ml_dsa_44, 2, "ML-DSA-44", "params_tables_44.rs");
 
 pub use active::*;
 
@@ -106,66 +114,6 @@ pub fn resharing_kappa(t: u32, n: u32) -> f64 {
 		.find(|(tt, nn, _)| *tt == t && *nn == n)
 		.map(|(_, _, k)| *k)
 		.unwrap_or(1.0)
-}
-
-#[cfg(feature = "ml-dsa-87")]
-mod tables {
-	/// Shipped `(t, n, k_iterations)` for ML-DSA-87 (v5 coset-splitter calibration).
-	pub(super) const K_ITERATIONS: &[(u32, u32, u32)] = &[
-		(2, 2, 4),
-		(2, 3, 5),
-		(3, 3, 12),
-		(2, 4, 10),
-		(3, 4, 24),
-		(4, 4, 25),
-		(2, 5, 6),
-		(3, 5, 60),
-		(4, 5, 110),
-		(5, 5, 60),
-		(2, 6, 8),
-		(3, 6, 65),
-		(4, 6, 1600),
-		(5, 6, 380),
-		(6, 6, 180),
-	];
-
-	/// Shipped `(t, n, r, r', nu)` for ML-DSA-87.
-	pub(super) const HYPERBALL: &[(u32, u32, f64, f64, f64)] = &[
-		(2, 2, 503119.0, 503192.0, 7.0),
-		(2, 3, 631601.0, 631703.0, 7.0),
-		(3, 3, 483107.0, 483180.0, 7.0),
-		(2, 4, 696194.0, 696307.0, 7.0),
-		(3, 4, 551752.0, 551854.0, 7.0),
-		(4, 4, 487958.0, 488031.0, 7.0),
-		(2, 5, 607694.0, 607820.0, 7.0),
-		(3, 5, 664010.0, 664178.0, 7.0),
-		(4, 5, 518384.0, 518510.0, 7.0),
-		(5, 5, 468214.0, 468287.0, 7.0),
-		(2, 6, 665106.0, 665232.0, 7.0),
-		(3, 6, 577541.0, 577704.0, 7.0),
-		(4, 6, 647112.0, 647317.0, 7.0),
-		(5, 6, 479692.0, 479819.0, 7.0),
-		(6, 6, 424124.0, 424197.0, 7.0),
-	];
-
-	/// Resharing enlargement `(t, n, κ)` for ML-DSA-87.
-	///
-	/// Measured honest overshoots (v5 coset splitter, fixed point):
-	/// (2,4) 0.961×, (3,5) 1.012×, (4,6) 1.163×. The (2,4)/(3,5)/(4,6)
-	/// `HYPERBALL` and `K_ITERATIONS` entries above are derived at these
-	/// enlarged radii.
-	pub(super) const RESHARING_KAPPA: &[(u32, u32, f64)] =
-		&[(2, 4, 1.10), (3, 5, 1.15), (4, 6, 1.25)];
-}
-
-#[cfg(all(feature = "ml-dsa-65", not(feature = "ml-dsa-87")))]
-mod tables {
-	include!("params_tables_65.rs");
-}
-
-#[cfg(all(feature = "ml-dsa-44", not(feature = "ml-dsa-87"), not(feature = "ml-dsa-65")))]
-mod tables {
-	include!("params_tables_44.rs");
 }
 
 #[cfg(test)]
