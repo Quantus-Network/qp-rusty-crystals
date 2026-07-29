@@ -14,33 +14,27 @@ pub mod ct_internals {
 	use super::Polyvec;
 	use crate::params;
 
-	/// ML-DSA-87 `Polyvec<L>` η-sampler (see [`super::uniform_eta`]).
-	pub fn l_uniform_eta(
-		v: &mut Polyvec<{ params::L }>,
+	/// Pass-through for [`super::uniform_eta`].
+	///
+	/// Parameterized so the constant-time harness can time both FIPS 204
+	/// secret-sampling paths (`ETA = 2` for ML-DSA-44/87, `ETA = 4` for
+	/// ML-DSA-65) rather than only the historical ML-DSA-87 monomorphization.
+	/// `ETA` must be 2 or 4 (enforced by the callee at monomorphization).
+	pub fn uniform_eta<const N: usize, const ETA: usize>(
+		v: &mut Polyvec<N>,
 		seed: &[u8; params::CRHBYTES],
 		base_nonce: u16,
 	) {
-		super::uniform_eta::<{ params::L }, { params::ETA }>(v, seed, base_nonce);
+		super::uniform_eta::<N, ETA>(v, seed, base_nonce);
 	}
 
-	/// ML-DSA-87 `Polyvec<K>` η-sampler (see [`super::uniform_eta`]).
-	pub fn k_uniform_eta(
-		v: &mut Polyvec<{ params::K }>,
-		seed: &[u8; params::CRHBYTES],
-		base_nonce: u16,
-	) {
-		super::uniform_eta::<{ params::K }, { params::ETA }>(v, seed, base_nonce);
-	}
-
-	/// ML-DSA-87 `Polyvec<L>` γ₁-sampler (see [`super::uniform_gamma1`]).
-	pub fn l_uniform_gamma1(
-		v: &mut Polyvec<{ params::L }>,
+	/// Pass-through for [`super::uniform_gamma1`].
+	pub fn uniform_gamma1<const N: usize, const GAMMA1: usize, const PZ: usize>(
+		v: &mut Polyvec<N>,
 		seed: &[u8; params::CRHBYTES],
 		nonce: u16,
 	) {
-		super::uniform_gamma1::<{ params::L }, { params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(
-			v, seed, nonce,
-		);
+		super::uniform_gamma1::<N, GAMMA1, PZ>(v, seed, nonce);
 	}
 }
 

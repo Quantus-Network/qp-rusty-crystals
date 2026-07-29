@@ -1,4 +1,4 @@
-//! dudect-based constant-time tests for the ML-DSA-87 implementation.
+//! dudect-based constant-time tests for the ML-DSA secret-consuming paths.
 //!
 //! Run with:
 //!
@@ -23,8 +23,11 @@
 //! So each test below isolates one secret-consuming component and compares a fixed secret
 //! input (Class Left) against fresh random secret inputs (Class Right):
 //!
-//! - `keygen_s1s2_sampling`     — sampling the secret vectors s1/s2 from rho' (keygen)
-//! - `rej_eta_one_block`        — the raw eta rejection-sampler over one SHAKE block
+//! - `keygen_s1s2_sampling_eta{2,4}` — sampling s1/s2 from rho' at both FIPS 204 η values (η = 2
+//!   for ML-DSA-44/87, η = 4 for ML-DSA-65). The η = 4 path runs 3 fixed SHAKE rounds instead of 2
+//!   and has a different rejection distribution.
+//! - `rej_eta_one_block_eta{2,4}` — the raw η rejection-sampler over one SHAKE block (acceptance
+//!   15/16 for η = 2, 9/16 for η = 4)
 //! - `sign_sk_expansion`        — unpacking the secret key and NTT-transforming s1/s2/t0
 //! - `sign_mask_expansion`      — expanding the secret mask vector y from rho'
 //! - `sign_norm_check`          — the infinity-norm rejection check on z = y + c*s1
@@ -72,7 +75,7 @@ use qp_rusty_crystals_dilithium::{
 	poly::Poly,
 	polyvec,
 	polyvec::{
-		ct_internals::{k_uniform_eta, l_uniform_eta, l_uniform_gamma1},
+		ct_internals::{uniform_eta, uniform_gamma1},
 		Polyvec,
 	},
 };
@@ -108,62 +111,94 @@ fn copy_polyvec<const N: usize>(dst: &mut Polyvec<N>, src: &Polyvec<N>) {
 	}
 }
 
-/// Keygen: sampling the secret vectors s1 (length L) and s2 (length K) from rho'.
+/// Stamp the η-sampler dudect benches for one `(ETA, K, L)` monomorphization.
 ///
-/// This is the secret-dependent part of key generation. (Matrix expansion from rho is
-/// public and excluded.) Fixed vs random rho' seed.
-fn keygen_s1s2_sampling(runner: &mut CtRunner, rng: &mut BenchRng) {
-	const SAMPLES: usize = 100_000;
-	let mut fixed = [0u8; params::CRHBYTES];
-	rng.fill_bytes(&mut fixed);
-	let mut scratch = [0u8; params::CRHBYTES];
-	let mut seed = [0u8; params::CRHBYTES];
+/// Both FIPS 204 secret-sampling paths must be timed: η = 2 accepts nibbles
+/// with probability 15/16 and runs 2 fixed SHAKE rounds; η = 4 accepts with
+/// 9/16 and runs 3 rounds. The round-count argument in `poly::uniform_eta`'s
+/// doc is sound, but the harness measures both paths rather than trusting
+/// the analysis for the new arm alone.
+macro_rules! eta_sampler_benches {
+	($keygen_fn:ident, $rej_fn:ident, $eta:expr, $k:expr, $l:expr) => {
+		/// Keygen: sampling the secret vectors s1 (length L) and s2 (length K)
+		/// from rho'. Matrix expansion from rho is public and excluded.
+		/// Fixed vs random rho' seed.
+		fn $keygen_fn(runner: &mut CtRunner, rng: &mut BenchRng) {
+			const SAMPLES: usize = 100_000;
+			const ETA: usize = $eta;
+			const KK: usize = $k;
+			const LL: usize = $l;
+			let mut fixed = [0u8; params::CRHBYTES];
+			rng.fill_bytes(&mut fixed);
+			let mut scratch = [0u8; params::CRHBYTES];
+			let mut seed = [0u8; params::CRHBYTES];
 
-	for _ in 0..SAMPLES {
-		let (is_left, class) = random_class(rng);
-		// Identical prep for both classes: RNG fill, then memcpy.
-		rng.fill_bytes(&mut scratch);
-		seed.copy_from_slice(if is_left { &fixed } else { &scratch });
-		runner.run_one(class, || {
-			let mut s1 = Polyvec::<L>::default();
-			let mut s2 = Polyvec::<K>::default();
-			l_uniform_eta(&mut s1, black_box(&seed), 0);
-			k_uniform_eta(&mut s2, black_box(&seed), L as u16);
-			black_box((&s1, &s2));
-		});
-	}
-}
-
-/// The raw eta rejection sampler over a single SHAKE256 block.
-///
-/// Called exactly as `uniform_eta` calls it in production: a 1000-slot output buffer, so
-/// the counter never saturates the index clamp. (Benching with a tight 256-slot buffer
-/// instead makes the clamp pin the store index to the last slot for the tail of the block,
-/// and the resulting same-address read-modify-write chain shows up as a large timing
-/// signal that production never exhibits.) Fixed vs random block.
-fn rej_eta_one_block(runner: &mut CtRunner, rng: &mut BenchRng) {
-	const SAMPLES: usize = 300_000;
-	const BATCH: usize = 8;
-
-	let mut fixed = [0u8; 136];
-	rng.fill_bytes(&mut fixed);
-	let mut scratch = [0u8; 136];
-	let mut block = [0u8; 136];
-
-	for _ in 0..SAMPLES {
-		let (is_left, class) = random_class(rng);
-		rng.fill_bytes(&mut scratch);
-		block.copy_from_slice(if is_left { &fixed } else { &scratch });
-		runner.run_one(class, || {
-			for _ in 0..BATCH {
-				// Same shape as the call in `uniform_eta`.
-				let mut out = [0i32; 1000];
-				let accepted = poly::rej_eta::<{ params::ETA }>(&mut out, black_box(&block));
-				black_box((accepted, &out));
+			for _ in 0..SAMPLES {
+				let (is_left, class) = random_class(rng);
+				// Identical prep for both classes: RNG fill, then memcpy.
+				rng.fill_bytes(&mut scratch);
+				seed.copy_from_slice(if is_left { &fixed } else { &scratch });
+				runner.run_one(class, || {
+					let mut s1 = Polyvec::<LL>::default();
+					let mut s2 = Polyvec::<KK>::default();
+					uniform_eta::<LL, ETA>(&mut s1, black_box(&seed), 0);
+					uniform_eta::<KK, ETA>(&mut s2, black_box(&seed), LL as u16);
+					black_box((&s1, &s2));
+				});
 			}
-		});
-	}
+		}
+
+		/// The raw eta rejection sampler over a single SHAKE256 block.
+		///
+		/// Called exactly as `uniform_eta` calls it in production: a 1000-slot
+		/// output buffer, so the counter never saturates the index clamp.
+		/// (Benching with a tight 256-slot buffer instead makes the clamp pin
+		/// the store index to the last slot for the tail of the block, and the
+		/// resulting same-address read-modify-write chain shows up as a large
+		/// timing signal that production never exhibits.) Fixed vs random block.
+		fn $rej_fn(runner: &mut CtRunner, rng: &mut BenchRng) {
+			const SAMPLES: usize = 300_000;
+			const BATCH: usize = 8;
+			const ETA: usize = $eta;
+
+			let mut fixed = [0u8; 136];
+			rng.fill_bytes(&mut fixed);
+			let mut scratch = [0u8; 136];
+			let mut block = [0u8; 136];
+
+			for _ in 0..SAMPLES {
+				let (is_left, class) = random_class(rng);
+				rng.fill_bytes(&mut scratch);
+				block.copy_from_slice(if is_left { &fixed } else { &scratch });
+				runner.run_one(class, || {
+					for _ in 0..BATCH {
+						// Same shape as the call in `uniform_eta`.
+						let mut out = [0i32; 1000];
+						let accepted = poly::rej_eta::<ETA>(&mut out, black_box(&block));
+						black_box((accepted, &out));
+					}
+				});
+			}
+		}
+	};
 }
+
+// η = 2 path (ML-DSA-44 / ML-DSA-87); dimensions from the 87 table.
+eta_sampler_benches!(
+	keygen_s1s2_sampling_eta2,
+	rej_eta_one_block_eta2,
+	2,
+	params::ml_dsa_87::K,
+	params::ml_dsa_87::L
+);
+// η = 4 path (ML-DSA-65); genuinely different acceptance rate and round count.
+eta_sampler_benches!(
+	keygen_s1s2_sampling_eta4,
+	rej_eta_one_block_eta4,
+	4,
+	params::ml_dsa_65::K,
+	params::ml_dsa_65::L
+);
 
 /// Signing: unpacking the packed secret key and NTT-transforming s1, s2 and t0.
 ///
@@ -229,7 +264,11 @@ fn sign_mask_expansion(runner: &mut CtRunner, rng: &mut BenchRng) {
 		seed.copy_from_slice(if is_left { &fixed } else { &scratch });
 		runner.run_one(class, || {
 			let mut y = Polyvec::<L>::default();
-			l_uniform_gamma1(&mut y, black_box(&seed), 0);
+			uniform_gamma1::<L, { params::GAMMA1 }, { params::POLYZ_PACKEDBYTES }>(
+				&mut y,
+				black_box(&seed),
+				0,
+			);
 			black_box(&y);
 		});
 	}
@@ -357,8 +396,10 @@ fn ntt_pointwise(runner: &mut CtRunner, rng: &mut BenchRng) {
 }
 
 ctbench_main!(
-	keygen_s1s2_sampling,
-	rej_eta_one_block,
+	keygen_s1s2_sampling_eta2,
+	keygen_s1s2_sampling_eta4,
+	rej_eta_one_block_eta2,
+	rej_eta_one_block_eta4,
 	sign_sk_expansion,
 	sign_mask_expansion,
 	sign_norm_check,
