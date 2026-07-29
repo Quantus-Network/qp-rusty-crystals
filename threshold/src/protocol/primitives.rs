@@ -24,14 +24,12 @@
 //! - Constant-time rejection sampling (e.g., with dummy operations)
 //! - Side-channel-resistant transcendental function approximations
 //!
-//! # ML-DSA-87 Parameters
+//! # Parameters
 //!
-//! This module uses ML-DSA-87 parameters directly from `dilithium_params`:
-//! - `N = 256`: coefficients per polynomial
-//! - `K = 8`: rows in public matrix A
-//! - `L = 7`: columns in public matrix A
-//! - `Q = 8380417`: the modulus
-//! - `ETA = 2`: secret key coefficient bound
+//! This module reads the active parameter set from [`crate::params`]
+//! (feature-selected, 87 > 65 > 44): the shared ring constants `N = 256` and
+//! `Q = 8380417`, plus the per-variant matrix dimensions `K`/`L` and packed
+//! sizes.
 
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::f64::consts::PI;
