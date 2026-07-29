@@ -338,18 +338,12 @@ pub fn generate_wormhole_from_seed(
 ) -> Result<WormholePair, HDLatticeError> {
 	check_wormhole_path(path)?;
 
-	// Derive entropy at the specified path
-	let xpriv = ExtendedPrivKey::derive(seed.as_bytes(), path)
-		.map_err(|_e| HDLatticeError::KeyDerivationFailed(path.to_string()))?;
-	let mut secret = xpriv.secret();
-	let derived_entropy = SensitiveBytes32::from(&mut secret);
-
-	// Generate wormhole pair
-	let wormhole_pair = WormholePair::generate_new(derived_entropy);
-
-	// seed and derived_entropy are automatically zeroized when they drop
-
-	Ok(wormhole_pair)
+	// Same HMAC-SHA512 tree derivation as the keypair entrypoints; only the
+	// consumer of the entropy differs. (`derive_entropy_from_seed` re-runs
+	// the generic path validation `check_wormhole_path` already performed —
+	// cheap and idempotent.) Seed and entropy are self-zeroizing.
+	let derived_entropy = derive_entropy_from_seed(seed, path)?;
+	Ok(WormholePair::generate_new(derived_entropy))
 }
 
 /// Validate a wormhole derivation path: generic path checks plus the
