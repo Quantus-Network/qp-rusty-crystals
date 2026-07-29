@@ -319,7 +319,7 @@ mod tests {
 
 	#[test]
 	fn test_dkg_eta_bounded() {
-		use qp_rusty_crystals_dilithium::params::ETA;
+		use crate::params::ETA;
 
 		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
 		let public_keys: Vec<u32> = (0..3).collect();

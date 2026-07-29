@@ -22,10 +22,9 @@ use qp_rusty_crystals_threshold::{
 	generate_with_dealer, ThresholdConfig, ThresholdError, ThresholdSigner,
 };
 
-/// Packed size of one commitment: K (8) polynomials of 736 bytes each.
-/// Round 2 packing allocates `k_iterations` of these in a single buffer
-/// (29,440 bytes for the 2-of-3 configuration used here).
-const SINGLE_COMMITMENT_SIZE: usize = 8 * 736;
+/// Packed size of one commitment: K polynomials of 736 bytes each.
+/// Round 2 packing allocates `k_iterations` of these in a single buffer.
+const SINGLE_COMMITMENT_SIZE: usize = qp_rusty_crystals_threshold::params::SINGLE_COMMITMENT_SIZE;
 
 static TRACKING: AtomicBool = AtomicBool::new(false);
 static MAX_ALLOC: AtomicUsize = AtomicUsize::new(0);
@@ -90,7 +89,7 @@ fn round2_reveal_rejects_bad_inputs_before_commitment_packing() {
 	);
 
 	// Same for an oversized message.
-	let oversized_message = vec![0u8; qp_rusty_crystals_dilithium::ml_dsa_87::MAX_MESSAGE_SIZE + 1];
+	let oversized_message = vec![0u8; qp_rusty_crystals_threshold::MAX_MESSAGE_SIZE + 1];
 	let (result, max_alloc) =
 		max_alloc_during(|| s0.round2_reveal(&ssid, &oversized_message, b"", others));
 	assert!(

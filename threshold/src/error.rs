@@ -3,7 +3,7 @@
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
-use qp_rusty_crystals_dilithium::ml_dsa_87::MAX_MESSAGE_SIZE;
+use crate::mldsa::MAX_MESSAGE_SIZE;
 
 /// Result type for threshold operations.
 pub type ThresholdResult<T> = Result<T, ThresholdError>;

@@ -1582,9 +1582,8 @@ fn test_resharing_detects_round2_payload_mismatch() {
 	// Tamper only the Round 4 payload (not the commitment). The recipient will
 	// detect that the received `r` doesn't match the broadcast commitment and
 	// fail with ShareVerificationFailed.
-	const N: usize = 256;
-	const L: usize = 7;
-	const K: usize = 8;
+	use qp_rusty_crystals_threshold::params::{K, L, N};
+	const N_USIZE: usize = N as usize;
 
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
 	let seed = [55u8; 32];
@@ -1596,7 +1595,7 @@ fn test_resharing_detects_round2_payload_mismatch() {
 	}
 
 	let target_pair = (0b011u16, 0b011u16);
-	let bogus_r = NewShareData { s1: [[99i32; N]; L], s2: [[13i32; N]; K] };
+	let bogus_r = NewShareData { s1: [[99i32; N_USIZE]; L], s2: [[13i32; N_USIZE]; K] };
 
 	let bogus_r_capt = bogus_r.clone();
 	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
@@ -1653,9 +1652,8 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 	// commit-vs-r check). The resulting `s_J^new` for the recipient is corrupted,
 	// the partial public-key sum no longer reconstructs the original public key,
 	// and `verify_public_key_preservation` fails.
-	const N: usize = 256;
-	const L: usize = 7;
-	const K: usize = 8;
+	use qp_rusty_crystals_threshold::params::{K, L, N};
+	const N_USIZE: usize = N as usize;
 
 	let config = ThresholdConfig::new(2, 2).expect("valid config");
 	let seed = [11u8; 32];
@@ -1666,7 +1664,7 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 		old_shares.insert(share.party_id(), share.clone());
 	}
 
-	let bogus_r = NewShareData { s1: [[42i32; N]; L], s2: [[7i32; N]; K] };
+	let bogus_r = NewShareData { s1: [[42i32; N_USIZE]; L], s2: [[7i32; N_USIZE]; K] };
 	let target_pair = (0b01u16, 0b10u16);
 	let bogus_commit = forge_consistent_commitment(target_pair.0, target_pair.1, &bogus_r);
 
@@ -2743,6 +2741,11 @@ fn test_reshares_and_sign_3_of_5() {
 /// is future work. Enabled because near-mpc requires the 4-of-6 committee shape.
 // K=1600 makes this the heaviest hot-path test (5 reshares + 2 signings); kept in
 // the default suite so the (4,6) end-to-end reshare→sign path is regression-covered.
+//
+// ML-DSA-44 does not support resharing into (4,6): kappa-enlargement is
+// infeasible under its verification ceilings, so the config fails closed
+// (see test_resharing_into_4_of_6_fails_closed below).
+#[cfg(any(feature = "ml-dsa-87", feature = "ml-dsa-65"))]
 #[test]
 fn test_reshares_and_sign_4_of_6() {
 	println!("\n=== Consecutive Resharings + Sign (4-of-6) ===\n");
@@ -2936,11 +2939,12 @@ fn test_resharing_aborts_on_round4_omission() {
 // layout of `PrivateKeyShare`; if that layout changes, deserialization here
 // fails loudly and this block must be updated.
 
-/// Mirror of the crate-private `SecretShareData` (L=7, K=8 for ML-DSA-87).
+/// Mirror of the crate-private `SecretShareData` (L/K from the active
+/// parameter set).
 #[derive(borsh::BorshDeserialize)]
 struct RawSubsetShare {
-	s1: [[i32; 256]; 7],
-	s2: [[i32; 256]; 8],
+	s1: [[i32; 256]; qp_rusty_crystals_threshold::params::L],
+	s2: [[i32; 256]; qp_rusty_crystals_threshold::params::K],
 }
 
 /// Mirror of `PrivateKeyShare`'s borsh layout.
@@ -3178,16 +3182,19 @@ fn test_coefficient_distribution_analysis() {
 	println!("\nChi-squared vs uniform: {:.2} (df={}, p≈{:.4})", chi_sq, df, p_value);
 	println!("  (p > 0.05 means we cannot reject uniformity hypothesis)");
 
-	// Verify DKG produces uniform over [-2, 2]
-	assert_eq!(dkg_stats.min, -2, "DKG min should be -2 (eta)");
-	assert_eq!(dkg_stats.max, 2, "DKG max should be 2 (eta)");
+	// Verify DKG produces uniform over [-eta, eta] for the active parameter set
+	let eta = qp_rusty_crystals_threshold::params::ETA as i32;
+	assert_eq!(dkg_stats.min, -eta, "DKG min should be -{eta} (eta)");
+	assert_eq!(dkg_stats.max, eta, "DKG max should be {eta} (eta)");
 	assert!(dkg_stats.skewness.abs() < 0.1, "DKG should be symmetric");
 
-	// For uniform over {-2,-1,0,1,2}: variance = (4+1+0+1+4)/5 = 2.0
-	let expected_uniform_variance = 2.0;
+	// For uniform over {-eta..eta} (2*eta+1 values): variance = eta(eta+1)/3
+	// (2.0 for eta=2, ~6.67 for eta=4).
+	let expected_uniform_variance = f64::from(eta * (eta + 1)) / 3.0;
 	assert!(
-		(dkg_stats.variance - expected_uniform_variance).abs() < 0.1,
-		"DKG variance should be ~2.0 for uniform over [-2,2], got {}",
+		(dkg_stats.variance - expected_uniform_variance).abs() < 0.1 * expected_uniform_variance,
+		"DKG variance should be ~{expected_uniform_variance:.2} for uniform over \
+		 [-{eta},{eta}], got {}",
 		dkg_stats.variance
 	);
 
@@ -3335,16 +3342,18 @@ fn test_coefficient_distribution_analysis() {
 	);
 
 	println!("\nInterpretation:");
-	println!("- DKG: Should be uniform over [-2, 2] (5 values)");
+	println!("- DKG: Should be uniform over [-{eta}, {eta}] ({} values)", 2 * eta + 1);
 	println!("- After resharing: Distribution changes but remains bounded");
 	println!("- High chi-squared = very non-uniform (peaked distribution)");
 	println!("- Negative kurtosis = flatter than normal (platykurtic)");
 	println!("- Positive kurtosis = more peaked than normal (leptokurtic)");
 
-	// Basic sanity checks
-	assert!(r1_stats.max <= 20, "After 1 resharing, max should be bounded");
-	assert!(r10_stats.max <= 20, "After 10 resharings, max should be bounded");
-	assert!(r100_stats.max <= 20, "After 100 resharings, max should be bounded");
+	// Basic sanity checks. The absolute bound scales with the keygen coefficient
+	// magnitude (20 was tuned for eta = 2).
+	let max_bound = 10 * eta;
+	assert!(r1_stats.max <= max_bound, "After 1 resharing, max should be bounded");
+	assert!(r10_stats.max <= max_bound, "After 10 resharings, max should be bounded");
+	assert!(r100_stats.max <= max_bound, "After 100 resharings, max should be bounded");
 	assert!(r1_stats.skewness.abs() < 0.5, "Distribution should remain roughly symmetric");
 	assert!(r10_stats.skewness.abs() < 0.5, "Distribution should remain roughly symmetric");
 	assert!(r100_stats.skewness.abs() < 0.5, "Distribution should remain roughly symmetric");
@@ -3463,6 +3472,9 @@ fn test_coefficient_distribution_2_of_4() {
 // ~15 MB/sig) for the near-mpc 4-of-6 shape. The path back to kappa=1/K=350
 // (budgeted per-reshare noise intensity, or a collaborative coset-Gaussian sample)
 // is future work; see resharing_norm_enlargement() and README.
+//
+// Not run on ML-DSA-44, where (4,6) resharing fails closed (kappa = 1).
+#[cfg(any(feature = "ml-dsa-87", feature = "ml-dsa-65"))]
 #[test]
 fn test_coefficient_distribution_4_of_6() {
 	run_distribution_analysis(4, 6, 10);
@@ -3587,8 +3599,8 @@ fn extract_recovered_coefficients(
 	}
 
 	// Accumulate coefficients directly (no NTT)
-	let mut s1_acc = vec![0i64; 7 * 256];
-	let mut s2_acc = vec![0i64; 8 * 256];
+	let mut s1_acc = vec![0i64; qp_rusty_crystals_threshold::params::L * 256];
+	let mut s2_acc = vec![0i64; qp_rusty_crystals_threshold::params::K * 256];
 
 	for &pattern_u in &patterns[current_i] {
 		let mut u_translated = 0u16;
@@ -3639,6 +3651,19 @@ fn generate_signing_sets(parties: &[u32], threshold: usize) -> Vec<Vec<u32>> {
 
 /// Analyze recovered partial variance for a given configuration.
 fn analyze_recovered_partials(threshold: u32, parties: u32, num_resharings: usize) {
+	analyze_recovered_partials_with_seed(threshold, parties, num_resharings, [0x42u8; 32]);
+}
+
+/// Like [`analyze_recovered_partials`] but with a caller-chosen keygen seed
+/// (the split-noise PRF is keyed to the shares, so varying the keygen seed
+/// decorrelates the whole reshare trajectory). Returns the measured guard
+/// overshoot so multi-seed stability checks can aggregate it.
+fn analyze_recovered_partials_with_seed(
+	threshold: u32,
+	parties: u32,
+	num_resharings: usize,
+	seed: [u8; 32],
+) -> f64 {
 	println!("\n======================================================================");
 	println!(
 		"RECOVERED PARTIAL ANALYSIS: {}-of-{} ({} resharings)",
@@ -3650,7 +3675,6 @@ fn analyze_recovered_partials(threshold: u32, parties: u32, num_resharings: usiz
 
 	// Generate initial keys
 	let config = ThresholdConfig::new(threshold, parties).expect("valid config");
-	let seed = [0x42u8; 32];
 	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
 
 	let mut current_shares: HashMap<u32, PrivateKeyShare> =
@@ -3739,18 +3763,24 @@ fn analyze_recovered_partials(threshold: u32, parties: u32, num_resharings: usiz
 	// Guard overshoot relative to the *base* keygen bound B (kappa = 1), computed
 	// exactly as partial_secret_norm_bound()/the Round-5 guard does: B_base =
 	// 1.3*sqrt(tau)*sqrt(dim*var_eta*num_secrets), num_secrets = ceil(C(n,t-1)/t),
-	// dim = n*(k + l/nu^2), var_eta = eta(eta+1)/3 = 2. Overshoot = sqrt(tau)*max /
-	// B_base. A config needs kappa >= this overshoot for honest reshares to pass.
+	// dim = n*(k + l/nu^2), var_eta = eta(eta+1)/3. All parameters come from the
+	// active ML-DSA set. Overshoot = sqrt(tau)*max / B_base. A config needs
+	// kappa >= this overshoot for honest reshares to pass.
+	let (p_k, p_l, p_tau, p_eta) = {
+		use qp_rusty_crystals_threshold::params::{ETA, K, L, TAU};
+		(K as f64, L as f64, TAU as f64, ETA as f64)
+	};
 	let num_secrets_ceil = {
 		let c = binomial(parties as usize, threshold as usize - 1) as f64;
 		(c / threshold as f64).ceil()
 	};
-	let dim_b = 256.0 * (8.0 + 7.0 / (nu * nu));
-	let base_b = 1.3 * 60.0f64.sqrt() * (dim_b * 2.0 * num_secrets_ceil).sqrt();
-	let guard_overshoot = 60.0f64.sqrt() * max_combined_norm / base_b;
+	let var_eta = p_eta * (p_eta + 1.0) / 3.0;
+	let dim_b = 256.0 * (p_k + p_l / (nu * nu));
+	let base_b = 1.3 * p_tau.sqrt() * (dim_b * var_eta * num_secrets_ceil).sqrt();
+	let guard_overshoot = p_tau.sqrt() * max_combined_norm / base_b;
 	println!("Guard overshoot vs base keygen B (kappa=1):");
 	println!("  base B (num_secrets=ceil={}): {:.0}", num_secrets_ceil, base_b);
-	println!("  sqrt(tau)*max_combined_norm:  {:.0}", 60.0f64.sqrt() * max_combined_norm);
+	println!("  sqrt(tau)*max_combined_norm:  {:.0}", p_tau.sqrt() * max_combined_norm);
 	println!("  >>> overshoot = {:.3}x  (need kappa >= this)", guard_overshoot);
 	println!();
 
@@ -3774,20 +3804,20 @@ fn analyze_recovered_partials(threshold: u32, parties: u32, num_resharings: usiz
 
 	// Compare to expected values based on coefficient variance
 	// The hyperball formula uses: beta = 1.3 * sqrt((k + l/nu²) * n * num_subsets) * sigt *
-	// sqrt(tau) where sigt is the coefficient std dev (sqrt(2) for eta=2)
-	let k = 8usize;
-	let l = 7usize;
+	// sqrt(tau) where sigt is the keygen coefficient std dev sqrt(eta(eta+1)/3)
+	let k = qp_rusty_crystals_threshold::params::K;
+	let l = qp_rusty_crystals_threshold::params::L;
 	let n_poly = 256usize;
-	let tau = 60.0f64;
+	let tau = p_tau;
 	let num_subsets_per_party =
 		binomial(parties as usize, threshold as usize - 1) / threshold as usize;
 
-	let original_sigt = (2.0f64).sqrt(); // sqrt((5²-1)/12) for eta=2
+	let original_sigt = var_eta.sqrt();
 	let post_reshare_sigt_s1 = avg_s1_variance.sqrt();
 	let post_reshare_sigt_s2 = avg_s2_variance.sqrt();
 
 	println!("Coefficient Standard Deviation Comparison:");
-	println!("  Original (η=2):            {:.4}", original_sigt);
+	println!("  Original (keygen η):       {:.4}", original_sigt);
 	println!("  Post-reshare s1:           {:.4}", post_reshare_sigt_s1);
 	println!("  Post-reshare s2:           {:.4}", post_reshare_sigt_s2);
 	println!("  Ratio (s1/original):       {:.2}x", post_reshare_sigt_s1 / original_sigt);
@@ -3852,6 +3882,8 @@ fn analyze_recovered_partials(threshold: u32, parties: u32, num_resharings: usiz
 	// The norm should have reasonable margin (at least 10%)
 	let margin_ratio = (r_prime - max_combined_norm) / r_prime;
 	println!("\nSafety check: margin ratio = {:.1}% (want > 10%)", margin_ratio * 100.0);
+
+	guard_overshoot
 }
 
 /// Compute binomial coefficient C(n, k).
@@ -3886,11 +3918,91 @@ fn test_recovered_partial_variance_3_of_5() {
 	analyze_recovered_partials(3, 5, 20);
 }
 
+// (4,6) carries the thinnest κ margin (ML-DSA-87: measured 1.163× vs κ = 1.25;
+// ML-DSA-65: measured 1.124× fixed-seed / 1.131× worst-of-6-seeds vs κ = 1.18);
+// its overshoot ≤ κ assertion runs in the default suite alongside the cheaper
+// configs. On ML-DSA-44 the config fails closed instead (κ = 1); see the
+// dedicated fail-closed test below.
+#[cfg(any(feature = "ml-dsa-87", feature = "ml-dsa-65"))]
 #[test]
-// (4,6) carries the thinnest κ margin (~7.5%: measured 1.163× vs κ=1.25); its
-// overshoot ≤ κ assertion runs in the default suite alongside the cheaper configs.
 fn test_recovered_partial_variance_4_of_6() {
 	analyze_recovered_partials(4, 6, 10);
+}
+
+/// Multi-seed stability check for the thin-margin overshoots: the default
+/// tests above use one fixed keygen seed; this one re-measures the honest
+/// guard overshoot across several independent keygen seeds (each of which
+/// re-keys the split-noise PRF for the entire reshare trajectory) and asserts
+/// every run stays under the shipped κ for every config whose fixed-seed
+/// overshoot sits near its κ. `#[ignore]`d (it repeats the default tests 6×);
+/// run with `cargo test --release -- --ignored multi_seed`.
+#[cfg(any(feature = "ml-dsa-87", feature = "ml-dsa-65"))]
+#[test]
+#[ignore]
+fn test_recovered_partial_overshoot_multi_seed() {
+	// (t, n, reshare count) for the configs with the thinnest κ margins.
+	let configs: &[(u32, u32, usize)] = &[(2, 4, 100), (3, 5, 20), (4, 6, 10)];
+	for &(t, n, reshares) in configs {
+		let kappa = resharing_norm_enlargement(t, n);
+		let mut worst: f64 = 0.0;
+		for s in 0u8..6 {
+			let seed = [0x40 + s; 32];
+			let overshoot = analyze_recovered_partials_with_seed(t, n, reshares, seed);
+			println!(
+				">>> {}-of-{} seed 0x{:02x}: overshoot = {:.3}x (kappa = {:.2})",
+				t,
+				n,
+				0x40 + s,
+				overshoot,
+				kappa
+			);
+			worst = worst.max(overshoot);
+		}
+		println!(
+			"\n>>> {}-of-{} worst overshoot over 6 seeds: {:.3}x (kappa = {:.2})\n",
+			t, n, worst, kappa
+		);
+		assert!(
+			worst <= kappa,
+			"{}-of-{}: worst multi-seed overshoot {:.3}x exceeds kappa {:.2}",
+			t,
+			n,
+			worst,
+			kappa
+		);
+	}
+}
+
+/// ML-DSA-44 cannot support resharing into a 4-of-6 committee: the measured
+/// honest overshoot (~1.166×) exceeds the base bound `B`, and enlarging the
+/// radii by κ = 1.25 is infeasible under this variant's verification ceilings
+/// (γ₁ = 2¹⁷, γ₂ = (Q−1)/88 collapse the per-iteration acceptance; MC gives
+/// K ≈ 5.8·10⁵). The params table therefore ships κ = 1 for (4,6) and the
+/// Round-5 recovered-partial guard must reject honest reshares — fail closed,
+/// never fail open. This test pins that behavior.
+#[cfg(all(feature = "ml-dsa-44", not(feature = "ml-dsa-87"), not(feature = "ml-dsa-65")))]
+#[test]
+fn test_resharing_into_4_of_6_fails_closed() {
+	let config = ThresholdConfig::new(4, 6).expect("valid config");
+	let seed = [77u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let party_ids: Vec<u32> = (0..6).collect();
+	let mut current_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
+	for share in shares {
+		current_shares.insert(share.party_id(), share.clone());
+	}
+
+	let result =
+		run_resharing_protocol(4, party_ids.clone(), 4, party_ids, &current_shares, &public_key);
+	let err = result.expect_err("4-of-6 resharing must fail closed on ML-DSA-44");
+	// The party whose Round-5 guard fires reports the norm-bound error; parties
+	// that observe the failure broadcasts abort with "N parties reported
+	// failure". Which one surfaces from the test harness depends on ordering.
+	assert!(
+		err.contains("partial-secret norm bound") || err.contains("parties reported failure"),
+		"expected the Round-5 recovered-partial norm guard to reject, got: {err}"
+	);
 }
 
 // ============================================================================
@@ -4171,7 +4283,7 @@ fn assert_resharing_survives_forged_round5_from_excluded(
 			Err(_) => return data,
 		};
 		if matches!(msg, ResharingMessage::Round1(_)) {
-			use qp_rusty_crystals_dilithium::params::{K, N};
+			use qp_rusty_crystals_threshold::params::{K, N};
 			// A partial PK keyed by the (non-canonical) full-committee mask:
 			// before the sender filter, this hard-failed pk preservation on
 			// every party that received it.

@@ -36,21 +36,20 @@ use borsh::{BorshDeserialize, BorshSerialize};
 /// Size of the session identifier (SSID) in bytes.
 pub const SSID_SIZE: usize = 32;
 
-/// Size of the ML-DSA-87 signature in bytes.
-pub const SIGNATURE_SIZE: usize = 4627;
+/// Size of the ML-DSA signature in bytes for the active parameter set.
+pub use crate::params::SIGNBYTES as SIGNATURE_SIZE;
 
 /// Maximum size of commitment data in Round2Broadcast.
 ///
-/// This is derived from: max_k_iterations (1600, for 4-of-6) × single_commitment_size (k ×
-/// POLY_Q_SIZE = 8 × 736 = 5888) = 9_420_800 bytes. We round up to 10.5 MB for margin. The 4-of-6
-/// resharing-hardened config raised the worst-case k from 380 to 1600; see `config::k_iterations`.
-pub const MAX_COMMITMENT_DATA_SIZE: usize = 10_500_000;
+/// Derived from worst-case `k_iterations` × `SINGLE_COMMITMENT_SIZE` for this
+/// parameter set, with margin. See `params::MAX_K_ITERATIONS`.
+pub use crate::params::MAX_COMMITMENT_DATA_SIZE;
 
 /// Maximum size of response data in Round3Broadcast.
 ///
-/// This is derived from: max_k_iterations (1600, for 4-of-6) × single_response_size (L × 640 = 7 ×
-/// 640 = 4480) = 7_168_000 bytes. We round up to 8 MB for margin.
-pub const MAX_RESPONSE_SIZE: usize = 8_000_000;
+/// Derived from worst-case `k_iterations` × single response size for this
+/// parameter set, with margin.
+pub use crate::params::MAX_RESPONSE_SIZE;
 
 /// Read exactly `len` bytes from `reader` without trusting `len` for the up-front
 /// allocation size.
@@ -236,10 +235,10 @@ impl Round3Broadcast {
 	}
 }
 
-/// A threshold signature in ML-DSA-87 format.
+/// A threshold signature in standard ML-DSA format.
 ///
 /// This is the final output of the threshold signing protocol.
-/// It is compatible with standard ML-DSA-87 verification - verifiers
+/// It is compatible with standard ML-DSA verification - verifiers
 /// do not need to know that the signature was produced by a threshold
 /// scheme.
 ///
@@ -261,7 +260,7 @@ impl Round3Broadcast {
 /// and ensures only valid-length signatures are accepted.
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize)]
 pub struct Signature {
-	/// The signature bytes in standard ML-DSA-87 format.
+	/// The signature bytes in standard ML-DSA format.
 	bytes: Vec<u8>,
 }
 

@@ -1,4 +1,5 @@
-//! Low-level primitives for threshold ML-DSA-87.
+//! Low-level primitives for threshold ML-DSA (the active parameter set is
+//! selected in [`crate::params`]).
 //!
 //! This module provides the basic types and functions needed by the threshold protocol,
 //! including hyperball sampling, matrix operations, and modular arithmetic helpers.
@@ -23,28 +24,22 @@
 //! - Constant-time rejection sampling (e.g., with dummy operations)
 //! - Side-channel-resistant transcendental function approximations
 //!
-//! # ML-DSA-87 Parameters
+//! # Parameters
 //!
-//! This module uses ML-DSA-87 parameters directly from `dilithium_params`:
-//! - `N = 256`: coefficients per polynomial
-//! - `K = 8`: rows in public matrix A
-//! - `L = 7`: columns in public matrix A
-//! - `Q = 8380417`: the modulus
-//! - `ETA = 2`: secret key coefficient bound
+//! This module reads the active parameter set from [`crate::params`]
+//! (feature-selected, 87 > 65 > 44): the shared ring constants `N = 256` and
+//! `Q = 8380417`, plus the per-variant matrix dimensions `K`/`L` and packed
+//! sizes.
 
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::f64::consts::PI;
-use qp_rusty_crystals_dilithium::{
-	fips202, packing,
-	params::{C_DASH_BYTES, GAMMA2, K, L, N, Q, SIGNBYTES},
-	poly, polyvec,
-};
+use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec, rounding};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-// Constants for decompose (ML-DSA-87)
-// ALPHA = 2 * GAMMA2 = 2 * ((Q-1)/32) = 523776
-const ALPHA: u32 = 2 * GAMMA2 as u32;
+use crate::params::{C_DASH_BYTES, GAMMA1, GAMMA2, K, L, N, POLY_Q_PACKEDBYTES, Q, SIGNBYTES};
+
 const Q_U32: u32 = Q as u32;
+const ALPHA: u32 = 2 * GAMMA2 as u32;
 
 // ============================================================================
 // Modular Arithmetic Helpers
@@ -111,7 +106,7 @@ const N_COEFFS: usize = N as usize;
 /// for poly in ntt_polys {
 ///     acc.add(&poly);
 /// }
-/// let result: Polyvecl = acc.finalize();
+/// let result: Polyvec<L> = acc.finalize();
 /// ```
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct NttAccumulator<const VECS: usize> {
@@ -159,24 +154,24 @@ impl<const VECS: usize> Default for NttAccumulator<VECS> {
 	}
 }
 
-/// Accumulator specialized for Polyvecl (L polynomials).
+/// Accumulator specialized for `Polyvec<L>` (L polynomials).
 pub type NttAccumulatorL = NttAccumulator<L>;
 
-/// Accumulator specialized for Polyveck (K polynomials).
+/// Accumulator specialized for `Polyvec<K>` (K polynomials).
 pub type NttAccumulatorK = NttAccumulator<K>;
 
 impl NttAccumulatorL {
-	/// Add all polynomials from a Polyvecl.
-	pub fn add_polyvecl(&mut self, vec: &polyvec::Polyvecl) {
+	/// Add all polynomials from a `Polyvec<L>`.
+	pub fn add_polyvec_l(&mut self, vec: &polyvec::Polyvec<L>) {
 		for (i, poly) in vec.vec.iter().enumerate().take(L) {
 			self.add_poly(i, poly);
 		}
 	}
 
-	/// Finalize to a Polyvecl.
-	pub fn finalize(self) -> polyvec::Polyvecl {
+	/// Finalize to a `Polyvec<L>`.
+	pub fn finalize_l(self) -> polyvec::Polyvec<L> {
 		let polys = self.finalize_to_polys();
-		let mut result = polyvec::Polyvecl::default();
+		let mut result = polyvec::Polyvec::<L>::default();
 		for (i, poly) in polys.into_iter().enumerate() {
 			result.vec[i] = poly;
 		}
@@ -185,17 +180,17 @@ impl NttAccumulatorL {
 }
 
 impl NttAccumulatorK {
-	/// Add all polynomials from a Polyveck.
-	pub fn add_polyveck(&mut self, vec: &polyvec::Polyveck) {
+	/// Add all polynomials from a `Polyvec<K>`.
+	pub fn add_polyvec_k(&mut self, vec: &polyvec::Polyvec<K>) {
 		for (i, poly) in vec.vec.iter().enumerate().take(K) {
 			self.add_poly(i, poly);
 		}
 	}
 
-	/// Finalize to a Polyveck.
-	pub fn finalize(self) -> polyvec::Polyveck {
+	/// Finalize to a `Polyvec<K>`.
+	pub fn finalize_k(self) -> polyvec::Polyvec<K> {
 		let polys = self.finalize_to_polys();
-		let mut result = polyvec::Polyveck::default();
+		let mut result = polyvec::Polyvec::<K>::default();
 		for (i, poly) in polys.into_iter().enumerate() {
 			result.vec[i] = poly;
 		}
@@ -209,43 +204,26 @@ impl NttAccumulatorK {
 
 /// Decompose a coefficient into low and high parts for ML-DSA rounding.
 ///
-/// Splits 0 ≤ a < q into (a₀, a₁) where a = a₁*α + a₀ with -α/2 < a₀ ≤ α/2,
-/// except when a₁ would equal (q-1)/α, in which case a₁=0 and -α/2 ≤ a₀ < 0.
-/// Returns (a₀ + q, a₁) where 0 ≤ a₁ < 16 and α = 2γ₂ = 523776.
-///
-/// This matches the reference Threshold-ML-DSA implementation for compatibility.
+/// Splits `0 ≤ a < q` into `(a₀_pq, a₁)` where `a ≡ a₁·α + a₀ (mod q)` with
+/// `-α/2 < a₀ ≤ α/2` (except the FIPS wrap case `a₁ = 0`, `-α/2 ≤ a₀ < 0`),
+/// and `a₀_pq = a₀ mod q` — i.e. `a₀ + q` when `a₀` is negative, otherwise
+/// `a₀`. High-bits extraction is delegated to
+/// [`rounding::decompose`](qp_rusty_crystals_dilithium::rounding::decompose);
+/// this wrapper only converts the signed low part to the threshold wire
+/// convention.
 pub(crate) fn decompose_coefficient(a: u32) -> (u32, u32) {
-	// a₁ = ⌈a / 128⌉
-	let mut a1 = (a + 127) >> 7;
-
-	// For Alpha == 523776 (ML-DSA-87):
-	// 1025/2²² is close enough to 1/4092 so that a₁
-	// becomes a/α rounded down.
-	a1 = ((a1 as u64 * 1025 + (1 << 21)) >> 22) as u32;
-
-	// For the corner-case a₁ = (q-1)/α = 16, we have to set a₁=0.
-	a1 &= 15;
-
-	let mut a0_plus_q = a.wrapping_sub(a1.wrapping_mul(ALPHA));
-
-	// In the corner-case, when we set a₁=0, we will incorrectly
-	// have a₀ > (q-1)/2 and we'll need to subtract q.  As we
-	// return a₀ + q, that comes down to adding q if a₀ < (q-1)/2.
-	let threshold = (Q_U32 - 1) / 2;
-	// Use i32 arithmetic to handle the comparison correctly
-	let cond = ((a0_plus_q as i32).wrapping_sub(threshold as i32)) >> 31; // -1 if a0_plus_q < threshold, 0 otherwise
-	a0_plus_q = a0_plus_q.wrapping_add((cond as u32) & Q_U32);
-
-	(a0_plus_q, a1)
+	let (a0, a1) = rounding::decompose::<GAMMA2>(a as i32);
+	let a0_pq = if a0 < 0 { (a0 + Q) as u32 } else { a0 as u32 };
+	(a0_pq, a1 as u32)
 }
 
 /// Decompose a vector of K polynomials into low and high parts.
 ///
 /// Matches the reference implementation's rounding behavior for compatibility.
-pub(crate) fn decompose_polyveck(
-	input: &polyvec::Polyveck,
-	w0: &mut polyvec::Polyveck,
-	w1: &mut polyvec::Polyveck,
+pub(crate) fn decompose_polyvec(
+	input: &polyvec::Polyvec<K>,
+	w0: &mut polyvec::Polyvec<K>,
+	w1: &mut polyvec::Polyvec<K>,
 ) {
 	for i in 0..K {
 		for j in 0..N as usize {
@@ -272,8 +250,8 @@ pub(crate) fn decompose_polyveck(
 /// `i32` range and inside [`poly::reduce`]'s input contract.
 pub(crate) fn compute_ntt_dot_product(
 	result: &mut poly::Poly,
-	a: &polyvec::Polyvecl,
-	b: &polyvec::Polyvecl,
+	a: &polyvec::Polyvec<L>,
+	b: &polyvec::Polyvec<L>,
 ) {
 	// Zero out result
 	result.coeffs_mut().fill(0);
@@ -392,7 +370,7 @@ impl HyperballSampleVector {
 	/// Round the z response component (s1 portion) to integer polynomial.
 	/// Used in signing when only the z response is needed.
 	/// Keeps values in centered representation [-(Q-1)/2, (Q-1)/2].
-	pub fn round_z_response(&self, z: &mut polyvec::Polyvecl) {
+	pub fn round_z_response(&self, z: &mut polyvec::Polyvec<L>) {
 		for i in 0..L {
 			for j in 0..N as usize {
 				let idx = i * N as usize + j;
@@ -410,7 +388,7 @@ impl HyperballSampleVector {
 
 	/// Round floating-point values back to integer polynomials.
 	/// Keeps values in centered representation [-(Q-1)/2, (Q-1)/2].
-	pub fn round(&self, s1: &mut polyvec::Polyvecl, s2: &mut polyvec::Polyveck) {
+	pub fn round(&self, s1: &mut polyvec::Polyvec<L>, s2: &mut polyvec::Polyvec<K>) {
 		// Round s1 components - keep in centered range
 		for i in 0..L {
 			for j in 0..N as usize {
@@ -482,7 +460,7 @@ impl HyperballSampleVector {
 	}
 
 	/// Create a vector from polynomial vectors (s1, s2).
-	pub fn from_polyvecs(s1: &polyvec::Polyvecl, s2: &polyvec::Polyveck) -> Self {
+	pub fn from_polyvecs(s1: &polyvec::Polyvec<L>, s2: &polyvec::Polyvec<K>) -> Self {
 		let size = N as usize * (L + K);
 		let mut data = vec![0.0f64; size];
 
@@ -525,9 +503,9 @@ impl HyperballSampleVector {
 /// Compute Dilithium hint for signature.
 /// Returns the hint population count.
 pub(crate) fn compute_dilithium_hint(
-	hint: &mut polyvec::Polyveck,
-	w0pf: &polyvec::Polyveck,
-	w1: &polyvec::Polyveck,
+	hint: &mut polyvec::Polyvec<K>,
+	w0pf: &polyvec::Polyvec<K>,
+	w1: &polyvec::Polyvec<K>,
 ) -> usize {
 	let mut pop = 0;
 	for i in 0..K {
@@ -561,15 +539,6 @@ fn make_hint_single(z0: i32, r1: i32) -> i32 {
 // Packing Functions
 // ============================================================================
 
-/// Packed size in bytes of one polynomial in the 23-bit `w` encoding:
-/// 256 coefficients × 23 bits = 736 bytes.
-pub(crate) const POLY_Q_SIZE: usize = (N as usize * 23) / 8;
-
-/// Packed size in bytes of one commitment (one `Polyveck` of `K` polynomials
-/// in the 23-bit encoding). Round 2 commitment data is `k_iterations` of
-/// these, concatenated.
-pub(crate) const SINGLE_COMMITMENT_SIZE: usize = K * POLY_Q_SIZE;
-
 /// Pack a polynomial with coefficients in `[0, Q)` using 23-bit encoding.
 ///
 /// The buffer length is enforced by the type (fixed-size array reference)
@@ -580,7 +549,7 @@ pub(crate) const SINGLE_COMMITMENT_SIZE: usize = K * POLY_Q_SIZE;
 ///
 /// Debug builds will panic if any coefficient is outside `[0, Q)`,
 /// indicating a bug in the calling code's reduction logic.
-pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8; POLY_Q_SIZE]) {
+pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8; POLY_Q_PACKEDBYTES]) {
 	// Enforce the documented contract: a coefficient >= Q would be silently
 	// truncated to its low 23 bits, and a negative one wraps via `as u32`
 	// into 23 bits of garbage — either way a corrupt commitment.
@@ -625,7 +594,7 @@ pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8; POLY_Q_SIZE]) {
 /// Returns an error if any coefficient is >= Q, which would indicate
 /// malformed or malicious input data.
 pub(crate) fn poly_unpack_w(buf: &[u8]) -> Result<poly::Poly, &'static str> {
-	if buf.len() < 736 {
+	if buf.len() < POLY_Q_PACKEDBYTES {
 		return Err("buffer too short for poly_unpack_w");
 	}
 	let mut p = poly::Poly::default();
@@ -668,21 +637,20 @@ pub(crate) fn poly_unpack_w(buf: &[u8]) -> Result<poly::Poly, &'static str> {
 	Ok(p)
 }
 
-/// Unpack a Polyveck from 23-bit encoding.
+/// Unpack a `Polyvec<K>` from 23-bit encoding.
 ///
-/// Returns an error if the buffer is shorter than `K * 736` bytes or if any
+/// Returns an error if the buffer is shorter than `K * POLY_Q_PACKEDBYTES` bytes or if any
 /// coefficient is >= Q. The length is validated up front so an undersized
 /// buffer is a recoverable `Err` rather than an out-of-bounds slice panic
 /// (which would abort the process in panic=abort deployments).
-pub(crate) fn unpack_polyveck_w(buf: &[u8]) -> Result<polyvec::Polyveck, &'static str> {
-	const POLY_W_SIZE: usize = 736;
-	if buf.len() < K * POLY_W_SIZE {
-		return Err("buffer too short for unpack_polyveck_w");
+pub(crate) fn unpack_polyvec_w(buf: &[u8]) -> Result<polyvec::Polyvec<K>, &'static str> {
+	if buf.len() < K * POLY_Q_PACKEDBYTES {
+		return Err("buffer too short for unpack_polyvec_w");
 	}
-	let mut w = polyvec::Polyveck::default();
+	let mut w = polyvec::Polyvec::<K>::default();
 	for i in 0..K {
-		let offset = i * POLY_W_SIZE;
-		w.vec[i] = poly_unpack_w(&buf[offset..offset + POLY_W_SIZE])?;
+		let offset = i * POLY_Q_PACKEDBYTES;
+		w.vec[i] = poly_unpack_w(&buf[offset..offset + POLY_Q_PACKEDBYTES])?;
 	}
 	Ok(w)
 }
@@ -697,8 +665,8 @@ pub(crate) fn unpack_polyveck_w(buf: &[u8]) -> Result<polyvec::Polyveck, &'stati
 /// is performed before calling this function.
 pub(crate) fn pack_signature(
 	c_tilde: &[u8],
-	z: &polyvec::Polyvecl,
-	hint: &polyvec::Polyveck,
+	z: &polyvec::Polyvec<L>,
+	hint: &polyvec::Polyvec<K>,
 ) -> Vec<u8> {
 	let mut sig = [0u8; SIGNBYTES];
 
@@ -706,8 +674,16 @@ pub(crate) fn pack_signature(
 	let c_tilde_arr: Option<&[u8; C_DASH_BYTES]> =
 		c_tilde.get(..C_DASH_BYTES).and_then(|slice| slice.try_into().ok());
 
-	// Use dilithium's pack_sig function
-	packing::pack_sig(&mut sig, c_tilde_arr, z, hint);
+	// Use dilithium's pack_sig function for the active parameter set.
+	packing::pack_sig::<
+		K,
+		L,
+		{ GAMMA1 },
+		{ crate::params::OMEGA },
+		C_DASH_BYTES,
+		{ crate::params::POLYZ_PACKEDBYTES },
+		SIGNBYTES,
+	>(&mut sig, c_tilde_arr, z, hint);
 
 	sig.to_vec()
 }
@@ -727,17 +703,75 @@ mod tests {
 
 	#[test]
 	fn test_decompose_coefficient() {
-		// Test that high part is always < 16
+		// High-bits range: 16 values for γ₂=(Q-1)/32, 44 for γ₂=(Q-1)/88.
+		let a1_mod = (Q as u32 - 1) / ALPHA;
 		let (_a0, a1) = decompose_coefficient(0);
-		assert!(a1 < 16);
+		assert!(a1 < a1_mod);
 
 		let (_a0, a1) = decompose_coefficient(Q_U32 - 1);
-		assert!(a1 < 16);
+		assert!(a1 < a1_mod);
 
-		// Test various values to ensure a1 is always < 16
 		for a in [0u32, 1, 100, 1000, Q_U32 / 2, Q_U32 - 1, ALPHA, ALPHA * 2, ALPHA * 15] {
 			let (_a0, a1) = decompose_coefficient(a);
-			assert!(a1 < 16, "a1 should be < 16 for a={}, got a1={}", a, a1);
+			assert!(a1 < a1_mod, "a1 should be < {a1_mod} for a={a}, got a1={a1}");
+		}
+	}
+
+	/// The original ML-DSA-87-only decompose that shipped in the audited
+	/// threshold implementation (bit-twiddled for α = 523776, returning
+	/// `a₀ + q` unconditionally). Kept verbatim as a test oracle.
+	fn decompose_coefficient_87_reference(a: u32) -> (u32, u32) {
+		let mut a1 = (a + 127) >> 7;
+		a1 = ((a1 as u64 * 1025 + (1 << 21)) >> 22) as u32;
+		a1 &= 15;
+
+		let mut a0_plus_q = a.wrapping_sub(a1.wrapping_mul(523776));
+		let threshold = (Q_U32 - 1) / 2;
+		let cond = ((a0_plus_q as i32).wrapping_sub(threshold as i32)) >> 31;
+		a0_plus_q = a0_plus_q.wrapping_add((cond as u32) & Q_U32);
+		(a0_plus_q, a1)
+	}
+
+	/// Exhaustive check of `decompose_coefficient` over `[0, Q)`:
+	/// 1. thin-wrapper equivalence with [`rounding::decompose`],
+	/// 2. the FIPS 204 Decompose contract on the centered low part,
+	/// 3. for γ₂ = (Q−1)/32, mod-q equivalence with the audited 87 original.
+	#[test]
+	fn test_decompose_coefficient_exhaustive() {
+		let m = (Q as u32 - 1) / ALPHA;
+		let gamma2 = GAMMA2 as i64;
+		let gamma2_32 = (Q as usize - 1) / 32;
+		for a in 0..Q_U32 {
+			let (a0_signed, a1_dil) = rounding::decompose::<GAMMA2>(a as i32);
+			let (a0_pq, a1) = decompose_coefficient(a);
+			assert_eq!(a1, a1_dil as u32, "a={a}: high part diverges from rounding::decompose");
+			let expected_pq = if a0_signed < 0 { (a0_signed + Q) as u32 } else { a0_signed as u32 };
+			assert_eq!(
+				a0_pq, expected_pq,
+				"a={a}: wire low part is not a0 mod q from rounding::decompose"
+			);
+
+			assert!(a1 < m, "a={a}: a1={a1} out of range (m={m})");
+
+			// Centered low part.
+			let a0 = if a0_pq as i64 > gamma2 { a0_pq as i64 - Q as i64 } else { a0_pq as i64 };
+			assert!(a0.abs() <= gamma2, "a={a}: |a0|={} exceeds gamma2={gamma2}", a0.abs());
+
+			// Reconstruction: a ≡ a1·α + a0 (mod q).
+			let recon = (a1 as i64 * ALPHA as i64 + a0).rem_euclid(Q as i64);
+			assert_eq!(recon, a as i64, "a={a}: reconstruction failed (a0={a0}, a1={a1})");
+
+			// Equivalence with the audited ML-DSA-87 original (mod q on the
+			// low part; identical high part).
+			if GAMMA2 == gamma2_32 {
+				let (ref_a0_pq, ref_a1) = decompose_coefficient_87_reference(a);
+				assert_eq!(a1, ref_a1, "a={a}: a1 diverges from audited 87 reference");
+				assert_eq!(
+					a0_pq % Q_U32,
+					ref_a0_pq % Q_U32,
+					"a={a}: a0 diverges from audited 87 reference mod q"
+				);
+			}
 		}
 	}
 
@@ -774,7 +808,7 @@ mod tests {
 			p.coeffs_mut()[i] = (i * 12345) as i32 % Q;
 		}
 
-		let mut buf = [0u8; POLY_Q_SIZE];
+		let mut buf = [0u8; POLY_Q_PACKEDBYTES];
 		poly_pack_w(&p, &mut buf);
 
 		let p2 = poly_unpack_w(&buf).expect("valid coefficients should unpack");
@@ -793,7 +827,7 @@ mod tests {
 	fn test_poly_pack_w_rejects_coefficient_at_q() {
 		let mut p = poly::Poly::default();
 		p.coeffs_mut()[0] = Q;
-		let mut buf = [0u8; POLY_Q_SIZE];
+		let mut buf = [0u8; POLY_Q_PACKEDBYTES];
 		poly_pack_w(&p, &mut buf);
 	}
 
@@ -806,22 +840,22 @@ mod tests {
 	fn test_poly_pack_w_rejects_negative_coefficient() {
 		let mut p = poly::Poly::default();
 		p.coeffs_mut()[0] = -1;
-		let mut buf = [0u8; POLY_Q_SIZE];
+		let mut buf = [0u8; POLY_Q_PACKEDBYTES];
 		poly_pack_w(&p, &mut buf);
 	}
 
 	#[test]
-	fn test_unpack_polyveck_w_rejects_short_buffer() {
+	fn test_unpack_polyvec_w_rejects_short_buffer() {
 		// Audit regression: an undersized buffer must be a recoverable Err,
 		// not an out-of-bounds slice panic. The function already returns
 		// Result for coefficient-range errors; a length violation must take
 		// the same path (a panic would abort the process in panic=abort
 		// deployments before the caller's error handling runs).
-		for len in [0usize, 100, 736, 8 * 736 - 1] {
+		for len in [0usize, 100, POLY_Q_PACKEDBYTES, K * POLY_Q_PACKEDBYTES - 1] {
 			let buf = vec![0u8; len];
-			let result = unpack_polyveck_w(&buf);
+			let result = unpack_polyvec_w(&buf);
 			assert!(
-				matches!(result, Err("buffer too short for unpack_polyveck_w")),
+				matches!(result, Err("buffer too short for unpack_polyvec_w")),
 				"len {} must be rejected with an error, got {:?}",
 				len,
 				result.is_ok()
@@ -829,14 +863,14 @@ mod tests {
 		}
 
 		// A correctly sized buffer still unpacks (all-zero coefficients are valid).
-		let buf = vec![0u8; 8 * 736];
-		assert!(unpack_polyveck_w(&buf).is_ok());
+		let buf = vec![0u8; K * POLY_Q_PACKEDBYTES];
+		assert!(unpack_polyvec_w(&buf).is_ok());
 	}
 
 	#[test]
 	fn test_poly_unpack_w_rejects_invalid_coefficients() {
 		// Create a buffer with a coefficient >= Q
-		let mut buf = vec![0u8; 736];
+		let mut buf = vec![0u8; POLY_Q_PACKEDBYTES];
 		// Pack Q (which is invalid, should be < Q) into the first coefficient
 		// Q = 8380417 = 0x7FE001, which fits in 23 bits
 		let invalid_val = Q as u32;

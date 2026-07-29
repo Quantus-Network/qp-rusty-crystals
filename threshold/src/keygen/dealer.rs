@@ -6,18 +6,14 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use qp_rusty_crystals_dilithium::{
-	fips202, packing,
-	params::{K, L, Q},
-	poly, polyvec,
-};
-
+use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey, SecretShareData, PUBLIC_KEY_SIZE},
+	params::{ETA, K, L, Q},
 	participants::{ParticipantId, ParticipantList},
 	protocol::primitives::{mod_q, NttAccumulatorL},
 };
@@ -143,12 +139,12 @@ pub fn generate_with_dealer(
 		generate_threshold_shares(&mut h, threshold, parties)?;
 
 	// 4. Generate matrix A from rho
-	let mut a_matrix: [polyvec::Polyvecl; K] =
-		core::array::from_fn(|_| polyvec::Polyvecl::default());
+	let mut a_matrix: [polyvec::Polyvec<L>; K] =
+		core::array::from_fn(|_| polyvec::Polyvec::<L>::default());
 	polyvec::matrix_expand(&mut a_matrix, &rho);
 
 	// 5. Compute t = A*s1 + s2
-	let mut t = polyvec::Polyveck::default();
+	let mut t = polyvec::Polyvec::<K>::default();
 
 	for (i, a_row) in a_matrix.iter().enumerate().take(K) {
 		for (a_poly, s1h_poly) in a_row.vec.iter().zip(s1h_total.vec.iter()).take(L) {
@@ -175,9 +171,9 @@ pub fn generate_with_dealer(
 	}
 
 	// 6. Extract t1 (high bits)
-	let mut t0 = polyvec::Polyveck::default();
+	let mut t0 = polyvec::Polyvec::<K>::default();
 	let mut t1 = t.clone();
-	polyvec::k_power2round(&mut t1, &mut t0);
+	polyvec::power2round(&mut t1, &mut t0);
 
 	// 7. Pack public key
 	let mut pk_packed = [0u8; PUBLIC_KEY_SIZE];
@@ -239,19 +235,19 @@ pub fn generate_with_dealer(
 /// Internal secret share structure used during key generation.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 struct SecretShare {
-	s1_share: polyvec::Polyvecl,
-	s2_share: polyvec::Polyveck,
+	s1_share: polyvec::Polyvec<L>,
+	s2_share: polyvec::Polyvec<K>,
 }
 
 /// Result type for threshold share generation containing:
-/// - s1_total: Polyvecl
-/// - s2_total: Polyveck
-/// - s1h_total: Polyvecl (NTT form)
+/// - s1_total: Polyvec<L>
+/// - s2_total: Polyvec<K>
+/// - s1h_total: Polyvec<L> (NTT form)
 /// - party_shares: BTreeMap<u32, BTreeMap<u16, SecretShare>> (u16 subset masks)
 type ThresholdSharesResult = (
-	polyvec::Polyvecl,
-	polyvec::Polyveck,
-	polyvec::Polyvecl,
+	polyvec::Polyvec<L>,
+	polyvec::Polyvec<K>,
+	polyvec::Polyvec<L>,
 	BTreeMap<u32, BTreeMap<u16, SecretShare>>,
 );
 
@@ -268,8 +264,8 @@ fn generate_threshold_shares(
 	}
 
 	// Total secrets (η-bounded, safe with i32)
-	let mut s1_total = polyvec::Polyvecl::default();
-	let mut s2_total = polyvec::Polyveck::default();
+	let mut s1_total = polyvec::Polyvec::<L>::default();
+	let mut s2_total = polyvec::Polyvec::<K>::default();
 
 	// NTT-domain accumulator uses u64 to avoid overflow for large configurations.
 	let mut s1h_acc = NttAccumulatorL::new();
@@ -302,15 +298,15 @@ fn generate_threshold_shares(
 		raw.zeroize();
 
 		// Create η-bounded shares for s1
-		let mut s1_share = polyvec::Polyvecl::default();
+		let mut s1_share = polyvec::Polyvec::<L>::default();
 		for (j, s1_poly) in s1_share.vec.iter_mut().enumerate().take(L) {
-			poly::uniform_eta(s1_poly, &share_seed, j as u16);
+			poly::uniform_eta::<ETA>(s1_poly, &share_seed, j as u16);
 		}
 
 		// Create η-bounded shares for s2
-		let mut s2_share = polyvec::Polyveck::default();
+		let mut s2_share = polyvec::Polyvec::<K>::default();
 		for (j, s2_poly) in s2_share.vec.iter_mut().enumerate().take(K) {
-			poly::uniform_eta(s2_poly, &share_seed, (L + j) as u16);
+			poly::uniform_eta::<ETA>(s2_poly, &share_seed, (L + j) as u16);
 		}
 
 		// The plaintext seed is no longer needed; wipe it rather than leaving it
@@ -322,7 +318,7 @@ fn generate_threshold_shares(
 		for s1h_poly in s1h_share.vec.iter_mut().take(L) {
 			poly::ntt(s1h_poly);
 		}
-		s1h_acc.add_polyvecl(&s1h_share);
+		s1h_acc.add_polyvec_l(&s1h_share);
 
 		// Create share object
 		let share = SecretShare { s1_share: s1_share.clone(), s2_share: s2_share.clone() };
@@ -362,7 +358,7 @@ fn generate_threshold_shares(
 	}
 
 	// Finalize NTT accumulator (reduces mod Q)
-	let s1h_total = s1h_acc.finalize();
+	let s1h_total = s1h_acc.finalize_l();
 
 	// Normalize s1_total (η-bounded sums)
 	for total_poly in s1_total.vec.iter_mut().take(L) {

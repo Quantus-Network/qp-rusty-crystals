@@ -1,10 +1,10 @@
 [package]
 name = "qp-rusty-crystals-threshold"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["Quantus Network"]
 license = "GPL-3.0"
-description = "Threshold ML-DSA-87 signature scheme implementation for post-quantum threshold signing"
+description = "Threshold ML-DSA signature scheme (FIPS 204 parameter sets)"
 readme = "README.md"
 homepage = "https://www.quantus.com"
 repository = "https://github.com/Quantus-Network/qp-rusty-crystals"
@@ -21,7 +21,7 @@ log = { workspace = true }
 # Serialization
 borsh = { workspace = true }
 
-# Local dependencies - reuse dilithium implementation
+# Local dependencies - reuse dilithium implementation (features via crate features below).
 qp-rusty-crystals-dilithium = { workspace = true }
 
 # no_std math support
@@ -34,8 +34,11 @@ hex-literal = { workspace = true }
 rand = { workspace = true }
 
 [features]
-default = ["std"]
+default = ["ml-dsa-87", "std"]
 std = ["zeroize/std"]
+ml-dsa-44 = ["qp-rusty-crystals-dilithium/ml-dsa-44"]
+ml-dsa-65 = ["qp-rusty-crystals-dilithium/ml-dsa-65"]
+ml-dsa-87 = ["qp-rusty-crystals-dilithium/ml-dsa-87"]
 
 [[bench]]
 name = "threshold_benchmarks"

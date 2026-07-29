@@ -1,4 +1,4 @@
-//! Key types for threshold ML-DSA-87.
+//! Key types for threshold ML-DSA.
 //!
 //! This module defines the public key and private key share types used in
 //! threshold signing. The private key share is intentionally opaque to
@@ -9,15 +9,16 @@ use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use qp_rusty_crystals_dilithium::params::{K, L};
 
 use crate::{
 	error::MAX_SUBSETS,
+	mldsa::MlDsaPublicKey,
+	params::{K, L, Q},
 	participants::{ParticipantId, ParticipantList},
 };
 
-/// Size of the packed ML-DSA-87 public key in bytes.
-pub const PUBLIC_KEY_SIZE: usize = 2592;
+/// Size of the packed ML-DSA public key in bytes for the active parameter set.
+pub use crate::params::PUBLICKEYBYTES as PUBLIC_KEY_SIZE;
 
 /// Size of the TR hash (public key hash) in bytes.
 pub const TR_SIZE: usize = 64;
@@ -35,23 +36,24 @@ fn compute_tr(bytes: &[u8; PUBLIC_KEY_SIZE]) -> [u8; TR_SIZE] {
 /// Validate public key bytes through the canonical ML-DSA parser.
 ///
 /// Every import boundary (`from_bytes`, Borsh deserialization) must apply
-/// the same key-validity rules as `ml_dsa_87::PublicKey::from_bytes` and the
+/// the same key-validity rules as [`MlDsaPublicKey::from_bytes`] and the
 /// verifier — in particular the rejection of the degenerate all-zero t1 key,
 /// which removes challenge binding and makes signatures forgeable. Accepting
 /// such bytes here would hand downstream code a trusted-looking `PublicKey`
 /// that the core implementation itself treats as invalid.
 fn validate_pk_bytes(bytes: &[u8; PUBLIC_KEY_SIZE]) -> Result<(), &'static str> {
-	qp_rusty_crystals_dilithium::ml_dsa_87::PublicKey::from_bytes(bytes)
+	MlDsaPublicKey::from_bytes(bytes)
 		.map(|_| ())
 		.map_err(|_| "invalid ML-DSA public key")
 }
 
-/// Public key for threshold ML-DSA-87.
+/// Public key for threshold ML-DSA.
 ///
 /// This key is shared among all parties and is used for signature verification.
 /// It can be freely distributed - there is no secret material here.
 ///
-/// The public key is compatible with standard ML-DSA-87 verification.
+/// The public key is compatible with standard ML-DSA verification for the
+/// active parameter set.
 ///
 /// # Serialization
 ///
@@ -60,7 +62,7 @@ fn validate_pk_bytes(bytes: &[u8; PUBLIC_KEY_SIZE]) -> Result<(), &'static str> 
 /// the possibility of "poisoned" public keys with mismatched TR values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicKey {
-	/// Packed public key bytes (standard ML-DSA-87 format).
+	/// Packed public key bytes (standard ML-DSA format).
 	bytes: [u8; PUBLIC_KEY_SIZE],
 	/// Public key hash (TR), used in signing. Always equals SHAKE256(bytes).
 	/// Cached for performance since it's used in hot paths during signing.
@@ -95,7 +97,7 @@ impl PublicKey {
 
 	/// Get the packed public key bytes.
 	///
-	/// These bytes are in standard ML-DSA-87 format and can be used
+	/// These bytes are in standard ML-DSA format and can be used
 	/// with the `qp-rusty-crystals-dilithium` crate for verification.
 	pub fn as_bytes(&self) -> &[u8; PUBLIC_KEY_SIZE] {
 		&self.bytes
@@ -125,7 +127,7 @@ impl PublicKey {
 	}
 }
 
-/// Private key share for one party in threshold ML-DSA-87.
+/// Private key share for one party in threshold ML-DSA.
 ///
 /// **This contains secret material and MUST be kept confidential.**
 ///
@@ -254,7 +256,6 @@ impl BorshDeserialize for SecretShareData {
 	/// coefficients must be rejected at import, not discovered as a panic
 	/// (overflow checks on) or silent wraparound (release) mid-signing.
 	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-		const Q: i32 = qp_rusty_crystals_dilithium::params::Q;
 		let s1 = <[[i32; 256]; L]>::deserialize_reader(reader)?;
 		let s2 = <[[i32; 256]; K]>::deserialize_reader(reader)?;
 		let in_range =
@@ -381,7 +382,7 @@ mod tests {
 
 	/// Security review: the threshold public key import paths must apply the
 	/// same degenerate-key check as the canonical ML-DSA parser
-	/// (`ml_dsa_87::PublicKey::from_bytes`) and the verifier, both of which
+	/// (`MlDsaPublicKey::from_bytes`) and the verifier, both of which
 	/// reject an all-zero t1 because it removes challenge binding and makes
 	/// signatures forgeable for that key. Accepting it here would let
 	/// downstream code trust a forgeable PublicKey object (or its
@@ -452,7 +453,7 @@ mod tests {
 	/// wrap in release) once the signer tries to use it.
 	#[test]
 	fn test_private_key_share_borsh_rejects_out_of_range_coefficients() {
-		use qp_rusty_crystals_dilithium::params::Q;
+		use crate::params::Q;
 
 		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
 		let mut shares = BTreeMap::new();

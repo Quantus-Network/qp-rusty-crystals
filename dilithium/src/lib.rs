@@ -4,6 +4,15 @@
 #![allow(clippy::precedence)]
 #![allow(clippy::unnecessary_cast)]
 #![allow(clippy::enum_variant_names)]
+// Without an `ml-dsa-*` feature the public frontends are not compiled, so the
+// const-generic signing core and the unused `define_ml_dsa!` macro become dead
+// code. That configuration is intentional (hdwallet's wormhole/mnemonic
+// surface depends on dilithium with no parameter set), so silence the
+// featureless-build lints rather than feature-gating the entire core.
+#![cfg_attr(
+	not(any(feature = "ml-dsa-44", feature = "ml-dsa-65", feature = "ml-dsa-87")),
+	allow(dead_code, unused_macros, unused_imports)
+)]
 
 extern crate alloc;
 
@@ -95,15 +104,22 @@ mod errors;
 pub use errors::{KeyParsingError, SignatureError};
 
 pub mod fips202;
-pub mod ml_dsa_87;
+pub(crate) mod frontend;
 pub(crate) mod ntt;
 pub mod packing;
 pub mod params;
 pub mod poly;
 pub mod polyvec;
 pub(crate) mod reduce;
-pub(crate) mod rounding;
+pub mod rounding;
 pub(crate) mod sign;
+
+#[cfg(feature = "ml-dsa-44")]
+pub mod ml_dsa_44;
+#[cfg(feature = "ml-dsa-65")]
+pub mod ml_dsa_65;
+#[cfg(feature = "ml-dsa-87")]
+pub mod ml_dsa_87;
 
 #[cfg(test)]
 mod acvp;

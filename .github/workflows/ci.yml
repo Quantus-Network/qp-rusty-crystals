@@ -71,6 +71,21 @@ jobs:
         run: cargo build --workspace --locked
       - name: Test workspace
         run: cargo test --workspace --locked
+      # Dilithium ACVP KATs for ML-DSA-44/65 are behind additive features;
+      # default workspace tests only exercise ML-DSA-87.
+      - name: Test dilithium (all parameter sets)
+        run: cargo test --locked -p qp-rusty-crystals-dilithium --all-features
+      # Threshold selects one active parameter set (priority 87 > 65 > 44), so
+      # --all-features never exercises 44/65. HD wallet modules coexist, but
+      # default tests only enable 87. Exclusive-feature runs cover both.
+      - name: Test threshold + hdwallet (ML-DSA-44 / ML-DSA-65 exclusive)
+        run: |
+          for variant in ml-dsa-44 ml-dsa-65; do
+            echo "::group::$variant"
+            cargo test --locked -p qp-rusty-crystals-threshold --no-default-features --features "std,$variant"
+            cargo test --locked -p qp-rusty-crystals-hdwallet --no-default-features --features "std,$variant"
+            echo "::endgroup::"
+          done
       # The stack-zeroization guard is gated to optimized builds
       # (#![cfg(not(debug_assertions))]): debug codegen materializes compiler
       # temporaries of the secret key that no source-level fix can wipe, so the
@@ -82,7 +97,7 @@ jobs:
       - name: Optimized-build regression tests (stack zeroization)
         run: |
           set -o pipefail
-          cargo test --release --locked -p qp-rusty-crystals-dilithium \
+          cargo test --release --locked -p qp-rusty-crystals-dilithium --all-features \
             --test import_stack_zeroization 2>&1 | tee stack-zeroization.log
           grep -Eq "test result: ok\. [1-9][0-9]* passed" stack-zeroization.log || {
             echo "::error::stack-zeroization tests were filtered out (0 tests ran)"
@@ -108,10 +123,14 @@ jobs:
       # wasm32v1-none is the target used by Substrate runtimes (chain, chain-update2512,
       # libp2p-identity-pqc, qp-libp2p-identity) which depend on these crates as no_std.
       # A regression here breaks the entire downstream stack.
+      # The ml-dsa-* features must be listed explicitly: the frontends are
+      # feature-gated, so a bare --no-default-features build compiles only the
+      # generic core and would let a no_std regression in the public signing
+      # API slip through. All three variants are built to cover every frontend.
       - name: Build dilithium for wasm32v1-none (no_std)
-        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-dilithium --no-default-features
+        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-dilithium --no-default-features --features ml-dsa-44,ml-dsa-65,ml-dsa-87
       - name: Build hdwallet for wasm32v1-none (no_std)
-        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-hdwallet --no-default-features
+        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-hdwallet --no-default-features --features ml-dsa-44,ml-dsa-65,ml-dsa-87
 
   analysis:
     name: 🤖 Analysis (Clippy & Doc)
@@ -133,6 +152,14 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Run clippy (workspace)
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # --all-features never exercises the intentional "no ML-DSA frontend"
+      # build: without an ml-dsa-* feature the signing core is unused, and a
+      # regression that makes that configuration fail clippy (as this PR once
+      # did) stays green under --all-features alone.
+      - name: Run clippy (dilithium, no ML-DSA features)
+        run: cargo clippy --locked -p qp-rusty-crystals-dilithium --no-default-features -- -D warnings
+      - name: Run clippy (hdwallet, std only / no ML-DSA)
+        run: cargo clippy --locked -p qp-rusty-crystals-hdwallet --no-default-features --features std -- -D warnings
       - name: Generate documentation
         run: cargo doc --workspace --locked --no-deps --all-features
       - name: Check documentation

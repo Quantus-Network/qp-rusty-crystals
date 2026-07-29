@@ -30,14 +30,14 @@ use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::fmt;
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use qp_rusty_crystals_dilithium::{fips202, poly};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	config::ThresholdConfig,
 	error::{MAX_PARTIES, MAX_SUBSETS},
+	params::{ETA, K, L, N, SUITE_ID, THRESHOLD_SSID_VERSION},
 };
-
-use qp_rusty_crystals_dilithium::fips202;
 
 // ============================================================================
 // Transcript Signing Trait
@@ -138,16 +138,13 @@ pub const DOMAIN_PK_COMMIT: &[u8] = b"THRESHOLD_DKG_PK_COMMIT_V1";
 pub const DOMAIN_TRANSCRIPT: &[u8] = b"THRESHOLD_DKG_TRANSCRIPT_V1";
 
 /// Domain separator for DKG session identifier.
-pub const DOMAIN_DKG_SSID: &[u8] = b"THRESHOLD_DKG_SSID_V1";
+///
+/// Bumped to V2 when the SSID began absorbing [`THRESHOLD_SSID_VERSION`] and
+/// [`SUITE_ID`] so sessions on different parameter sets cannot collide.
+pub const DOMAIN_DKG_SSID: &[u8] = b"THRESHOLD_DKG_SSID_V2";
 
 /// Size of the DKG session identifier in bytes.
 pub const DKG_SSID_SIZE: usize = 32;
-
-use qp_rusty_crystals_dilithium::{
-	params::{K, L, N},
-	poly,
-};
-
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -425,7 +422,7 @@ fn read_eta_bounded_polys<R: borsh::io::Read>(
 	reader: &mut R,
 	expected: usize,
 ) -> borsh::io::Result<Vec<[i32; N as usize]>> {
-	let eta = qp_rusty_crystals_dilithium::params::ETA as i32;
+	let eta = crate::params::ETA as i32;
 	let len = u32::deserialize_reader(reader)? as usize;
 	if len != expected {
 		return Err(borsh::io::Error::new(
@@ -709,16 +706,21 @@ impl DkgMessage {
 /// Compute the DKG session identifier (SSID).
 ///
 /// The SSID binds:
+/// - Protocol version and ML-DSA suite (so sessions on different parameter sets cannot collide —
+///   same binding as signing / resharing SSIDs)
 /// - The threshold configuration (t, n)
 /// - All participant IDs (sorted)
 /// - A session nonce (caller-provided, e.g., from transport layer)
 ///
 /// This prevents cross-session replay attacks where messages from one DKG
-/// session could be replayed into another session with different parameters.
+/// session could be replayed into another session with different parameters
+/// or a different FIPS 204 parameter set.
 ///
 /// ```text
 /// ssid = SHAKE256(
-///     "THRESHOLD_DKG_SSID_V1" ||
+///     "THRESHOLD_DKG_SSID_V2" ||
+///     THRESHOLD_SSID_VERSION (u32 LE) ||
+///     SUITE_ID (u32 LE) ||
 ///     threshold (u32 LE) ||
 ///     total_parties (u32 LE) ||
 ///     num_participants (u32 LE) ||
@@ -735,8 +737,10 @@ pub fn compute_dkg_ssid(
 	let mut ssid = [0u8; DKG_SSID_SIZE];
 	let mut state = fips202::KeccakState::default();
 
-	// Domain separator
+	// Domain separator + protocol / suite binding (mirrors signing SSID).
 	fips202::shake256_absorb(&mut state, DOMAIN_DKG_SSID);
+	fips202::shake256_absorb(&mut state, &THRESHOLD_SSID_VERSION.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &SUITE_ID.to_le_bytes());
 
 	// Threshold configuration
 	fips202::shake256_absorb(&mut state, &threshold.to_le_bytes());
@@ -926,18 +930,19 @@ pub fn compute_signing_message(
 
 /// Derive an η-bounded SubsetContribution from a seed.
 ///
-/// Uses ETA=2 (ML-DSA-87 parameter) via the dilithium crate's `uniform_eta`.
+/// Samples η-bounded shares via the dilithium crate's `uniform_eta` for the
+/// active parameter set (`ETA` from [`crate::params`]).
 pub fn derive_subset_contribution(combined_seed: &[u8; SUBSET_SEED_SIZE]) -> SubsetContribution {
 	let mut contribution = SubsetContribution::new();
 	let mut temp_poly = poly::Poly::default();
 
 	for i in 0..L {
-		poly::uniform_eta(&mut temp_poly, combined_seed, i as u16);
+		poly::uniform_eta::<ETA>(&mut temp_poly, combined_seed, i as u16);
 		contribution.s1[i].copy_from_slice(temp_poly.coeffs());
 	}
 
 	for i in 0..K {
-		poly::uniform_eta(&mut temp_poly, combined_seed, (L + i) as u16);
+		poly::uniform_eta::<ETA>(&mut temp_poly, combined_seed, (L + i) as u16);
 		contribution.s2[i].copy_from_slice(temp_poly.coeffs());
 	}
 
@@ -1121,11 +1126,38 @@ mod tests {
 		assert_eq!(hash1, hash2);
 	}
 
+	/// Version + suite must be in the absorb list: a hand-rolled hash that
+	/// substitutes a different suite ID must not collide with the real SSID.
+	#[test]
+	fn test_dkg_ssid_binds_suite() {
+		let participants = [0u32, 1, 2];
+		let nonce = [0xABu8; 32];
+		let real = compute_dkg_ssid(2, 3, &participants, &nonce);
+
+		let mut state = fips202::KeccakState::default();
+		fips202::shake256_absorb(&mut state, DOMAIN_DKG_SSID);
+		fips202::shake256_absorb(&mut state, &THRESHOLD_SSID_VERSION.to_le_bytes());
+		fips202::shake256_absorb(&mut state, &(SUITE_ID ^ 0xDEAD).to_le_bytes());
+		fips202::shake256_absorb(&mut state, &2u32.to_le_bytes());
+		fips202::shake256_absorb(&mut state, &3u32.to_le_bytes());
+		fips202::shake256_absorb(&mut state, &3u32.to_le_bytes());
+		for id in &participants {
+			fips202::shake256_absorb(&mut state, &id.to_le_bytes());
+		}
+		fips202::shake256_absorb(&mut state, &nonce);
+		fips202::shake256_finalize(&mut state);
+		let mut other_suite = [0u8; DKG_SSID_SIZE];
+		fips202::shake256_squeeze(&mut other_suite, &mut state);
+
+		assert_ne!(real, other_suite, "SSID must change when SUITE_ID changes");
+		assert_eq!(real, compute_dkg_ssid(2, 3, &participants, &nonce));
+	}
+
 	#[test]
 	fn test_derive_contribution_bounded() {
 		let seed = [42u8; SUBSET_SEED_SIZE];
 		let contribution = derive_subset_contribution(&seed);
-		assert!(contribution.verify_bounds(2));
+		assert!(contribution.verify_bounds(ETA as i32));
 	}
 
 	/// A well-formed contribution must round-trip through Borsh.
@@ -1181,7 +1213,7 @@ mod tests {
 	/// NTT arithmetic whose bounds are a caller-enforced contract.
 	#[test]
 	fn test_subset_contribution_deserialize_rejects_out_of_range_coefficients() {
-		use qp_rusty_crystals_dilithium::params::ETA;
+		use crate::params::ETA;
 
 		let mut contribution = derive_subset_contribution(&[7u8; SUBSET_SEED_SIZE]);
 		contribution.s1[0][0] = ETA as i32 + 1;

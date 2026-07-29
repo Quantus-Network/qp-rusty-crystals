@@ -1,8 +1,15 @@
-//! # Threshold ML-DSA-87 Signature Scheme
+//! # Threshold ML-DSA Signature Scheme
 //!
-//! This crate implements a threshold variant of the ML-DSA-87 (Dilithium)
-//! signature scheme, allowing multiple parties to collectively sign messages
-//! without any single party having access to the complete signing key.
+//! This crate implements a threshold variant of ML-DSA (FIPS 204 / Dilithium),
+//! allowing multiple parties to collectively sign messages without any single
+//! party having access to the complete signing key.
+//!
+//! ## Parameter sets
+//!
+//! Build for exactly one ML-DSA parameter set via Cargo feature:
+//! - `ml-dsa-87` (default) — category 5
+//! - `ml-dsa-65` — category 3
+//! - `ml-dsa-44` — category 2
 //!
 //! ## Overview
 //!
@@ -12,7 +19,8 @@
 //! - Fewer than t parties cannot produce a signature or learn the secret key
 //!
 //! This implementation supports configurations up to (6, 6) and produces
-//! signatures that are compatible with standard ML-DSA-87 verification.
+//! signatures that are compatible with standard ML-DSA verification for the
+//! selected parameter set.
 //!
 //! ## Quick Start
 //!
@@ -76,7 +84,7 @@
 //! // 6. Combine into final signature
 //! let signature = signers[0].combine(&r2_broadcasts, &r3_broadcasts)?;
 //!
-//! // 7. Verify (works with standard ML-DSA-87 verification)
+//! // 7. Verify (works with standard ML-DSA verification for the active set)
 //! assert!(verify_signature(&public_key, b"message", b"context", &signature));
 //! ```
 //!
@@ -110,6 +118,9 @@
 //! ## Features
 //!
 //! - `std` (default): Enable standard library support
+//! - `ml-dsa-87` (default): ML-DSA category 5 parameter set
+//! - `ml-dsa-65`: ML-DSA category 3 parameter set
+//! - `ml-dsa-44`: ML-DSA category 2 parameter set
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
@@ -122,6 +133,8 @@ pub mod broadcast;
 mod config;
 mod error;
 pub mod keys;
+mod mldsa;
+pub mod params;
 pub mod participants;
 mod signer;
 
@@ -174,6 +187,9 @@ pub use derivation::{derive_dkg_contribution, DerivedKeyId};
 // Verification
 pub use verification::verify_signature;
 
+/// Maximum message length accepted by the active ML-DSA parameter set.
+pub use mldsa::MAX_MESSAGE_SIZE;
+
 // SSID computation (for tests and advanced use cases)
 pub use protocol::signing::compute_ssid;
 
@@ -182,14 +198,14 @@ pub use protocol::signing::get_hyperball_params;
 
 /// Signature verification.
 mod verification {
-	use crate::{broadcast::Signature, keys::PublicKey};
-	use qp_rusty_crystals_dilithium::params::SIGNBYTES;
+	use crate::{broadcast::Signature, keys::PublicKey, mldsa::MlDsaPublicKey, params::SIGNBYTES};
 
 	/// Verify a threshold signature.
 	///
 	/// This function verifies a signature produced by the threshold signing
-	/// protocol. The signature is compatible with standard ML-DSA-87, so it
-	/// can also be verified using the `qp-rusty-crystals-dilithium` crate.
+	/// protocol. The signature is compatible with standard ML-DSA verification
+	/// for the active parameter set, so it can also be verified using the
+	/// `qp-rusty-crystals-dilithium` crate.
 	///
 	/// # Arguments
 	///
@@ -229,9 +245,7 @@ mod verification {
 		}
 
 		// Use dilithium crate for verification
-		let dilithium_pk = match qp_rusty_crystals_dilithium::ml_dsa_87::PublicKey::from_bytes(
-			public_key.as_bytes(),
-		) {
+		let dilithium_pk = match MlDsaPublicKey::from_bytes(public_key.as_bytes()) {
 			Ok(pk) => pk,
 			Err(_) => return false,
 		};

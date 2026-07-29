@@ -35,10 +35,9 @@ use super::{
 
 use crate::participants::ParticipantId;
 
-use qp_rusty_crystals_dilithium::{
-	fips202,
-	params::{K, L, N},
-};
+use qp_rusty_crystals_dilithium::fips202;
+
+use crate::params::{K, L, N};
 
 /// Maximum DKG message size in bytes (256 KB).
 /// Maximum size of a serialized DKG message (256 KB).
@@ -503,9 +502,10 @@ impl<S: TranscriptSigner> Dkg<S> {
 	///
 	/// # Session Identifier (SSID)
 	///
-	/// The SSID is computed from the threshold configuration, participant list, and session nonce.
-	/// It binds all protocol messages to this specific session, preventing cross-session replay
-	/// attacks (CVE-2022-47930 class vulnerabilities).
+	/// The SSID is computed from the protocol version, ML-DSA suite ID, threshold
+	/// configuration, participant list, and session nonce. It binds all protocol
+	/// messages to this specific session (and parameter set), preventing
+	/// cross-session / cross-suite replay attacks (CVE-2022-47930 class).
 	///
 	/// # Security Warning
 	///
@@ -2167,7 +2167,7 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use qp_rusty_crystals_dilithium::params::ETA;
+	use crate::params::ETA;
 
 	/// Test session nonce for DKG tests.
 	const TEST_SESSION_NONCE: [u8; 32] = [0xDEu8; 32];
@@ -2433,10 +2433,8 @@ mod tests {
 	/// a real post-quantum signature scheme.
 	#[test]
 	fn test_dkg_with_dilithium_signing() {
-		use qp_rusty_crystals_dilithium::{
-			ml_dsa_87::{Keypair, PublicKey, SecretKey, SIGNBYTES},
-			SensitiveBytes32,
-		};
+		use crate::mldsa::{Keypair, MlDsaPublicKey as PublicKey, SecretKey, SIGNBYTES};
+		use qp_rusty_crystals_dilithium::SensitiveBytes32;
 
 		/// Signer that wraps a Dilithium secret key.
 		/// Clone is implemented manually to explicitly copy the secret key bytes.

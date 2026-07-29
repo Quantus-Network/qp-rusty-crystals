@@ -4,26 +4,37 @@ use crate::helpers::{
 	drbg::Drbg,
 	kat::{parse_test_vectors, TestVector},
 };
-use qp_rusty_crystals_dilithium::ml_dsa_87::{Keypair, PUBLICKEYBYTES};
 use qp_rusty_crystals_hdwallet::SensitiveBytes32;
 use rand::RngExt;
 
-fn keypair_from_test(test: &TestVector) -> Keypair {
-	let total_len = test.sk.len() + test.pk.len();
-	let mut result = vec![0; total_len];
-	result[..test.sk.len()].copy_from_slice(&test.sk);
-	result[test.sk.len()..].copy_from_slice(&test.pk);
-	Keypair::from_bytes(&result).unwrap()
+/// Run the PQCrystals NIST KAT suite for one ML-DSA parameter set.
+///
+/// Dilithium2/3/5 map to ML-DSA-44/65/87. Vectors are generated with
+/// `PQCgenKAT_sign{2,3,5}` from https://github.com/pq-crystals/dilithium.
+macro_rules! nist_kat_for {
+	($test_name:ident, $module:ident, $rsp:expr) => {
+		#[test]
+		fn $test_name() {
+			use qp_rusty_crystals_dilithium::$module::{Keypair, PUBLICKEYBYTES};
+
+			let kat_data = include_str!($rsp);
+			let test_vectors = parse_test_vectors(kat_data);
+			assert!(!test_vectors.is_empty(), "KAT file must contain vectors");
+			for test in &test_vectors {
+				verify_test_vector(
+					test,
+					PUBLICKEYBYTES,
+					|entropy| Keypair::generate(entropy),
+					|bytes| Keypair::from_bytes(bytes).expect("KAT keypair bytes must deserialize"),
+				);
+			}
+		}
+	};
 }
 
-#[test]
-fn test_nist_kat() {
-	let kat_data = include_str!("../../test_vectors/PQCsignKAT_Dilithium5.rsp");
-	let test_vectors = parse_test_vectors(kat_data);
-	for test in test_vectors {
-		verify_test_vector(&test);
-	}
-}
+nist_kat_for!(test_nist_kat_ml_dsa_44, ml_dsa_44, "../../test_vectors/PQCsignKAT_Dilithium2.rsp");
+nist_kat_for!(test_nist_kat_ml_dsa_65, ml_dsa_65, "../../test_vectors/PQCsignKAT_Dilithium3.rsp");
+nist_kat_for!(test_nist_kat_ml_dsa_87, ml_dsa_87, "../../test_vectors/PQCsignKAT_Dilithium5.rsp");
 
 fn get_random_bytes() -> SensitiveBytes32 {
 	let mut rng = rand::rng();
@@ -32,62 +43,57 @@ fn get_random_bytes() -> SensitiveBytes32 {
 	(&mut bytes).into()
 }
 
-/// Verifies a single test vector for Falcon-1024 (padded).
-///
-/// # Arguments
-///
-/// * `test` - A reference to the `TestVector` struct containing all the necessary fields.
-fn verify_test_vector(test: &TestVector) {
-	// NOTE: Keypair generation KAT test uses a random number generator
-	// This means: The rng must be initialized with the seed, same as the NIST KAT file does it
-	// It also means key gen and secret must happen in the same order because each invocation of the
-	// rng changes the next rng output.
-	//
-	// Initialize DRBG with seed - same as KAT file
+fn keypair_bytes(sk: &[u8], pk: &[u8]) -> Vec<u8> {
+	let mut result = vec![0; sk.len() + pk.len()];
+	result[..sk.len()].copy_from_slice(sk);
+	result[sk.len()..].copy_from_slice(pk);
+	result
+}
+
+/// Verifies a single PQCrystals NIST KAT vector.
+fn verify_test_vector<K, FGen, FFromBytes>(
+	test: &TestVector,
+	public_key_bytes: usize,
+	generate: FGen,
+	from_bytes: FFromBytes,
+) where
+	FGen: FnOnce(SensitiveBytes32) -> K,
+	FFromBytes: FnOnce(&[u8]) -> K,
+	K: HasNistKatApi,
+{
+	// Keypair generation KAT uses AES-256-CTR DRBG seeded like the C reference.
 	let mut drbg = Drbg::new(&test.seed, None).unwrap();
 	let mut entropy = [0u8; 32];
-	let res = drbg.randombytes(&mut entropy, 32);
-	let entropy_s = SensitiveBytes32::new(&mut entropy);
-	assert!(res.is_ok());
-	let generated_keypair = Keypair::generate(entropy_s);
-	let generated_pk = generated_keypair.public().to_bytes();
-	let generated_sk = generated_keypair.secret().to_bytes();
+	assert!(drbg.randombytes(&mut entropy, 32).is_ok());
+	let generated_keypair = generate(SensitiveBytes32::new(&mut entropy));
 	assert_eq!(
-		&generated_pk[..],
-		&test.pk[..],
-		"Generated public key doesn't match NIST KAT for
-	// count {}",
+		generated_keypair.public_bytes().as_slice(),
+		test.pk.as_slice(),
+		"Generated public key doesn't match NIST KAT for count {}",
 		test.count
 	);
 	assert_eq!(
-		&generated_sk[..],
-		&test.sk[..],
-		"Generated secret key
-	// doesn't match NIST KAT for count {}",
+		generated_keypair.secret_bytes().as_slice(),
+		test.sk.as_slice(),
+		"Generated secret key doesn't match NIST KAT for count {}",
 		test.count
 	);
 
-	// Check if the fields have correct lengths
 	assert_eq!(test.msg.len(), test.mlen, "Message length mismatch from test vector");
 	assert_eq!(test.sm.len(), test.smlen, "Signed message length mismatch from test vector");
-	// Check public key length for Dilithium5
-	assert_eq!(test.pk.len(), PUBLICKEYBYTES, "Public key length mismatch");
+	assert_eq!(test.pk.len(), public_key_bytes, "Public key length mismatch");
 
 	let nist_signature = test.extract_signature();
+	let keypair = from_bytes(&keypair_bytes(&test.sk, &test.pk));
+	assert!(
+		keypair.verify_msg(&test.msg, nist_signature),
+		"Signature verification failed for count {}",
+		test.count
+	);
 
-	// Now call verify with the extracted signature
-
-	let keypair = keypair_from_test(test);
-	let result = keypair.verify(&test.msg, nist_signature, None);
-
-	assert!(result, "Signature verification failed",);
-
-	// // Check that our system generates the same signature as NIST on the same message with the
-	// same keypair
 	let mut hedge = [0u8; 32];
-	let res = drbg.randombytes(&mut hedge, 32);
-	assert!(res.is_ok());
-	let our_signature = keypair.sign(&test.msg, None, Some(hedge)).unwrap();
+	assert!(drbg.randombytes(&mut hedge, 32).is_ok());
+	let our_signature = keypair.sign_msg(&test.msg, Some(hedge));
 	assert_eq!(
 		our_signature.as_slice(),
 		nist_signature,
@@ -95,52 +101,37 @@ fn verify_test_vector(test: &TestVector) {
 		test.count
 	);
 
-	// Fuzzing loop: randomly modify signature and verify it fails
 	let mut rng = rand::rng();
-	let num_fuzz_attempts = 20; // Number of random modifications to test
-
-	for _ in 0..num_fuzz_attempts {
+	for _ in 0..20 {
 		let mut fuzzed_signature = nist_signature.to_vec();
-
-		// Skip if signature is empty
 		if fuzzed_signature.is_empty() {
 			continue;
 		}
 
-		// Randomly choose modification type
-		let modification_type = rng.random_range(0..4);
-
-		match modification_type {
+		match rng.random_range(0..4) {
 			0 => {
-				// Flip a random bit
 				let byte_index = rng.random_range(0..fuzzed_signature.len());
 				let bit_index = rng.random_range(0..8);
 				fuzzed_signature[byte_index] ^= 1 << bit_index;
 			},
 			1 => {
-				// Replace a random byte with a random value
 				let byte_index = rng.random_range(0..fuzzed_signature.len());
 				let previous = fuzzed_signature[byte_index];
 				let mut new_value = rng.random();
-				// Make sure it is actually different
 				while new_value == previous {
 					new_value = rng.random();
 				}
 				fuzzed_signature[byte_index] = new_value;
 			},
 			2 => {
-				// Zero out a random byte (only if it's not already zero)
 				let byte_index = rng.random_range(0..fuzzed_signature.len());
 				if fuzzed_signature[byte_index] != 0 {
 					fuzzed_signature[byte_index] = 0;
 				} else {
-					// If it's already zero, set it to a non-zero value
-					println!("Byte at index {byte_index} was already zero, setting to non-zero");
 					fuzzed_signature[byte_index] = rng.random_range(1..=255);
 				}
 			},
-			3 => {
-				// Modify multiple bytes (1-5 bytes)
+			_ => {
 				let num_bytes_to_modify = rng.random_range(1..=5.min(fuzzed_signature.len()));
 				for _ in 0..num_bytes_to_modify {
 					let byte_index = rng.random_range(0..fuzzed_signature.len());
@@ -152,23 +143,54 @@ fn verify_test_vector(test: &TestVector) {
 					fuzzed_signature[byte_index] = new_value;
 				}
 			},
-			_ => unreachable!(),
 		}
 
-		// Verify that the fuzzed signature fails verification
-		let fuzzed_result = keypair.verify(&test.msg, &fuzzed_signature, None);
 		assert!(
-            !fuzzed_result,
-            "Fuzzed signature unexpectedly passed verification! Original signature length: {}, fuzzed signature length: {}",
-            nist_signature.len(),
-            fuzzed_signature.len()
-        );
+			!keypair.verify_msg(&test.msg, &fuzzed_signature),
+			"Fuzzed signature unexpectedly passed verification for count {}",
+			test.count
+		);
 	}
 }
 
+/// Thin adapter so the KAT harness can share one body across parameter-set modules.
+trait HasNistKatApi {
+	fn public_bytes(&self) -> Vec<u8>;
+	fn secret_bytes(&self) -> Vec<u8>;
+	fn verify_msg(&self, msg: &[u8], sig: &[u8]) -> bool;
+	fn sign_msg(&self, msg: &[u8], hedge: Option<[u8; 32]>) -> Vec<u8>;
+}
+
+macro_rules! impl_has_nist_kat_api {
+	($module:ident) => {
+		impl HasNistKatApi for qp_rusty_crystals_dilithium::$module::Keypair {
+			fn public_bytes(&self) -> Vec<u8> {
+				self.public().to_bytes().to_vec()
+			}
+
+			fn secret_bytes(&self) -> Vec<u8> {
+				self.secret().to_bytes().to_vec()
+			}
+
+			fn verify_msg(&self, msg: &[u8], sig: &[u8]) -> bool {
+				self.verify(msg, sig, None)
+			}
+
+			fn sign_msg(&self, msg: &[u8], hedge: Option<[u8; 32]>) -> Vec<u8> {
+				self.sign(msg, None, hedge).expect("Signing should succeed").to_vec()
+			}
+		}
+	};
+}
+
+impl_has_nist_kat_api!(ml_dsa_44);
+impl_has_nist_kat_api!(ml_dsa_65);
+impl_has_nist_kat_api!(ml_dsa_87);
+
 #[test]
 fn test_verify_invalid_signature() {
-	// Generate Dilithium keypair
+	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
+
 	let entropy1 = get_random_bytes();
 	let entropy2 = get_random_bytes();
 	let entropy3 = get_random_bytes();
@@ -176,17 +198,9 @@ fn test_verify_invalid_signature() {
 	let keys_2 = Keypair::generate(entropy2);
 	let keys_3 = Keypair::generate(entropy3);
 
-	// Message to sign
 	let message = b"Hello, Resonance!";
-	// Sign the message
 	let signature = keys_2.sign(message, None, None).unwrap();
 
-	// Verify the signature with wrong key
-	let result = keys_1.verify(&signature, message, None);
-
-	assert!(!result, "Expected verification to fail, but it succeeded");
-
-	let result = keys_3.verify(&signature, message, None);
-
-	assert!(!result, "Expected verification to fail, but it succeeded");
+	assert!(!keys_1.verify(message, signature.as_slice(), None));
+	assert!(!keys_3.verify(message, signature.as_slice(), None));
 }

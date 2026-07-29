@@ -41,7 +41,8 @@ This workspace contains two independent crates:
 
 ```toml
 [dependencies]
-qp-rusty-crystals-dilithium = "2.0.0"
+# Default feature enables ML-DSA-87. Add ml-dsa-44 / ml-dsa-65 as needed.
+qp-rusty-crystals-dilithium = "3.0.1"
 getrandom = "0.2"  # For secure entropy generation if needed
 ```
 
@@ -55,14 +56,14 @@ let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
 
 // Generate keypair
-let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into()).expect("Failed to generate keypair");
+let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
 
 // Sign message
 let message = b"Hello, post-quantum world!";
-let signature = keypair.sign(message, None, None);
+let signature = keypair.sign(message, None, None).expect("Signing should succeed");
 
 // Verify signature
-let is_valid = keypair.verify(message, &signature, None);
+let is_valid = keypair.verify(message, signature.as_slice(), None);
 ```
 
 ### HD Wallet
@@ -112,6 +113,8 @@ Run all tests with:
 
 ```bash
 cargo test --workspace
+# Also exercise ML-DSA-44/65 ACVP suites:
+cargo test -p qp-rusty-crystals-dilithium --all-features
 ```
 
 For test coverage:
@@ -123,17 +126,14 @@ cargo tarpaulin --workspace
 
 ### NIST KAT tests
 
-test_nist_kat test case in 'verify_integration_tests.rs' covers the NIST KAT test cases generated from the PQCrystals 
-for ML-DSA-87. We exported the test file from PQ-Crystals c code, and are importing and testing against it here. 
+ACVP known-answer vectors for ML-DSA-44/65/87 live under
+`dilithium/tests/acvp_vectors/` (see `NIST_VALIDATION.md`).
 
-To regenerate this file...
-```
-git clone https://github.com/pq-crystals/dilithium
-cd dilithium/ref
-make nistkat
-./nistkat/PQCgenKAT_sign5 
-cp ./nistkat/PQCsignKAT_Dilithium5.rsp ???
-```
+PQCrystals-style NIST KATs (`PQCsignKAT_Dilithium{2,3,5}.rsp`) cover
+ML-DSA-44/65/87 via `test_nist_kat_ml_dsa_{44,65,87}` in
+`tests/src/verify_integration_tests.rs` (keygen, verify, and hedged sign
+bit-exact against the C reference). See `test_vectors/README_TEST_VECTORS.md`
+for regeneration steps.
 
 ## Deep Wiki
 

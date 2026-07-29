@@ -1,4 +1,4 @@
-//! Threshold signer for ML-DSA-87.
+//! Threshold signer for ML-DSA.
 //!
 //! This module provides the main API for threshold signing. Each party
 //! creates a `ThresholdSigner` with their private key share and uses it
@@ -51,6 +51,7 @@ use crate::{
 	config::ThresholdConfig,
 	error::{ThresholdError, ThresholdResult},
 	keys::{PrivateKeyShare, PublicKey},
+	params::{L, SINGLE_COMMITMENT_SIZE},
 	participants::ParticipantId,
 	protocol::signing::{
 		aggregate_commitments_dilithium, combine_signature, generate_round1,
@@ -59,8 +60,6 @@ use crate::{
 		Round2Data,
 	},
 };
-
-pub(crate) use crate::protocol::primitives::SINGLE_COMMITMENT_SIZE;
 
 /// A threshold signer for a single party.
 ///
@@ -141,7 +140,7 @@ struct SignerState {
 	/// Context for the signature.
 	context: Option<Vec<u8>>,
 	/// Our computed responses (for Round 3).
-	my_responses: Option<Vec<polyvec::Polyvecl>>,
+	my_responses: Option<Vec<polyvec::Polyvec<L>>>,
 }
 
 impl SignerState {
@@ -185,7 +184,9 @@ impl SignerState {
 
 	/// Verify AfterRound3 phase and return (round2_data, my_responses, message, context).
 	#[allow(clippy::type_complexity)]
-	fn expect_round3(&self) -> ThresholdResult<(&Round2Data, &[polyvec::Polyvecl], &[u8], &[u8])> {
+	fn expect_round3(
+		&self,
+	) -> ThresholdResult<(&Round2Data, &[polyvec::Polyvec<L>], &[u8], &[u8])> {
 		if self.phase != SigningPhase::AfterRound3 {
 			return Err(ThresholdError::InvalidState {
 				current: self.phase_name(),
@@ -408,10 +409,11 @@ impl ThresholdSigner {
 		//
 		// The ML-DSA message/context bounds must be enforced *before*
 		// `pack_round1_commitment` below: packing allocates and serializes
-		// k_iterations * SINGLE_COMMITMENT_SIZE bytes (~9.4 MB for 4-of-6),
-		// and a request that can never yield a verifiable signature must not
-		// be able to force that work. `process_round2` re-checks these bounds
-		// as defense in depth.
+		// k_iterations * SINGLE_COMMITMENT_SIZE bytes (multiple MB for deep
+		// committees — ~9.4 MB for 87's 4-of-6, up to ~12.4 MB for 44's
+		// 5-of-6), and a request that can never yield a verifiable signature
+		// must not be able to force that work. `process_round2` re-checks
+		// these bounds as defense in depth.
 		crate::error::validate_message(message)?;
 		crate::error::validate_context(context)?;
 
@@ -766,7 +768,7 @@ impl ThresholdSigner {
 	}
 
 	/// Validation pass of the aggregation: unpack every chunk of every reveal,
-	/// holding at most one transient `Polyveck` at a time, and discard the
+	/// holding at most one transient `Polyvec<K>` at a time, and discard the
 	/// results. No persistent state is touched, so a failure here is a clean
 	/// rejection.
 	///
@@ -831,10 +833,10 @@ impl ThresholdSigner {
 	/// to include only authorized participants before calling `combine()`.
 	fn collect_responses(
 		&self,
-		my_responses: &[polyvec::Polyvecl],
+		my_responses: &[polyvec::Polyvec<L>],
 		all_round3: &[Round3Broadcast],
-	) -> ThresholdResult<Vec<Vec<polyvec::Polyvecl>>> {
-		let mut all_responses: Vec<Vec<polyvec::Polyvecl>> = Vec::new();
+	) -> ThresholdResult<Vec<Vec<polyvec::Polyvec<L>>>> {
+		let mut all_responses: Vec<Vec<polyvec::Polyvec<L>>> = Vec::new();
 		let mut seen_parties: BTreeSet<u32> = BTreeSet::new();
 
 		// Add our own response first
@@ -1086,7 +1088,7 @@ mod tests {
 	/// that verification then rejects.
 	#[test]
 	fn test_round2_reveal_rejects_oversized_message() {
-		use qp_rusty_crystals_dilithium::ml_dsa_87::MAX_MESSAGE_SIZE;
+		use crate::mldsa::MAX_MESSAGE_SIZE;
 
 		use crate::generate_with_dealer;
 
@@ -1208,7 +1210,7 @@ mod tests {
 		// commitment hash is over that same garbage, so the later reveal is
 		// genuinely hash-bound to what s0 freezes in Round 2.
 		let k = config.k_iterations() as usize;
-		let garbage = alloc::vec![0xFFu8; k * 8 * 736];
+		let garbage = alloc::vec![0xFFu8; k * SINGLE_COMMITMENT_SIZE];
 		let garbage_hash = compute_commitment_hash(&ssid, 1, &garbage);
 		let r1_1 = Round1Broadcast::new(ssid, 1, garbage_hash);
 		let r2_1 = Round2Broadcast::new(ssid, 1, garbage);
@@ -1249,7 +1251,8 @@ mod tests {
 	/// commitment hash is verified, so a peer cannot force SHAKE256 work over
 	/// a payload far larger than the session's configuration can legitimately
 	/// produce (the bounded deserializer admits up to the global
-	/// `MAX_COMMITMENT_DATA_SIZE`, ~10.5 MB, sized for the largest config).
+	/// `MAX_COMMITMENT_DATA_SIZE`, ~10–13 MB depending on the parameter set,
+	/// sized for the largest config).
 	///
 	/// The ordering is pinned through the error variant: an oversized reveal
 	/// whose hash does NOT match the frozen commitment must fail as

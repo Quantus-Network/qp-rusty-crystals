@@ -5,13 +5,12 @@
 //! partial contributions and pack them into the canonical ML-DSA-87 public-key
 //! encoding (`rho || t1`).
 
-use qp_rusty_crystals_dilithium::{
-	packing,
-	params::{K, N, Q},
-	polyvec,
-};
+use qp_rusty_crystals_dilithium::{packing, polyvec};
 
-use crate::keys::{PublicKey, PUBLIC_KEY_SIZE};
+use crate::{
+	keys::{PublicKey, PUBLIC_KEY_SIZE},
+	params::{K, L, N, Q},
+};
 
 /// Compute the unrounded partial PK polynomial vector `t = A·s1 + s2 mod Q`.
 ///
@@ -25,32 +24,33 @@ pub fn compute_partial_pk_t(
 	s1: &[[i32; N as usize]],
 	s2: &[[i32; N as usize]],
 ) -> [[i32; N as usize]; K] {
-	let mut mat: [polyvec::Polyvecl; K] = core::array::from_fn(|_| polyvec::Polyvecl::default());
+	let mut mat: [polyvec::Polyvec<L>; K] =
+		core::array::from_fn(|_| polyvec::Polyvec::<L>::default());
 	polyvec::matrix_expand(&mut mat, rho);
 
-	let mut s1_pv = polyvec::Polyvecl::default();
+	let mut s1_pv = polyvec::Polyvec::<L>::default();
 	for (i, poly_coeffs) in s1.iter().enumerate() {
 		s1_pv.vec[i].coeffs_mut().copy_from_slice(poly_coeffs);
 	}
 
-	let mut s2_pv = polyvec::Polyveck::default();
+	let mut s2_pv = polyvec::Polyvec::<K>::default();
 	for (i, poly_coeffs) in s2.iter().enumerate() {
 		s2_pv.vec[i].coeffs_mut().copy_from_slice(poly_coeffs);
 	}
 
 	let mut s1_hat = s1_pv.clone();
-	polyvec::l_ntt(&mut s1_hat);
+	polyvec::ntt(&mut s1_hat);
 
-	let mut t = polyvec::Polyveck::default();
+	let mut t = polyvec::Polyvec::<K>::default();
 	polyvec::matrix_pointwise_montgomery(&mut t, &mat, &s1_hat);
 	// The accumulated dot products can reach L*Q in absolute value; the
 	// inverse NTT requires coefficients below Q (same as the keygen flow in
 	// dilithium's sign.rs).
-	polyvec::k_reduce(&mut t);
-	polyvec::k_invntt_tomont(&mut t);
-	polyvec::k_add(&mut t, &s2_pv);
-	polyvec::k_reduce(&mut t);
-	polyvec::k_caddq(&mut t);
+	polyvec::reduce(&mut t);
+	polyvec::invntt_tomont(&mut t);
+	polyvec::add(&mut t, &s2_pv);
+	polyvec::reduce(&mut t);
+	polyvec::caddq(&mut t);
 
 	let mut t_coeffs = [[0i32; N as usize]; K];
 	for (i, poly) in t.vec.iter().enumerate() {
@@ -92,7 +92,7 @@ pub fn pack_combined_pk<'a, I>(
 where
 	I: IntoIterator<Item = &'a [[i32; N as usize]; K]>,
 {
-	let mut t = polyvec::Polyveck::default();
+	let mut t = polyvec::Polyvec::<K>::default();
 	for partial in partial_ts {
 		for (i, poly_coeffs) in partial.iter().enumerate() {
 			for (j, &coeff) in poly_coeffs.iter().enumerate() {
@@ -107,12 +107,12 @@ where
 			}
 		}
 	}
-	polyvec::k_reduce(&mut t);
-	polyvec::k_caddq(&mut t);
+	polyvec::reduce(&mut t);
+	polyvec::caddq(&mut t);
 
-	let mut t0 = polyvec::Polyveck::default();
+	let mut t0 = polyvec::Polyvec::<K>::default();
 	let mut t1 = t.clone();
-	polyvec::k_power2round(&mut t1, &mut t0);
+	polyvec::power2round(&mut t1, &mut t0);
 
 	let mut pk_packed = [0u8; PUBLIC_KEY_SIZE];
 	packing::pack_pk(&mut pk_packed, rho, &t1);
@@ -124,8 +124,6 @@ where
 mod tests {
 	use super::*;
 	use alloc::vec;
-
-	const L: usize = 7;
 
 	#[test]
 	fn pack_combined_pk_is_additive() {
