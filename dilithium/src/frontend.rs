@@ -407,6 +407,68 @@ macro_rules! define_ml_dsa {
 
 pub(crate) use define_ml_dsa;
 
+/// Basic per-variant smoke tests (sign/verify round trip with the FIPS 204
+/// Table 2 sizes pinned, hedged + context behavior, oversized-message
+/// rejection), stamped into a parameter-set module's `mod tests` via
+/// `crate::frontend::basic_variant_tests!(SIGNBYTES, PUBLICKEYBYTES,
+/// SECRETKEYBYTES);`. The bodies were previously duplicated byte-for-byte in
+/// `ml_dsa_44.rs` and `ml_dsa_65.rs`, differing only in the pinned sizes.
+#[cfg(test)]
+macro_rules! basic_variant_tests {
+	($sig_bytes:expr, $pk_bytes:expr, $sk_bytes:expr) => {
+		fn basic_test_entropy() -> $crate::SensitiveBytes32 {
+			use rand::RngExt;
+			let mut rng = rand::rng();
+			let mut bytes = [0u8; 32];
+			rng.fill(&mut bytes);
+			(&mut bytes).into()
+		}
+
+		#[test]
+		fn self_verify_roundtrip() {
+			use super::{Keypair, PUBLICKEYBYTES, SECRETKEYBYTES, SIGNBYTES};
+
+			let keys = Keypair::generate(basic_test_entropy());
+			let msg = b"variant smoke test";
+			let sig = keys.sign(msg, None, None).unwrap();
+			assert!(keys.verify(msg, &sig, None));
+			assert_eq!(sig.len(), SIGNBYTES);
+			assert_eq!(SIGNBYTES, $sig_bytes);
+			assert_eq!(PUBLICKEYBYTES, $pk_bytes);
+			assert_eq!(SECRETKEYBYTES, $sk_bytes);
+		}
+
+		#[test]
+		fn hedged_and_context() {
+			use super::Keypair;
+
+			let keys = Keypair::generate(basic_test_entropy());
+			let msg = b"ctx";
+			let h1 = basic_test_entropy();
+			let h2 = basic_test_entropy();
+			let s1 = keys.sign(msg, Some(b"a"), Some(h1.0)).unwrap();
+			let s2 = keys.sign(msg, Some(b"a"), Some(h2.0)).unwrap();
+			assert_ne!(s1, s2);
+			assert!(keys.verify(msg, &s1, Some(b"a")));
+			assert!(!keys.verify(msg, &s1, Some(b"b")));
+		}
+
+		#[test]
+		fn rejects_oversized_message() {
+			use super::{Keypair, MAX_MESSAGE_SIZE, SIGNBYTES};
+			use $crate::errors::SignatureError;
+
+			let keys = Keypair::generate(basic_test_entropy());
+			let big = alloc::vec![0u8; MAX_MESSAGE_SIZE + 1];
+			assert!(matches!(keys.sign(&big, None, None), Err(SignatureError::MessageTooLong)));
+			assert!(!keys.verify(&big, &[0u8; SIGNBYTES], None));
+		}
+	};
+}
+
+#[cfg(test)]
+pub(crate) use basic_variant_tests;
+
 /// Adversarial key-import regression tests, stamped into each parameter-set
 /// module's `mod tests` via `crate::frontend::adversarial_import_tests!();`.
 ///

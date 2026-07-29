@@ -94,29 +94,15 @@ fn fill_poly(p: &mut Poly, bound: i32, rng: &mut BenchRng) {
 	}
 }
 
-/// Fill a Polyvec<L> with uniform coefficients in [-bound, bound].
-fn fill_polyvecl(v: &mut Polyvec<L>, bound: i32, rng: &mut BenchRng) {
-	for p in v.vec.iter_mut() {
-		fill_poly(p, bound, rng);
-	}
-}
-
-/// Fill a Polyvec<K> with uniform coefficients in [-bound, bound].
-fn fill_polyveck(v: &mut Polyvec<K>, bound: i32, rng: &mut BenchRng) {
+/// Fill a Polyvec with uniform coefficients in [-bound, bound].
+fn fill_polyvec<const N: usize>(v: &mut Polyvec<N>, bound: i32, rng: &mut BenchRng) {
 	for p in v.vec.iter_mut() {
 		fill_poly(p, bound, rng);
 	}
 }
 
 /// Plain coefficient copy (no allocation, no zeroize-on-drop of the destination).
-fn copy_polyvecl(dst: &mut Polyvec<L>, src: &Polyvec<L>) {
-	for (d, s) in dst.vec.iter_mut().zip(src.vec.iter()) {
-		*d.coeffs_mut() = *s.coeffs();
-	}
-}
-
-/// Plain coefficient copy (no allocation, no zeroize-on-drop of the destination).
-fn copy_polyveck(dst: &mut Polyvec<K>, src: &Polyvec<K>) {
+fn copy_polyvec<const N: usize>(dst: &mut Polyvec<N>, src: &Polyvec<N>) {
 	for (d, s) in dst.vec.iter_mut().zip(src.vec.iter()) {
 		*d.coeffs_mut() = *s.coeffs();
 	}
@@ -261,14 +247,14 @@ fn sign_norm_check(runner: &mut CtRunner, rng: &mut BenchRng) {
 	let bound = (params::GAMMA1 - params::BETA) as i32;
 
 	let mut fixed = Polyvec::<L>::default();
-	fill_polyvecl(&mut fixed, REDUCE32_RANGE, rng);
+	fill_polyvec(&mut fixed, REDUCE32_RANGE, rng);
 	let mut scratch = Polyvec::<L>::default();
 	let mut z = Polyvec::<L>::default();
 
 	for _ in 0..SAMPLES {
 		let (is_left, class) = random_class(rng);
-		fill_polyvecl(&mut scratch, REDUCE32_RANGE, rng);
-		copy_polyvecl(&mut z, if is_left { &fixed } else { &scratch });
+		fill_polyvec(&mut scratch, REDUCE32_RANGE, rng);
+		copy_polyvec(&mut z, if is_left { &fixed } else { &scratch });
 		runner.run_one(class, || {
 			for _ in 0..BATCH {
 				let ok = polyvec::is_norm_within_bound(black_box(&z), bound);
@@ -297,7 +283,7 @@ fn sign_make_hint(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 	let mut fixed_w0 = Polyvec::<K>::default();
 	let mut fixed_w1 = Polyvec::<K>::default();
-	fill_polyveck(&mut fixed_w0, 2 * gamma2, rng);
+	fill_polyvec(&mut fixed_w0, 2 * gamma2, rng);
 	fill_w1(&mut fixed_w1, rng);
 
 	let mut scratch_w0 = Polyvec::<K>::default();
@@ -307,14 +293,14 @@ fn sign_make_hint(runner: &mut CtRunner, rng: &mut BenchRng) {
 
 	for _ in 0..SAMPLES {
 		let (is_left, class) = random_class(rng);
-		fill_polyveck(&mut scratch_w0, 2 * gamma2, rng);
+		fill_polyvec(&mut scratch_w0, 2 * gamma2, rng);
 		fill_w1(&mut scratch_w1, rng);
 		if is_left {
-			copy_polyveck(&mut w0, &fixed_w0);
-			copy_polyveck(&mut w1, &fixed_w1);
+			copy_polyvec(&mut w0, &fixed_w0);
+			copy_polyvec(&mut w1, &fixed_w1);
 		} else {
-			copy_polyveck(&mut w0, &scratch_w0);
-			copy_polyveck(&mut w1, &scratch_w1);
+			copy_polyvec(&mut w0, &scratch_w0);
+			copy_polyvec(&mut w1, &scratch_w1);
 		}
 		runner.run_one(class, || {
 			for _ in 0..BATCH {
