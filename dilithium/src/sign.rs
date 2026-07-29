@@ -379,7 +379,7 @@ fn compute_and_check_signature_z<
 	polyvec::add(signature_z, masking_vector_y);
 	polyvec::reduce(signature_z);
 
-	let beta = TAU * ETA;
+	let beta = params::beta(TAU, ETA);
 	polyvec::is_norm_within_bound(signature_z, (GAMMA1 - beta) as i32)
 }
 
@@ -401,7 +401,7 @@ fn compute_and_check_commitment_w0<
 	polyvec::sub(commitment_w0, &temp_vector);
 	polyvec::reduce(commitment_w0);
 
-	let beta = TAU * ETA;
+	let beta = params::beta(TAU, ETA);
 	polyvec::is_norm_within_bound(commitment_w0, (GAMMA2 - beta) as i32)
 }
 
@@ -662,7 +662,7 @@ pub(crate) fn verify_var<
 	if !packing::unpack_sig::<K, L, GAMMA1, OMEGA, CD, PZ, SIG>(&mut c, &mut z, &mut h, sig) {
 		return false;
 	}
-	let beta = TAU * ETA;
+	let beta = params::beta(TAU, ETA);
 	if !polyvec::is_norm_within_bound(&z, (GAMMA1 - beta) as i32) {
 		return false;
 	}

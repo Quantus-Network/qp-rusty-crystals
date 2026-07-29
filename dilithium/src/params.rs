@@ -5,9 +5,10 @@
 //! [`ml_dsa_87`] submodules, each exposing the same constant names so generic
 //! code can be instantiated uniformly from any of them.
 //!
-//! The crate's current single-variant frontend is ML-DSA-87, so its constants
-//! are additionally re-exported at the top level under the historical names
-//! (`params::K`, `params::GAMMA1`, ...). Existing call sites are unaffected.
+//! ML-DSA-87's constants are additionally re-exported at the top level under
+//! the historical names (`params::K`, `params::GAMMA1`, ...) for the internal
+//! call sites and downstream consumers that predate the multi-variant
+//! frontends and were audited against those names.
 
 // Specification defined constants (shared by all variants)
 pub const Q: i32 = (1 << 23) - (1 << 13) + 1; //prime defining the field
@@ -28,6 +29,13 @@ pub const TR_BYTES: usize = 64;
 // GAMMA2 values it was given (the assertions are evaluated at
 // monomorphization). Each panics on a value not defined by FIPS 204, so an
 // unsupported instantiation fails to compile.
+
+/// Signing rejection margin `BETA = TAU · ETA` (FIPS 204). Defined once so
+/// the const-generic signing core and the per-variant `BETA` constants share
+/// the same formula.
+pub const fn beta(tau: usize, eta: usize) -> usize {
+	tau * eta
+}
 
 /// Packed byte size of one eta-encoded secret polynomial (`s1`/`s2`).
 pub const fn polyeta_packedbytes(eta: usize) -> usize {
@@ -79,9 +87,28 @@ pub const fn signbytes(
 	c_dash_bytes + l * polyz_packedbytes(gamma1) + omega + k
 }
 
+/// Stamp the constants *derived* from a variant's base parameters (`BETA`,
+/// `C_DASH_BYTES`, and the packed object sizes). The base constants above the
+/// invocation are per-variant data; these derivation formulas are the FIPS 204
+/// size arithmetic and are identical for every parameter set, so they are
+/// written once here rather than repeated in each module.
+macro_rules! derived_params {
+	() => {
+		pub const BETA: usize = super::beta(TAU, ETA);
+		pub const C_DASH_BYTES: usize = (COLLISION_STRENGTH * 2) / 8;
+		pub const POLYZ_PACKEDBYTES: usize = super::polyz_packedbytes(GAMMA1);
+		pub const POLYW1_PACKEDBYTES: usize = super::polyw1_packedbytes(GAMMA2);
+		pub const POLYETA_PACKEDBYTES: usize = super::polyeta_packedbytes(ETA);
+		pub const POLYVECH_PACKEDBYTES: usize = OMEGA + K;
+		pub const PUBLICKEYBYTES: usize = super::publickeybytes(K);
+		pub const SECRETKEYBYTES: usize = super::secretkeybytes(K, L, ETA);
+		pub const SIGNBYTES: usize = super::signbytes(K, L, GAMMA1, OMEGA, C_DASH_BYTES);
+	};
+}
+
 /// ML-DSA-44 parameter set (FIPS 204 category 2).
 pub mod ml_dsa_44 {
-	use super::{polyeta_packedbytes, polyw1_packedbytes, polyz_packedbytes, Q};
+	use super::Q;
 
 	pub const TAU: usize = 39; //number of +-1s in c
 	pub const CHALLENGE_ENTROPY: usize = 192;
@@ -90,23 +117,15 @@ pub mod ml_dsa_44 {
 	pub const K: usize = 4; //rows in A
 	pub const L: usize = 4; //columns in A
 	pub const ETA: usize = 2;
-	pub const BETA: usize = TAU * ETA;
 	pub const OMEGA: usize = 80;
 	pub const COLLISION_STRENGTH: usize = 128;
 
-	pub const C_DASH_BYTES: usize = (COLLISION_STRENGTH * 2) / 8;
-	pub const POLYZ_PACKEDBYTES: usize = polyz_packedbytes(GAMMA1);
-	pub const POLYW1_PACKEDBYTES: usize = polyw1_packedbytes(GAMMA2);
-	pub const POLYETA_PACKEDBYTES: usize = polyeta_packedbytes(ETA);
-	pub const POLYVECH_PACKEDBYTES: usize = OMEGA + K;
-	pub const PUBLICKEYBYTES: usize = super::publickeybytes(K);
-	pub const SECRETKEYBYTES: usize = super::secretkeybytes(K, L, ETA);
-	pub const SIGNBYTES: usize = super::signbytes(K, L, GAMMA1, OMEGA, C_DASH_BYTES);
+	derived_params!();
 }
 
 /// ML-DSA-65 parameter set (FIPS 204 category 3).
 pub mod ml_dsa_65 {
-	use super::{polyeta_packedbytes, polyw1_packedbytes, polyz_packedbytes, Q};
+	use super::Q;
 
 	pub const TAU: usize = 49; //number of +-1s in c
 	pub const CHALLENGE_ENTROPY: usize = 225;
@@ -115,23 +134,15 @@ pub mod ml_dsa_65 {
 	pub const K: usize = 6; //rows in A
 	pub const L: usize = 5; //columns in A
 	pub const ETA: usize = 4;
-	pub const BETA: usize = TAU * ETA;
 	pub const OMEGA: usize = 55;
 	pub const COLLISION_STRENGTH: usize = 192;
 
-	pub const C_DASH_BYTES: usize = (COLLISION_STRENGTH * 2) / 8;
-	pub const POLYZ_PACKEDBYTES: usize = polyz_packedbytes(GAMMA1);
-	pub const POLYW1_PACKEDBYTES: usize = polyw1_packedbytes(GAMMA2);
-	pub const POLYETA_PACKEDBYTES: usize = polyeta_packedbytes(ETA);
-	pub const POLYVECH_PACKEDBYTES: usize = OMEGA + K;
-	pub const PUBLICKEYBYTES: usize = super::publickeybytes(K);
-	pub const SECRETKEYBYTES: usize = super::secretkeybytes(K, L, ETA);
-	pub const SIGNBYTES: usize = super::signbytes(K, L, GAMMA1, OMEGA, C_DASH_BYTES);
+	derived_params!();
 }
 
 /// ML-DSA-87 parameter set (FIPS 204 category 5).
 pub mod ml_dsa_87 {
-	use super::{polyeta_packedbytes, polyw1_packedbytes, polyz_packedbytes, Q};
+	use super::Q;
 
 	pub const TAU: usize = 60; //number of +-1s in c
 	pub const CHALLENGE_ENTROPY: usize = 257;
@@ -140,18 +151,10 @@ pub mod ml_dsa_87 {
 	pub const K: usize = 8; //rows in A
 	pub const L: usize = 7; //columns in A
 	pub const ETA: usize = 2;
-	pub const BETA: usize = TAU * ETA;
 	pub const OMEGA: usize = 75;
 	pub const COLLISION_STRENGTH: usize = 256;
 
-	pub const C_DASH_BYTES: usize = (COLLISION_STRENGTH * 2) / 8;
-	pub const POLYZ_PACKEDBYTES: usize = polyz_packedbytes(GAMMA1);
-	pub const POLYW1_PACKEDBYTES: usize = polyw1_packedbytes(GAMMA2);
-	pub const POLYETA_PACKEDBYTES: usize = polyeta_packedbytes(ETA);
-	pub const POLYVECH_PACKEDBYTES: usize = OMEGA + K;
-	pub const PUBLICKEYBYTES: usize = super::publickeybytes(K);
-	pub const SECRETKEYBYTES: usize = super::secretkeybytes(K, L, ETA);
-	pub const SIGNBYTES: usize = super::signbytes(K, L, GAMMA1, OMEGA, C_DASH_BYTES);
+	derived_params!();
 }
 
 // Compatibility re-exports: the crate's existing single-variant surface is
