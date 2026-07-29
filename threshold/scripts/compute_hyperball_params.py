@@ -353,10 +353,18 @@ RESHARING_DATA = {
                (3, 5): 186602.5, (4, 6): 174241.4},
         overshoot={(2, 2): 0.794, (2, 3): 0.827, (2, 4): 0.991,
                    (3, 5): 1.023, (4, 6): 1.166},
-        # Same enlargements as ML-DSA-87: the measured overshoots are nearly
-        # identical (the splitter overshoot is a variance ratio, largely
-        # independent of the parameter set), giving ~7-11% margins.
-        kappa={(2, 2): 1.00, (2, 3): 1.00, (2, 4): 1.10, (3, 5): 1.15, (4, 6): 1.25},
+        # (2,4)/(3,5) take the same enlargements as ML-DSA-87: the measured
+        # overshoots are nearly identical (the splitter overshoot is a
+        # variance ratio, largely independent of the parameter set), giving
+        # ~7-11% margins. (4,6) is intentionally ABSENT: kappa=1.25 collapses
+        # the per-iteration acceptance under ML-DSA-44's tight verification
+        # ceilings (gamma1=2^17, gamma2=(Q-1)/88), so the crate ships base
+        # (kappa=1) parameters for (4,6) and reshares into a 4-of-6 committee
+        # fail closed at the Round-5 recovered-partial guard. Do NOT re-add it
+        # here: regenerating tables from this script must not reintroduce an
+        # enlargement params_tables_44.rs declares infeasible (pinned by
+        # `generator_script_agrees_on_44_fail_closed_4_of_6` in src/params.rs).
+        kappa={(2, 2): 1.00, (2, 3): 1.00, (2, 4): 1.10, (3, 5): 1.15},
     ),
 }
 
@@ -420,8 +428,15 @@ def compute_resharing_params(variant: int, nbsamples: int = 8000):
     if SHIP_K:
         header += f" {'K_ship':>7}"
     print(header)
-    for cfg in sorted(KAPPA):
+    for cfg in sorted(OVERSHOOT):
         t, n = cfg
+        if cfg not in KAPPA:
+            # Measured but not enlargeable on this parameter set: the crate
+            # ships base (kappa=1) parameters and reshares into this committee
+            # fail closed at the Round-5 recovered-partial guard.
+            print(f"{f'{t}-{n}':>6} {OVERSHOOT[cfg]:>9.2f}   "
+                  f"fail-closed (enlargement infeasible; ships base params)")
+            continue
         expo = recover_expo(t, n, fact, eta, params, REF_R[cfg])
         k = KAPPA[cfg]
         r0, rp0 = compute_radii(t, n, expo, fact, eta, params)
@@ -458,7 +473,10 @@ def emit_rust_tables(variant: int, results: list[dict], default_fact: float):
 
 # Shipped (t, n, r, r', fact, k_shipped, kappa) for refine-shipped. Radii stay
 # fixed; only K is re-estimated at higher sample counts. Keep in sync with
-# params_tables_{44,65}.rs (including kappa-enlarged radii on 44).
+# params_tables_{44,65}.rs (including kappa-enlarged radii on 44): the sync is
+# pinned by `generator_script_shipped_tables_match_crate_tables` in
+# src/params.rs, which the exclusive-feature CI jobs run — drifting either
+# side fails the build.
 #
 # Radii come from the vectorized full grid search at 2000 MC samples
 # (`--variant {44,65} --nbsamples 2000`); kappa-enlarged entries are the base

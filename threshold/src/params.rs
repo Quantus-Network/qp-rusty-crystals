@@ -167,3 +167,68 @@ mod tables {
 mod tables {
 	include!("params_tables_44.rs");
 }
+
+#[cfg(test)]
+mod tests {
+	/// The generator script duplicates the shipped 44/65 tables in its
+	/// `SHIPPED_TABLES` structure (used by `--refine-shipped`). A drifted copy
+	/// would let a regeneration silently ship different radii or K than the
+	/// crate documents, so pin every `(t, n, r, r', nu, K)` row of the active
+	/// table against the script text. (ML-DSA-87's tables predate the script's
+	/// shipped-table mechanism and are not duplicated there.)
+	#[cfg(not(feature = "ml-dsa-87"))]
+	#[test]
+	fn generator_script_shipped_tables_match_crate_tables() {
+		let script = include_str!("../scripts/compute_hyperball_params.py");
+		assert_eq!(super::tables::K_ITERATIONS.len(), super::tables::HYPERBALL.len());
+		for ((t, n, k), (t2, n2, r, rp, nu)) in
+			super::tables::K_ITERATIONS.iter().zip(super::tables::HYPERBALL.iter())
+		{
+			assert_eq!((t, n), (t2, n2), "K_ITERATIONS and HYPERBALL row order must match");
+			// Matches the row up to and including k_shipped; the trailing
+			// kappa field is checked separately (its formatting varies).
+			let row = alloc::format!("({t}, {n}, {r:.1}, {rp:.1}, {nu:.1}, {k},");
+			assert!(
+				script.contains(&row),
+				"compute_hyperball_params.py SHIPPED_TABLES is missing or stale for \
+				 this row of the shipped Rust table: {row}"
+			);
+		}
+	}
+
+	/// `params_tables_44.rs` intentionally omits a `(4, 6)` resharing
+	/// enlargement (κ = 1.25 collapses the per-iteration acceptance under
+	/// ML-DSA-44's verification ceilings, so reshares into 4-of-6 fail
+	/// closed). The generator script's `RESHARING_DATA[44]["kappa"]` must
+	/// agree, or regenerating from the script could reintroduce the
+	/// enlargement the crate declares infeasible.
+	#[cfg(all(feature = "ml-dsa-44", not(feature = "ml-dsa-87"), not(feature = "ml-dsa-65")))]
+	#[test]
+	fn generator_script_agrees_on_44_fail_closed_4_of_6() {
+		let script = include_str!("../scripts/compute_hyperball_params.py");
+
+		// Slice the kappa dict inside the `44: dict(...)` block so the check
+		// cannot accidentally match ML-DSA-87's (legitimate) (4,6) entry.
+		let block_start = script.find("44: dict(").expect("RESHARING_DATA 44 block");
+		let kappa_rel = script[block_start..].find("kappa={").expect("44 kappa dict");
+		let kappa_start = block_start + kappa_rel;
+		let kappa_end = kappa_start + script[kappa_start..].find('}').expect("kappa dict close");
+		let kappa_dict = &script[kappa_start..kappa_end];
+
+		// Every shipped enlargement must appear in the script...
+		for (t, n, k) in super::tables::RESHARING_KAPPA {
+			let entry = alloc::format!("({t}, {n}): {k:.2}");
+			assert!(
+				kappa_dict.contains(&entry),
+				"script RESHARING_DATA[44] kappa is missing shipped entry {entry}"
+			);
+		}
+		// ...and the fail-closed (4,6) omission must hold on both sides.
+		assert!(
+			!kappa_dict.contains("(4, 6)"),
+			"script RESHARING_DATA[44] kappa reintroduces the (4,6) enlargement that \
+			 params_tables_44.rs declares infeasible (fail-closed)"
+		);
+		assert_eq!(super::resharing_kappa(4, 6), 1.0, "(4,6) must reshare fail-closed at κ = 1");
+	}
+}
