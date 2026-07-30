@@ -292,6 +292,14 @@ impl ParticipantList {
 	/// The bitmask uses bit position `i` to represent the participant
 	/// at index `i` in this list.
 	///
+	/// # Errors
+	///
+	/// Returns `None` if `mask` sets any bit at a position `>= len()` — i.e.
+	/// a bit that does not correspond to a participant in this list. Such a
+	/// mask cannot be faithfully converted, and silently dropping the
+	/// out-of-range bits would yield a set that does not match the mask the
+	/// caller supplied. A mask with no bits set returns `Some(vec![])`.
+	///
 	/// # Example
 	///
 	/// ```
@@ -299,22 +307,41 @@ impl ParticipantList {
 	///
 	/// let list = ParticipantList::new(&[100, 200, 300]).unwrap();
 	/// // Bitmask 0b101 = indices 0 and 2 = participants 100 and 300
-	/// let ids = list.ids_from_mask(0b101);
+	/// let ids = list.ids_from_mask(0b101).unwrap();
 	/// assert_eq!(ids, vec![100, 300]);
+	///
+	/// // Bit 3 has no participant at index 3, so the whole mask is rejected.
+	/// assert_eq!(list.ids_from_mask(0b1000), None);
 	/// ```
-	pub fn ids_from_mask(&self, mask: u16) -> Vec<ParticipantId> {
+	pub fn ids_from_mask(&self, mask: u16) -> Option<Vec<ParticipantId>> {
+		// Reject any bit set outside [0, len): those positions map to no
+		// participant, so the mask does not faithfully describe a subset of
+		// this list. `len()` is at most MAX_PARTIES (6), so the shift is safe.
+		let in_range = (1u16 << self.participants.len()) - 1;
+		if mask & !in_range != 0 {
+			return None;
+		}
+
 		let mut result = Vec::new();
 		for (idx, &id) in self.participants.iter().enumerate() {
 			if mask & (1 << idx) != 0 {
 				result.push(id);
 			}
 		}
-		result
+		Some(result)
 	}
 
 	/// Convert a list of participant IDs to a bitmask of indices.
 	///
-	/// Unknown participant IDs are ignored.
+	/// # Errors
+	///
+	/// Returns `None` if any ID in `ids` is not a member of this list.
+	/// Silently ignoring unknown IDs (the previous behavior) could shrink a
+	/// requested quorum to an undersized mask with no indication — an
+	/// ID mismatch on the caller's side (or an attacker-influenced ID that
+	/// fails to match the canonical sorted list) would then select fewer
+	/// than the intended signers. Duplicate valid IDs are accepted; they set
+	/// the same bit and do not change the represented set.
 	///
 	/// # Example
 	///
@@ -322,17 +349,20 @@ impl ParticipantList {
 	/// use qp_rusty_crystals_threshold::participants::ParticipantList;
 	///
 	/// let list = ParticipantList::new(&[100, 200, 300]).unwrap();
-	/// let mask = list.mask_from_ids(&[100, 300]);
+	/// let mask = list.mask_from_ids(&[100, 300]).unwrap();
 	/// assert_eq!(mask, 0b101); // indices 0 and 2
+	///
+	/// // An unknown ID rejects the whole request instead of silently
+	/// // dropping it and returning an undersized mask.
+	/// assert_eq!(list.mask_from_ids(&[100, 999]), None);
 	/// ```
-	pub fn mask_from_ids(&self, ids: &[ParticipantId]) -> u16 {
+	pub fn mask_from_ids(&self, ids: &[ParticipantId]) -> Option<u16> {
 		let mut mask: u16 = 0;
 		for &id in ids {
-			if let Some(idx) = self.index_of(id) {
-				mask |= 1 << idx;
-			}
+			let idx = self.index_of(id)?;
+			mask |= 1 << idx;
 		}
-		mask
+		Some(mask)
 	}
 
 	/// Check if a participant is included in a subset bitmask.
@@ -469,10 +499,44 @@ mod tests {
 
 		// Test mask -> ids -> mask roundtrip
 		let original_mask: u16 = 0b1010; // indices 1 and 3 = 200 and 400
-		let ids = list.ids_from_mask(original_mask);
+		let ids = list.ids_from_mask(original_mask).expect("in-range mask");
 		assert_eq!(ids, vec![200, 400]);
-		let recovered_mask = list.mask_from_ids(&ids);
+		let recovered_mask = list.mask_from_ids(&ids).expect("known IDs");
 		assert_eq!(recovered_mask, original_mask);
+	}
+
+	/// Security review: mask conversions must fail closed on inputs they
+	/// cannot faithfully represent. Silently dropping unknown IDs / out-of-
+	/// range mask bits used to shrink a requested quorum to an undersized
+	/// mask with no signal — an integrator-side ID mismatch (or an
+	/// attacker-influenced ID that fails to match the canonical sorted list)
+	/// would then select fewer than the intended signers.
+	#[test]
+	fn mask_conversions_reject_unrepresentable_inputs() {
+		let list = ParticipantList::new(&[100, 200, 300]).unwrap();
+
+		// A 2-signer request that includes an unknown ID is rejected whole,
+		// instead of returning a 1-bit mask for {100}.
+		assert_eq!(
+			list.mask_from_ids(&[100, 999]),
+			None,
+			"unknown ID must reject the whole mask request"
+		);
+		// Valid IDs still convert; duplicates set the same bit.
+		assert_eq!(list.mask_from_ids(&[100, 300]), Some(0b101));
+		assert_eq!(list.mask_from_ids(&[100, 100, 300]), Some(0b101));
+		assert_eq!(list.mask_from_ids(&[]), Some(0));
+
+		// A mask with a bit beyond the list (bit 3 on a 3-participant list)
+		// is rejected; in-range bits alone still convert.
+		assert_eq!(
+			list.ids_from_mask(0b1101),
+			None,
+			"out-of-range mask bit must reject the whole conversion"
+		);
+		assert_eq!(list.ids_from_mask(0b1000), None);
+		assert_eq!(list.ids_from_mask(0b101), Some(vec![100, 300]));
+		assert_eq!(list.ids_from_mask(0), Some(vec![]));
 	}
 
 	#[test]

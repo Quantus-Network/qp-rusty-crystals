@@ -2238,7 +2238,19 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 				self.recovered_partial_weighted_norm(&sharing_patterns, signing_mask, my_idx, nu)?;
 			let challenge_bound = weighted_norm * (TAU as f64).sqrt();
 			if challenge_bound > bound {
-				let signing_set = self.config.new_participants().ids_from_mask(signing_mask);
+				// `signing_mask` was generated for this committee, so every
+				// set bit is in range. A `None` here would mean an internal
+				// enumerator/list mismatch — surface it as InternalError
+				// rather than panicking.
+				let signing_set = self
+					.config
+					.new_participants()
+					.ids_from_mask(signing_mask)
+					.ok_or_else(|| {
+						ResharingProtocolError::InternalError(format!(
+							"signing_mask {signing_mask:#b} out of range for new committee"
+						))
+					})?;
 				return Err(ResharingProtocolError::ShareVerificationFailed(format!(
 					"recovered partial for signing set {:?} exceeds partial-secret norm \
 					 bound: sqrt(tau) * weighted_norm = {:.0}, B = {:.0}",
