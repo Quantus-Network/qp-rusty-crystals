@@ -13,7 +13,7 @@ use qp_rusty_crystals_threshold::{
 
 use qp_rusty_crystals_threshold::resharing::{
 	resharing_norm_enlargement, Action, NewShareData, ResharingConfig, ResharingMessage,
-	ResharingProtocol, ResharingRound5Broadcast, ResharingState,
+	ResharingProtocol, ResharingProtocolError, ResharingRound5Broadcast, ResharingState,
 };
 
 mod common;
@@ -1132,6 +1132,97 @@ fn test_resharing_round1_message_from_non_member_ignored() {
 
 	// Protocol should still be in Round1Waiting (error doesn't change state)
 	assert_eq!(*protocol.state(), ResharingState::Round1Waiting);
+}
+
+/// Security review: malformed bytes must be a hard error only when the
+/// session actually *depends on* the sender (new committee members, and old
+/// members in the agreed active set). The pre-deserialization filter in
+/// `message()` only checked membership in old ∪ new, so an old-only member
+/// that `Act` deliberately excludes — the compromised/leaving member the
+/// active-set machinery exists to proceed without — could send one garbage
+/// frame per receiver and force `MalformedMessage` out of `message()`. A
+/// transport runner that treats `message()` errors as fatal then aborts
+/// every resharing attempt, even though every post-deserialization consumer
+/// would have ignored that sender entirely.
+#[test]
+fn test_malformed_frame_from_excluded_old_member_ignored() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let session_nonce = [0x88u8; 32];
+	let make_protocol = |party_id: u32| {
+		let share = shares.iter().find(|s| s.party_id() == party_id).cloned();
+		let config = ResharingConfig::new(
+			share,
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![1, 2, 3],
+			party_id,
+			public_key.clone(),
+		)
+		.expect("valid config");
+		let mut seed = [7u8; 32];
+		seed[0..4].copy_from_slice(&party_id.to_le_bytes());
+		new_test_protocol(config, seed, &session_nonce)
+	};
+
+	// Old {0, 1, 2} (t = 2), new {1, 2, 3}, leader = 1, expected = {1, 2}:
+	// party 0 is the old-only member the session is configured to proceed
+	// without.
+	let mut leader = make_protocol(1);
+	let mut party2 = make_protocol(2);
+	leader.set_expected_active_set(&[1, 2]).expect("valid expected set");
+
+	// Pre-Act: no individual old-only member is required (any t_old subset
+	// suffices), so garbage from party 0 must be dropped, not escalated.
+	let _ = leader.poke().expect("leader round 1");
+	let result = leader.message(0, vec![0xFF]);
+	assert!(
+		result.is_ok(),
+		"pre-Act garbage from an old-only member must be dropped, got {:?}",
+		result
+	);
+
+	// Agree on Act = {1, 2}.
+	let commit2 = match party2.poke().expect("party 2 round 1") {
+		Action::SendMany(data) => data,
+		other => panic!("expected party 2 commitment broadcast, got {:?}", other),
+	};
+	leader.message(2, commit2).expect("deliver c2 to leader");
+	let _act_proposal = match leader.poke().expect("leader act proposal") {
+		Action::SendMany(data) => data,
+		other => panic!("expected Act proposal broadcast, got {:?}", other),
+	};
+	assert_eq!(leader.active_set(), Some(&[1u32, 2][..]));
+
+	// Post-Act: party 0 is outside Act; its garbage frame must still be
+	// dropped instead of becoming an abort surface.
+	let result = leader.message(0, vec![0xFF]);
+	assert!(
+		result.is_ok(),
+		"malformed frame from an old member excluded from Act must be dropped, got {:?}",
+		result
+	);
+	assert!(!leader.is_failed(), "excluded member's garbage must not affect the session");
+
+	// Accountability is preserved for senders the session depends on:
+	// an active old member...
+	let result = leader.message(2, vec![0xFF]);
+	assert!(
+		matches!(result, Err(ResharingProtocolError::MalformedMessage { from: 2, .. })),
+		"malformed frame from an Act member must stay a hard error, got {:?}",
+		result
+	);
+	// ...and a new-only committee member (always required: it receives a
+	// share and signs the acceptance).
+	let result = leader.message(3, vec![0xFF]);
+	assert!(
+		matches!(result, Err(ResharingProtocolError::MalformedMessage { from: 3, .. })),
+		"malformed frame from a new committee member must stay a hard error, got {:?}",
+		result
+	);
 }
 
 #[test]

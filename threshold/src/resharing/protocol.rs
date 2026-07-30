@@ -785,6 +785,23 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		self.active_set.as_ref().is_some_and(|act| act.binary_search(&party).is_ok())
 	}
 
+	/// Whether the session's completion depends on `party`: new committee
+	/// members always (they receive shares and sign the acceptance), old
+	/// members only once they are in the agreed active set.
+	///
+	/// Before `Act` is agreed, no individual old-only member is required —
+	/// the liveness design explicitly proceeds without any `n_old - t_old`
+	/// of them (timeout / expected active set), so a not-(yet-)active old
+	/// member is never a sender this session must hear from.
+	///
+	/// This is the *outermost* trust boundary, mirroring
+	/// [`Self::round5_required_senders`]: input from parties outside it must
+	/// never influence the session's outcome, including by escalating into
+	/// an error a transport runner would treat as fatal.
+	fn session_depends_on(&self, party: ParticipantId) -> bool {
+		self.config.new_participants().contains(party) || self.is_active(party)
+	}
+
 	/// Leader-side active-set proposal.
 	///
 	/// Returns `Some(SendMany(..))` when this party is the leader and the
@@ -917,8 +934,30 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 
 		let msg = match Self::deserialize_message(&data) {
 			Ok(m) => m,
-			Err(e) =>
-				return Err(ResharingProtocolError::MalformedMessage { from, reason: e.to_string() }),
+			Err(e) => {
+				// A hard, sender-attributable error is only warranted when
+				// the session depends on this sender (its garbage means the
+				// session cannot complete, so the runner may abort with
+				// blame). For anyone else — in particular an old member
+				// excluded from Act, exactly the compromised/leaving party
+				// the active-set machinery proceeds without — escalating
+				// would hand them a one-packet abort surface on a session
+				// every post-deserialization consumer already ignores them
+				// in. Drop the frame instead.
+				if self.session_depends_on(from) {
+					return Err(ResharingProtocolError::MalformedMessage {
+						from,
+						reason: e.to_string(),
+					});
+				}
+				log::warn!(
+					"Resharing: Ignoring malformed message from party {} (session does not \
+					 depend on this sender): {}",
+					from,
+					e
+				);
+				return Ok(());
+			},
 		};
 
 		// Verify SSID matches for all message types to prevent cross-session replay
