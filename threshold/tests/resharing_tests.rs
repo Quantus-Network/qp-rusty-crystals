@@ -4068,31 +4068,41 @@ fn test_recovered_partial_overshoot_multi_seed() {
 /// honest overshoot (~1.166×) exceeds the base bound `B`, and enlarging the
 /// radii by κ = 1.25 is infeasible under this variant's verification ceilings
 /// (γ₁ = 2¹⁷, γ₂ = (Q−1)/88 collapse the per-iteration acceptance; MC gives
-/// K ≈ 5.8·10⁵). The params table therefore ships κ = 1 for (4,6) and the
-/// Round-5 recovered-partial guard must reject honest reshares — fail closed,
-/// never fail open. This test pins that behavior.
+/// K ≈ 5.8·10⁵). `(4, 6)` is listed in `RESHARING_UNSUPPORTED`, so
+/// `ResharingConfig::new` rejects it at construction time — fail closed
+/// before any rounds run, never fail open at the Round-5 guard after the
+/// parties have spent the session. Freshly-dealt 4-of-6 committees still
+/// sign (`ThresholdConfig::new(4, 6)` succeeds).
 #[cfg(all(feature = "ml-dsa-44", not(feature = "ml-dsa-87"), not(feature = "ml-dsa-65")))]
 #[test]
 fn test_resharing_into_4_of_6_fails_closed() {
-	let config = ThresholdConfig::new(4, 6).expect("valid config");
+	// Signing support is unchanged.
+	let _ = ThresholdConfig::new(4, 6).expect("4-of-6 remains valid for signing on ML-DSA-44");
+
 	let seed = [77u8; 32];
-	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+	let (public_key, shares) =
+		generate_with_dealer(&seed, ThresholdConfig::new(2, 3).expect("valid")).expect("keygen");
 
 	let party_ids: Vec<u32> = (0..6).collect();
-	let mut current_shares: HashMap<u32, PrivateKeyShare> = HashMap::new();
-	for share in shares {
-		current_shares.insert(share.party_id(), share.clone());
-	}
-
-	let result =
-		run_resharing_protocol(4, party_ids.clone(), 4, party_ids, &current_shares, &public_key);
-	let err = result.expect_err("4-of-6 resharing must fail closed on ML-DSA-44");
-	// The party whose Round-5 guard fires reports the norm-bound error; parties
-	// that observe the failure broadcasts abort with "N parties reported
-	// failure". Which one surfaces from the test harness depends on ordering.
+	let result = ResharingConfig::new(
+		Some(shares[0].clone()),
+		2,
+		vec![0, 1, 2],
+		4,
+		party_ids,
+		0,
+		public_key,
+	);
 	assert!(
-		err.contains("partial-secret norm bound") || err.contains("parties reported failure"),
-		"expected the Round-5 recovered-partial norm guard to reject, got: {err}"
+		matches!(
+			result,
+			Err(qp_rusty_crystals_threshold::resharing::ResharingConfigError::UnsupportedNewCommittee {
+				threshold: 4,
+				parties: 6
+			})
+		),
+		"ML-DSA-44 resharing into 4-of-6 must be rejected at construction, got {:?}",
+		result.map(|_| ())
 	);
 }
 

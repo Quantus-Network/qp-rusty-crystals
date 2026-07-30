@@ -390,26 +390,60 @@ impl ResharingConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResharingConfigError {
 	/// Invalid old committee threshold.
-	InvalidOldThreshold { threshold: u32, parties: u32 },
+	InvalidOldThreshold {
+		/// Requested old-committee threshold.
+		threshold: u32,
+		/// Number of old-committee parties.
+		parties: u32,
+	},
 	/// Invalid new committee threshold.
-	InvalidNewThreshold { threshold: u32, parties: u32 },
+	InvalidNewThreshold {
+		/// Requested new-committee threshold.
+		threshold: u32,
+		/// Number of new-committee parties.
+		parties: u32,
+	},
 	/// The new committee's `(t, n)` is valid for signing but the active
 	/// parameter set declares resharing *into* it infeasible (no κ
 	/// enlargement ships, so the Round-5 recovered-partial guard would
 	/// reject honest reshares). E.g. `(4, 6)` on ML-DSA-44.
-	UnsupportedNewCommittee { threshold: u32, parties: u32 },
+	UnsupportedNewCommittee {
+		/// Requested new-committee threshold.
+		threshold: u32,
+		/// Number of new-committee parties.
+		parties: u32,
+	},
 	/// Too many parties in old committee (max 6).
-	TooManyOldParties { parties: u32, max: u32 },
+	TooManyOldParties {
+		/// Requested old-committee size.
+		parties: u32,
+		/// Maximum supported parties.
+		max: u32,
+	},
 	/// Too many parties in new committee (max 6).
-	TooManyNewParties { parties: u32, max: u32 },
+	TooManyNewParties {
+		/// Requested new-committee size.
+		parties: u32,
+		/// Maximum supported parties.
+		max: u32,
+	},
 	/// Party is not in either committee.
-	PartyNotInEitherCommittee { party_id: ParticipantId },
+	PartyNotInEitherCommittee {
+		/// The party that is in neither committee.
+		party_id: ParticipantId,
+	},
 	/// Duplicate participant ID in a committee.
 	DuplicateParticipant,
 	/// Old committee member must provide their existing share.
-	OldMemberMustProvideShare { party_id: ParticipantId },
+	OldMemberMustProvideShare {
+		/// The old-committee party that omitted its share.
+		party_id: ParticipantId,
+	},
 	/// Share's party_id is not in the old committee.
-	SharePartyNotInOldCommittee { party_id: ParticipantId },
+	SharePartyNotInOldCommittee {
+		/// The share's party ID that is missing from the old committee.
+		party_id: ParticipantId,
+	},
 	/// Old committee does not exactly match the share's embedded DKG
 	/// participant list, so the share's subset masks would be interpreted
 	/// under a different identity mapping than the one they were created
@@ -418,7 +452,12 @@ pub enum ResharingConfigError {
 	/// Share's public key (TR) doesn't match the provided public key.
 	PublicKeyMismatch,
 	/// Share's threshold doesn't match the old_threshold parameter.
-	ThresholdMismatch { share_threshold: u32, config_threshold: u32 },
+	ThresholdMismatch {
+		/// Threshold stored in the share.
+		share_threshold: u32,
+		/// Threshold supplied in the config.
+		config_threshold: u32,
+	},
 	/// Signer configuration is missing the verifying key for a new committee member.
 	MissingVerifyingKey(ParticipantId),
 }

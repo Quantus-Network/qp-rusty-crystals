@@ -182,12 +182,12 @@ mod types;
 // Re-export public types
 pub use types::{
 	compute_accept_hash, compute_resharing_ssid, NewShareData, ResharingAccept,
-	ResharingActProposal, ResharingCertificate, ResharingConfig, ResharingMessage, ResharingOutput,
-	ResharingRole, ResharingRound1EntropyCommitment, ResharingRound2EntropyReveal,
-	ResharingRound3Broadcast, ResharingRound4Message, ResharingRound5Broadcast,
-	ResharingSignerConfig, SubsetMask, SubsetPair, ENTROPY_SIZE, MAX_ACCEPT_SIGNATURE_LEN,
-	MAX_ERROR_MESSAGE_LEN, RESHARING_PROTOCOL_VERSION, RESHARING_SSID_SIZE, RESHARING_SUITE_ID,
-	SUBSHARE_COEFF_BOUND,
+	ResharingActProposal, ResharingCertificate, ResharingConfig, ResharingConfigError,
+	ResharingMessage, ResharingOutput, ResharingRole, ResharingRound1EntropyCommitment,
+	ResharingRound2EntropyReveal, ResharingRound3Broadcast, ResharingRound4Message,
+	ResharingRound5Broadcast, ResharingSignerConfig, SubsetMask, SubsetPair, ENTROPY_SIZE,
+	MAX_ACCEPT_SIGNATURE_LEN, MAX_ERROR_MESSAGE_LEN, RESHARING_PROTOCOL_VERSION,
+	RESHARING_SSID_SIZE, RESHARING_SUITE_ID, SUBSHARE_COEFF_BOUND,
 };
 
 // Re-export the long-term-key signing trait used for Round 6 acceptance, so
