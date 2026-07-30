@@ -246,6 +246,20 @@ impl ResharingConfig {
 			});
 		}
 
+		// A (t, n) that is valid for signing can still be an impossible
+		// reshare *target*: on ML-DSA-44, (4, 6) ships no κ enlargement, so
+		// the Round-5 recovered-partial guard is guaranteed to reject honest
+		// reshares (measured overshoot 1.166 > κ = 1). Reject at construction
+		// time rather than letting every party burn Rounds 1–5 on a session
+		// the parameter file declares unable to complete. Only the new
+		// committee needs this check — old shares never hit the guard.
+		if !crate::params::resharing_supported(new_threshold, new_n) {
+			return Err(ResharingConfigError::UnsupportedNewCommittee {
+				threshold: new_threshold,
+				parties: new_n,
+			});
+		}
+
 		Ok(Self {
 			old_threshold: actual_old_threshold,
 			old_participants: old_participant_list,
@@ -265,27 +279,28 @@ impl ResharingConfig {
 		self.existing_share.as_ref()
 	}
 
-	/// Securely erase the old committee share held in this config.
+	/// Securely erase the old-share **working copy** held in this config.
 	///
 	/// Called automatically when the protocol completes successfully, and again
-	/// when the protocol is dropped. Integrators should treat the returned new
-	/// share as the only live key material after a successful handoff. For
-	/// sessions that failed or stalled before completion, recover the share
-	/// with `ResharingProtocol::abort_and_take_existing_share` before
-	/// dropping the protocol.
+	/// when the protocol is dropped. This clears only the in-memory copy loaded
+	/// into the attempt; durable key material is expected to live in the
+	/// caller's persistent store. After a certified handoff, integrators should
+	/// erase that durable copy and treat the returned new share as the only live
+	/// key material. In-memory-only callers recover via
+	/// `ResharingProtocol::abort_and_take_existing_share` before drop on abort.
 	pub fn zeroize_existing_share(&mut self) {
 		if let Some(mut share) = self.existing_share.take() {
 			share.zeroize();
 		}
 	}
 
-	/// Take ownership of the old committee share, removing it from the config.
+	/// Take ownership of the old-share working copy, removing it from the config.
 	///
-	/// This is the abort-recovery path: a session that failed or stalled before
-	/// Round 6 certification has produced no replacement share, so the old share
-	/// must survive for a retry. Dropping the protocol (and with it this config)
-	/// zeroizes the share, so callers that moved their only live copy in must
-	/// take it back out first.
+	/// Abort-recovery for callers that moved their only in-memory copy in with
+	/// no external durable store. Dropping the protocol zeroizes this working
+	/// copy; take it back out first if you need it for a retry. Production
+	/// integrators that persist shares outside the protocol typically reload
+	/// from storage instead.
 	pub fn take_existing_share(&mut self) -> Option<PrivateKeyShare> {
 		self.existing_share.take()
 	}
@@ -375,21 +390,60 @@ impl ResharingConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResharingConfigError {
 	/// Invalid old committee threshold.
-	InvalidOldThreshold { threshold: u32, parties: u32 },
+	InvalidOldThreshold {
+		/// Requested old-committee threshold.
+		threshold: u32,
+		/// Number of old-committee parties.
+		parties: u32,
+	},
 	/// Invalid new committee threshold.
-	InvalidNewThreshold { threshold: u32, parties: u32 },
+	InvalidNewThreshold {
+		/// Requested new-committee threshold.
+		threshold: u32,
+		/// Number of new-committee parties.
+		parties: u32,
+	},
+	/// The new committee's `(t, n)` is valid for signing but the active
+	/// parameter set declares resharing *into* it infeasible (no κ
+	/// enlargement ships, so the Round-5 recovered-partial guard would
+	/// reject honest reshares). E.g. `(4, 6)` on ML-DSA-44.
+	UnsupportedNewCommittee {
+		/// Requested new-committee threshold.
+		threshold: u32,
+		/// Number of new-committee parties.
+		parties: u32,
+	},
 	/// Too many parties in old committee (max 6).
-	TooManyOldParties { parties: u32, max: u32 },
+	TooManyOldParties {
+		/// Requested old-committee size.
+		parties: u32,
+		/// Maximum supported parties.
+		max: u32,
+	},
 	/// Too many parties in new committee (max 6).
-	TooManyNewParties { parties: u32, max: u32 },
+	TooManyNewParties {
+		/// Requested new-committee size.
+		parties: u32,
+		/// Maximum supported parties.
+		max: u32,
+	},
 	/// Party is not in either committee.
-	PartyNotInEitherCommittee { party_id: ParticipantId },
+	PartyNotInEitherCommittee {
+		/// The party that is in neither committee.
+		party_id: ParticipantId,
+	},
 	/// Duplicate participant ID in a committee.
 	DuplicateParticipant,
 	/// Old committee member must provide their existing share.
-	OldMemberMustProvideShare { party_id: ParticipantId },
+	OldMemberMustProvideShare {
+		/// The old-committee party that omitted its share.
+		party_id: ParticipantId,
+	},
 	/// Share's party_id is not in the old committee.
-	SharePartyNotInOldCommittee { party_id: ParticipantId },
+	SharePartyNotInOldCommittee {
+		/// The share's party ID that is missing from the old committee.
+		party_id: ParticipantId,
+	},
 	/// Old committee does not exactly match the share's embedded DKG
 	/// participant list, so the share's subset masks would be interpreted
 	/// under a different identity mapping than the one they were created
@@ -398,7 +452,12 @@ pub enum ResharingConfigError {
 	/// Share's public key (TR) doesn't match the provided public key.
 	PublicKeyMismatch,
 	/// Share's threshold doesn't match the old_threshold parameter.
-	ThresholdMismatch { share_threshold: u32, config_threshold: u32 },
+	ThresholdMismatch {
+		/// Threshold stored in the share.
+		share_threshold: u32,
+		/// Threshold supplied in the config.
+		config_threshold: u32,
+	},
 	/// Signer configuration is missing the verifying key for a new committee member.
 	MissingVerifyingKey(ParticipantId),
 }
@@ -411,6 +470,16 @@ impl fmt::Display for ResharingConfigError {
 			},
 			ResharingConfigError::InvalidNewThreshold { threshold, parties } => {
 				write!(f, "Invalid new threshold: t={}, n={}", threshold, parties)
+			},
+			ResharingConfigError::UnsupportedNewCommittee { threshold, parties } => {
+				write!(
+					f,
+					"Resharing into a {}-of-{} committee is not supported on {} \
+					 (no κ enlargement; the Round-5 guard would reject honest reshares)",
+					threshold,
+					parties,
+					crate::params::VARIANT_NAME
+				)
 			},
 			ResharingConfigError::TooManyOldParties { parties, max } => {
 				write!(f, "Too many parties in old committee: {} (max {})", parties, max)
@@ -1812,6 +1881,72 @@ mod tests {
 		let result =
 			ResharingConfig::new(None, 1, vec![0, 1, 2], 2, vec![0, 1, 2, 3], 3, pk.clone());
 		assert!(matches!(result, Err(ResharingConfigError::InvalidOldThreshold { .. })));
+	}
+
+	/// Security review: ML-DSA-44 declares resharing *into* a 4-of-6 committee
+	/// infeasible (`params_tables_44.rs` omits the `(4, 6)` κ enlargement, so
+	/// the Round-5 recovered-partial guard rejects honest reshares at κ = 1).
+	/// `ThresholdConfig::new(4, 6)` still succeeds — freshly-dealt 4-of-6
+	/// committees sign normally — so the config constructor must check
+	/// resharing support explicitly. Without it, a coordinator can start a
+	/// session the parameter file guarantees cannot complete, wasting all
+	/// parties' Rounds 1–5 before the guaranteed late failure.
+	#[cfg(all(feature = "ml-dsa-44", not(feature = "ml-dsa-87"), not(feature = "ml-dsa-65")))]
+	#[test]
+	fn test_config_rejects_fail_closed_new_committee_44() {
+		// NewOnly party 5: in the new committee, not in the old.
+		let result = ResharingConfig::new(
+			None,
+			2,
+			vec![0, 1, 2],
+			4,
+			vec![0, 1, 2, 3, 4, 5],
+			5,
+			make_test_public_key(),
+		);
+		assert!(
+			matches!(
+				result,
+				Err(ResharingConfigError::UnsupportedNewCommittee { threshold: 4, parties: 6 })
+			),
+			"ML-DSA-44 resharing into a 4-of-6 committee must be rejected at \
+			 construction time, got {:?}",
+			result.map(|_| ())
+		);
+
+		// Resharing *from* a 4-of-6 old committee stays allowed: only new
+		// shares hit the Round-5 recovered-partial guard.
+		let result = ResharingConfig::new(
+			None,
+			4,
+			vec![0, 1, 2, 3, 4, 5],
+			3,
+			vec![1, 2, 3, 4, 6],
+			6,
+			make_test_public_key(),
+		);
+		assert!(result.is_ok(), "resharing from a 4-of-6 old committee must stay valid");
+	}
+
+	/// On ML-DSA-65/87 the `(4, 6)` κ enlargement ships, so resharing into a
+	/// 4-of-6 committee is supported and must keep working.
+	#[cfg(any(feature = "ml-dsa-87", feature = "ml-dsa-65"))]
+	#[test]
+	fn test_config_accepts_4_of_6_new_committee_65_87() {
+		let result = ResharingConfig::new(
+			None,
+			2,
+			vec![0, 1, 2],
+			4,
+			vec![0, 1, 2, 3, 4, 5],
+			5,
+			make_test_public_key(),
+		);
+		assert!(
+			result.is_ok(),
+			"4-of-6 reshares are supported on ML-DSA-65/87: {:?}",
+			result.err()
+		);
 	}
 
 	#[test]

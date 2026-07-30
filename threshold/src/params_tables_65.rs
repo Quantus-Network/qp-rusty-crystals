@@ -22,6 +22,10 @@
 pub(super) const RESHARING_KAPPA: &[(u32, u32, f64)] =
 	&[(2, 4, 1.10), (3, 5, 1.10), (4, 6, 1.18)];
 
+/// Every signing-supported `(t, n)` can also be reshared into on ML-DSA-65
+/// (κ enlargements ship for all configs whose overshoot exceeds 1).
+pub(super) const RESHARING_UNSUPPORTED: &[(u32, u32)] = &[];
+
 pub(super) const K_ITERATIONS: &[(u32, u32, u32)] = &[
 	(2, 2, 6),
 	(2, 3, 10),

@@ -65,6 +65,16 @@ use super::types::{
 };
 use crate::keygen::dkg::TranscriptSigner;
 
+/// Fixed, secret-independent reason placed in a failed party's public Round 5
+/// broadcast (`ResharingRound5Broadcast.error_message`).
+///
+/// Round 5 verification failures can be secret-dependent: the stored-share and
+/// recovered-partial norm guards fail based on the exact norms of the honest
+/// party's aggregated secret shares. Their detailed `Display` strings embed
+/// those norm values, so they are logged locally only and never broadcast — see
+/// `handle_round5_generate`.
+const ROUND5_VERIFICATION_FAILED_REASON: &str = "resharing verification failed";
+
 /// Domain separator for the per-subset PRF seed (includes public session seed for randomization).
 const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
 
@@ -469,6 +479,12 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	///
 	/// Called automatically on successful completion and again on drop. The
 	/// completed output (if any) is preserved until [`Self::take_output`].
+	///
+	/// Erasing `config.existing_share` clears the in-memory **working copy**
+	/// loaded into this attempt. Durable key material is expected to live in
+	/// the caller's persistent store; see the module docs on working copy vs
+	/// durable share. In-memory-only callers use
+	/// [`Self::abort_and_take_existing_share`] before drop on abort paths.
 	fn zeroize_session_secrets(&mut self) {
 		self.seed.zeroize();
 		if let Some(ref mut entropy) = self.my_entropy {
@@ -608,14 +624,18 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		}
 	}
 
-	/// Recover the old committee share from a session that did not complete.
+	/// Recover the in-memory old-share working copy from a session that did
+	/// not complete.
 	///
-	/// Dropping the protocol erases every session secret, **including the old
-	/// share held in the config**. A session that failed or stalled before the
-	/// Round 6 certificate was produced has generated no replacement share, so
-	/// a caller that moved its only live copy of the old share into
-	/// [`ResharingConfig`] MUST call this before dropping the failed protocol,
-	/// or the old key material is lost and no retry is possible.
+	/// Dropping the protocol erases every session secret, including the
+	/// working copy held in the config. Production integrators that persist
+	/// the durable share outside the protocol do not need this path: a failed
+	/// attempt only loses the working copy, and a retry reloads from storage.
+	///
+	/// Callers that moved their only in-memory copy into [`ResharingConfig`]
+	/// (no external durable store) MUST call this before dropping a failed or
+	/// stalled protocol, or that in-memory copy is gone and no retry is
+	/// possible without reloading from wherever they persist shares.
 	///
 	/// Returns `None` for new-only parties, and after successful completion
 	/// (the share is erased at finalize; the new share from
@@ -713,12 +733,19 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// the new participant set, so old-only members can never connect and the
 	/// fast path (all old members ready) would stall forever.
 	///
-	/// This is deterministic where `close_ready_window` is timing-dependent:
-	/// commitments from members outside the expected set are still accepted
-	/// (and included in `Act`) if they arrive before the proposal, so this
-	/// never excludes a live member, and safety is unaffected — every party
-	/// still validates the proposed `Act` and reveals only after holding all
-	/// of `Act`'s commitments.
+	/// This is deterministic where `close_ready_window` is timing-dependent,
+	/// and the expected set is also an *inclusion policy*: once set, `Act` is
+	/// restricted to the expected members, and commitments from old members
+	/// outside it are ignored for `Act` membership. Every party blocks on the
+	/// Round 2 reveal and Round 3/4 dealing of every `Act` member, so
+	/// admitting an outsider that manages to deliver a single Round 1 packet
+	/// would hand it a liveness veto (commit, then go silent) — exactly the
+	/// member the caller declared unreachable or leaving. Excluding a live
+	/// old member is safe (it just doesn't deal; dealers are
+	/// `min(I ∩ Act)`, and it still receives its new share if it is in the
+	/// new committee), and safety is unaffected — every party still
+	/// validates the proposed `Act` and reveals only after holding all of
+	/// `Act`'s commitments.
 	///
 	/// Call before or during Rounds 1-2, on the leader. Requires
 	/// `expected ⊆ old committee` and `|expected| ≥ t_old`.
@@ -758,6 +785,23 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		self.active_set.as_ref().is_some_and(|act| act.binary_search(&party).is_ok())
 	}
 
+	/// Whether the session's completion depends on `party`: new committee
+	/// members always (they receive shares and sign the acceptance), old
+	/// members only once they are in the agreed active set.
+	///
+	/// Before `Act` is agreed, no individual old-only member is required —
+	/// the liveness design explicitly proceeds without any `n_old - t_old`
+	/// of them (timeout / expected active set), so a not-(yet-)active old
+	/// member is never a sender this session must hear from.
+	///
+	/// This is the *outermost* trust boundary, mirroring
+	/// [`Self::round5_required_senders`]: input from parties outside it must
+	/// never influence the session's outcome, including by escalating into
+	/// an error a transport runner would treat as fatal.
+	fn session_depends_on(&self, party: ParticipantId) -> bool {
+		self.config.new_participants().contains(party) || self.is_active(party)
+	}
+
 	/// Leader-side active-set proposal.
 	///
 	/// Returns `Some(SendMany(..))` when this party is the leader and the
@@ -780,8 +824,23 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			return Ok(None);
 		}
 
-		// BTreeMap keys iterate in sorted order, so `act` is sorted.
-		let act: Vec<ParticipantId> = self.round1_entropy_commits.keys().copied().collect();
+		// The expected set is an *inclusion policy*, not just an early
+		// trigger: every party later blocks on the Round 2 reveal and Round
+		// 3/4 dealing of every Act member, so admitting a committed member
+		// from outside the expected set would hand it a one-packet liveness
+		// veto (send Round 1, then go silent) — exactly the member the
+		// caller declared unreachable or leaving. Excluding a live member is
+		// safe: any Act with |Act| >= t_old intersects every old RSS subset,
+		// and dealers fail over to min(I ∩ Act).
+		let act: Vec<ParticipantId> = match &self.expected_active_set {
+			Some(expected) => expected
+				.iter()
+				.copied()
+				.filter(|p| self.round1_entropy_commits.contains_key(p))
+				.collect(),
+			// BTreeMap keys iterate in sorted order, so `act` is sorted.
+			None => self.round1_entropy_commits.keys().copied().collect(),
+		};
 		let required = self.config.old_threshold() as usize;
 		if act.len() < required {
 			let err = ResharingProtocolError::InsufficientParties { required, received: act.len() };
@@ -875,8 +934,30 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 
 		let msg = match Self::deserialize_message(&data) {
 			Ok(m) => m,
-			Err(e) =>
-				return Err(ResharingProtocolError::MalformedMessage { from, reason: e.to_string() }),
+			Err(e) => {
+				// A hard, sender-attributable error is only warranted when
+				// the session depends on this sender (its garbage means the
+				// session cannot complete, so the runner may abort with
+				// blame). For anyone else — in particular an old member
+				// excluded from Act, exactly the compromised/leaving party
+				// the active-set machinery proceeds without — escalating
+				// would hand them a one-packet abort surface on a session
+				// every post-deserialization consumer already ignores them
+				// in. Drop the frame instead.
+				if self.session_depends_on(from) {
+					return Err(ResharingProtocolError::MalformedMessage {
+						from,
+						reason: e.to_string(),
+					});
+				}
+				log::warn!(
+					"Resharing: Ignoring malformed message from party {} (session does not \
+					 depend on this sender): {}",
+					from,
+					e
+				);
+				return Ok(());
+			},
 		};
 
 		// Verify SSID matches for all message types to prevent cross-session replay
@@ -1524,23 +1605,29 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		// New committee members verify privately-received sub-shares against the
 		// broadcast commitments, sum them into new subset shares, and commit.
 		if self.config.role().is_new_committee() {
-			match self.verify_and_aggregate_new_shares() {
-				Ok(commits) => match self.verify_stored_new_share_norms() {
-					Ok(()) => match self.verify_recovered_partial_norms() {
-						Ok(()) => share_commitments = commits,
-						Err(e) => {
-							success = false;
-							error_message = Some(e.to_string());
-						},
-					},
-					Err(e) => {
-						success = false;
-						error_message = Some(e.to_string());
-					},
-				},
+			let outcome = self.verify_and_aggregate_new_shares().and_then(|commits| {
+				self.verify_stored_new_share_norms()?;
+				self.verify_recovered_partial_norms()?;
+				Ok(commits)
+			});
+			match outcome {
+				Ok(commits) => share_commitments = commits,
 				Err(e) => {
+					// SECURITY: Round 5 verification failures can be secret-dependent
+					// — the stored-share and recovered-partial norm guards fail based
+					// on the exact norms of this party's aggregated secret shares, and
+					// their `Display` strings embed those norm values. Broadcasting
+					// them turns a private abort into a norm/inner-product oracle a
+					// malicious dealer can query with chosen bounded Round 4
+					// perturbations. Log the detailed error locally and put only a
+					// fixed, value-free reason on the public wire message.
+					log::warn!(
+						"Round 5 verification failed (party {}): {}",
+						self.config.my_party_id(),
+						e
+					);
 					success = false;
-					error_message = Some(e.to_string());
+					error_message = Some(ROUND5_VERIFICATION_FAILED_REASON.to_string());
 				},
 			}
 		}
@@ -2151,7 +2238,18 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 				self.recovered_partial_weighted_norm(&sharing_patterns, signing_mask, my_idx, nu)?;
 			let challenge_bound = weighted_norm * (TAU as f64).sqrt();
 			if challenge_bound > bound {
-				let signing_set = self.config.new_participants().ids_from_mask(signing_mask);
+				// `signing_mask` was generated for this committee, so every
+				// set bit is in range. A `None` here would mean an internal
+				// enumerator/list mismatch — surface it as InternalError
+				// rather than panicking.
+				let signing_set =
+					self.config.new_participants().ids_from_mask(signing_mask).ok_or_else(
+						|| {
+							ResharingProtocolError::InternalError(format!(
+								"signing_mask {signing_mask:#b} out of range for new committee"
+							))
+						},
+					)?;
 				return Err(ResharingProtocolError::ShareVerificationFailed(format!(
 					"recovered partial for signing set {:?} exceeds partial-secret norm \
 					 bound: sqrt(tau) * weighted_norm = {:.0}, B = {:.0}",
@@ -2690,8 +2788,10 @@ fn single_share_weighted_norm(share: &NewShareData, nu: f64) -> f64 {
 /// ML-DSA-44 ships the same (2,4)/(3,5) enlargements as 87 (its overshoots are
 /// nearly identical) but *no* `(4,6)` entry: κ = 1.25 collapses the
 /// per-iteration acceptance under its verification ceilings, so `(4,6)` keeps
-/// base parameters and reshares into a 4-of-6 committee fail closed at the
-/// Round-5 guard (overshoot 1.166 > κ = 1).
+/// base parameters. Reshares into a 4-of-6 committee would fail closed at the
+/// Round-5 guard (overshoot 1.166 > κ = 1); `(4,6)` is therefore listed in
+/// the variant's `RESHARING_UNSUPPORTED` table and `ResharingConfig::new`
+/// rejects it up front (see `crate::params::resharing_supported`).
 pub fn resharing_norm_enlargement(threshold: u32, parties: u32) -> f64 {
 	crate::params::resharing_kappa(threshold, parties)
 }
@@ -3706,6 +3806,103 @@ mod tests {
 			err.to_string().contains("exceeds partial-secret norm bound"),
 			"unexpected error: {}",
 			err
+		);
+	}
+
+	/// Security review regression: a Round 5 verification failure must not put
+	/// secret-dependent norm values (derived from honest new-share material) into
+	/// the public `ResharingRound5Broadcast.error_message`. The stored-share and
+	/// recovered-partial guards fail based on the exact norms of the party's
+	/// aggregated secret shares; broadcasting those numbers turns repeated failed
+	/// reshares into a norm/inner-product oracle on honest share coefficients.
+	#[test]
+	fn round5_broadcast_omits_secret_dependent_norm_diagnostics() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[11u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(1, &[0, 1, 2]),
+			[1u8; 32],
+			&[2u8; 32],
+			0,
+		);
+		// Post-Act state: the full old committee is active, so the designated
+		// dealers are party 0 (for old subsets 0b011, 0b101) and party 1 (0b110).
+		protocol.active_set = Some(vec![0, 1, 2]);
+
+		// An oversized-but-bounded contribution: every coefficient sits just under
+		// SUBSHARE_COEFF_BOUND so the per-contribution bound check passes, yet the
+		// aggregated stored share blows past the single-share norm envelope. This
+		// models a malicious dealer probing the norm guard.
+		let delta = SUBSHARE_COEFF_BOUND - 50;
+		assert!(delta > 0);
+		let big = NewShareData { s1: [[delta; N as usize]; L], s2: [[delta; N as usize]; K] };
+		assert!(big.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+		let zero = NewShareData::new();
+
+		// Our index (party 1) belongs to new subsets 0b011 and 0b110. Put the sole
+		// big contribution on (i=0b011, j=0b011); everything else is zero, so the
+		// aggregated share for new subset 0b011 equals `big` and trips the guard.
+		let make = |i: SubsetMask, j: SubsetMask| -> NewShareData {
+			if i == 0b011 && j == 0b011 {
+				big.clone()
+			} else {
+				zero.clone()
+			}
+		};
+		let target_js = [0b011u16, 0b110u16];
+		for (dealer, i_masks) in [(0u32, &[0b011u16, 0b101u16][..]), (1u32, &[0b110u16][..])] {
+			let mut contributions: BTreeMap<SubsetPair, NewShareData> = BTreeMap::new();
+			let mut commitments: BTreeMap<SubsetPair, [u8; COMMITMENT_HASH_SIZE]> = BTreeMap::new();
+			for &i in i_masks {
+				for &j in &target_js {
+					let r = make(i, j);
+					commitments.insert((i, j), commit_subshare(i, j, &r));
+					contributions.insert((i, j), r);
+				}
+			}
+			protocol.round3_broadcasts.insert(
+				dealer,
+				ResharingRound3Broadcast { ssid: protocol.ssid, party_id: dealer, commitments },
+			);
+			protocol.round4_messages.insert(
+				dealer,
+				ResharingRound4Message {
+					ssid: protocol.ssid,
+					from_party_id: dealer,
+					to_party_id: 1,
+					contributions,
+				},
+			);
+		}
+
+		let action = protocol.handle_round5_generate().expect("round 5 generate");
+		assert!(matches!(action, Action::SendMany(_)));
+
+		let broadcast = protocol.round5_broadcasts.get(&1).expect("own Round 5 broadcast");
+		assert!(!broadcast.success, "the oversized aggregated share must fail verification");
+		let msg = broadcast.error_message.clone().expect("a failure reason must be set");
+
+		// The public wire message must carry no secret-dependent norm diagnostics:
+		// no norm/bound labels, and no numeric value at all.
+		assert!(!msg.contains("weighted_norm"), "leaked norm label on the wire: {msg}");
+		assert!(!msg.contains("B_G"), "leaked bound label on the wire: {msg}");
+		assert!(!msg.contains("sqrt(tau)"), "leaked norm expression on the wire: {msg}");
+		assert!(!msg.contains('='), "wire reason embeds a value assignment: {msg}");
+		assert!(
+			!msg.chars().any(|c| c.is_ascii_digit()),
+			"wire reason embeds digits (possible secret leak): {msg}"
 		);
 	}
 

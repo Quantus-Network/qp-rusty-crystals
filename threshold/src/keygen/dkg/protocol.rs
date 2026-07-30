@@ -1942,6 +1942,11 @@ fn build_private_share<S: TranscriptSigner>(
 			s2_arr[i] = *poly;
 		}
 		combined_shares.insert(*subset_mask, SecretShareData { s1: s1_arr, s2: s2_arr });
+		// `SecretShareData` is `ZeroizeOnDrop`, but the arrays are `Copy`, so the
+		// construction above left the secret coefficients in these stack locals;
+		// wipe the source copies now.
+		s1_arr.zeroize();
+		s2_arr.zeroize();
 	}
 
 	// Derive `party_key` from the actual secret share polynomials so that this byte
@@ -1984,7 +1989,7 @@ fn build_private_share<S: TranscriptSigner>(
 	// Use the TR from the public key (tr = H(pk))
 	let tr = *public_key.tr();
 
-	Ok(PrivateKeyShare::new(
+	let share = PrivateKeyShare::new(
 		config.my_party_id(),
 		config.total_parties(),
 		config.threshold(),
@@ -1993,7 +1998,11 @@ fn build_private_share<S: TranscriptSigner>(
 		tr,
 		combined_shares,
 		dkg_participants,
-	))
+	);
+	// `party_key` was copied (not moved) into the share above; the share
+	// zeroizes on drop, but this stack copy would otherwise linger, so wipe it.
+	party_key.zeroize();
+	Ok(share)
 }
 
 // ============================================================================

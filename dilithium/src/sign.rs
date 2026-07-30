@@ -291,14 +291,20 @@ fn unpack_secret_key_for_signing<
 	polyvec::ntt(&mut secret_poly_s2);
 	polyvec::ntt(&mut secret_poly_t0);
 
-	UnpackedSecretKey {
+	let unpacked = UnpackedSecretKey {
 		public_seed_rho,
 		public_key_hash_tr,
 		private_key_seed,
 		secret_poly_t0_ntt: secret_poly_t0,
 		secret_poly_s1_ntt: secret_poly_s1,
 		secret_poly_s2_ntt: secret_poly_s2,
-	}
+	};
+	// `private_key_seed` is `Copy`, so the field init above left a copy of the
+	// secret seed in this stack local. `UnpackedSecretKey` is `ZeroizeOnDrop`,
+	// but this source is not (rho/tr are public; the polyvecs are moved, not
+	// copied), so wipe it.
+	private_key_seed.zeroize();
+	unpacked
 }
 
 /// Compute the message representative μ = H(tr || pre || M).
@@ -353,14 +359,18 @@ fn prepare_signing_context<const K: usize, const L: usize>(
 		derive_message_hash(&unpacked_sk.public_key_hash_tr, domain_prefix, message);
 
 	let mut hedge_bytes = hedge_randomness.unwrap_or([0u8; params::SEEDBYTES]);
-	let signing_entropy_rho_prime =
+	let mut signing_entropy_rho_prime =
 		derive_mask_seed(&unpacked_sk.private_key_seed, &hedge_bytes, &message_hash_mu);
 
 	hedge_bytes.zeroize();
 
 	let public_seed_rho = unpacked_sk.public_seed_rho;
 
-	SigningContext { public_seed_rho, message_hash_mu, signing_entropy_rho_prime }
+	let ctx = SigningContext { public_seed_rho, message_hash_mu, signing_entropy_rho_prime };
+	// `signing_entropy_rho_prime` is `Copy`, so the move above left a secret copy
+	// in this local. `SigningContext` zeroizes the field on drop; wipe the source.
+	signing_entropy_rho_prime.zeroize();
+	ctx
 }
 
 fn compute_and_check_signature_z<

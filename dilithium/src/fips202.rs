@@ -135,6 +135,18 @@ const KECCAKF_ROUNDCONSTANTS: [u64; NROUNDS] = [
 ];
 
 /// The Keccak F1600 Permutation
+///
+/// Secret-scrubbing boundary: this permutation unrolls the sponge into ~25 lane
+/// locals plus per-round temporaries. These are deliberately *not* individually
+/// zeroized. Doing so would be security theater with a real cost: `zeroize`'s
+/// guarantee stops at owned buffers, the compiler already spills this round
+/// state across registers and stack slots we cannot name, and adding volatile
+/// wipes to every local in the hottest primitive in the library (run on every
+/// absorb/squeeze for hashing, signing, and verification) is a measurable
+/// regression for no reachable benefit. The owning [`KeccakState`] sponge is
+/// `ZeroizeOnDrop`, so the durable copy of any absorbed secret is wiped when the
+/// state is dropped; callers that squeeze secrets into their own buffers are
+/// responsible for wiping those (see `poly::uniform_eta` / `uniform_gamma1`).
 fn keccakf1600_statepermute(state: &mut [u64; 25]) {
 	let mut aba = state[0];
 	let mut abe = state[1];

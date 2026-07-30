@@ -49,3 +49,7 @@ pub(super) const HYPERBALL: &[(u32, u32, f64, f64, f64)] = &[
 /// `HYPERBALL` and `K_ITERATIONS` entries above are derived at these
 /// enlarged radii.
 pub(super) const RESHARING_KAPPA: &[(u32, u32, f64)] = &[(2, 4, 1.10), (3, 5, 1.15), (4, 6, 1.25)];
+
+/// Every signing-supported `(t, n)` can also be reshared into on ML-DSA-87
+/// (κ enlargements ship for all configs whose overshoot exceeds 1).
+pub(super) const RESHARING_UNSUPPORTED: &[(u32, u32)] = &[];
