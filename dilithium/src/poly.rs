@@ -270,7 +270,14 @@ pub fn pointwise_montgomery(c: &mut Poly, a: &Poly, b: &Poly) {
 }
 
 /// For all coefficients c of the input polynomial, compute c0, c1 such that c mod Q = c1*2^D + c0
-/// with -2^{D-1} < c0 <= 2^{D-1}. Assumes coefficients to be standard representatives.
+/// with -2^{D-1} < c0 <= 2^{D-1}.
+///
+/// Coefficients may be any representative in `(-Q, Q)` (the range guaranteed
+/// by [`Poly::from_coeffs`]): [`rounding::power2round`] canonicalizes a signed
+/// coefficient to its standard representative first, so `c` and `c + Q`
+/// decompose identically. Reaching this with a coefficient outside `(-Q, Q)`
+/// (only possible via [`Poly::coeffs_mut`]) violates the rounding
+/// precondition — see [`rounding::power2round`].
 ///
 /// # Arguments
 ///
@@ -493,7 +500,14 @@ const UNIFORM_GAMMA1_NBLOCKS: usize = 640usize.div_ceil(fips202::SHAKE256_RATE);
 
 /// For all coefficients c of the input polynomial, compute high and low bits c0, c1 such c mod Q =
 /// c1*ALPHA + c0 with -ALPHA/2 < c0 <= ALPHA/2 except c1 = (Q-1)/ALPHA where we set c1 = 0 and
-/// -ALPHA/2 <= c0 = c mod Q - Q < 0. Assumes coefficients to be standard representatives.
+/// -ALPHA/2 <= c0 = c mod Q - Q < 0.
+///
+/// Coefficients may be any representative in `(-Q, Q)` (the range guaranteed
+/// by [`Poly::from_coeffs`]): [`rounding::decompose`] canonicalizes a signed
+/// coefficient to its standard representative first, so `c` and `c + Q`
+/// decompose identically. Reaching this with a coefficient outside `(-Q, Q)`
+/// (only possible via [`Poly::coeffs_mut`]) violates the rounding
+/// precondition — see [`rounding::decompose`].
 ///
 /// # Arguments
 ///
@@ -1275,16 +1289,58 @@ mod tests {
 		let original = a.clone();
 		power2round(&mut a, &mut a0);
 
-		// Check that the decomposition is correct: original = a * 2^D + a0
+		// Reconstruction invariant (FIPS 204): a1*2^D + a0 == c mod^+ Q. The
+		// low bits are recovered exactly, so the comparison is mod Q — a
+		// signed input like -500 reconstructs to its standard representative
+		// Q-500, not the signed original.
 		for i in 0..3 {
-			let reconstructed = a.coeffs[i] * (1 << params::D) + a0.coeffs[i];
-			let diff = (reconstructed - original.coeffs[i]).abs();
-			assert!(
-				diff <= 1,
-				"Power2round failed at index {}: {} vs {}",
-				i,
+			let reconstructed =
+				(a.coeffs[i] as i64 * (1 << params::D) + a0.coeffs[i] as i64).rem_euclid(params::Q as i64);
+			assert_eq!(
 				reconstructed,
-				original.coeffs[i]
+				(original.coeffs[i] as i64).rem_euclid(params::Q as i64),
+				"Power2round reconstruction failed at index {}",
+				i
+			);
+		}
+	}
+
+	/// Security review: [`Poly::from_coeffs`] admits all of `(-Q, Q)`, and the
+	/// module contract promises that range is valid for the public rounding
+	/// wrappers. A signed coefficient and its standard representative are the
+	/// same field element, so they must decompose identically. Before
+	/// canonicalization the signed value was fed straight into the FIPS
+	/// formula and produced non-canonical high/low bits.
+	#[test]
+	fn power2round_and_decompose_canonicalize_signed_coeffs() {
+		// coeff, its standard representative in [0, Q)
+		let pairs = [(-1i32, params::Q - 1), (-(params::Q - 1), 1), (-500, params::Q - 500)];
+
+		for (signed, canon) in pairs {
+			let signed_p = |v: i32| {
+				let mut c = [0i32; N];
+				c[0] = v;
+				Poly::from_coeffs(c).expect("(-Q, Q) accepted")
+			};
+
+			let (mut s_hi, mut s_lo) = (signed_p(signed), Poly::default());
+			power2round(&mut s_hi, &mut s_lo);
+			let (mut c_hi, mut c_lo) = (signed_p(canon), Poly::default());
+			power2round(&mut c_hi, &mut c_lo);
+			assert_eq!(
+				(s_hi.coeffs[0], s_lo.coeffs[0]),
+				(c_hi.coeffs[0], c_lo.coeffs[0]),
+				"power2round({signed}) must match power2round({canon})"
+			);
+
+			let (mut s_hi, mut s_lo) = (signed_p(signed), Poly::default());
+			decompose::<{ params::GAMMA2 }>(&mut s_hi, &mut s_lo);
+			let (mut c_hi, mut c_lo) = (signed_p(canon), Poly::default());
+			decompose::<{ params::GAMMA2 }>(&mut c_hi, &mut c_lo);
+			assert_eq!(
+				(s_hi.coeffs[0], s_lo.coeffs[0]),
+				(c_hi.coeffs[0], c_lo.coeffs[0]),
+				"decompose({signed}) must match decompose({canon})"
 			);
 		}
 	}

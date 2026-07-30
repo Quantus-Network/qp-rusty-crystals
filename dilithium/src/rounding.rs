@@ -16,14 +16,31 @@ const fn assert_supported_gamma2(gamma2: usize) {
 }
 
 /// For finite field element a, compute high and low bits a0, a1 such that a mod^+ Q = a1*2^D + a0
-/// with -2^{D-1} < a0 <= 2^{D-1}. Assumes a to be standard representative.
+/// with -2^{D-1} < a0 <= 2^{D-1}.
+///
 /// # Arguments
 ///
 /// * 'a' - input element
 ///
+/// # Preconditions
+///
+/// `a` must lie in `(-Q, Q)` — the range guaranteed by
+/// [`Poly::from_coeffs`](crate::poly::Poly::from_coeffs). A signed
+/// representative is canonicalized to its standard representative in `[0, Q)`
+/// first (the FIPS formula is defined on `a mod^+ Q`), so `a` and `a + Q`
+/// decompose identically; the canonicalization is a no-op for inputs already
+/// in `[0, Q)`. Inputs outside `(-Q, Q)` violate the contract and can
+/// overflow the `i32` arithmetic below: a panic in overflow-checked builds,
+/// silent wraparound (and a corrupt decomposition) otherwise. Checked with
+/// `debug_assert!`.
+///
 /// Returns a touple (a0, a1).
 pub fn power2round(a: i32) -> (i32, i32) {
 	use crate::params::D;
+	debug_assert!(-Q < a && a < Q, "power2round input outside (-Q, Q)");
+	// Canonicalize to the standard representative in [0, Q); branchless, so
+	// constant-time, and identity for inputs already in [0, Q).
+	let a = crate::reduce::caddq(a);
 	let a1: i32 = (a + (1 << (D - 1)) - 1) >> D;
 	let a0: i32 = a - (a1 << D);
 	(a0, a1)
@@ -31,7 +48,7 @@ pub fn power2round(a: i32) -> (i32, i32) {
 
 /// For finite field element a, compute high and low bits a0, a1 such that a mod^+ Q = a1*ALPHA + a0
 /// with -ALPHA/2 < a0 <= ALPHA/2 except if a1 = (Q-1)/ALPHA where we set a1 = 0 and -ALPHA/2 <= a0
-/// = a mod^+ Q - Q < 0. Assumes a to be standard representative.
+/// = a mod^+ Q - Q < 0.
 ///
 /// The high-bits extraction divides by `ALPHA = 2*GAMMA2` with a fixed-point
 /// reciprocal that is exact over the whole input domain `[0, Q)`:
@@ -45,11 +62,26 @@ pub fn power2round(a: i32) -> (i32, i32) {
 ///
 /// * 'a' - input element
 ///
+/// # Preconditions
+///
+/// `a` must lie in `(-Q, Q)` — the range guaranteed by
+/// [`Poly::from_coeffs`](crate::poly::Poly::from_coeffs). A signed
+/// representative is canonicalized to its standard representative in `[0, Q)`
+/// first (the FIPS formula is defined on `a mod^+ Q`), so `a` and `a + Q`
+/// decompose identically; the canonicalization is a no-op for inputs already
+/// in `[0, Q)`. Inputs outside `(-Q, Q)` violate the contract and can
+/// overflow the `i32` arithmetic below (panic in overflow-checked builds,
+/// silent wraparound otherwise). Checked with `debug_assert!`.
+///
 /// Returns a touple (a0, a1).
 pub fn decompose<const GAMMA2: usize>(a: i32) -> (i32, i32) {
 	const {
 		assert_supported_gamma2(GAMMA2);
 	}
+	debug_assert!(-Q < a && a < Q, "decompose input outside (-Q, Q)");
+	// Canonicalize to the standard representative in [0, Q); branchless, so
+	// constant-time, and identity for inputs already in [0, Q).
+	let a = crate::reduce::caddq(a);
 	let gamma2 = GAMMA2 as i32;
 	let mut a1: i32 = (a + 127) >> 7;
 	if GAMMA2 == GAMMA2_32 {
@@ -73,6 +105,18 @@ pub fn decompose<const GAMMA2: usize>(a: i32) -> (i32, i32) {
 /// Branchless via sign-bit arithmetic: the inputs are derived from secret data
 /// (w0 - c*s2 + c*t0) and this runs on rejected signing attempts whose hints are never
 /// published, so a data-dependent branch here could leak.
+///
+/// # Preconditions
+///
+/// `a0` and `a1` are a [`decompose`] output (`a0` the centered low part, `a1`
+/// the high part). `a0` must satisfy `|a0| < Q`: the branchless comparisons
+/// below add/subtract `GAMMA2` to it, so an out-of-domain `a0` near the `i32`
+/// extremes overflows (panic in overflow-checked builds, silent wraparound
+/// otherwise). This function deliberately does **not** validate at runtime —
+/// a data-dependent branch on the secret `a0` would defeat its constant-time
+/// purpose — so callers reaching it with peer-controlled integers (e.g. an
+/// FFI wrapper) must bound them first. The bound holds automatically for any
+/// `a0` produced by [`decompose`].
 ///
 /// Returns 1 if overflow, i.e. if a0 > GAMMA2, or a0 < -GAMMA2, or (a0 == -GAMMA2 && a1 != 0).
 pub fn make_hint<const GAMMA2: usize>(a0: i32, a1: i32) -> i32 {
@@ -245,5 +289,43 @@ mod tests {
 	#[test]
 	fn make_hint_boundaries_gamma2_88() {
 		make_hint_check::<GAMMA2_88>();
+	}
+
+	/// Security review: the rounding helpers are defined on the field element
+	/// `a mod^+ Q`, so a signed representative and its standard representative
+	/// (`a` and `a + Q`) must decompose identically. `Poly::from_coeffs`
+	/// admits all of `(-Q, Q)` and the module contract promises that range is
+	/// valid for every public routine, but before canonicalization a
+	/// negative-but-valid input was fed straight into the FIPS formula and
+	/// produced non-canonical bits (e.g. `power2round(-1)` returned `(-1, 0)`
+	/// instead of `power2round(Q-1) = (0, 1023)`).
+	#[test]
+	fn power2round_canonicalizes_signed_representatives() {
+		for a in [-1, -2, -1000, -(GAMMA2_32 as i32), -(Q - 1)] {
+			assert_eq!(
+				power2round(a),
+				power2round(a + Q),
+				"power2round({a}) must equal power2round({}) (same field element)",
+				a + Q
+			);
+		}
+	}
+
+	#[test]
+	fn decompose_canonicalizes_signed_representatives() {
+		for a in [-1, -2, -1000, -(GAMMA2_32 as i32), -(GAMMA2_88 as i32), -(Q - 1)] {
+			assert_eq!(
+				decompose::<GAMMA2_32>(a),
+				decompose::<GAMMA2_32>(a + Q),
+				"decompose::<32>({a}) must equal decompose::<32>({})",
+				a + Q
+			);
+			assert_eq!(
+				decompose::<GAMMA2_88>(a),
+				decompose::<GAMMA2_88>(a + Q),
+				"decompose::<88>({a}) must equal decompose::<88>({})",
+				a + Q
+			);
+		}
 	}
 }
