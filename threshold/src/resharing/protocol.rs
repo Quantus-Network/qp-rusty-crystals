@@ -2716,8 +2716,10 @@ fn single_share_weighted_norm(share: &NewShareData, nu: f64) -> f64 {
 /// ML-DSA-44 ships the same (2,4)/(3,5) enlargements as 87 (its overshoots are
 /// nearly identical) but *no* `(4,6)` entry: κ = 1.25 collapses the
 /// per-iteration acceptance under its verification ceilings, so `(4,6)` keeps
-/// base parameters and reshares into a 4-of-6 committee fail closed at the
-/// Round-5 guard (overshoot 1.166 > κ = 1).
+/// base parameters. Reshares into a 4-of-6 committee would fail closed at the
+/// Round-5 guard (overshoot 1.166 > κ = 1); `(4,6)` is therefore listed in
+/// the variant's `RESHARING_UNSUPPORTED` table and `ResharingConfig::new`
+/// rejects it up front (see `crate::params::resharing_supported`).
 pub fn resharing_norm_enlargement(threshold: u32, parties: u32) -> f64 {
 	crate::params::resharing_kappa(threshold, parties)
 }

@@ -246,6 +246,20 @@ impl ResharingConfig {
 			});
 		}
 
+		// A (t, n) that is valid for signing can still be an impossible
+		// reshare *target*: on ML-DSA-44, (4, 6) ships no κ enlargement, so
+		// the Round-5 recovered-partial guard is guaranteed to reject honest
+		// reshares (measured overshoot 1.166 > κ = 1). Reject at construction
+		// time rather than letting every party burn Rounds 1–5 on a session
+		// the parameter file declares unable to complete. Only the new
+		// committee needs this check — old shares never hit the guard.
+		if !crate::params::resharing_supported(new_threshold, new_n) {
+			return Err(ResharingConfigError::UnsupportedNewCommittee {
+				threshold: new_threshold,
+				parties: new_n,
+			});
+		}
+
 		Ok(Self {
 			old_threshold: actual_old_threshold,
 			old_participants: old_participant_list,
@@ -379,6 +393,11 @@ pub enum ResharingConfigError {
 	InvalidOldThreshold { threshold: u32, parties: u32 },
 	/// Invalid new committee threshold.
 	InvalidNewThreshold { threshold: u32, parties: u32 },
+	/// The new committee's `(t, n)` is valid for signing but the active
+	/// parameter set declares resharing *into* it infeasible (no κ
+	/// enlargement ships, so the Round-5 recovered-partial guard would
+	/// reject honest reshares). E.g. `(4, 6)` on ML-DSA-44.
+	UnsupportedNewCommittee { threshold: u32, parties: u32 },
 	/// Too many parties in old committee (max 6).
 	TooManyOldParties { parties: u32, max: u32 },
 	/// Too many parties in new committee (max 6).
@@ -412,6 +431,16 @@ impl fmt::Display for ResharingConfigError {
 			},
 			ResharingConfigError::InvalidNewThreshold { threshold, parties } => {
 				write!(f, "Invalid new threshold: t={}, n={}", threshold, parties)
+			},
+			ResharingConfigError::UnsupportedNewCommittee { threshold, parties } => {
+				write!(
+					f,
+					"Resharing into a {}-of-{} committee is not supported on {} \
+					 (no κ enlargement; the Round-5 guard would reject honest reshares)",
+					threshold,
+					parties,
+					crate::params::VARIANT_NAME
+				)
 			},
 			ResharingConfigError::TooManyOldParties { parties, max } => {
 				write!(f, "Too many parties in old committee: {} (max {})", parties, max)
@@ -1813,6 +1842,68 @@ mod tests {
 		let result =
 			ResharingConfig::new(None, 1, vec![0, 1, 2], 2, vec![0, 1, 2, 3], 3, pk.clone());
 		assert!(matches!(result, Err(ResharingConfigError::InvalidOldThreshold { .. })));
+	}
+
+	/// Security review: ML-DSA-44 declares resharing *into* a 4-of-6 committee
+	/// infeasible (`params_tables_44.rs` omits the `(4, 6)` κ enlargement, so
+	/// the Round-5 recovered-partial guard rejects honest reshares at κ = 1).
+	/// `ThresholdConfig::new(4, 6)` still succeeds — freshly-dealt 4-of-6
+	/// committees sign normally — so the config constructor must check
+	/// resharing support explicitly. Without it, a coordinator can start a
+	/// session the parameter file guarantees cannot complete, wasting all
+	/// parties' Rounds 1–5 before the guaranteed late failure.
+	#[cfg(all(feature = "ml-dsa-44", not(feature = "ml-dsa-87"), not(feature = "ml-dsa-65")))]
+	#[test]
+	fn test_config_rejects_fail_closed_new_committee_44() {
+		// NewOnly party 5: in the new committee, not in the old.
+		let result = ResharingConfig::new(
+			None,
+			2,
+			vec![0, 1, 2],
+			4,
+			vec![0, 1, 2, 3, 4, 5],
+			5,
+			make_test_public_key(),
+		);
+		assert!(
+			matches!(
+				result,
+				Err(ResharingConfigError::UnsupportedNewCommittee { threshold: 4, parties: 6 })
+			),
+			"ML-DSA-44 resharing into a 4-of-6 committee must be rejected at \
+			 construction time, got {:?}",
+			result.map(|_| ())
+		);
+
+		// Resharing *from* a 4-of-6 old committee stays allowed: only new
+		// shares hit the Round-5 recovered-partial guard.
+		let result = ResharingConfig::new(
+			None,
+			4,
+			vec![0, 1, 2, 3, 4, 5],
+			3,
+			vec![1, 2, 3, 4, 6],
+			6,
+			make_test_public_key(),
+		);
+		assert!(result.is_ok(), "resharing from a 4-of-6 old committee must stay valid");
+	}
+
+	/// On ML-DSA-65/87 the `(4, 6)` κ enlargement ships, so resharing into a
+	/// 4-of-6 committee is supported and must keep working.
+	#[cfg(any(feature = "ml-dsa-87", feature = "ml-dsa-65"))]
+	#[test]
+	fn test_config_accepts_4_of_6_new_committee_65_87() {
+		let result = ResharingConfig::new(
+			None,
+			2,
+			vec![0, 1, 2],
+			4,
+			vec![0, 1, 2, 3, 4, 5],
+			5,
+			make_test_public_key(),
+		);
+		assert!(result.is_ok(), "4-of-6 reshares are supported on ML-DSA-65/87: {:?}", result.err());
 	}
 
 	#[test]

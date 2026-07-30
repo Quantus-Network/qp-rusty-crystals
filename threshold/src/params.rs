@@ -145,6 +145,13 @@ pub const fn subshare_coeff_bound(eta: usize) -> i32 {
 /// `resharing::resharing_norm_enlargement` for the full analysis). Configs
 /// absent from the table reshare at `κ = 1` (base signing parameters).
 ///
+/// A missing table row alone does **not** mean the reshare can succeed:
+/// configs listed in `RESHARING_UNSUPPORTED` (see [`resharing_supported`])
+/// have a measured honest overshoot above 1 with no shipped enlargement, so
+/// the base κ = 1 guard is guaranteed to reject them. Callers that admit new
+/// committees must check [`resharing_supported`]; this function only supplies
+/// the guard factor for configurations already admitted.
+///
 /// Invariant: any entry here with `κ > 1` must have its `HYPERBALL` and
 /// `K_ITERATIONS` entries derived at the *enlarged* radii, so the guard bound
 /// and the sampling radii stay consistent.
@@ -156,8 +163,53 @@ pub fn resharing_kappa(t: u32, n: u32) -> f64 {
 		.unwrap_or(1.0)
 }
 
-#[cfg(test)]
+/// Whether resharing *into* a `(t, n)` committee is supported on this
+/// parameter set.
+///
+/// `(t, n)` combinations valid for signing (present in `K_ITERATIONS`) may
+/// still be impossible reshare targets: on ML-DSA-44, `(4, 6)` ships no κ
+/// enlargement because its verification ceilings collapse the per-iteration
+/// acceptance, so the Round-5 recovered-partial guard rejects honest reshares
+/// (measured overshoot 1.166 > κ = 1). Such configs are listed in the
+/// per-variant `RESHARING_UNSUPPORTED` table and must be rejected when a
+/// resharing session is configured, instead of failing after Rounds 1–5.
+///
+/// Returns `false` for configurations that are not signing-supported at all;
+/// callers are expected to validate signing support separately (via
+/// [`k_iterations`] / `ThresholdConfig::new`) for a precise error.
+pub fn resharing_supported(t: u32, n: u32) -> bool {
+	k_iterations(t, n).is_some() &&
+		!tables::RESHARING_UNSUPPORTED.iter().any(|&(tt, nn)| tt == t && nn == n)
+}
+
+	#[cfg(test)]
 mod tests {
+	/// `RESHARING_UNSUPPORTED` marks signing-valid configs that cannot be
+	/// reshared into. Each entry must therefore (a) exist in `K_ITERATIONS`
+	/// (otherwise it is dead — signing validation already rejects it) and
+	/// (b) have no `RESHARING_KAPPA` enlargement (an enlargement would mean
+	/// the reshare *is* supported, contradicting the listing).
+	#[test]
+	fn resharing_unsupported_table_is_consistent() {
+		for &(t, n) in super::tables::RESHARING_UNSUPPORTED {
+			assert!(
+				super::k_iterations(t, n).is_some(),
+				"RESHARING_UNSUPPORTED ({t}, {n}) is not a signing-supported config"
+			);
+			assert!(
+				!super::tables::RESHARING_KAPPA.iter().any(|&(tt, nn, _)| tt == t && nn == n),
+				"RESHARING_UNSUPPORTED ({t}, {n}) contradicts a RESHARING_KAPPA enlargement"
+			);
+			assert!(!super::resharing_supported(t, n));
+		}
+		// Everything not listed reshares (κ ≥ 1, guard accepts honest traffic).
+		for &(t, n, _) in super::tables::K_ITERATIONS {
+			let listed =
+				super::tables::RESHARING_UNSUPPORTED.iter().any(|&(tt, nn)| tt == t && nn == n);
+			assert_eq!(super::resharing_supported(t, n), !listed);
+		}
+	}
+
 	#[test]
 	fn subshare_coeff_bound_tracks_eta() {
 		// 10 × (⌊150/20⌋ + 19·2) = 10 × 45 = 450
@@ -227,5 +279,9 @@ mod tests {
 			 params_tables_44.rs declares infeasible (fail-closed)"
 		);
 		assert_eq!(super::resharing_kappa(4, 6), 1.0, "(4,6) must reshare fail-closed at κ = 1");
+		assert!(
+			!super::resharing_supported(4, 6),
+			"(4,6) must be declared an unsupported reshare target on ML-DSA-44"
+		);
 	}
 }

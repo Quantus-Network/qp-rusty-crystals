@@ -9,9 +9,11 @@
 // (kappa = 1.10 / 1.15). (4,6) CANNOT be enlarged on this parameter set: its
 // tight verification ceilings (gamma1 = 2^17, gamma2 = (Q-1)/88) collapse the
 // per-iteration acceptance at kappa = 1.25, so (4,6) keeps base signing
-// parameters and resharing *into* a 4-of-6 committee fails closed at the
-// Round-5 recovered-partial guard (overshoot 1.166 > kappa 1).
-// Freshly-dealt/DKG 4-of-6 committees sign normally.
+// parameters and resharing *into* a 4-of-6 committee is unsupported: it is
+// listed in RESHARING_UNSUPPORTED below and rejected when the resharing
+// session is configured (it would otherwise fail closed at the Round-5
+// recovered-partial guard, overshoot 1.166 > kappa 1, after all parties
+// spent Rounds 1-5). Freshly-dealt/DKG 4-of-6 committees sign normally.
 
 pub(super) const K_ITERATIONS: &[(u32, u32, u32)] = &[
 	(2, 2, 6),
@@ -53,3 +55,12 @@ pub(super) const HYPERBALL: &[(u32, u32, f64, f64, f64)] = &[
 /// absent (κ = 1): enlargement is infeasible under this variant's verification
 /// ceilings, so reshares into 4-of-6 fail closed (see header comment).
 pub(super) const RESHARING_KAPPA: &[(u32, u32, f64)] = &[(2, 4, 1.10), (3, 5, 1.15)];
+
+/// New-committee `(t, n)` shapes that resharing *into* cannot produce on
+/// ML-DSA-44, even though they are valid for signing (present in
+/// `K_ITERATIONS`). The measured honest overshoot exceeds the base κ = 1
+/// guard and no enlargement ships (see `RESHARING_KAPPA`), so the Round-5
+/// recovered-partial guard is guaranteed to reject honest reshares.
+/// `ResharingConfig` rejects these at construction time instead of failing
+/// late.
+pub(super) const RESHARING_UNSUPPORTED: &[(u32, u32)] = &[(4, 6)];
