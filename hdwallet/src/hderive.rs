@@ -2,6 +2,7 @@ use alloc::vec::Vec;
 use core::{ops::Deref, str::FromStr};
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
+use zeroize::Zeroize;
 
 use crate::{SensitiveBytes32, MAX_DERIVATION_DEPTH, MAX_DERIVATION_PATH_BYTES};
 
@@ -163,13 +164,17 @@ impl ExtendedPrivKey {
 			Hmac::new_from_slice(b"Dilithium seed").expect("seed is always correct; qed");
 		hmac.update(seed);
 
-		let result = hmac.finalize().into_bytes();
+		// `into_bytes()` yields a 64-byte buffer holding secret_key || chain_code.
+		// It is not a zeroizing type, so wipe it once the halves are copied into
+		// the self-zeroizing `SensitiveBytes32` fields.
+		let mut result = hmac.finalize().into_bytes();
 		let (secret_key, chain_code) = result.split_at(32);
 
 		let mut sk = ExtendedPrivKey {
 			secret_key: SensitiveBytes32::from(&mut secret_key.try_into().unwrap()),
 			chain_code: SensitiveBytes32::from(&mut chain_code.try_into().unwrap()),
 		};
+		result.as_mut_slice().zeroize();
 
 		for child in path.as_ref() {
 			sk = sk.child(*child)?;
@@ -187,17 +192,24 @@ impl ExtendedPrivKey {
 			.map_err(|_| Error::InvalidChildNumber)?;
 
 		hmac.update(&[0]);
-		hmac.update(&self.secret());
+		// Feed the HMAC directly from the stored secret rather than
+		// `self.secret()`, which would materialize a throwaway `[u8; 32]` copy
+		// on the stack that is never wiped.
+		hmac.update(self.secret_key.as_bytes());
 
 		hmac.update(&child.to_bytes());
 
-		let result = hmac.finalize().into_bytes();
+		// See `derive`: wipe the 64-byte secret_key || chain_code buffer once
+		// its halves are copied into the self-zeroizing fields below.
+		let mut result = hmac.finalize().into_bytes();
 		let (secret_key, chain_code) = result.split_at(32);
 
-		Ok(ExtendedPrivKey {
+		let child = ExtendedPrivKey {
 			secret_key: SensitiveBytes32::from(&mut secret_key.try_into().unwrap()),
 			chain_code: SensitiveBytes32::from(&mut chain_code.try_into().unwrap()),
-		})
+		};
+		result.as_mut_slice().zeroize();
+		Ok(child)
 	}
 }
 

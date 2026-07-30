@@ -649,6 +649,12 @@ pub fn uniform_eta<const ETA: usize>(
 
 	// Copy first N coefficients to polynomial output
 	output_polynomial.coeffs[..N].copy_from_slice(&temporary_coefficient_storage[..N]);
+
+	// These stack buffers held secret s1/s2 coefficients and the raw SHAKE
+	// keystream; the `Poly` output is `ZeroizeOnDrop`, but these temporaries
+	// are not, so wipe them before returning. (`state` is `ZeroizeOnDrop`.)
+	temporary_coefficient_storage.zeroize();
+	shake_output_buffer.zeroize();
 }
 
 /// Sample polynomial with uniformly random coefficients in [-(GAMMA1 - 1), GAMMA1] by
@@ -678,6 +684,10 @@ pub fn uniform_gamma1<const GAMMA1: usize, const PZ: usize>(
 		.first_chunk::<PZ>()
 		.expect("gamma1 buffer covers the packed-z size");
 	z_unpack::<GAMMA1, PZ>(a, z_bytes);
+
+	// `buf` held the packed secret masking vector `y`; the `Poly` output is
+	// `ZeroizeOnDrop`, but this squeeze buffer is not, so wipe it.
+	buf.zeroize();
 }
 
 /// Implementation of H. Samples polynomial with TAU nonzero coefficients in {-1,1} using the output
