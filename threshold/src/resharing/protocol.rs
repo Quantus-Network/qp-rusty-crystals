@@ -65,6 +65,16 @@ use super::types::{
 };
 use crate::keygen::dkg::TranscriptSigner;
 
+/// Fixed, secret-independent reason placed in a failed party's public Round 5
+/// broadcast (`ResharingRound5Broadcast.error_message`).
+///
+/// Round 5 verification failures can be secret-dependent: the stored-share and
+/// recovered-partial norm guards fail based on the exact norms of the honest
+/// party's aggregated secret shares. Their detailed `Display` strings embed
+/// those norm values, so they are logged locally only and never broadcast — see
+/// `handle_round5_generate`.
+const ROUND5_VERIFICATION_FAILED_REASON: &str = "resharing verification failed";
+
 /// Domain separator for the per-subset PRF seed (includes public session seed for randomization).
 const SUBSET_SEED_DOMAIN: &[u8] = b"resharing-subset-prf-v3";
 
@@ -1524,23 +1534,29 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		// New committee members verify privately-received sub-shares against the
 		// broadcast commitments, sum them into new subset shares, and commit.
 		if self.config.role().is_new_committee() {
-			match self.verify_and_aggregate_new_shares() {
-				Ok(commits) => match self.verify_stored_new_share_norms() {
-					Ok(()) => match self.verify_recovered_partial_norms() {
-						Ok(()) => share_commitments = commits,
-						Err(e) => {
-							success = false;
-							error_message = Some(e.to_string());
-						},
-					},
-					Err(e) => {
-						success = false;
-						error_message = Some(e.to_string());
-					},
-				},
+			let outcome = self.verify_and_aggregate_new_shares().and_then(|commits| {
+				self.verify_stored_new_share_norms()?;
+				self.verify_recovered_partial_norms()?;
+				Ok(commits)
+			});
+			match outcome {
+				Ok(commits) => share_commitments = commits,
 				Err(e) => {
+					// SECURITY: Round 5 verification failures can be secret-dependent
+					// — the stored-share and recovered-partial norm guards fail based
+					// on the exact norms of this party's aggregated secret shares, and
+					// their `Display` strings embed those norm values. Broadcasting
+					// them turns a private abort into a norm/inner-product oracle a
+					// malicious dealer can query with chosen bounded Round 4
+					// perturbations. Log the detailed error locally and put only a
+					// fixed, value-free reason on the public wire message.
+					log::warn!(
+						"Round 5 verification failed (party {}): {}",
+						self.config.my_party_id(),
+						e
+					);
 					success = false;
-					error_message = Some(e.to_string());
+					error_message = Some(ROUND5_VERIFICATION_FAILED_REASON.to_string());
 				},
 			}
 		}
@@ -3706,6 +3722,103 @@ mod tests {
 			err.to_string().contains("exceeds partial-secret norm bound"),
 			"unexpected error: {}",
 			err
+		);
+	}
+
+	/// Security review regression: a Round 5 verification failure must not put
+	/// secret-dependent norm values (derived from honest new-share material) into
+	/// the public `ResharingRound5Broadcast.error_message`. The stored-share and
+	/// recovered-partial guards fail based on the exact norms of the party's
+	/// aggregated secret shares; broadcasting those numbers turns repeated failed
+	/// reshares into a norm/inner-product oracle on honest share coefficients.
+	#[test]
+	fn round5_broadcast_omits_secret_dependent_norm_diagnostics() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[11u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(1, &[0, 1, 2]),
+			[1u8; 32],
+			&[2u8; 32],
+			0,
+		);
+		// Post-Act state: the full old committee is active, so the designated
+		// dealers are party 0 (for old subsets 0b011, 0b101) and party 1 (0b110).
+		protocol.active_set = Some(vec![0, 1, 2]);
+
+		// An oversized-but-bounded contribution: every coefficient sits just under
+		// SUBSHARE_COEFF_BOUND so the per-contribution bound check passes, yet the
+		// aggregated stored share blows past the single-share norm envelope. This
+		// models a malicious dealer probing the norm guard.
+		let delta = SUBSHARE_COEFF_BOUND - 50;
+		assert!(delta > 0);
+		let big = NewShareData { s1: [[delta; N as usize]; L], s2: [[delta; N as usize]; K] };
+		assert!(big.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
+		let zero = NewShareData::new();
+
+		// Our index (party 1) belongs to new subsets 0b011 and 0b110. Put the sole
+		// big contribution on (i=0b011, j=0b011); everything else is zero, so the
+		// aggregated share for new subset 0b011 equals `big` and trips the guard.
+		let make = |i: SubsetMask, j: SubsetMask| -> NewShareData {
+			if i == 0b011 && j == 0b011 {
+				big.clone()
+			} else {
+				zero.clone()
+			}
+		};
+		let target_js = [0b011u16, 0b110u16];
+		for (dealer, i_masks) in [(0u32, &[0b011u16, 0b101u16][..]), (1u32, &[0b110u16][..])] {
+			let mut contributions: BTreeMap<SubsetPair, NewShareData> = BTreeMap::new();
+			let mut commitments: BTreeMap<SubsetPair, [u8; COMMITMENT_HASH_SIZE]> = BTreeMap::new();
+			for &i in i_masks {
+				for &j in &target_js {
+					let r = make(i, j);
+					commitments.insert((i, j), commit_subshare(i, j, &r));
+					contributions.insert((i, j), r);
+				}
+			}
+			protocol.round3_broadcasts.insert(
+				dealer,
+				ResharingRound3Broadcast { ssid: protocol.ssid, party_id: dealer, commitments },
+			);
+			protocol.round4_messages.insert(
+				dealer,
+				ResharingRound4Message {
+					ssid: protocol.ssid,
+					from_party_id: dealer,
+					to_party_id: 1,
+					contributions,
+				},
+			);
+		}
+
+		let action = protocol.handle_round5_generate().expect("round 5 generate");
+		assert!(matches!(action, Action::SendMany(_)));
+
+		let broadcast = protocol.round5_broadcasts.get(&1).expect("own Round 5 broadcast");
+		assert!(!broadcast.success, "the oversized aggregated share must fail verification");
+		let msg = broadcast.error_message.clone().expect("a failure reason must be set");
+
+		// The public wire message must carry no secret-dependent norm diagnostics:
+		// no norm/bound labels, and no numeric value at all.
+		assert!(!msg.contains("weighted_norm"), "leaked norm label on the wire: {msg}");
+		assert!(!msg.contains("B_G"), "leaked bound label on the wire: {msg}");
+		assert!(!msg.contains("sqrt(tau)"), "leaked norm expression on the wire: {msg}");
+		assert!(!msg.contains('='), "wire reason embeds a value assignment: {msg}");
+		assert!(
+			!msg.chars().any(|c| c.is_ascii_digit()),
+			"wire reason embeds digits (possible secret leak): {msg}"
 		);
 	}
 
