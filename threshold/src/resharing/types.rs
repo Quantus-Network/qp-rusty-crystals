@@ -1903,7 +1903,11 @@ mod tests {
 			5,
 			make_test_public_key(),
 		);
-		assert!(result.is_ok(), "4-of-6 reshares are supported on ML-DSA-65/87: {:?}", result.err());
+		assert!(
+			result.is_ok(),
+			"4-of-6 reshares are supported on ML-DSA-65/87: {:?}",
+			result.err()
+		);
 	}
 
 	#[test]

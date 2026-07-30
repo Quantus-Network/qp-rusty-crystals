@@ -1294,8 +1294,8 @@ mod tests {
 		// signed input like -500 reconstructs to its standard representative
 		// Q-500, not the signed original.
 		for i in 0..3 {
-			let reconstructed =
-				(a.coeffs[i] as i64 * (1 << params::D) + a0.coeffs[i] as i64).rem_euclid(params::Q as i64);
+			let reconstructed = (a.coeffs[i] as i64 * (1 << params::D) + a0.coeffs[i] as i64)
+				.rem_euclid(params::Q as i64);
 			assert_eq!(
 				reconstructed,
 				(original.coeffs[i] as i64).rem_euclid(params::Q as i64),

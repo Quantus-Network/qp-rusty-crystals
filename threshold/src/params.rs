@@ -182,7 +182,7 @@ pub fn resharing_supported(t: u32, n: u32) -> bool {
 		!tables::RESHARING_UNSUPPORTED.iter().any(|&(tt, nn)| tt == t && nn == n)
 }
 
-	#[cfg(test)]
+#[cfg(test)]
 mod tests {
 	/// `RESHARING_UNSUPPORTED` marks signing-valid configs that cannot be
 	/// reshared into. Each entry must therefore (a) exist in `K_ITERATIONS`
