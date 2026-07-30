@@ -4773,12 +4773,15 @@ fn test_expected_active_set_completes_without_timeout() {
 	assert!(is_valid, "Signature with reshared shares should verify");
 }
 
-/// A committed member outside the expected set is still included in Act: the
-/// expected set is a liveness floor, not a cap. Everyone is online here, and
-/// messages flow freely, so whether Act ends up {1, 2} or {0, 1, 2} depends on
-/// arrival order — either way the session must complete without a timeout.
+/// The expected set caps Act: a live old member outside it (party 2 here) is
+/// excluded from the active set even though its commitment arrives, becoming
+/// a passive observer instead of a dealer. The session must still complete —
+/// and because party 2 is in the new committee, it must still receive a
+/// working new share (verified by signing with it below). This is the
+/// flip side of the one-packet-veto fix: exclusion costs an outsider nothing
+/// but its dealer role, while inclusion would let it stall the handoff.
 #[test]
-fn test_expected_active_set_does_not_exclude_live_members() {
+fn test_expected_active_set_excludes_live_outsider_but_completes() {
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
 	let seed = [42u8; 32];
 	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
@@ -4811,6 +4814,108 @@ fn test_expected_active_set_does_not_exclude_live_members() {
 	let is_valid =
 		run_signing_and_verify(&signing_shares, &public_key, new_config, b"expected floor", b"");
 	assert!(is_valid, "Signature with reshared shares should verify");
+}
+
+/// Security review: the expected active set must be an *inclusion policy*,
+/// not merely an early proposal trigger. Round 1 accepts commitments from any
+/// old committee member, and every party later blocks on the Round 2 reveal
+/// and Round 3/4 dealing of every `Act` member. If the leader builds `Act`
+/// from all observed commitments, an old member that was deliberately left
+/// out of the expected set (leaving, compromised, or structurally unreachable
+/// for later rounds) can send a single Round 1 packet just before the
+/// proposal, enter `Act`, and then go silent — a one-packet veto that stalls
+/// the handoff and defeats the deterministic-liveness purpose of
+/// `set_expected_active_set`.
+///
+/// Old {0, 1, 2} (t = 2), new {1, 2, 3}, leader = 1, expected = {1, 2}.
+/// Party 0 plays the attacker: it commits first, then never speaks again.
+#[test]
+fn test_expected_active_set_excludes_late_ready_outsider() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let seed = [42u8; 32];
+	let (public_key, shares) = generate_with_dealer(&seed, config).expect("keygen");
+
+	let session_nonce = [0x77u8; 32];
+	let make_protocol = |party_id: u32| {
+		let share = shares.iter().find(|s| s.party_id() == party_id).cloned();
+		let config = ResharingConfig::new(
+			share,
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![1, 2, 3],
+			party_id,
+			public_key.clone(),
+		)
+		.expect("valid config");
+		let mut seed = [9u8; 32];
+		seed[0..4].copy_from_slice(&party_id.to_le_bytes());
+		new_test_protocol(config, seed, &session_nonce)
+	};
+
+	let mut attacker = make_protocol(0);
+	let mut leader = make_protocol(1);
+	let mut party2 = make_protocol(2);
+
+	leader.set_expected_active_set(&[1, 2]).expect("valid expected set");
+
+	// Round 1 commitments.
+	let commit0 = match attacker.poke().expect("attacker round 1") {
+		Action::SendMany(data) => data,
+		other => panic!("expected attacker commitment broadcast, got {:?}", other),
+	};
+	let commit1 = match leader.poke().expect("leader round 1") {
+		Action::SendMany(data) => data,
+		other => panic!("expected leader commitment broadcast, got {:?}", other),
+	};
+	let commit2 = match party2.poke().expect("party 2 round 1") {
+		Action::SendMany(data) => data,
+		other => panic!("expected party 2 commitment broadcast, got {:?}", other),
+	};
+
+	// The attack: the excluded member's Ready lands on the leader *before*
+	// the expected members complete.
+	leader.message(0, commit0.clone()).expect("deliver attacker commit to leader");
+	leader.message(2, commit2.clone()).expect("deliver c2 to leader");
+
+	// Every expected member has now committed, so the proposal fires. The
+	// proposed Act must be exactly the expected set — the attacker's
+	// commitment must not buy it a seat (and with it, a reveal/dealing veto).
+	let act_proposal = match leader.poke().expect("leader act proposal") {
+		Action::SendMany(data) => data,
+		other => panic!("expected Act proposal broadcast, got {:?}", other),
+	};
+	assert_eq!(
+		leader.active_set(),
+		Some(&[1u32, 2][..]),
+		"a committed member outside the expected set must not enter Act"
+	);
+
+	// Liveness past the old stall point: party 2 resolves the proposal and
+	// reveals with only the expected members' commitments...
+	party2.message(1, commit1).expect("deliver c1 to party 2");
+	party2.message(0, commit0).expect("deliver attacker commit to party 2");
+	party2.message(1, act_proposal).expect("deliver act proposal to party 2");
+	let reveal2 = match party2.poke().expect("party 2 reveals") {
+		Action::SendMany(data) => data,
+		other => panic!("expected party 2's Round 2 reveal, got {:?}", other),
+	};
+	let msg: ResharingMessage = borsh::from_slice(&reveal2).expect("decode reveal");
+	assert!(matches!(msg, ResharingMessage::Round2(_)), "expected a Round 2 entropy reveal");
+
+	// ...and the leader advances to Round 3 dealing without the attacker ever
+	// revealing. Before the fix this waited forever on Act member 0.
+	leader.message(2, reveal2).expect("deliver reveal to leader");
+	match leader.poke().expect("leader advances") {
+		Action::SendMany(data) => {
+			let msg: ResharingMessage = borsh::from_slice(&data).expect("decode round 3");
+			assert!(
+				matches!(msg, ResharingMessage::Round2(_) | ResharingMessage::Round3(_)),
+				"leader must progress past entropy exchange without the outsider"
+			);
+		},
+		other => panic!("leader must keep progressing without the outsider, got {:?}", other),
+	}
 }
 
 /// `set_expected_active_set` validation: leader-only, must be a subset of the

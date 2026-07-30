@@ -733,12 +733,19 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// the new participant set, so old-only members can never connect and the
 	/// fast path (all old members ready) would stall forever.
 	///
-	/// This is deterministic where `close_ready_window` is timing-dependent:
-	/// commitments from members outside the expected set are still accepted
-	/// (and included in `Act`) if they arrive before the proposal, so this
-	/// never excludes a live member, and safety is unaffected — every party
-	/// still validates the proposed `Act` and reveals only after holding all
-	/// of `Act`'s commitments.
+	/// This is deterministic where `close_ready_window` is timing-dependent,
+	/// and the expected set is also an *inclusion policy*: once set, `Act` is
+	/// restricted to the expected members, and commitments from old members
+	/// outside it are ignored for `Act` membership. Every party blocks on the
+	/// Round 2 reveal and Round 3/4 dealing of every `Act` member, so
+	/// admitting an outsider that manages to deliver a single Round 1 packet
+	/// would hand it a liveness veto (commit, then go silent) — exactly the
+	/// member the caller declared unreachable or leaving. Excluding a live
+	/// old member is safe (it just doesn't deal; dealers are
+	/// `min(I ∩ Act)`, and it still receives its new share if it is in the
+	/// new committee), and safety is unaffected — every party still
+	/// validates the proposed `Act` and reveals only after holding all of
+	/// `Act`'s commitments.
 	///
 	/// Call before or during Rounds 1-2, on the leader. Requires
 	/// `expected ⊆ old committee` and `|expected| ≥ t_old`.
@@ -800,8 +807,23 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			return Ok(None);
 		}
 
-		// BTreeMap keys iterate in sorted order, so `act` is sorted.
-		let act: Vec<ParticipantId> = self.round1_entropy_commits.keys().copied().collect();
+		// The expected set is an *inclusion policy*, not just an early
+		// trigger: every party later blocks on the Round 2 reveal and Round
+		// 3/4 dealing of every Act member, so admitting a committed member
+		// from outside the expected set would hand it a one-packet liveness
+		// veto (send Round 1, then go silent) — exactly the member the
+		// caller declared unreachable or leaving. Excluding a live member is
+		// safe: any Act with |Act| >= t_old intersects every old RSS subset,
+		// and dealers fail over to min(I ∩ Act).
+		let act: Vec<ParticipantId> = match &self.expected_active_set {
+			Some(expected) => expected
+				.iter()
+				.copied()
+				.filter(|p| self.round1_entropy_commits.contains_key(p))
+				.collect(),
+			// BTreeMap keys iterate in sorted order, so `act` is sorted.
+			None => self.round1_entropy_commits.keys().copied().collect(),
+		};
 		let required = self.config.old_threshold() as usize;
 		if act.len() < required {
 			let err = ResharingProtocolError::InsufficientParties { required, received: act.len() };
