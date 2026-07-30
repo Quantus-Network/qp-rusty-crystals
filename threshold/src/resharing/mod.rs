@@ -106,12 +106,19 @@
 //! its config (check via `ResharingProtocol::old_share_erased`). Callers remain responsible for
 //! erasing their own copies of the old share (key files, keystore entries).
 //!
-//! The same erasure runs again on `Drop` — **including for failed or stalled sessions**. A
-//! session that aborts before Round 6 certification has produced no replacement share, so old
-//! committee members that moved their only live copy of the share into [`ResharingConfig`]
-//! MUST recover it via `ResharingProtocol::abort_and_take_existing_share` before dropping the
-//! failed protocol, then retry with a fresh session. Otherwise the old key material is destroyed
-//! and the group can fall below signing quorum.
+//! ## Working copy vs durable share
+//!
+//! [`ResharingConfig`] takes ownership of an in-memory **working copy** of the old share for
+//! the duration of one attempt. Production integrators are expected to keep the durable copy
+//! in persistent storage (keystore / permanent keyshare store) and load a clone into each
+//! attempt. Dropping a failed or stalled protocol therefore zeroizes only that working copy —
+//! it does **not** destroy the persisted share, and a retry simply reloads from storage.
+//!
+//! The same erasure runs again on `Drop` for session ephemerals and the working copy. Callers
+//! that truly move their only in-memory copy into [`ResharingConfig`] (no external durable
+//! store) must recover it via `ResharingProtocol::abort_and_take_existing_share` before
+//! dropping a failed protocol; otherwise that in-memory copy is gone and they cannot retry
+//! without reloading from wherever they persist shares.
 //!
 //! # Why Custom Protocol?
 //!

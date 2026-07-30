@@ -479,6 +479,12 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	///
 	/// Called automatically on successful completion and again on drop. The
 	/// completed output (if any) is preserved until [`Self::take_output`].
+	///
+	/// Erasing `config.existing_share` clears the in-memory **working copy**
+	/// loaded into this attempt. Durable key material is expected to live in
+	/// the caller's persistent store; see the module docs on working copy vs
+	/// durable share. In-memory-only callers use
+	/// [`Self::abort_and_take_existing_share`] before drop on abort paths.
 	fn zeroize_session_secrets(&mut self) {
 		self.seed.zeroize();
 		if let Some(ref mut entropy) = self.my_entropy {
@@ -618,14 +624,18 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		}
 	}
 
-	/// Recover the old committee share from a session that did not complete.
+	/// Recover the in-memory old-share working copy from a session that did
+	/// not complete.
 	///
-	/// Dropping the protocol erases every session secret, **including the old
-	/// share held in the config**. A session that failed or stalled before the
-	/// Round 6 certificate was produced has generated no replacement share, so
-	/// a caller that moved its only live copy of the old share into
-	/// [`ResharingConfig`] MUST call this before dropping the failed protocol,
-	/// or the old key material is lost and no retry is possible.
+	/// Dropping the protocol erases every session secret, including the
+	/// working copy held in the config. Production integrators that persist
+	/// the durable share outside the protocol do not need this path: a failed
+	/// attempt only loses the working copy, and a retry reloads from storage.
+	///
+	/// Callers that moved their only in-memory copy into [`ResharingConfig`]
+	/// (no external durable store) MUST call this before dropping a failed or
+	/// stalled protocol, or that in-memory copy is gone and no retry is
+	/// possible without reloading from wherever they persist shares.
 	///
 	/// Returns `None` for new-only parties, and after successful completion
 	/// (the share is erased at finalize; the new share from

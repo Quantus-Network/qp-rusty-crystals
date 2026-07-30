@@ -265,27 +265,28 @@ impl ResharingConfig {
 		self.existing_share.as_ref()
 	}
 
-	/// Securely erase the old committee share held in this config.
+	/// Securely erase the old-share **working copy** held in this config.
 	///
 	/// Called automatically when the protocol completes successfully, and again
-	/// when the protocol is dropped. Integrators should treat the returned new
-	/// share as the only live key material after a successful handoff. For
-	/// sessions that failed or stalled before completion, recover the share
-	/// with `ResharingProtocol::abort_and_take_existing_share` before
-	/// dropping the protocol.
+	/// when the protocol is dropped. This clears only the in-memory copy loaded
+	/// into the attempt; durable key material is expected to live in the
+	/// caller's persistent store. After a certified handoff, integrators should
+	/// erase that durable copy and treat the returned new share as the only live
+	/// key material. In-memory-only callers recover via
+	/// `ResharingProtocol::abort_and_take_existing_share` before drop on abort.
 	pub fn zeroize_existing_share(&mut self) {
 		if let Some(mut share) = self.existing_share.take() {
 			share.zeroize();
 		}
 	}
 
-	/// Take ownership of the old committee share, removing it from the config.
+	/// Take ownership of the old-share working copy, removing it from the config.
 	///
-	/// This is the abort-recovery path: a session that failed or stalled before
-	/// Round 6 certification has produced no replacement share, so the old share
-	/// must survive for a retry. Dropping the protocol (and with it this config)
-	/// zeroizes the share, so callers that moved their only live copy in must
-	/// take it back out first.
+	/// Abort-recovery for callers that moved their only in-memory copy in with
+	/// no external durable store. Dropping the protocol zeroizes this working
+	/// copy; take it back out first if you need it for a retry. Production
+	/// integrators that persist shares outside the protocol typically reload
+	/// from storage instead.
 	pub fn take_existing_share(&mut self) -> Option<PrivateKeyShare> {
 		self.existing_share.take()
 	}
