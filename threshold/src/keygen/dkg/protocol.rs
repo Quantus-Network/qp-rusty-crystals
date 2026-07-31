@@ -538,6 +538,19 @@ impl<S: TranscriptSigner> Dkg<S> {
 		&self.ssid
 	}
 
+	/// Check if the protocol has completed successfully.
+	pub fn is_complete(&self) -> bool {
+		self.state.is_complete()
+	}
+
+	/// Check if the protocol has failed terminally.
+	///
+	/// Every fatal `poke` error drives the state machine here; a failed
+	/// session holds no secret material and only reports its saved error.
+	pub fn is_failed(&self) -> bool {
+		self.state.is_failed()
+	}
+
 	/// Pop the next queued Round 1 private without leaving K_S behind.
 	///
 	/// `Vec::pop` alone moves the element out but leaves its bytes intact in
@@ -576,34 +589,69 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// * `Ok(DkgAction)` - The action to perform
 	/// * `Err(DkgError)` - If the protocol encounters an error
 	pub fn poke(&mut self) -> Result<DkgAction, DkgError> {
-		if let Some((to, private)) = self.pop_pending_private() {
-			return serialize_round1_private(to, private);
-		}
-
-		match self.state.phase {
-			DkgPhase::Initialized => self.start_round1(),
-			DkgPhase::Round1 => self.process_round1(),
-			DkgPhase::Round2 => self.process_round2(),
-			DkgPhase::Round3 => self.process_round3(),
-			DkgPhase::Round4 => self.process_round4(),
-			DkgPhase::Complete => {
-				let output = self
+		let result = if let Some((to, private)) = self.pop_pending_private() {
+			serialize_round1_private(to, private)
+		} else {
+			match self.state.phase {
+				DkgPhase::Initialized => self.start_round1(),
+				DkgPhase::Round1 => self.process_round1(),
+				DkgPhase::Round2 => self.process_round2(),
+				DkgPhase::Round3 => self.process_round3(),
+				DkgPhase::Round4 => self.process_round4(),
+				DkgPhase::Complete => self
 					.state
 					.output
 					.as_ref()
-					.ok_or_else(|| DkgError::InvalidState("Complete but no output".into()))?;
-				Ok(DkgAction::Return(output.clone()))
-			},
-			DkgPhase::Failed => {
-				let msg = self
-					.state
-					.error_message
-					.as_ref()
-					.cloned()
-					.unwrap_or_else(|| "unknown error".into());
-				Err(DkgError::InvalidState(msg))
+					.map(|output| DkgAction::Return(output.clone()))
+					.ok_or_else(|| DkgError::InvalidState("Complete but no output".into())),
+				DkgPhase::Failed => {
+					// Already terminal: keep reporting the saved error without
+					// re-running abort (which would re-wrap the message).
+					let msg = self
+						.state
+						.error_message
+						.as_ref()
+						.cloned()
+						.unwrap_or_else(|| "unknown error".into());
+					return Err(DkgError::InvalidState(msg));
+				},
+			}
+		};
+
+		// Common abort path: every fatal error from an active phase is
+		// terminal. The documented lifecycle has a Failed branch from every
+		// active phase, and integrations observe it via `is_failed()`;
+		// without this, a validation failure (e.g. CommitmentMismatch) left
+		// the phase at the current round, so a subsequent poke re-entered
+		// the failing round and secret round material stayed resident until
+		// the caller dropped the instance.
+		match result {
+			Ok(action) => Ok(action),
+			Err(error) => {
+				self.abort(&error);
+				Err(error)
 			},
 		}
+	}
+
+	/// Terminal abort: wipe all secret session material (mirroring `Drop`),
+	/// then record the `Failed` phase and the error message — in that order,
+	/// because `DkgState::zeroize` resets `phase` and `error_message` too.
+	/// Idempotent, so nested `poke` recursion may abort more than once.
+	fn abort(&mut self, error: &DkgError) {
+		self.state.zeroize();
+		self.seed.zeroize();
+		for (_, private) in self.pending_privates.iter_mut() {
+			private.zeroize();
+		}
+		self.pending_privates.clear();
+		for private in self.message_buffer.round1_privates.values_mut() {
+			private.zeroize();
+		}
+		self.message_buffer = DkgMessageBuffer::new();
+
+		self.state.phase = DkgPhase::Failed;
+		self.state.error_message = Some(format!("{}", error));
 	}
 
 	/// Process an incoming message from another party.
@@ -2814,6 +2862,45 @@ mod tests {
 			.any(|e| matches!(e, Some(DkgError::CommitmentMismatch { party_id: 2 })));
 
 		assert!(has_commitment_error, "At least one party should reject party 2's bad commitment");
+
+		// Security review: a fatal round error must be terminal, exactly like a
+		// `complete()` failure — the state machine transitions to Failed (so
+		// `is_failed()` is observable), secret round material is wiped, and a
+		// subsequent poke reports the saved error instead of re-entering the
+		// failed round. Before the fix, the CommitmentMismatch above left the
+		// phase at Round2 with randomness and shared secrets still resident.
+		for (party_id, error) in errors.iter().enumerate() {
+			if !matches!(error, Some(DkgError::CommitmentMismatch { party_id: 2 })) {
+				continue;
+			}
+			let dkg = &mut dkgs[party_id];
+			assert!(
+				dkg.is_failed(),
+				"party {} hit a fatal round error but is_failed() is false",
+				party_id
+			);
+			assert!(
+				dkg.state.my_randomness.is_none() &&
+					dkg.state.my_shared_secrets.is_none() &&
+					dkg.state.received_shared_secrets.is_none() &&
+					dkg.state.shared_secrets.is_none() &&
+					dkg.state.my_contributions.is_none(),
+				"party {} failed terminally but secret round material is still resident",
+				party_id
+			);
+			assert!(
+				dkg.state.error_message.is_some(),
+				"party {} failed without a saved error message",
+				party_id
+			);
+			// Terminal: poking again reports the saved failure rather than
+			// re-running the failed round's processing.
+			assert!(
+				matches!(dkg.poke(), Err(DkgError::InvalidState(_))),
+				"a failed session must keep reporting its terminal error on poke"
+			);
+			assert!(dkg.is_failed(), "a failed session must stay failed after poke");
+		}
 	}
 
 	/// Test that non-leaders detect tampered PK commitments in Round 4 before signing.
