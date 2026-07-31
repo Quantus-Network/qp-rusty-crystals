@@ -2519,13 +2519,11 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			.map_err(|e| {
 				use crate::protocol::partial_pk::PackCombinedPkError;
 				ResharingProtocolError::ShareVerificationFailed(match e {
-					PackCombinedPkError::CoefficientOutOfRange => {
+					PackCombinedPkError::CoefficientOutOfRange =>
 						"a Round 5 partial public key contains out-of-range coefficients"
-							.to_string()
-					},
-					PackCombinedPkError::DegenerateCombinedKey => {
-						"the recovered public key is degenerate (all-zero t1)".to_string()
-					},
+							.to_string(),
+					PackCombinedPkError::DegenerateCombinedKey =>
+						"the recovered public key is degenerate (all-zero t1)".to_string(),
 				})
 			})?;
 		if recovered.as_bytes() != self.config.public_key().as_bytes() {
@@ -2693,21 +2691,17 @@ fn partial_secret_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
 /// worth of material), but with two deliberate differences matching what the
 /// guard actually measures:
 ///
-/// - **No `√τ` challenge amplification.** The recovered-partial guard
-///   multiplies its measured norm by `√τ` to match `B`'s challenge-shifted
-///   convention; [`verify_stored_new_share_norms`] compares the *raw*
-///   [`single_share_weighted_norm`]. Inheriting `√τ` here loosened the
-///   single-share envelope by ~7.75× on ML-DSA-87, letting a malicious
-///   dealer inflate individual stored shares while public-key and
-///   recovered-partial checks still passed.
-/// - **κ is kept.** Honest resharing inflates individual stored shares too:
-///   the mean-subtracted coset noise adds per-share variance that only
-///   partially cancels in recovered sums. Measured over 20 chained reshares
-///   (steady state), honest stored-share norms reach ~1.24× the keygen
-///   single-share norm on (4,6) — nearly the full 1.3 base headroom — so the
-///   envelope needs the same per-config enlargement as the recovered-partial
-///   bound. Worst honest norm/bound ratio observed with κ: 0.83 (κ ≤ 1.5, so
-///   the envelope stays ~√τ tighter than before).
+/// - **No `√τ` challenge amplification.** The recovered-partial guard multiplies its measured norm
+///   by `√τ` to match `B`'s challenge-shifted convention; [`verify_stored_new_share_norms`]
+///   compares the *raw* [`single_share_weighted_norm`]. Inheriting `√τ` here loosened the
+///   single-share envelope by ~7.75× on ML-DSA-87, letting a malicious dealer inflate individual
+///   stored shares while public-key and recovered-partial checks still passed.
+/// - **κ is kept.** Honest resharing inflates individual stored shares too: the mean-subtracted
+///   coset noise adds per-share variance that only partially cancels in recovered sums. Measured
+///   over 20 chained reshares (steady state), honest stored-share norms reach ~1.24× the keygen
+///   single-share norm on (4,6) — nearly the full 1.3 base headroom — so the envelope needs the
+///   same per-config enlargement as the recovered-partial bound. Worst honest norm/bound ratio
+///   observed with κ: 0.83 (κ ≤ 1.5, so the envelope stays ~√τ tighter than before).
 fn stored_subset_share_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
 	secret_norm_envelope(threshold, parties, nu, 1.0)
 }
@@ -3887,9 +3881,9 @@ mod tests {
 		}
 		protocol.new_shares.insert(0b011, inflated);
 
-		let err = protocol
-			.verify_stored_new_share_norms()
-			.expect_err("a stored share inflated 3x past the single-share envelope must be rejected");
+		let err = protocol.verify_stored_new_share_norms().expect_err(
+			"a stored share inflated 3x past the single-share envelope must be rejected",
+		);
 		assert!(
 			err.to_string().contains("exceeds single-share norm bound"),
 			"unexpected error: {}",

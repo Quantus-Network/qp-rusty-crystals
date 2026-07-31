@@ -145,8 +145,8 @@ impl PublicKey {
 /// - Never transmit this over an insecure channel
 /// - Never log or print this value
 /// - Store securely (encrypted at rest)
-/// - The `Zeroize` trait ensures memory is cleared on drop — **per
-///   instance**: zeroization never reaches other copies (see *Cloning*)
+/// - The `Zeroize` trait ensures memory is cleared on drop — **per instance**: zeroization never
+///   reaches other copies (see *Cloning*)
 ///
 /// # Cloning
 ///
@@ -579,8 +579,7 @@ mod tests {
 			let mut data = SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] };
 			data.s2[K - 1][255] = value;
 			shares.insert(0b011u16, data);
-			shares
-				.insert(0b101u16, SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] });
+			shares.insert(0b101u16, SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] });
 			let share = PrivateKeyShare::new(
 				0,
 				3,
@@ -693,7 +692,9 @@ mod tests {
 	/// storage.
 	#[test]
 	fn test_private_key_share_borsh_rejects_wrong_share_map_key_set() {
-		let roundtrip = |party_id: u32, masks: &[u16]| -> Result<PrivateKeyShare, borsh::io::Error> {
+		let roundtrip = |party_id: u32,
+		                 masks: &[u16]|
+		 -> Result<PrivateKeyShare, borsh::io::Error> {
 			let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
 			let mut shares = BTreeMap::new();
 			for &mask in masks {
@@ -725,10 +726,7 @@ mod tests {
 			"a share map missing a required subset mask must be rejected at import"
 		);
 		// Empty map.
-		assert!(
-			roundtrip(0, &[]).is_err(),
-			"an empty share map must be rejected at import"
-		);
+		assert!(roundtrip(0, &[]).is_err(), "an empty share map must be rejected at import");
 		// Complete set plus an extra mask that excludes the holder.
 		assert!(
 			roundtrip(0, &[0b011, 0b101, 0b110]).is_err(),

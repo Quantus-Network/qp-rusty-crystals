@@ -184,9 +184,7 @@ pub fn generate_with_dealer(
 	// unlikely entropy), but internal construction enforces the same parser
 	// rules as every import boundary.
 	let public_key = PublicKey::new(pk_packed).map_err(|_| {
-		ThresholdError::InvalidData(
-			"dealer generated a degenerate public key (all-zero t1)".into(),
-		)
+		ThresholdError::InvalidData("dealer generated a degenerate public key (all-zero t1)".into())
 	})?;
 
 	// 8. Compute TR = SHAKE256(pk) for private key shares

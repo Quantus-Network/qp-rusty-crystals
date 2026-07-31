@@ -69,10 +69,10 @@
 //!
 //! The protocol uses a leader-based approach for Round 4 (signature combination):
 //!
-//! - The **leader** (party with lowest ID among participants; enforced by the constructor)
-//!   combines signature shares. On success it broadcasts `Round4Complete(signature)`; on failure
-//!   it returns `SignProtocolError::ProtocolFailed`, ending the protocol instance. The caller is
-//!   responsible for starting a fresh attempt with new randomness.
+//! - The **leader** (party with lowest ID among participants; enforced by the constructor) combines
+//!   signature shares. On success it broadcasts `Round4Complete(signature)`; on failure it returns
+//!   `SignProtocolError::ProtocolFailed`, ending the protocol instance. The caller is responsible
+//!   for starting a fresh attempt with new randomness.
 //! - **Followers** verify the leader's signature before accepting it. This removes the leader trust
 //!   assumption for signature validity (a malicious leader cannot send a forged signature).
 //!
@@ -80,8 +80,8 @@
 //! - A malicious leader cannot forge signatures (requires threshold parties to collude).
 //! - A malicious leader cannot send invalid signatures (followers verify before accepting).
 //! - A malicious leader CAN cause denial-of-signature by aborting; in that case the caller (e.g.
-//!   NEAR MPC) will retry with a fresh protocol instance. Selecting a different signing set for
-//!   the retry changes the leader (the lowest ID of the new set), routing around the aborter.
+//!   NEAR MPC) will retry with a fresh protocol instance. Selecting a different signing set for the
+//!   retry changes the leader (the lowest ID of the new set), routing around the aborter.
 //!
 //! ## Message Buffering
 //!

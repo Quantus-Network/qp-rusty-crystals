@@ -2145,8 +2145,10 @@ mod tests {
 #[cfg(all(test, not(debug_assertions)))]
 mod pack_stack_zeroization_tests {
 	extern crate std;
-	use std::alloc::{alloc, dealloc, Layout};
-	use std::vec::Vec;
+	use std::{
+		alloc::{alloc, dealloc, Layout},
+		vec::Vec,
+	};
 
 	use super::*;
 

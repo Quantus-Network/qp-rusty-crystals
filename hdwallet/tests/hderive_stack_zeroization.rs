@@ -95,7 +95,11 @@ fn hderive_leaves_no_secret_material_on_the_stack() {
 
 	let mut master = ExtendedPrivKey::zeroed();
 	ExtendedPrivKey::derive(&SEED, "m", &mut master).unwrap();
-	assert_eq!(master.secret().as_bytes(), &master_secret, "reference HMAC disagrees with derive()");
+	assert_eq!(
+		master.secret().as_bytes(),
+		&master_secret,
+		"reference HMAC disagrees with derive()"
+	);
 
 	// Sanity: the technique detects an unwiped copy. A closure that
 	// deliberately leaves the seed in a dead stack frame must be seen.
@@ -181,8 +185,5 @@ fn derive_and_secret_access_leave_no_unwiped_copies() {
 		core::hint::black_box(&secret);
 		// `key` drops here and wipes its fields in place.
 	});
-	assert!(
-		leaks.is_empty(),
-		"derived key material survived in dead stack memory: {leaks:?}"
-	);
+	assert!(leaks.is_empty(), "derived key material survived in dead stack memory: {leaks:?}");
 }
