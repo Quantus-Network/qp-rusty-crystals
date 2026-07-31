@@ -440,6 +440,10 @@ pub(crate) fn t0_pack(r: &mut [u8], a: &Poly) {
 		r[13 * i + 11] |= (t[7] << 3) as u8;
 		r[13 * i + 12] = (t[7] >> 5) as u8;
 	}
+
+	// The staging array holds `D_SHL - t0[i]`, a trivially invertible
+	// transform of secret t0 coefficients; wipe it before returning.
+	t.zeroize();
 }
 
 /// Unpack polynomial t0 with coefficients in ]-2^{D-1}, 2^{D-1}].
@@ -783,6 +787,10 @@ pub(crate) fn eta_pack<const ETA: usize>(r: &mut [u8], a: &Poly) {
 			r[3 * i + 1] = (t[2] >> 2) | (t[3] << 1) | (t[4] << 4) | (t[5] << 7);
 			r[3 * i + 2] = (t[5] >> 1) | (t[6] << 2) | (t[7] << 5);
 		}
+
+		// The staging array holds `ETA - s[i]`, a trivially invertible
+		// transform of secret s1/s2 coefficients; wipe it before returning.
+		t.zeroize();
 	} else {
 		for i in 0..N / 2 {
 			let t0 = (ETA as i32 - a.coeffs[2 * i + 0]) as u8;
@@ -2122,5 +2130,133 @@ mod tests {
 		}
 		check::<39, 32>(0xA1); // ML-DSA-44: TAU = 39, c~ is 32 bytes
 		check::<49, 48>(0xB2); // ML-DSA-65: TAU = 49, c~ is 48 bytes
+	}
+}
+
+/// Regression tests (security review): the `t` staging arrays in `t0_pack`
+/// and `eta_pack` hold `D_SHL - t0[i]` / `ETA - s[i]` — trivially invertible
+/// transforms of secret-key coefficients — and must not survive in dead
+/// stack memory after packing returns.
+///
+/// Detection uses the same painted-stack technique as the workspace's
+/// `*_stack_zeroization` integration tests; these live here as unit tests
+/// because the packers are `pub(crate)`. The assertion is about codegen, so
+/// it is only compiled for optimized builds (`cargo test --release`).
+#[cfg(all(test, not(debug_assertions)))]
+mod pack_stack_zeroization_tests {
+	extern crate std;
+	use std::alloc::{alloc, dealloc, Layout};
+	use std::vec::Vec;
+
+	use super::*;
+
+	const PAINT: u8 = 0xAA;
+	// The packers only need a few KiB; keep the scanned region small.
+	const STACK_BYTES: usize = 256 * 1024;
+	const ALIGN: usize = 4096;
+
+	/// Run `f` on a freshly painted stack buffer, then scan the buffer for
+	/// `pattern` and return whether it was found.
+	fn probe_stack_for<F: FnOnce()>(pattern: &[u8], f: F) -> bool {
+		let layout = Layout::from_size_align(STACK_BYTES, ALIGN).unwrap();
+		unsafe {
+			let base = alloc(layout);
+			assert!(!base.is_null(), "probe stack allocation failed");
+			std::ptr::write_bytes(base, PAINT, STACK_BYTES);
+
+			psm::on_stack(base, STACK_BYTES, f);
+
+			let region = std::slice::from_raw_parts(base, STACK_BYTES);
+			let offsets: Vec<usize> = region
+				.windows(pattern.len())
+				.enumerate()
+				.filter(|(_, w)| w == &pattern)
+				.map(|(i, _)| i)
+				.collect();
+			std::eprintln!("probe: {} match(es) at offsets {:?}", offsets.len(), offsets);
+			let found = !offsets.is_empty();
+			dealloc(base, layout);
+			found
+		}
+	}
+
+	#[test]
+	fn t0_pack_staging_buffer_leaves_no_residue() {
+		// Varied t0-range coefficients; stride 37 is coprime to the modulus
+		// walk so all eight final-iteration t values are distinct.
+		let mut a = Poly::default();
+		for (j, c) in a.coeffs.iter_mut().enumerate() {
+			*c = ((j * 37 + 11) % 8191) as i32 - 4095;
+		}
+
+		// The residue candidate is the staging array's final state: the last
+		// iteration's eight i32 values, in memory order.
+		let mut pattern = [0u8; 32];
+		for j in 0..8 {
+			let v = D_SHL - a.coeffs[N - 8 + j];
+			pattern[4 * j..4 * j + 4].copy_from_slice(&v.to_le_bytes());
+		}
+
+		// Sanity: the technique detects a deliberately leaked copy.
+		assert!(
+			probe_stack_for(&pattern, || {
+				let mut leaked = [0i32; 8];
+				for j in 0..8 {
+					leaked[j] = D_SHL - a.coeffs[N - 8 + j];
+				}
+				core::hint::black_box(&leaked);
+			}),
+			"probe self-check: a deliberately leaked staging copy was not detected"
+		);
+
+		let leaked = probe_stack_for(&pattern, || {
+			let mut packed = [0u8; 13 * N / 8];
+			t0_pack(&mut packed, &a);
+			core::hint::black_box(&packed);
+		});
+		assert!(
+			!leaked,
+			"t0_pack's staging buffer (D_SHL - t0 coefficients) survived in dead \
+			 stack memory after packing"
+		);
+	}
+
+	#[test]
+	fn eta_pack_staging_buffer_leaves_no_residue() {
+		// Coefficients in [-2, 1] so every staged byte ETA - c lies in 1..=4:
+		// the pattern then contains no 0x00/0xFF and cannot be mimicked by the
+		// i32 coefficient bytes of `a` or by the packed output (whose bytes
+		// are all >= 36 for staged values >= 1).
+		let mut a = Poly::default();
+		for (j, c) in a.coeffs.iter_mut().enumerate() {
+			*c = (j % 4) as i32 - 2;
+		}
+
+		let mut pattern = [0u8; 8];
+		for j in 0..8 {
+			pattern[j] = (2 - a.coeffs[N - 8 + j]) as u8;
+		}
+
+		assert!(
+			probe_stack_for(&pattern, || {
+				let mut leaked = [0u8; 8];
+				for j in 0..8 {
+					leaked[j] = (2 - a.coeffs[N - 8 + j]) as u8;
+				}
+				core::hint::black_box(&leaked);
+			}),
+			"probe self-check: a deliberately leaked staging copy was not detected"
+		);
+
+		let leaked = probe_stack_for(&pattern, || {
+			let mut packed = [0u8; 3 * N / 8];
+			eta_pack::<2>(&mut packed, &a);
+			core::hint::black_box(&packed);
+		});
+		assert!(
+			!leaked,
+			"eta_pack's staging buffer (ETA - s coefficients) survived in dead \
+			 stack memory after packing"
+		);
 	}
 }
