@@ -68,6 +68,14 @@ pub enum PackCombinedPkError {
 	/// is always reduced into `[0, Q)`. A value outside that range indicates a
 	/// malformed or attacker-supplied contribution.
 	CoefficientOutOfRange,
+	/// The combined key failed canonical ML-DSA public-key validation.
+	///
+	/// This happens when the aggregated t vector's high bits (t1) are all
+	/// zero — e.g. colluding contributors whose partial PKs cancel mod Q.
+	/// Such a key is rejected by `PublicKey::from_bytes` and by standard
+	/// ML-DSA verification, so packing it would hand out a trusted-looking
+	/// `PublicKey` that can never verify a signature.
+	DegenerateCombinedKey,
 }
 
 /// Sum a collection of partial-PK polynomial vectors and pack into the canonical
@@ -117,7 +125,7 @@ where
 	let mut pk_packed = [0u8; PUBLIC_KEY_SIZE];
 	packing::pack_pk(&mut pk_packed, rho, &t1);
 
-	Ok(PublicKey::new(pk_packed))
+	PublicKey::new(pk_packed).map_err(|_| PackCombinedPkError::DegenerateCombinedKey)
 }
 
 #[cfg(test)]
@@ -214,6 +222,37 @@ mod tests {
 		assert_eq!(
 			pack_combined_pk(&rho, [&at_q]),
 			Err(PackCombinedPkError::CoefficientOutOfRange),
+		);
+	}
+
+	/// Regression test (security review): `pack_combined_pk` must not
+	/// construct a `PublicKey` that the canonical ML-DSA parser rejects.
+	/// Colluding contributors can make the aggregated t vector sum to values
+	/// whose high bits are all zero (a single all-zero partial PK is the
+	/// simplest case), yielding the degenerate all-zero t1 encoding that
+	/// `PublicKey::from_bytes` and the verifier both reject. Handing such
+	/// bytes out as a trusted-looking `PublicKey` leaves the group with an
+	/// unusable key that only fails later, at verification time.
+	#[test]
+	fn pack_combined_pk_rejects_degenerate_all_zero_t1() {
+		let rho = [7u8; 32];
+
+		// All-zero contribution: every coefficient is canonical, but t1 = 0.
+		let zero = [[0i32; N as usize]; K];
+		assert_eq!(
+			pack_combined_pk(&rho, [&zero]),
+			Err(PackCombinedPkError::DegenerateCombinedKey),
+			"a combined key with all-zero t1 must be rejected, not packed"
+		);
+
+		// Small nonzero coefficients are also degenerate: power2round drops
+		// the low 13 bits, so any t with all coefficients below 2^12 still
+		// packs to an all-zero t1.
+		let small = [[1i32; N as usize]; K];
+		assert_eq!(
+			pack_combined_pk(&rho, [&small]),
+			Err(PackCombinedPkError::DegenerateCombinedKey),
+			"a combined key whose t1 high bits are all zero must be rejected"
 		);
 	}
 }

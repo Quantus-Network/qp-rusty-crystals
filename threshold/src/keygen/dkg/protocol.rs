@@ -1548,12 +1548,20 @@ impl<S: TranscriptSigner> Dkg<S> {
 		)?;
 
 		// Combine partial PKs to get final public key. Reject any partial PK with
-		// non-canonical coefficients rather than overflowing the i32 accumulation.
-		let public_key =
-			pack_combined_pk(&rho, all_partial_pks.values().map(|pk| &pk.t)).map_err(|_| {
-				DkgError::InvalidMessage(
-					"a partial public key contains out-of-range coefficients".into(),
-				)
+		// non-canonical coefficients rather than overflowing the i32 accumulation,
+		// and reject a degenerate (all-zero t1) combined key that standard ML-DSA
+		// verification would refuse.
+		let public_key = pack_combined_pk(&rho, all_partial_pks.values().map(|pk| &pk.t))
+			.map_err(|e| {
+				use crate::protocol::partial_pk::PackCombinedPkError;
+				DkgError::InvalidMessage(match e {
+					PackCombinedPkError::CoefficientOutOfRange => {
+						"a partial public key contains out-of-range coefficients".into()
+					},
+					PackCombinedPkError::DegenerateCombinedKey => {
+						"the combined public key is degenerate (all-zero t1)".into()
+					},
+				})
 			})?;
 
 		// Build private key share

@@ -79,20 +79,22 @@ impl BorshSerialize for PublicKey {
 impl BorshDeserialize for PublicKey {
 	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
 		let bytes = <[u8; PUBLIC_KEY_SIZE]>::deserialize_reader(reader)?;
-		validate_pk_bytes(&bytes)
-			.map_err(|e| borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, e))?;
-		let tr = compute_tr(&bytes);
-		Ok(Self { bytes, tr })
+		Self::new(bytes).map_err(|e| borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, e))
 	}
 }
 
 impl PublicKey {
 	/// Create a new public key from packed bytes.
 	///
+	/// The bytes are validated through the canonical ML-DSA parser (rejecting
+	/// e.g. the degenerate all-zero t1 key), so internal producers — dealer
+	/// generation and DKG/resharing aggregation — cannot construct a
+	/// `PublicKey` that standard ML-DSA verification would later reject.
 	/// TR is computed automatically as `SHAKE256(bytes)`.
-	pub(crate) fn new(bytes: [u8; PUBLIC_KEY_SIZE]) -> Self {
+	pub(crate) fn new(bytes: [u8; PUBLIC_KEY_SIZE]) -> Result<Self, &'static str> {
+		validate_pk_bytes(&bytes)?;
 		let tr = compute_tr(&bytes);
-		Self { bytes, tr }
+		Ok(Self { bytes, tr })
 	}
 
 	/// Get the packed public key bytes.
@@ -120,10 +122,7 @@ impl PublicKey {
 
 		let mut pk_bytes = [0u8; PUBLIC_KEY_SIZE];
 		pk_bytes.copy_from_slice(bytes);
-		validate_pk_bytes(&pk_bytes)?;
-
-		let tr = compute_tr(&pk_bytes);
-		Ok(Self { bytes: pk_bytes, tr })
+		Self::new(pk_bytes)
 	}
 }
 

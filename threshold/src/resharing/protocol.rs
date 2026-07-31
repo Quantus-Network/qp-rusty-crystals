@@ -2513,12 +2513,20 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		let rho = self.derive_rho();
 		// Reject partial PKs with non-canonical coefficients. An attacker-supplied
 		// coefficient near i32::MAX would otherwise overflow the i32 accumulation
-		// inside `pack_combined_pk` (panic in debug, silent wrap in release).
+		// inside `pack_combined_pk` (panic in debug, silent wrap in release). A
+		// degenerate (all-zero t1) recovered key is likewise rejected there.
 		let recovered = crate::protocol::partial_pk::pack_combined_pk(&rho, canonical.values())
-			.map_err(|_| {
-				ResharingProtocolError::ShareVerificationFailed(
-					"a Round 5 partial public key contains out-of-range coefficients".to_string(),
-				)
+			.map_err(|e| {
+				use crate::protocol::partial_pk::PackCombinedPkError;
+				ResharingProtocolError::ShareVerificationFailed(match e {
+					PackCombinedPkError::CoefficientOutOfRange => {
+						"a Round 5 partial public key contains out-of-range coefficients"
+							.to_string()
+					},
+					PackCombinedPkError::DegenerateCombinedKey => {
+						"the recovered public key is degenerate (all-zero t1)".to_string()
+					},
+				})
 			})?;
 		if recovered.as_bytes() != self.config.public_key().as_bytes() {
 			return Err(ResharingProtocolError::ShareVerificationFailed(
