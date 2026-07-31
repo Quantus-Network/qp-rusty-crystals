@@ -59,6 +59,12 @@ fn derive_public_components<const K: usize, const L: usize>(
 }
 
 /// Generate public and private key for an arbitrary ML-DSA parameter set.
+///
+/// The seed is borrowed rather than taken by value (security review): a
+/// by-value `SensitiveBytes32` is moved — i.e. copied — through parameter
+/// slots that are dead but never dropped, so `ZeroizeOnDrop` cannot wipe
+/// them. The borrow keeps the seed in the caller's wiping guard; the only
+/// in-frame copy lives in `preimage`, which is zeroized before returning.
 pub(crate) fn keypair_var<
 	const K: usize,
 	const L: usize,
@@ -68,13 +74,12 @@ pub(crate) fn keypair_var<
 >(
 	pk: &mut [u8; PK],
 	sk: &mut [u8; SK],
-	seed: SensitiveBytes32,
+	seed: &SensitiveBytes32,
 ) {
 	const {
 		assert!(PK == params::publickeybytes(K));
 		assert!(SK == params::secretkeybytes(K, L, ETA));
 	}
-	let mut seed_bytes = seed.into_bytes();
 	const SEEDBUF_LEN: usize = 2 * params::SEEDBYTES + params::CRHBYTES;
 	let mut seedbuf = [0u8; SEEDBUF_LEN];
 	// Build preimage = seed || K || L in a fixed stack buffer. A growable
@@ -83,7 +88,7 @@ pub(crate) fn keypair_var<
 	// realloc), freeing a seed-bearing heap block that zeroize() can no
 	// longer reach.
 	let mut preimage = [0u8; params::SEEDBYTES + 2];
-	preimage[..params::SEEDBYTES].copy_from_slice(&seed_bytes);
+	preimage[..params::SEEDBYTES].copy_from_slice(seed.as_bytes());
 	preimage[params::SEEDBYTES] = K as u8;
 	preimage[params::SEEDBYTES + 1] = L as u8;
 	fips202::shake256(&mut seedbuf, &preimage);
@@ -116,7 +121,6 @@ pub(crate) fn keypair_var<
 	// secret polynomials; now that they're packed into `sk` the working copies
 	// must not linger on the stack. (`rho`/`tr`/`t1` are public.)
 	seedbuf.zeroize();
-	seed_bytes.zeroize();
 	preimage.zeroize();
 	rhoprime.zeroize();
 	key.zeroize();
@@ -731,7 +735,7 @@ fn keypair(
 		{ params::ETA },
 		{ params::PUBLICKEYBYTES },
 		{ params::SECRETKEYBYTES },
-	>(pk, sk, seed)
+	>(pk, sk, &seed)
 }
 
 #[cfg(test)]

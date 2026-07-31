@@ -2510,7 +2510,7 @@ mod tests {
 			seed[4] = 0xDE;
 			seed[5] = 0xAD;
 
-			let keypair = Keypair::generate(SensitiveBytes32::from(&mut seed));
+			let keypair = Keypair::generate(&mut SensitiveBytes32::from(&mut seed));
 
 			public_keys.push(keypair.public().clone());
 			// Explicitly copy secret key to create signer

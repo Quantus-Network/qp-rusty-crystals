@@ -88,7 +88,7 @@ macro_rules! acvp_for {
 						crate::sign::keypair_var::<K, L, ETA, PUBLICKEYBYTES, SECRETKEYBYTES>(
 							&mut pk,
 							&mut sk,
-							sensitive_seed,
+							&sensitive_seed,
 						);
 
 						assert_eq!(

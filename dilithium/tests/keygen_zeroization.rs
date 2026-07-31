@@ -58,11 +58,11 @@ macro_rules! check_variant {
 		use qp_rusty_crystals_dilithium::$mod_name::Keypair;
 
 		let mut seed = SEED_PATTERN;
-		let sensitive = SensitiveBytes32::new(&mut seed);
+		let mut sensitive = SensitiveBytes32::new(&mut seed);
 
 		SEED_FREED_UNCLEARED.store(false, Ordering::SeqCst);
 		SCANNING.store(true, Ordering::SeqCst);
-		let keypair = Keypair::generate(sensitive);
+		let keypair = Keypair::generate(&mut sensitive);
 		SCANNING.store(false, Ordering::SeqCst);
 
 		assert!(

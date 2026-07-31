@@ -24,7 +24,7 @@ macro_rules! nist_kat_for {
 				verify_test_vector(
 					test,
 					PUBLICKEYBYTES,
-					|entropy| Keypair::generate(entropy),
+					|mut entropy| Keypair::generate(&mut entropy),
 					|bytes| Keypair::from_bytes(bytes).expect("KAT keypair bytes must deserialize"),
 				);
 			}
@@ -191,12 +191,12 @@ impl_has_nist_kat_api!(ml_dsa_87);
 fn test_verify_invalid_signature() {
 	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 
-	let entropy1 = get_random_bytes();
-	let entropy2 = get_random_bytes();
-	let entropy3 = get_random_bytes();
-	let keys_1 = Keypair::generate(entropy1);
-	let keys_2 = Keypair::generate(entropy2);
-	let keys_3 = Keypair::generate(entropy3);
+	let mut entropy1 = get_random_bytes();
+	let mut entropy2 = get_random_bytes();
+	let mut entropy3 = get_random_bytes();
+	let keys_1 = Keypair::generate(&mut entropy1);
+	let keys_2 = Keypair::generate(&mut entropy2);
+	let keys_3 = Keypair::generate(&mut entropy3);
 
 	let message = b"Hello, Resonance!";
 	let signature = keys_2.sign(message, None, None).unwrap();

@@ -45,13 +45,13 @@ fn kb(bytes: usize) -> String {
 
 fn main() {
 	// Prepare inputs on the normal stack.
-	let kp = ml_dsa_87::Keypair::generate((&mut [7u8; 32]).into());
+	let kp = ml_dsa_87::Keypair::generate(&mut (&mut [7u8; 32]).into());
 	let kp_bytes = kp.to_bytes();
 	let msg: &[u8] = b"stack probe message";
 	let sig = kp.sign(msg, None, None).expect("sign");
 
 	let keygen = peak_stack(|| {
-		let _ = ml_dsa_87::Keypair::generate((&mut [1u8; 32]).into());
+		let _ = ml_dsa_87::Keypair::generate(&mut (&mut [1u8; 32]).into());
 	});
 
 	// `to_bytes` now returns a self-wiping `Zeroizing` buffer, which is not

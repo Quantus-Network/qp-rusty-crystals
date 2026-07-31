@@ -29,8 +29,8 @@ mod tests {
 	#[test]
 	fn self_verify_hedged() {
 		let msg = get_random_msg();
-		let entropy = get_random_bytes();
-		let keys = Keypair::generate(entropy);
+		let mut entropy = get_random_bytes();
+		let keys = Keypair::generate(&mut entropy);
 		let hedge = get_random_bytes();
 		let sig = keys.sign(&msg, None, Some(hedge.0)).unwrap();
 		assert!(keys.verify(&msg, &sig, None));
@@ -39,8 +39,8 @@ mod tests {
 	#[test]
 	fn self_verify() {
 		let msg = get_random_msg();
-		let entropy = get_random_bytes();
-		let keys = Keypair::generate(entropy);
+		let mut entropy = get_random_bytes();
+		let keys = Keypair::generate(&mut entropy);
 		let hedge = get_random_bytes();
 		let sig = keys.sign(&msg, None, Some(hedge.0)).unwrap();
 		assert!(keys.verify(&msg, &sig, None));
@@ -49,8 +49,8 @@ mod tests {
 	#[test]
 	fn verify_fails_with_different_context() {
 		let msg = get_random_msg();
-		let entropy = get_random_bytes();
-		let keys = Keypair::generate(entropy);
+		let mut entropy = get_random_bytes();
+		let keys = Keypair::generate(&mut entropy);
 		let hedge = get_random_bytes();
 
 		// Sign with context "test1"
@@ -67,7 +67,7 @@ mod tests {
 
 	#[test]
 	fn sign_rejects_oversized_message() {
-		let keys = Keypair::generate(get_random_bytes());
+		let keys = Keypair::generate(&mut get_random_bytes());
 		let big_msg = vec![0u8; MAX_MESSAGE_SIZE + 1];
 		let result = keys.sign(&big_msg, None, None);
 		assert!(matches!(result, Err(SignatureError::MessageTooLong)));
@@ -75,7 +75,7 @@ mod tests {
 
 	#[test]
 	fn verify_rejects_oversized_message() {
-		let keys = Keypair::generate(get_random_bytes());
+		let keys = Keypair::generate(&mut get_random_bytes());
 		let big_msg = vec![0u8; MAX_MESSAGE_SIZE + 1];
 		assert!(!keys.verify(&big_msg, &[0u8; SIGNBYTES], None));
 	}

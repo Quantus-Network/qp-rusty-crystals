@@ -228,20 +228,24 @@ fn parse_mnemonic_to_seed_into(
 	Ok(())
 }
 
-/// Derive the 32 bytes of keypair entropy at the given BIP44 path.
+/// Derive the 32 bytes of keypair entropy at the given BIP44 path, writing
+/// them into the caller-provided `out`.
 ///
 /// This is the parameter-set-independent half of key derivation: path
-/// validation plus HMAC-SHA512 tree derivation. The returned entropy is what
+/// validation plus HMAC-SHA512 tree derivation. The derived entropy is what
 /// each variant's `Keypair::generate` consumes (FIPS 204 domain-separates the
 /// subsequent seed expansion by `(k, ℓ)`, so feeding the same entropy to
 /// different parameter sets yields independent keys).
 ///
-/// The seed is taken by move and zeroized on drop; the returned entropy is
-/// itself a self-zeroizing type.
+/// The entropy is written in place rather than returned by value (security
+/// review): a by-value return is moved — i.e. copied — through dead stack
+/// slots that are never dropped, so `ZeroizeOnDrop` could not wipe them.
+/// On error, `out` is untouched.
 fn derive_entropy_from_seed(
-	seed: SensitiveBytes64,
+	seed: &SensitiveBytes64,
 	path: &str,
-) -> Result<SensitiveBytes32, HDLatticeError> {
+	out: &mut SensitiveBytes32,
+) -> Result<(), HDLatticeError> {
 	// Validate the derivation path
 	check_derivation_path(path)?;
 
@@ -249,14 +253,11 @@ fn derive_entropy_from_seed(
 	let mut xpriv = ExtendedPrivKey::zeroed();
 	ExtendedPrivKey::derive(seed.as_bytes(), path, &mut xpriv)
 		.map_err(|_e| HDLatticeError::KeyDerivationFailed(path.to_string()))?;
-	// Deliberate guarded copy: filled in place inside the self-zeroizing
-	// wrapper, so the secret never exists outside a wiping guard (`xpriv`
-	// wipes its own storage when it drops below).
-	let mut entropy = SensitiveBytes32::zeroed();
-	entropy.as_mut_bytes().copy_from_slice(xpriv.secret().as_bytes());
-	Ok(entropy)
-
-	// seed is automatically zeroized when it drops
+	// Deliberate guarded copy: filled in place inside the caller's
+	// self-zeroizing wrapper, so the secret never exists outside a wiping
+	// guard (`xpriv` wipes its own storage when it drops below).
+	out.as_mut_bytes().copy_from_slice(xpriv.secret().as_bytes());
+	Ok(())
 }
 
 /// Stamp a per-variant key-derivation module mirroring the dilithium crate's
@@ -270,7 +271,7 @@ macro_rules! mldsa_variant_module {
 		pub mod $mod_name {
 			pub use qp_rusty_crystals_dilithium::$mod_name::Keypair;
 
-			use crate::{HDLatticeError, SensitiveBytes64};
+			use crate::{HDLatticeError, SensitiveBytes32, SensitiveBytes64};
 
 			#[doc = concat!("Derive an ", $doc_name, " keypair from a seed at the given BIP44 path.")]
 			///
@@ -281,9 +282,11 @@ macro_rules! mldsa_variant_module {
 				seed: SensitiveBytes64,
 				path: &str,
 			) -> Result<Keypair, HDLatticeError> {
-				let derived_entropy = crate::derive_entropy_from_seed(seed, path)?;
-				// derived_entropy is automatically zeroized when it drops
-				Ok(Keypair::generate(derived_entropy))
+				// The entropy is filled in place and lent to `generate`,
+				// which wipes it; it never crosses a boundary by value.
+				let mut entropy = SensitiveBytes32::zeroed();
+				crate::derive_entropy_from_seed(&seed, path, &mut entropy)?;
+				Ok(Keypair::generate(&mut entropy))
 			}
 
 			#[doc = concat!("Derive an ", $doc_name, " keypair from a mnemonic with passphrase.")]
@@ -386,8 +389,9 @@ pub fn generate_wormhole_from_seed(
 	// consumer of the entropy differs. (`derive_entropy_from_seed` re-runs
 	// the generic path validation `check_wormhole_path` already performed —
 	// cheap and idempotent.) Seed and entropy are self-zeroizing.
-	let derived_entropy = derive_entropy_from_seed(seed, path)?;
-	Ok(WormholePair::generate_new(derived_entropy))
+	let mut entropy = SensitiveBytes32::zeroed();
+	derive_entropy_from_seed(&seed, path, &mut entropy)?;
+	Ok(WormholePair::generate_new(&mut entropy))
 }
 
 /// Validate a wormhole derivation path: generic path checks plus the
