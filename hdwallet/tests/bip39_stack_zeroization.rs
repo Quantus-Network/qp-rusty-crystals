@@ -23,8 +23,9 @@
 use std::alloc::{alloc, dealloc, Layout};
 
 use bip39::Language;
-use qp_rusty_crystals_hdwallet::{generate_mnemonic, mnemonic_to_seed, SensitiveBytes32};
-use zeroize::Zeroize;
+use qp_rusty_crystals_hdwallet::{
+	generate_mnemonic, mnemonic_to_seed, SensitiveBytes32, SensitiveBytes64,
+};
 
 const PAINT: u8 = 0xAA;
 // 4 MiB: comfortably above what PBKDF2 seed stretching needs.
@@ -84,8 +85,7 @@ fn mnemonic_word_indices_never_survive_on_the_stack() {
 	// parses one and skips its destructor must be seen.
 	assert!(
 		probe_stack_for(&pattern, || {
-			let mnemonic =
-				bip39::Mnemonic::parse_in_normalized(Language::English, PHRASE).unwrap();
+			let mnemonic = bip39::Mnemonic::parse_in_normalized(Language::English, PHRASE).unwrap();
 			core::mem::forget(mnemonic);
 		}),
 		"probe self-check: a deliberately leaked Mnemonic was not detected"
@@ -95,8 +95,9 @@ fn mnemonic_word_indices_never_survive_on_the_stack() {
 	// after PBKDF2; its word-index buffer must not survive.
 	let phrase = PHRASE.to_string();
 	let seed_stretch_leaked = probe_stack_for(&pattern, move || {
-		let mut seed = mnemonic_to_seed(phrase, None).unwrap();
-		seed.zeroize();
+		let mut seed = SensitiveBytes64::zeroed();
+		mnemonic_to_seed(phrase, None, &mut seed).unwrap();
+		core::hint::black_box(&seed);
 	});
 
 	// Scenario B: mnemonic generation. The Mnemonic built from entropy is
@@ -120,5 +121,37 @@ fn mnemonic_word_indices_never_survive_on_the_stack() {
 		!generation_leaked,
 		"generate_mnemonic() left the mnemonic word indices in dead stack memory; \
 		 the phrase is reconstructible from them and yields the whole HD wallet"
+	);
+}
+
+// Regression test (security review): the seed produced by `mnemonic_to_seed`
+// must leave no copy in memory once the caller's `SensitiveBytes64` is
+// dropped — with no manual zeroization hygiene on the caller's part. The seed
+// yields the entire HD wallet.
+//
+// This is why the API writes into a caller-provided `SensitiveBytes64`
+// instead of returning the seed by value: a by-value return is moved (i.e.
+// copied) through the `Result` payload and return slot, and moved-from stack
+// slots are dead but never dropped, so `ZeroizeOnDrop` cannot wipe them. With
+// the out-parameter the secret only ever exists inside the caller's wiping
+// guard, and this probe asserts exactly that: zero residue.
+#[test]
+fn seed_produced_by_mnemonic_to_seed_wipes_itself_on_drop() {
+	// Expected seed bytes, computed outside the probed region.
+	let mut expected_holder = SensitiveBytes64::zeroed();
+	mnemonic_to_seed(PHRASE.to_string(), None, &mut expected_holder).unwrap();
+	let expected = *expected_holder.as_bytes();
+
+	let phrase = PHRASE.to_string();
+	let leaked = probe_stack_for(&expected[..], move || {
+		let mut seed = SensitiveBytes64::zeroed();
+		mnemonic_to_seed(phrase, None, &mut seed).unwrap();
+		core::hint::black_box(&seed);
+		// `seed` drops here and wipes its interior in place.
+	});
+	assert!(
+		!leaked,
+		"the seed produced by mnemonic_to_seed() survived in dead stack memory \
+		 after the caller's SensitiveBytes64 was dropped"
 	);
 }

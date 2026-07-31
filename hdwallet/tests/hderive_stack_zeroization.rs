@@ -5,15 +5,13 @@
 //! The previous implementation drove the derivation through the `hmac` crate's
 //! `Hmac<Sha512>`, whose state is dropped without zeroization:
 //!
-//! - `Hmac::new_from_slice` builds a 128-byte key block, XORs it in place with
-//!   the ipad/opad constants and drops it unwiped, leaving `key ^ 0x5c..` (the
-//!   parent chain code in `child()`) in a dead stack frame.
-//! - The wrapper's block buffer holds the raw message tail — the BIP39 seed in
-//!   `derive()`, `0x00 || parent_secret_key || child_index` in `child()` —
-//!   verbatim, and `finalize()` consumes the ~470-byte wrapper by value, so
-//!   moves smear unwiped copies of that buffer across the stack.
-//! - The two inner SHA-512 states that absorbed the secrets are dropped
-//!   unwiped as well.
+//! - `Hmac::new_from_slice` builds a 128-byte key block, XORs it in place with the ipad/opad
+//!   constants and drops it unwiped, leaving `key ^ 0x5c..` (the parent chain code in `child()`) in
+//!   a dead stack frame.
+//! - The wrapper's block buffer holds the raw message tail — the BIP39 seed in `derive()`, `0x00 ||
+//!   parent_secret_key || child_index` in `child()` — verbatim, and `finalize()` consumes the
+//!   ~470-byte wrapper by value, so moves smear unwiped copies of that buffer across the stack.
+//! - The two inner SHA-512 states that absorbed the secrets are dropped unwiped as well.
 //!
 //! Detection uses the same painted-stack technique as
 //! `dilithium/tests/import_stack_zeroization.rs`: run the derivation on a

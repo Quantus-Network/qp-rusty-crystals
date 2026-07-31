@@ -83,6 +83,22 @@ impl SensitiveBytes64 {
 		result
 	}
 
+	/// All-zero value, intended to be filled in place via [`Self::as_mut_bytes`].
+	///
+	/// Writing the secret directly into the wrapper's interior avoids ever
+	/// materializing it in a separate buffer that `new`/`from` would have to
+	/// copy from (Rust moves and copies leave unwiped duplicates in dead
+	/// stack slots).
+	pub fn zeroed() -> Self {
+		Self([0u8; 64])
+	}
+
+	/// Mutable access to the wrapped bytes, for in-place construction
+	/// (see [`Self::zeroed`]). The value keeps sole ownership of the secret.
+	pub fn as_mut_bytes(&mut self) -> &mut [u8; 64] {
+		&mut self.0
+	}
+
 	pub fn as_bytes(&self) -> &[u8; 64] {
 		&self.0
 	}

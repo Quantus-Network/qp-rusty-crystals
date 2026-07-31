@@ -75,10 +75,13 @@ derive many keys), use the seed entrypoints. Seeds are passed by move as
 self-zeroizing types:
 
 ```rust
-use qp_rusty_crystals_hdwallet::{derive_key_from_seed, mnemonic_to_seed};
+use qp_rusty_crystals_hdwallet::{derive_key_from_seed, mnemonic_to_seed, SensitiveBytes64};
 
-let mut seed = mnemonic_to_seed(mnemonic, None)?; // consumes the mnemonic
-let keypair = derive_key_from_seed((&mut seed).into(), "m/44'/189189'/0'/0'/0'")?;
+// The seed is written into a caller-provided self-zeroizing buffer;
+// the mnemonic string is consumed and zeroized.
+let mut seed = SensitiveBytes64::zeroed();
+mnemonic_to_seed(mnemonic, None, &mut seed)?;
+let keypair = derive_key_from_seed(seed, "m/44'/189189'/0'/0'/0'")?;
 ```
 
 ### Wormhole pairs

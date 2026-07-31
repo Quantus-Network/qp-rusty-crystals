@@ -5,7 +5,7 @@ mod hdwallet_tests {
 		hderive::{ChildNumber, ExtendedPrivKey},
 		mnemonic_to_seed,
 		test_vectors::get_test_vectors,
-		HDLatticeError,
+		HDLatticeError, SensitiveBytes64,
 	};
 	use alloc::{
 		borrow::ToOwned,
@@ -25,25 +25,32 @@ mod hdwallet_tests {
 	#[cfg(test)]
 	use std::println;
 
+	/// Test helper: stretch a known-valid mnemonic into a fresh seed.
+	fn seed_from(mnemonic: String, passphrase: Option<&str>) -> SensitiveBytes64 {
+		let mut seed = SensitiveBytes64::zeroed();
+		mnemonic_to_seed(mnemonic, passphrase, &mut seed).expect("valid mnemonic");
+		seed
+	}
+
 	#[test]
 	fn test_from_seed() {
 		// Single use pattern - mnemonic gets consumed
 		let mnemonic1 =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let mut seed1 = mnemonic_to_seed(mnemonic1, None).unwrap();
+		let seed1 = seed_from(mnemonic1, None);
 
 		// Multi-use pattern - explicitly clone when needed
 		let mnemonic2 =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let mut seed2 = mnemonic_to_seed(mnemonic2.clone(), None).unwrap();
+		let seed2 = seed_from(mnemonic2.clone(), None);
 		// mnemonic2 still available here, gets consumed when dropped
 
 		// Seeds from same mnemonic should be identical
-		assert_eq!(seed1, seed2);
+		assert_eq!(seed1.as_bytes(), seed2.as_bytes());
 
 		// Should be able to derive same keys from same seed
-		let key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0'/0'").unwrap();
-		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
+		let key1 = derive_key_from_seed(seed1, "m/44'/0'/0'/0'/0'").unwrap();
+		let key2 = derive_key_from_seed(seed2, "m/44'/0'/0'/0'/0'").unwrap();
 		assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
 	}
 
@@ -56,19 +63,23 @@ mod hdwallet_tests {
 		assert_eq!(mnemonic.split_whitespace().count(), 24);
 
 		// Test creating seeds from mnemonic - demonstrate explicit copying
-		let mut seed1 = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
-		let mut seed2 = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
-		let mut seed3 = mnemonic_to_seed(mnemonic.clone(), Some("password")).unwrap();
+		let seed1 = seed_from(mnemonic.clone(), None);
+		let seed2 = seed_from(mnemonic.clone(), None);
+		let seed3 = seed_from(mnemonic.clone(), Some("password"));
 
 		// Seeds from same mnemonic should be identical
-		assert_eq!(seed1, seed2, "seeds from same mnemonic should be identical");
+		assert_eq!(
+			seed1.as_bytes(),
+			seed2.as_bytes(),
+			"seeds from same mnemonic should be identical"
+		);
 
 		// Different passphrase should produce different seed
-		assert_ne!(seed1, seed3, "password should affect seed");
+		assert_ne!(seed1.as_bytes(), seed3.as_bytes(), "password should affect seed");
 
-		let master_key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0'/0'").unwrap();
-		let master_key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
-		let master_key3 = derive_key_from_seed((&mut seed3).into(), "m/44'/0'/0'/0'/0'").unwrap();
+		let master_key1 = derive_key_from_seed(seed1, "m/44'/0'/0'/0'/0'").unwrap();
+		let master_key2 = derive_key_from_seed(seed2, "m/44'/0'/0'/0'/0'").unwrap();
+		let master_key3 = derive_key_from_seed(seed3, "m/44'/0'/0'/0'/0'").unwrap();
 
 		// Keys from same seed should be identical
 		assert_eq!(
@@ -85,9 +96,8 @@ mod hdwallet_tests {
 		);
 
 		// Derive a different path - need a fresh seed since seed1 was already consumed
-		let mut seed_for_derive = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
-		let derived_key =
-			derive_key_from_seed((&mut seed_for_derive).into(), "m/0'/2147483647'/1'").unwrap();
+		let seed_for_derive = seed_from(mnemonic.clone(), None);
+		let derived_key = derive_key_from_seed(seed_for_derive, "m/0'/2147483647'/1'").unwrap();
 		assert_ne!(
 			master_key1.secret().to_bytes(),
 			derived_key.secret().to_bytes(),
@@ -113,11 +123,11 @@ mod hdwallet_tests {
 				"rocket primary way job input cactus submit menu zoo burger rent impose"
 					.to_string();
 
-			let mut seed1 = mnemonic_to_seed(mnemonic1, None).unwrap();
-			let mut seed2 = mnemonic_to_seed(mnemonic2, None).unwrap();
+			let seed1 = seed_from(mnemonic1, None);
+			let seed2 = seed_from(mnemonic2, None);
 
-			let k1 = derive_key_from_seed((&mut seed1).into(), p).unwrap();
-			let k2 = derive_key_from_seed((&mut seed2).into(), p).unwrap();
+			let k1 = derive_key_from_seed(seed1, p).unwrap();
+			let k2 = derive_key_from_seed(seed2, p).unwrap();
 
 			assert_eq!(k1.secret().to_bytes(), k2.secret().to_bytes());
 			assert_eq!(k1.public().to_bytes(), k2.public().to_bytes());
@@ -133,8 +143,8 @@ mod hdwallet_tests {
 				rng.fill_bytes(&mut seed);
 				let mnemonic = generate_mnemonic((&mut seed).into()).unwrap();
 				let path = generate_random_path();
-				let mut seed = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
-				let k = derive_key_from_seed((&mut seed).into(), &path).unwrap();
+				let seed = seed_from(mnemonic.clone(), None);
+				let k = derive_key_from_seed(seed, &path).unwrap();
 				(k, mnemonic, path)
 			})
 			.collect()
@@ -143,12 +153,12 @@ mod hdwallet_tests {
 	#[test]
 	fn test_derive_seed() {
 		for (expected_keys, mnemonic_str, derivation_path) in get_test_vectors() {
-			let mut seed = mnemonic_to_seed(mnemonic_str.to_string(), None).unwrap();
+			let seed = seed_from(mnemonic_str.to_string(), None);
 			let generated_keys = if derivation_path.is_empty() || derivation_path == "m" {
 				// Use a default path for empty or "m" path
-				derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0'/0'").unwrap()
+				derive_key_from_seed(seed, "m/44'/0'/0'/0'/0'").unwrap()
 			} else {
-				derive_key_from_seed((&mut seed).into(), derivation_path).unwrap()
+				derive_key_from_seed(seed, derivation_path).unwrap()
 			};
 
 			// Compare secret keys
@@ -223,10 +233,10 @@ mod hdwallet_tests {
 	fn test_derive_invalid_path() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
+		let seed = seed_from(mnemonic, None);
 
 		// Attempt to derive a key with an invalid path
-		let result = derive_key_from_seed((&mut seed).into(), "abc");
+		let result = derive_key_from_seed(seed, "abc");
 
 		assert_eq!(
 			result.err().unwrap(),
@@ -239,10 +249,10 @@ mod hdwallet_tests {
 	fn test_derive_invalid_index() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
+		let seed = seed_from(mnemonic, None);
 
 		// Attempt to derive a key with an invalid index
-		let result = derive_key_from_seed((&mut seed).into(), "m/2147483648'"); // Index exceeds HARDENED_OFFSET (2^31)
+		let result = derive_key_from_seed(seed, "m/2147483648'"); // Index exceeds HARDENED_OFFSET (2^31)
 
 		assert!(result.is_err());
 		assert_eq!(
@@ -256,10 +266,10 @@ mod hdwallet_tests {
 	fn test_derive_with_non_integer_path() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
+		let seed = seed_from(mnemonic, None);
 
 		// Invalid derivation path with non-integer components
-		let result = derive_key_from_seed((&mut seed).into(), "1/a/2");
+		let result = derive_key_from_seed(seed, "1/a/2");
 
 		assert!(result.is_err());
 		assert_eq!(
@@ -273,13 +283,13 @@ mod hdwallet_tests {
 	fn test_derive_master_path() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let mut seed = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
+		let seed = seed_from(mnemonic.clone(), None);
 
 		// Test deriving at master path "m"
-		let key1 = derive_key_from_seed((&mut seed).into(), "m/44'/0'/0'/0'/0'").unwrap();
+		let key1 = derive_key_from_seed(seed, "m/44'/0'/0'/0'/0'").unwrap();
 
-		let mut seed2 = mnemonic_to_seed(mnemonic, None).unwrap();
-		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
+		let seed2 = seed_from(mnemonic, None);
+		let key2 = derive_key_from_seed(seed2, "m/44'/0'/0'/0'/0'").unwrap();
 
 		// Keys derived from same path should be identical
 		assert_eq!(
@@ -347,18 +357,18 @@ mod hdwallet_tests {
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
 
 		// Test invalid wormhole path (wrong chain ID)
-		let mut seed1 = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
-		let result = generate_wormhole_from_seed((&mut seed1).into(), "m/44'/60'/0'");
+		let seed1 = seed_from(mnemonic.clone(), None);
+		let result = generate_wormhole_from_seed(seed1, "m/44'/60'/0'");
 		assert!(result.is_err());
 
 		// Test valid wormhole path
-		let mut seed2 = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
-		let result2 = generate_wormhole_from_seed((&mut seed2).into(), "m/44'/189189189'/0'");
+		let seed2 = seed_from(mnemonic.clone(), None);
+		let result2 = generate_wormhole_from_seed(seed2, "m/44'/189189189'/0'");
 		assert!(result2.is_ok());
 
 		// Test another valid wormhole path
-		let mut seed3 = mnemonic_to_seed(mnemonic, None).unwrap();
-		let result3 = generate_wormhole_from_seed((&mut seed3).into(), "m/44'/189189189'/1'");
+		let seed3 = seed_from(mnemonic, None);
+		let result3 = generate_wormhole_from_seed(seed3, "m/44'/189189189'/1'");
 		assert!(result3.is_ok());
 	}
 
@@ -366,12 +376,12 @@ mod hdwallet_tests {
 	fn test_master_key_derivation() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let mut seed1 = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
-		let mut seed2 = mnemonic_to_seed(mnemonic, None).unwrap();
+		let seed1 = seed_from(mnemonic.clone(), None);
+		let seed2 = seed_from(mnemonic, None);
 
 		// Derive keys from master path - should be deterministic
-		let key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0'/0'").unwrap();
-		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/0'").unwrap();
+		let key1 = derive_key_from_seed(seed1, "m/44'/0'/0'/0'/0'").unwrap();
+		let key2 = derive_key_from_seed(seed2, "m/44'/0'/0'/0'/0'").unwrap();
 
 		assert_eq!(
 			key1.secret().to_bytes(),
@@ -385,21 +395,21 @@ mod hdwallet_tests {
 		// Single-use pattern
 		let mnemonic1 =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let seed1 = mnemonic_to_seed(mnemonic1, None).unwrap();
+		let seed1 = seed_from(mnemonic1, None);
 
 		let mnemonic2 =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let seed2 = mnemonic_to_seed(mnemonic2, None).unwrap();
+		let seed2 = seed_from(mnemonic2, None);
 
 		// Same mnemonic should produce same seed
-		assert_eq!(seed1, seed2);
-		assert_eq!(seed1.len(), 64);
+		assert_eq!(seed1.as_bytes(), seed2.as_bytes());
+		assert_eq!(seed1.as_bytes().len(), 64);
 
 		// Different passphrase should produce different seed
 		let mnemonic3 =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let seed3 = mnemonic_to_seed(mnemonic3, Some("password")).unwrap();
-		assert_ne!(seed1, seed3);
+		let seed3 = seed_from(mnemonic3, Some("password"));
+		assert_ne!(seed1.as_bytes(), seed3.as_bytes());
 	}
 
 	#[test]
@@ -412,10 +422,11 @@ mod hdwallet_tests {
 		let decomposed = "cafe\u{0301}";
 		assert_ne!(composed.as_bytes(), decomposed.as_bytes());
 
-		let seed_composed = mnemonic_to_seed(mnemonic.to_string(), Some(composed)).unwrap();
-		let seed_decomposed = mnemonic_to_seed(mnemonic.to_string(), Some(decomposed)).unwrap();
+		let seed_composed = seed_from(mnemonic.to_string(), Some(composed));
+		let seed_decomposed = seed_from(mnemonic.to_string(), Some(decomposed));
 		assert_eq!(
-			seed_composed, seed_decomposed,
+			seed_composed.as_bytes(),
+			seed_decomposed.as_bytes(),
 			"canonically equivalent passphrases must derive the same seed"
 		);
 
@@ -424,7 +435,7 @@ mod hdwallet_tests {
 		let reference = bip39::Mnemonic::parse_in_normalized(bip39::Language::English, mnemonic)
 			.unwrap()
 			.to_seed_normalized(decomposed);
-		assert_eq!(seed_composed, reference);
+		assert_eq!(seed_composed.as_bytes(), &reference);
 
 		// Same guarantee through the borrowing derivation helpers.
 		let key_composed =
@@ -445,27 +456,27 @@ mod hdwallet_tests {
 		let nbsp = ascii.replace(' ', "\u{00a0}");
 		assert_ne!(ascii.as_bytes(), nbsp.as_bytes());
 
-		let seed_ascii = mnemonic_to_seed(ascii.to_string(), None).unwrap();
-		let seed_nbsp = mnemonic_to_seed(nbsp, None)
+		let seed_ascii = seed_from(ascii.to_string(), None);
+		let mut seed_nbsp = SensitiveBytes64::zeroed();
+		mnemonic_to_seed(nbsp, None, &mut seed_nbsp)
 			.expect("NFKD-equivalent mnemonic must parse after normalization");
-		assert_eq!(seed_ascii, seed_nbsp);
+		assert_eq!(seed_ascii.as_bytes(), seed_nbsp.as_bytes());
 	}
 
 	#[test]
 	fn test_derive_key_from_seed_different_paths() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let seed = mnemonic_to_seed(mnemonic, None).unwrap();
+		let seed = seed_from(mnemonic, None);
 
 		// Derive keys at different paths - need separate seeds since they get consumed
-		let mut seed1 = seed;
-		let mut seed2 = mnemonic_to_seed(
+		let seed1 = seed;
+		let seed2 = seed_from(
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string(),
 			None,
-		)
-		.unwrap();
-		let key1 = derive_key_from_seed((&mut seed1).into(), "m/44'/0'/0'/0'/0'").unwrap();
-		let key2 = derive_key_from_seed((&mut seed2).into(), "m/44'/0'/0'/0'/1'").unwrap();
+		);
+		let key1 = derive_key_from_seed(seed1, "m/44'/0'/0'/0'/0'").unwrap();
+		let key2 = derive_key_from_seed(seed2, "m/44'/0'/0'/0'/1'").unwrap();
 
 		// Keys should be different
 		assert_ne!(key1.secret().to_bytes(), key2.secret().to_bytes());
@@ -481,11 +492,11 @@ mod hdwallet_tests {
 		let mnemonic2 =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
 
-		let mut seed1 = mnemonic_to_seed(mnemonic1, None).unwrap();
-		let mut seed2 = mnemonic_to_seed(mnemonic2, None).unwrap();
+		let seed1 = seed_from(mnemonic1, None);
+		let seed2 = seed_from(mnemonic2, None);
 
-		let key1 = derive_key_from_seed((&mut seed1).into(), path).unwrap();
-		let key2 = derive_key_from_seed((&mut seed2).into(), path).unwrap();
+		let key1 = derive_key_from_seed(seed1, path).unwrap();
+		let key2 = derive_key_from_seed(seed2, path).unwrap();
 
 		// Same seed and path should produce same keys
 		assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
@@ -496,10 +507,9 @@ mod hdwallet_tests {
 	fn test_generate_wormhole_from_seed() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
+		let seed = seed_from(mnemonic, None);
 
-		let wormhole =
-			generate_wormhole_from_seed((&mut seed).into(), "m/44'/189189189'/0'").unwrap();
+		let wormhole = generate_wormhole_from_seed(seed, "m/44'/189189189'/0'").unwrap();
 
 		// Verify wormhole pair has expected structure
 		assert_eq!(wormhole.secret.as_bytes().len(), 32);
@@ -513,10 +523,10 @@ mod hdwallet_tests {
 	fn test_wormhole_invalid_path() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
+		let seed = seed_from(mnemonic, None);
 
 		// Should fail with invalid wormhole chain ID
-		let result = generate_wormhole_from_seed((&mut seed).into(), "m/44'/60'/0'");
+		let result = generate_wormhole_from_seed(seed, "m/44'/60'/0'");
 		assert!(result.is_err());
 		assert_eq!(
 			result.err().unwrap(),
@@ -528,9 +538,9 @@ mod hdwallet_tests {
 	fn test_invalid_derivation_path() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
-		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
+		let seed = seed_from(mnemonic, None);
 
-		let result = derive_key_from_seed((&mut seed).into(), "m/44/60/0");
+		let result = derive_key_from_seed(seed, "m/44/60/0");
 		assert!(result.is_err());
 		assert_eq!(
 			result.err().unwrap(),
@@ -545,12 +555,12 @@ mod hdwallet_tests {
 		let path = "m/44'/0'/0'/0'/0'";
 
 		// First derivation
-		let mut seed1 = mnemonic_to_seed(mnemonic.to_string(), None).unwrap();
-		let key1 = derive_key_from_seed((&mut seed1).into(), path).unwrap();
+		let seed1 = seed_from(mnemonic.to_string(), None);
+		let key1 = derive_key_from_seed(seed1, path).unwrap();
 
 		// Second derivation
-		let mut seed2 = mnemonic_to_seed(mnemonic.to_string(), None).unwrap();
-		let key2 = derive_key_from_seed((&mut seed2).into(), path).unwrap();
+		let seed2 = seed_from(mnemonic.to_string(), None);
+		let key2 = derive_key_from_seed(seed2, path).unwrap();
 
 		// Should produce identical results
 		assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
@@ -572,7 +582,7 @@ mod hdwallet_tests {
 
 		// Use the wrapped data - this should move it
 		let mnemonic = generate_mnemonic(sensitive_entropy).unwrap();
-		let seed_from_mnemonic = mnemonic_to_seed(mnemonic, None).unwrap();
+		let seed_from_mnemonic = seed_from(mnemonic, None);
 		let _key = derive_key_from_seed(sensitive_seed, "m/44'/0'/0'/0'/0'").unwrap();
 
 		// After this point, sensitive_entropy and sensitive_seed should be consumed
@@ -584,7 +594,7 @@ mod hdwallet_tests {
 		let _key2 = derive_key_from_seed((&mut raw_seed).into(), "m/44'/0'/0'/0'/0'").unwrap();
 		// raw_seed was zeroized by the conversion
 
-		assert_eq!(seed_from_mnemonic.len(), 64);
+		assert_eq!(seed_from_mnemonic.as_bytes().len(), 64);
 	}
 
 	// For reference and in case test vectors need to be regenerated
@@ -628,12 +638,12 @@ mod hdwallet_tests {
 		}
 		assert!(oversized.len() > MAX_DERIVATION_PATH_BYTES);
 
-		let mut seed1 = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
-		let err1 = derive_key_from_seed((&mut seed1).into(), &oversized).unwrap_err();
+		let seed1 = seed_from(mnemonic.clone(), None);
+		let err1 = derive_key_from_seed(seed1, &oversized).unwrap_err();
 		assert!(matches!(err1, HDLatticeError::PathTooLong(_)), "got {err1:?}");
 
-		let mut seed2 = mnemonic_to_seed(mnemonic, None).unwrap();
-		match generate_wormhole_from_seed((&mut seed2).into(), &oversized) {
+		let seed2 = seed_from(mnemonic, None);
+		match generate_wormhole_from_seed(seed2, &oversized) {
 			Err(HDLatticeError::PathTooLong(_)) => {},
 			Err(other) => panic!("expected PathTooLong, got {other:?}"),
 			Ok(_) => panic!("expected PathTooLong, got Ok"),
@@ -651,12 +661,12 @@ mod hdwallet_tests {
 			too_deep.push_str("/1'");
 		}
 
-		let mut seed1 = mnemonic_to_seed(mnemonic.clone(), None).unwrap();
-		let err1 = derive_key_from_seed((&mut seed1).into(), &too_deep).unwrap_err();
+		let seed1 = seed_from(mnemonic.clone(), None);
+		let err1 = derive_key_from_seed(seed1, &too_deep).unwrap_err();
 		assert!(matches!(err1, HDLatticeError::PathTooDeep(_)), "got {err1:?}");
 
-		let mut seed2 = mnemonic_to_seed(mnemonic, None).unwrap();
-		match generate_wormhole_from_seed((&mut seed2).into(), &too_deep) {
+		let seed2 = seed_from(mnemonic, None);
+		match generate_wormhole_from_seed(seed2, &too_deep) {
 			Err(HDLatticeError::PathTooDeep(_)) => {},
 			Err(other) => panic!("expected PathTooDeep, got {other:?}"),
 			Ok(_) => panic!("expected PathTooDeep, got Ok"),
@@ -716,10 +726,12 @@ mod hdwallet_tests {
 
 		let valid = "rocket primary way job input cactus submit menu zoo burger rent impose";
 
+		let mut seed = SensitiveBytes64::zeroed();
+
 		// A valid mnemonic paired with an oversized passphrase must be rejected
 		// up front instead of deriving a seed over attacker-sized input.
 		let huge_passphrase = "p".repeat(MAX_PASSPHRASE_BYTES + 1);
-		let err = mnemonic_to_seed(valid.to_string(), Some(&huge_passphrase))
+		let err = mnemonic_to_seed(valid.to_string(), Some(&huge_passphrase), &mut seed)
 			.expect_err("oversized passphrase must be rejected");
 		assert!(matches!(err, HDLatticeError::PassphraseTooLong(_)), "got {err:?}");
 
@@ -727,8 +739,8 @@ mod hdwallet_tests {
 		// Use a non-NFKD char so the pre-fix code path would also allocate a
 		// normalized copy of the whole input.
 		let huge_mnemonic = "\u{00e9} ".repeat(MAX_MNEMONIC_BYTES / 2 + 1);
-		let err =
-			mnemonic_to_seed(huge_mnemonic, None).expect_err("oversized mnemonic must be rejected");
+		let err = mnemonic_to_seed(huge_mnemonic, None, &mut seed)
+			.expect_err("oversized mnemonic must be rejected");
 		assert!(matches!(err, HDLatticeError::MnemonicTooLong(_)), "got {err:?}");
 
 		// The borrowed-mnemonic helpers share the same parser and must enforce
@@ -739,18 +751,19 @@ mod hdwallet_tests {
 
 		// Inputs at exactly the caps must still be accepted.
 		let max_passphrase = "p".repeat(MAX_PASSPHRASE_BYTES);
-		mnemonic_to_seed(valid.to_string(), Some(&max_passphrase))
+		mnemonic_to_seed(valid.to_string(), Some(&max_passphrase), &mut seed)
 			.expect("passphrase at exactly MAX_PASSPHRASE_BYTES must be accepted");
 	}
 
 	#[test]
 	fn test_mnemonic_to_seed_zeroizes_on_parse_failure() {
 		let bogus = "not a valid bip39 mnemonic phrase at all".to_string();
-		let result = mnemonic_to_seed(bogus, None);
-		match result {
-			Err(HDLatticeError::Bip39Error(_)) => {},
-			other => panic!("expected Bip39Error, got {other:?}"),
-		}
+		let mut seed = SensitiveBytes64::zeroed();
+		let err =
+			mnemonic_to_seed(bogus, None, &mut seed).expect_err("bogus mnemonic must be rejected");
+		assert!(matches!(err, HDLatticeError::Bip39Error(_)), "got {err:?}");
+		// On error the seed buffer is untouched (still all zeros).
+		assert_eq!(seed.as_bytes(), &[0u8; 64]);
 	}
 
 	#[test]
@@ -764,8 +777,8 @@ mod hdwallet_tests {
 			max_depth.push_str("/1'");
 		}
 
-		let mut seed = mnemonic_to_seed(mnemonic, None).unwrap();
-		derive_key_from_seed((&mut seed).into(), &max_depth)
+		let seed = seed_from(mnemonic, None);
+		derive_key_from_seed(seed, &max_depth)
 			.expect("path at exactly MAX_DERIVATION_DEPTH must succeed");
 	}
 }

@@ -24,6 +24,29 @@ const HARDENED_BIT: u32 = 1 << 31;
 const HMAC_BLOCK_BYTES: usize = 128;
 const HMAC_OUTPUT_BYTES: usize = 64;
 
+/// SHA-512 over `first` followed by the concatenation of `rest`, writing the
+/// digest into `out` and volatile-wiping the hasher state in place afterwards.
+///
+/// This is the only function in the crate containing `unsafe`; every other
+/// primitive that hashes secret material is built on it. It exists because
+/// `sha2` 0.10 has no zeroizing drop semantics: a plainly dropped `Sha512`
+/// leaves its block buffer — still holding input bytes verbatim — in a dead
+/// stack frame (security review). The hasher here is only driven through
+/// `&mut` methods (never moved), so wiping it in place erases every copy.
+fn sha512_wiped(first: &[u8], rest: &[&[u8]], out: &mut [u8; HMAC_OUTPUT_BYTES]) {
+	let mut hasher = Sha512::new();
+	hasher.update(first);
+	for part in rest {
+		hasher.update(part);
+	}
+	hasher.finalize_into_reset(GenericArray::from_mut_slice(&mut out[..]));
+
+	// SAFETY: `Sha512` is a flat struct (word state, length counter, block
+	// buffer, position), containing no pointers or Drop glue, so writing
+	// zeros over it is sound and it may be dropped afterwards.
+	unsafe { zeroize::zeroize_flat_type(&mut hasher) };
+}
+
 /// HMAC-SHA512 over `key` and the concatenation of `message_parts`, writing
 /// the tag into `out`.
 ///
@@ -33,12 +56,10 @@ const HMAC_OUTPUT_BYTES: usize = 64;
 /// frame, its block buffer holds message bytes verbatim, and its consuming
 /// `finalize(self)` moves all of that around the stack unwiped. Here every
 /// secret-bearing buffer is under our control: the ipad/opad key blocks are
-/// self-wiping, the hashers are only driven through `&mut` methods (never
-/// moved), and their flat state — which includes a block buffer still holding
-/// message bytes verbatim — is volatile-wiped in place before drop.
+/// self-wiping and both hash passes go through [`sha512_wiped`].
 ///
 /// Only keys up to one block are supported (the longer-key hashing step of
-/// RFC 2104 is intentionally omitted); both callers pass 14 or 32 bytes.
+/// RFC 2104 is intentionally omitted); callers pass 14, 32, or 64 bytes.
 fn hmac_sha512(key: &[u8], message_parts: &[&[u8]], out: &mut [u8; HMAC_OUTPUT_BYTES]) {
 	debug_assert!(key.len() <= HMAC_BLOCK_BYTES, "keys longer than one block are unsupported");
 
@@ -51,25 +72,53 @@ fn hmac_sha512(key: &[u8], message_parts: &[&[u8]], out: &mut [u8; HMAC_OUTPUT_B
 
 	// The pads are always passed as slices: passing the (Copy) arrays by
 	// value would leave unwiped copies of key material on the stack.
-	let mut inner = Sha512::new();
-	inner.update(ipad.as_slice());
-	for part in message_parts {
-		inner.update(part);
-	}
 	let mut inner_hash = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
-	inner.finalize_into_reset(GenericArray::from_mut_slice(&mut inner_hash[..]));
+	sha512_wiped(ipad.as_slice(), message_parts, &mut inner_hash);
+	sha512_wiped(opad.as_slice(), &[inner_hash.as_slice()], out);
+}
 
-	let mut outer = Sha512::new();
-	outer.update(opad.as_slice());
-	outer.update(inner_hash.as_slice());
-	outer.finalize_into_reset(GenericArray::from_mut_slice(&mut out[..]));
+/// PBKDF2-HMAC-SHA512 restricted to a single 64-byte output block (all this
+/// crate needs: BIP39 seed stretching), built on the zeroizing [`hmac_sha512`].
+///
+/// This replaces `bip39::Mnemonic::to_seed_normalized`, which returns the
+/// stretched seed as a plain `[u8; 64]` from a non-inlinable external
+/// function: its internal seed local is dropped unwiped in a dead stack
+/// frame, out of reach of any caller-side hygiene (security review). Here the
+/// caller provides the output buffer and every intermediate is self-wiping.
+pub(crate) fn pbkdf2_hmac_sha512(
+	password: &[u8],
+	salt_parts: &[&[u8]],
+	rounds: u32,
+	out: &mut [u8; HMAC_OUTPUT_BYTES],
+) {
+	// HMAC keys longer than one block are pre-hashed, exactly as RFC 2104
+	// prescribes (and as any HMAC implementation would do internally), so
+	// `hmac_sha512`'s one-block key limit holds. A 24-word mnemonic phrase —
+	// the PBKDF2 password — is typically longer than 128 bytes.
+	let mut hashed_key = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
+	let key: &[u8] = if password.len() > HMAC_BLOCK_BYTES {
+		sha512_wiped(password, &[], &mut hashed_key);
+		&hashed_key[..]
+	} else {
+		password
+	};
 
-	// SAFETY: `Sha512` is a flat struct (word state, length counter, block
-	// buffer, position), containing no pointers or Drop glue, so writing
-	// zeros over it is sound and it may be dropped afterwards.
-	unsafe {
-		zeroize::zeroize_flat_type(&mut inner);
-		zeroize::zeroize_flat_type(&mut outer);
+	// U1 = HMAC(P, salt || INT_32_BE(1)); the single output block is
+	// U1 ^ U2 ^ ... ^ Uc with U_i = HMAC(P, U_{i-1}).
+	let mut u = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
+	let mut next = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
+	let mut first_parts: Vec<&[u8]> = salt_parts.to_vec();
+	let block_index = 1u32.to_be_bytes();
+	first_parts.push(&block_index);
+	hmac_sha512(key, &first_parts, &mut u);
+	out.copy_from_slice(&*u);
+
+	for _ in 1..rounds {
+		hmac_sha512(key, &[&u[..]], &mut next);
+		u.copy_from_slice(&*next);
+		for (o, v) in out.iter_mut().zip(u.iter()) {
+			*o ^= v;
+		}
 	}
 }
 

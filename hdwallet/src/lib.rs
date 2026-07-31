@@ -108,37 +108,45 @@ pub const MAX_MNEMONIC_BYTES: usize = 1024;
 /// passphrase is a CPU/memory DoS vector. 1 KiB far exceeds any realistic use.
 pub const MAX_PASSPHRASE_BYTES: usize = 1024;
 
-/// Convert a BIP39 mnemonic phrase to a seed
+/// Convert a BIP39 mnemonic phrase to a seed, writing it into the
+/// caller-provided self-zeroizing [`SensitiveBytes64`].
 ///
 /// This function takes ownership of the mnemonic string for security.
 /// Users must explicitly choose to move or copy their mnemonic:
 ///
 /// ```rust
-/// use qp_rusty_crystals_hdwallet::mnemonic_to_seed;
-/// let mnemonic = "word word word...".to_string();
+/// use qp_rusty_crystals_hdwallet::{mnemonic_to_seed, SensitiveBytes64};
+/// let mnemonic = "legal winner thank year wave sausage worth useful legal winner thank yellow".to_string();
 ///
 /// // Move the mnemonic (recommended for single use)
-/// let seed = mnemonic_to_seed(mnemonic, None);
-/// // mnemonic is now consumed and zeroized
-///
-/// // Or explicitly copy for multiple uses
-/// let mnemonic = "word word word...".to_string();
-/// let seed1 = mnemonic_to_seed(mnemonic.clone(), None);
-/// let seed2 = mnemonic_to_seed(mnemonic, None); // consumes original
+/// let mut seed = SensitiveBytes64::zeroed();
+/// mnemonic_to_seed(mnemonic, None, &mut seed).unwrap();
+/// // mnemonic is now consumed and zeroized; seed wipes itself on drop
 /// ```
 ///
 /// # Security Note
 /// This function performs expensive PBKDF2 key stretching (2048 iterations).
 /// The mnemonic string is zeroized before returning.
-/// The returned seed contains sensitive cryptographic material and should be
-/// zeroized when no longer needed.
+///
+/// The seed is written in place into the caller's [`SensitiveBytes64`]
+/// rather than returned by value (security review). A raw `[u8; 64]` return
+/// would require every caller to remember to wipe a complete BIP39 seed
+/// manually — and even a self-zeroizing return value would be *moved* out,
+/// and Rust moves are copies that leave the moved-from stack slot dead and
+/// unwiped (`ZeroizeOnDrop` only wipes the value's final resting place).
+/// With an out-parameter the secret only ever exists inside the caller's
+/// wiping guard; the stack-residue regression test pins this.
+///
+/// On error, `seed_out` is untouched.
 pub fn mnemonic_to_seed(
 	mnemonic: String,
 	passphrase: Option<&str>,
-) -> Result<[u8; 64], HDLatticeError> {
-	// Drop guard: zeroizes the mnemonic on every exit path (success, parse error, unwind).
+	seed_out: &mut SensitiveBytes64,
+) -> Result<(), HDLatticeError> {
+	// Drop guard: zeroizes the mnemonic on every exit path (success, parse
+	// error, unwind).
 	let mnemonic = Zeroizing::new(mnemonic);
-	parse_mnemonic_to_seed(mnemonic.as_str(), passphrase)
+	parse_mnemonic_to_seed_into(mnemonic.as_str(), passphrase, seed_out.as_mut_bytes())
 }
 
 /// NFKD-normalize a potentially secret string. Returns `None` when the input is already
@@ -166,10 +174,17 @@ fn nfkd_owned(s: &str) -> Option<Zeroizing<String>> {
 /// Both inputs are size-capped ([`MAX_MNEMONIC_BYTES`], [`MAX_PASSPHRASE_BYTES`])
 /// *before* normalization, so attacker-controlled text cannot drive unbounded
 /// allocation, normalization scans, or PBKDF2 work prior to rejection.
-fn parse_mnemonic_to_seed(
+///
+/// The stretched seed is written through `seed_out` rather than returned by
+/// value: a by-value seed would be moved (i.e. copied) across function
+/// boundaries, leaving unwiped copies in dead stack slots. Callers pass the
+/// interior of a self-zeroizing `SensitiveBytes64`, so the seed only ever
+/// lives inside a wiping guard. On error, `seed_out` is untouched.
+fn parse_mnemonic_to_seed_into(
 	mnemonic: &str,
 	passphrase: Option<&str>,
-) -> Result<[u8; 64], HDLatticeError> {
+	seed_out: &mut [u8; 64],
+) -> Result<(), HDLatticeError> {
 	if mnemonic.len() > MAX_MNEMONIC_BYTES {
 		return Err(HDLatticeError::MnemonicTooLong(mnemonic.len()));
 	}
@@ -188,7 +203,29 @@ fn parse_mnemonic_to_seed(
 
 	let parsed_mnemonic = Mnemonic::parse_in_normalized(Language::English, mnemonic)
 		.map_err(|e| HDLatticeError::Bip39Error(e.to_string()))?;
-	Ok(parsed_mnemonic.to_seed_normalized(passphrase))
+
+	// Seed stretching is done in-crate rather than via
+	// `Mnemonic::to_seed_normalized`, which returns the seed as a plain
+	// `[u8; 64]` from a non-inlinable external function and leaves an
+	// unwiped copy of it in a dead stack frame (security review). The PBKDF2
+	// password is the canonical phrase — the validated words joined by
+	// single spaces — matching `to_seed_normalized` byte for byte (pinned by
+	// the golden-vector tests and a direct cross-check against bip39).
+	let mut password = Zeroizing::new(String::with_capacity(mnemonic.len()));
+	for (i, word) in parsed_mnemonic.words().enumerate() {
+		if i > 0 {
+			password.push(' ');
+		}
+		password.push_str(word);
+	}
+
+	hderive::pbkdf2_hmac_sha512(
+		password.as_bytes(),
+		&[b"mnemonic", passphrase.as_bytes()],
+		2048,
+		seed_out,
+	);
+	Ok(())
 }
 
 /// Derive the 32 bytes of keypair entropy at the given BIP44 path.
@@ -260,8 +297,9 @@ macro_rules! mldsa_variant_module {
 				path: &str,
 			) -> Result<Keypair, HDLatticeError> {
 				crate::check_derivation_path(path)?;
-				let mut seed = crate::parse_mnemonic_to_seed(mnemonic, passphrase)?;
-				derive_key_from_seed(SensitiveBytes64::from(&mut seed), path)
+				let mut seed = SensitiveBytes64::zeroed();
+				crate::parse_mnemonic_to_seed_into(mnemonic, passphrase, seed.as_mut_bytes())?;
+				derive_key_from_seed(seed, path)
 			}
 		}
 	};
@@ -323,8 +361,9 @@ pub fn derive_wormhole_from_mnemonic(
 	path: &str,
 ) -> Result<WormholePair, HDLatticeError> {
 	check_wormhole_path(path)?;
-	let mut seed = parse_mnemonic_to_seed(mnemonic, passphrase)?;
-	generate_wormhole_from_seed(SensitiveBytes64::from(&mut seed), path)
+	let mut seed = SensitiveBytes64::zeroed();
+	parse_mnemonic_to_seed_into(mnemonic, passphrase, seed.as_mut_bytes())?;
+	generate_wormhole_from_seed(seed, path)
 }
 
 /// Generate a wormhole pair from a seed at the given path
