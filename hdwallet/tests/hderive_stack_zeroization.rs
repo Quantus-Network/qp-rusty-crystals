@@ -93,8 +93,9 @@ fn hderive_leaves_no_secret_material_on_the_stack() {
 	let master_secret: [u8; 32] = reference[..32].try_into().unwrap();
 	let master_chain: [u8; 32] = reference[32..].try_into().unwrap();
 
-	let master = ExtendedPrivKey::derive(&SEED, "m").unwrap();
-	assert_eq!(master.secret(), master_secret, "reference HMAC disagrees with derive()");
+	let mut master = ExtendedPrivKey::zeroed();
+	ExtendedPrivKey::derive(&SEED, "m", &mut master).unwrap();
+	assert_eq!(master.secret().as_bytes(), &master_secret, "reference HMAC disagrees with derive()");
 
 	// Sanity: the technique detects an unwiped copy. A closure that
 	// deliberately leaves the seed in a dead stack frame must be seen.
@@ -115,7 +116,8 @@ fn hderive_leaves_no_secret_material_on_the_stack() {
 	// must not survive anywhere on the stack once the derived key (which is
 	// self-zeroizing) has been dropped.
 	let derive_leaks = probe_stack_for(&seed_patterns, || {
-		let key = ExtendedPrivKey::derive(&SEED, "m").unwrap();
+		let mut key = ExtendedPrivKey::zeroed();
+		ExtendedPrivKey::derive(&SEED, "m", &mut key).unwrap();
 		core::hint::black_box(&key);
 	});
 
@@ -130,8 +132,10 @@ fn hderive_leaves_no_secret_material_on_the_stack() {
 	];
 	let child_number: ChildNumber = "0'".parse().unwrap();
 	let child_leaks = probe_stack_for(&child_patterns, || {
-		let child = master.child(child_number).unwrap();
-		core::hint::black_box(&child);
+		let mut key = ExtendedPrivKey::zeroed();
+		ExtendedPrivKey::derive(&SEED, "m", &mut key).unwrap();
+		key.child_in_place(child_number);
+		core::hint::black_box(&key);
 	});
 
 	assert!(
@@ -140,6 +144,45 @@ fn hderive_leaves_no_secret_material_on_the_stack() {
 	);
 	assert!(
 		child_leaks.is_empty(),
-		"child() left secret material in dead stack memory: {child_leaks:?}"
+		"child_in_place() left secret material in dead stack memory: {child_leaks:?}"
+	);
+}
+
+// Regression test (security review): deriving a key, reading its secret
+// through `ExtendedPrivKey::secret()`, and dropping everything must leave no
+// copy of the derived key material in dead stack memory — with no manual
+// wiping on the caller's part.
+//
+// Two past violations are pinned here. The raw-array accessor
+// (`fn secret(&self) -> [u8; 32]`) handed the caller an unguarded duplicate
+// with no destruction-time zeroization. And `derive()` returned the key
+// struct by value: Rust moves are copies that leave the moved-from stack
+// slot dead but never dropped, so the secret key and chain code survived in
+// a dead `Result` slot that `ZeroizeOnDrop` could not wipe. The accessor now
+// returns a borrow (no copy exists to leak) and `derive()` fills a
+// caller-provided key in place, so the material only ever lives inside the
+// caller's self-zeroizing value.
+#[test]
+fn derive_and_secret_access_leave_no_unwiped_copies() {
+	// Reference master secret and chain code, computed independently outside
+	// the probed region.
+	let mut reference: Hmac<Sha512> = Hmac::new_from_slice(b"Dilithium seed").unwrap();
+	reference.update(&SEED);
+	let reference = reference.finalize().into_bytes();
+	let patterns = [
+		("master secret_key", reference[..32].try_into().unwrap()),
+		("master chain_code", reference[32..].try_into().unwrap()),
+	];
+
+	let leaks = probe_stack_for(&patterns, || {
+		let mut key = ExtendedPrivKey::zeroed();
+		ExtendedPrivKey::derive(&SEED, "m", &mut key).unwrap();
+		let secret = key.secret();
+		core::hint::black_box(&secret);
+		// `key` drops here and wipes its fields in place.
+	});
+	assert!(
+		leaks.is_empty(),
+		"derived key material survived in dead stack memory: {leaks:?}"
 	);
 }

@@ -250,12 +250,30 @@ pub struct ExtendedPrivKey {
 }
 
 impl ExtendedPrivKey {
-	/// Attempts to derive an extended private key from a path.
+	/// All-zero key, intended to be filled by [`Self::derive`].
+	pub fn zeroed() -> ExtendedPrivKey {
+		ExtendedPrivKey {
+			secret_key: SensitiveBytes32::zeroed(),
+			chain_code: SensitiveBytes32::zeroed(),
+		}
+	}
+
+	/// Derives the extended private key at `path`, writing it into the
+	/// caller-provided `out`.
 	///
 	/// The path is parsed and validated first and the seed length is bounded
 	/// to [`MIN_SEED_BYTES`]`..=`[`MAX_SEED_BYTES`], so malformed requests are
-	/// rejected before any HMAC work is spent on the seed.
-	pub fn derive<Path>(seed: &[u8], path: Path) -> Result<ExtendedPrivKey, Error>
+	/// rejected before any HMAC work is spent on the seed. On error, `out` is
+	/// untouched.
+	///
+	/// The key is written in place rather than returned by value (security
+	/// review): Rust moves are copies that leave the moved-from stack slot
+	/// dead and unwiped (`ZeroizeOnDrop` only wipes the value's final resting
+	/// place), so a by-value return would leave the secret key and chain code
+	/// in a dead `Result` slot. With an out-parameter the key material only
+	/// ever exists inside the caller's self-zeroizing value; the
+	/// stack-residue regression test pins this.
+	pub fn derive<Path>(seed: &[u8], path: Path, out: &mut ExtendedPrivKey) -> Result<(), Error>
 	where
 		Path: IntoDerivationPath,
 	{
@@ -265,46 +283,50 @@ impl ExtendedPrivKey {
 		}
 
 		// `result` holds secret_key || chain_code; the self-wiping buffer is
-		// zeroized on drop, after the halves are copied into the
+		// zeroized on drop, after the halves are copied into `out`'s
 		// self-zeroizing `SensitiveBytes32` fields.
 		let mut result = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
 		hmac_sha512(b"Dilithium seed", &[seed], &mut result);
-		let (secret_key, chain_code) = result.split_at(32);
-
-		let mut sk = ExtendedPrivKey {
-			secret_key: SensitiveBytes32::from(&mut secret_key.try_into().unwrap()),
-			chain_code: SensitiveBytes32::from(&mut chain_code.try_into().unwrap()),
-		};
+		out.secret_key.as_mut_bytes().copy_from_slice(&result[..32]);
+		out.chain_code.as_mut_bytes().copy_from_slice(&result[32..]);
 
 		for child in path.as_ref() {
-			sk = sk.child(*child)?;
+			out.child_in_place(*child);
 		}
 
-		Ok(sk)
+		Ok(())
 	}
 
-	pub fn secret(&self) -> [u8; 32] {
-		*self.secret_key.as_bytes()
+	/// Borrow the derived secret key.
+	///
+	/// Returns a reference to the internal self-zeroizing storage rather
+	/// than a raw `[u8; 32]` copy (security review): the raw accessor
+	/// silently materialized an unguarded duplicate of the private key that
+	/// every caller had to remember to wipe. No copy is made here; a caller
+	/// that needs an owned copy must create it deliberately, inside a
+	/// self-zeroizing wrapper (e.g. fill a `SensitiveBytes32` in place).
+	pub fn secret(&self) -> &SensitiveBytes32 {
+		&self.secret_key
 	}
 
-	pub fn child(&self, child: ChildNumber) -> Result<ExtendedPrivKey, Error> {
-		// Feed the HMAC directly from the stored secret rather than
-		// `self.secret()`, which would materialize a throwaway `[u8; 32]` copy
-		// on the stack that is never wiped. See `derive` for the lifecycle of
-		// the self-wiping `result` buffer.
+	/// Overwrites this key with its child key at `child`, in place.
+	///
+	/// This replaces the by-value `child()` (security review): returning a
+	/// fresh `ExtendedPrivKey` moved the child's secret key and chain code
+	/// through a dead `Result` slot on every derivation step (see
+	/// [`Self::derive`]). Stepping in place keeps the key material inside
+	/// this value's self-zeroizing fields; the parent's bytes are destroyed
+	/// by being overwritten with the child's.
+	pub fn child_in_place(&mut self, child: ChildNumber) {
+		// See `derive` for the lifecycle of the self-wiping `result` buffer.
 		let mut result = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
 		hmac_sha512(
 			self.chain_code.as_bytes(),
 			&[&[0], self.secret_key.as_bytes(), &child.to_bytes()],
 			&mut result,
 		);
-		let (secret_key, chain_code) = result.split_at(32);
-
-		let child = ExtendedPrivKey {
-			secret_key: SensitiveBytes32::from(&mut secret_key.try_into().unwrap()),
-			chain_code: SensitiveBytes32::from(&mut chain_code.try_into().unwrap()),
-		};
-		Ok(child)
+		self.secret_key.as_mut_bytes().copy_from_slice(&result[..32]);
+		self.chain_code.as_mut_bytes().copy_from_slice(&result[32..]);
 	}
 }
 
@@ -329,9 +351,10 @@ mod tests {
 		let mnemonic = Mnemonic::parse_in_normalized(Language::English, phrase).unwrap();
 		let seed = mnemonic.to_seed_normalized("");
 
-		let account = ExtendedPrivKey::derive(&seed, "m/44'/60'/0'/0'/0'").unwrap();
+		let mut account = ExtendedPrivKey::zeroed();
+		ExtendedPrivKey::derive(&seed, "m/44'/60'/0'/0'/0'", &mut account).unwrap();
 
-		assert_eq!(expected_secret_key, &account.secret(), "Secret key is invalid");
+		assert_eq!(expected_secret_key, account.secret().as_bytes(), "Secret key is invalid");
 	}
 
 	// The in-crate zeroizing HMAC must be a correct HMAC-SHA512. Pin it to the
@@ -503,15 +526,16 @@ mod tests {
 	#[test]
 	fn seed_length_bounds_enforced() {
 		let path = "m/44'/60'/0'";
+		let mut out = ExtendedPrivKey::zeroed();
 		for ok_len in [16usize, 32, 64] {
 			assert!(
-				ExtendedPrivKey::derive(&vec![7u8; ok_len], path).is_ok(),
+				ExtendedPrivKey::derive(&vec![7u8; ok_len], path, &mut out).is_ok(),
 				"seed of {ok_len} bytes must be accepted"
 			);
 		}
 		for bad_len in [0usize, 15, 65, 1 << 20] {
 			assert_eq!(
-				ExtendedPrivKey::derive(&vec![7u8; bad_len], path).unwrap_err(),
+				ExtendedPrivKey::derive(&vec![7u8; bad_len], path, &mut out).unwrap_err(),
 				Error::InvalidSeedLength(bad_len),
 				"seed of {bad_len} bytes must be rejected"
 			);
@@ -525,8 +549,9 @@ mod tests {
 	#[test]
 	fn invalid_path_rejected_before_seed_is_touched() {
 		let huge_seed = vec![7u8; 1 << 20];
+		let mut out = ExtendedPrivKey::zeroed();
 		assert_eq!(
-			ExtendedPrivKey::derive(&huge_seed, "not-a-path").unwrap_err(),
+			ExtendedPrivKey::derive(&huge_seed, "not-a-path", &mut out).unwrap_err(),
 			Error::InvalidDerivationPath,
 			"path validation must run (and fail) before the seed is processed"
 		);

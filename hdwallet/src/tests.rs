@@ -304,12 +304,15 @@ mod hdwallet_tests {
 		// Test that nam-tiny-hderive works with our seed format
 		let seed: &[u8] = &[42; 64];
 		let path = "m/44'/60'/0'/0'/0'";
-		let ext = ExtendedPrivKey::derive(seed, path).unwrap();
-		assert_eq!(&ext.secret(), b"\xfc\x29\xd9\xfc\x63\x5b\x32\x72\x63\x1b\x43\x02\xf7\x9b\xe4\x07\xa7\xf6\x77\xef\x73\x4a\xf2\xc4\x52\x7c\x90\x88\x97\xcd\xaa\x86");
+		let mut ext = ExtendedPrivKey::zeroed();
+		ExtendedPrivKey::derive(seed, path, &mut ext).unwrap();
+		assert_eq!(ext.secret().as_bytes(), b"\xfc\x29\xd9\xfc\x63\x5b\x32\x72\x63\x1b\x43\x02\xf7\x9b\xe4\x07\xa7\xf6\x77\xef\x73\x4a\xf2\xc4\x52\x7c\x90\x88\x97\xcd\xaa\x86");
 
-		let base_ext = ExtendedPrivKey::derive(seed, "m/44'/60'/0'/0'").unwrap();
-		let child_ext = base_ext.child(ChildNumber::from_str("0'").unwrap()).unwrap();
-		assert_eq!(ext.secret(), child_ext.secret());
+		// Stepping the parent in place must agree with the full-path derivation.
+		let mut stepped = ExtendedPrivKey::zeroed();
+		ExtendedPrivKey::derive(seed, "m/44'/60'/0'/0'", &mut stepped).unwrap();
+		stepped.child_in_place(ChildNumber::from_str("0'").unwrap());
+		assert_eq!(ext.secret().as_bytes(), stepped.secret().as_bytes());
 	}
 
 	// End-to-end known-answer test: pins the full mnemonic -> seed -> wormhole pipeline.

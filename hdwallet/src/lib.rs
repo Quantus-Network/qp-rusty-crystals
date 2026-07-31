@@ -246,10 +246,15 @@ fn derive_entropy_from_seed(
 	check_derivation_path(path)?;
 
 	// Derive entropy at the specified path
-	let xpriv = ExtendedPrivKey::derive(seed.as_bytes(), path)
+	let mut xpriv = ExtendedPrivKey::zeroed();
+	ExtendedPrivKey::derive(seed.as_bytes(), path, &mut xpriv)
 		.map_err(|_e| HDLatticeError::KeyDerivationFailed(path.to_string()))?;
-	let mut secret = xpriv.secret();
-	Ok(SensitiveBytes32::from(&mut secret))
+	// Deliberate guarded copy: filled in place inside the self-zeroizing
+	// wrapper, so the secret never exists outside a wiping guard (`xpriv`
+	// wipes its own storage when it drops below).
+	let mut entropy = SensitiveBytes32::zeroed();
+	entropy.as_mut_bytes().copy_from_slice(xpriv.secret().as_bytes());
+	Ok(entropy)
 
 	// seed is automatically zeroized when it drops
 }
