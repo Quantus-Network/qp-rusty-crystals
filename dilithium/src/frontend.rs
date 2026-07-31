@@ -111,14 +111,18 @@ macro_rules! define_ml_dsa {
 			/// * 'entropy' - bytes for determining the generation process (must be at least 32
 			///   bytes)
 			///
-			/// Note: The entropy is moved here and zeroized after use, along with the derived
-			/// secret key.
-			pub fn generate(entropy: SensitiveBytes32) -> Keypair {
+			/// The entropy is borrowed mutably and zeroized in place after use
+			/// (security review): taking it by value would move — i.e. copy —
+			/// it through parameter slots that are dead but never dropped, so
+			/// `ZeroizeOnDrop` could not wipe them. The caller's value is
+			/// consumed in the practical sense: it is all zeros afterwards.
+			pub fn generate(entropy: &mut SensitiveBytes32) -> Keypair {
 				let mut pk = [0u8; PUBLICKEYBYTES];
 				let mut sk = [0u8; SECRETKEYBYTES];
 				$crate::sign::keypair_var::<K, L, ETA, PUBLICKEYBYTES, SECRETKEYBYTES>(
 					&mut pk, &mut sk, entropy,
 				);
+				entropy.as_mut_bytes().zeroize();
 				let keypair = Keypair {
 					// Constructed directly rather than via `SecretKey::from_bytes`:
 					// a freshly generated key is consistent by construction, and the
@@ -451,7 +455,7 @@ macro_rules! basic_variant_tests {
 		fn self_verify_roundtrip() {
 			use super::{Keypair, PUBLICKEYBYTES, SECRETKEYBYTES, SIGNBYTES};
 
-			let keys = Keypair::generate(basic_test_entropy());
+			let keys = Keypair::generate(&mut basic_test_entropy());
 			let msg = b"variant smoke test";
 			let sig = keys.sign(msg, None, None).unwrap();
 			assert!(keys.verify(msg, &sig, None));
@@ -465,7 +469,7 @@ macro_rules! basic_variant_tests {
 		fn hedged_and_context() {
 			use super::Keypair;
 
-			let keys = Keypair::generate(basic_test_entropy());
+			let keys = Keypair::generate(&mut basic_test_entropy());
 			let msg = b"ctx";
 			let h1 = basic_test_entropy();
 			let h2 = basic_test_entropy();
@@ -481,7 +485,7 @@ macro_rules! basic_variant_tests {
 			use super::{Keypair, MAX_MESSAGE_SIZE, SIGNBYTES};
 			use $crate::errors::SignatureError;
 
-			let keys = Keypair::generate(basic_test_entropy());
+			let keys = Keypair::generate(&mut basic_test_entropy());
 			let big = alloc::vec![0u8; MAX_MESSAGE_SIZE + 1];
 			assert!(matches!(keys.sign(&big, None, None), Err(SignatureError::MessageTooLong)));
 			assert!(!keys.verify(&big, &[0u8; SIGNBYTES], None));
@@ -524,8 +528,8 @@ macro_rules! adversarial_import_tests {
 			use super::{Keypair, KEYPAIRBYTES, SECRETKEYBYTES};
 			use $crate::errors::KeyParsingError;
 
-			let keys_a = Keypair::generate(adversarial_entropy());
-			let keys_b = Keypair::generate(adversarial_entropy());
+			let keys_a = Keypair::generate(&mut adversarial_entropy());
+			let keys_b = Keypair::generate(&mut adversarial_entropy());
 
 			// Genuine keypair bytes must round-trip.
 			let good = keys_a.to_bytes();
@@ -553,8 +557,8 @@ macro_rules! adversarial_import_tests {
 			use super::{Keypair, SecretKey};
 			use $crate::errors::KeyParsingError;
 
-			let keys_a = Keypair::generate(adversarial_entropy());
-			let keys_b = Keypair::generate(adversarial_entropy());
+			let keys_a = Keypair::generate(&mut adversarial_entropy());
+			let keys_b = Keypair::generate(&mut adversarial_entropy());
 
 			let secret_a = SecretKey::from_bytes(keys_a.secret().to_bytes().as_slice()).unwrap();
 			assert!(
@@ -585,7 +589,7 @@ macro_rules! adversarial_import_tests {
 				params::{POLYT0_PACKEDBYTES, SEEDBYTES, TR_BYTES},
 			};
 
-			let keys = Keypair::generate(adversarial_entropy());
+			let keys = Keypair::generate(&mut adversarial_entropy());
 			let good = keys.to_bytes();
 			assert!(
 				Keypair::from_bytes(good.as_slice()).is_ok(),
@@ -628,7 +632,7 @@ macro_rules! adversarial_import_tests {
 				params::{POLYT0_PACKEDBYTES, SEEDBYTES, TR_BYTES},
 			};
 
-			let keys = Keypair::generate(adversarial_entropy());
+			let keys = Keypair::generate(&mut adversarial_entropy());
 			let good = keys.secret().to_bytes();
 			assert!(
 				SecretKey::from_bytes(good.as_slice()).is_ok(),
@@ -717,7 +721,7 @@ macro_rules! adversarial_import_tests {
 			// Start from an honest key and re-derive everything after
 			// planting the out-of-range coefficient, so the forged blob is
 			// fully self-consistent (valid t0, tr, and matching public key).
-			let keys = Keypair::generate(adversarial_entropy());
+			let keys = Keypair::generate(&mut adversarial_entropy());
 			let sk_bytes = keys.secret().to_bytes();
 
 			let mut rho = [0u8; params::SEEDBYTES];
@@ -802,7 +806,7 @@ macro_rules! adversarial_import_tests {
 			assert!(matches!(PublicKey::from_bytes(&pk), Err(KeyParsingError::BadPublicKey)));
 
 			// A genuine public key must still round-trip through from_bytes.
-			let keys = Keypair::generate(adversarial_entropy());
+			let keys = Keypair::generate(&mut adversarial_entropy());
 			let good = keys.public().to_bytes();
 			assert!(PublicKey::from_bytes(&good).is_ok());
 		}

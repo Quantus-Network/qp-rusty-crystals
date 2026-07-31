@@ -302,7 +302,7 @@ fn bench_comparison(c: &mut Criterion) {
 	let context: &[u8] = b"";
 
 	// Standard Dilithium
-	let keypair = Keypair::generate((&mut seed).into());
+	let keypair = Keypair::generate(&mut (&mut seed).into());
 
 	group.bench_function("standard_dilithium_sign", |b| {
 		b.iter(|| keypair.sign(message, None, None).unwrap());

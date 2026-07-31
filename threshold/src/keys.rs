@@ -4,7 +4,10 @@
 //! threshold signing. The private key share is intentionally opaque to
 //! prevent accidental exposure of secret material.
 
-use alloc::{collections::BTreeMap, format};
+use alloc::{
+	collections::{BTreeMap, BTreeSet},
+	format,
+};
 use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -79,20 +82,22 @@ impl BorshSerialize for PublicKey {
 impl BorshDeserialize for PublicKey {
 	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
 		let bytes = <[u8; PUBLIC_KEY_SIZE]>::deserialize_reader(reader)?;
-		validate_pk_bytes(&bytes)
-			.map_err(|e| borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, e))?;
-		let tr = compute_tr(&bytes);
-		Ok(Self { bytes, tr })
+		Self::new(bytes).map_err(|e| borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, e))
 	}
 }
 
 impl PublicKey {
 	/// Create a new public key from packed bytes.
 	///
+	/// The bytes are validated through the canonical ML-DSA parser (rejecting
+	/// e.g. the degenerate all-zero t1 key), so internal producers — dealer
+	/// generation and DKG/resharing aggregation — cannot construct a
+	/// `PublicKey` that standard ML-DSA verification would later reject.
 	/// TR is computed automatically as `SHAKE256(bytes)`.
-	pub(crate) fn new(bytes: [u8; PUBLIC_KEY_SIZE]) -> Self {
+	pub(crate) fn new(bytes: [u8; PUBLIC_KEY_SIZE]) -> Result<Self, &'static str> {
+		validate_pk_bytes(&bytes)?;
 		let tr = compute_tr(&bytes);
-		Self { bytes, tr }
+		Ok(Self { bytes, tr })
 	}
 
 	/// Get the packed public key bytes.
@@ -120,10 +125,7 @@ impl PublicKey {
 
 		let mut pk_bytes = [0u8; PUBLIC_KEY_SIZE];
 		pk_bytes.copy_from_slice(bytes);
-		validate_pk_bytes(&pk_bytes)?;
-
-		let tr = compute_tr(&pk_bytes);
-		Ok(Self { bytes: pk_bytes, tr })
+		Self::new(pk_bytes)
 	}
 }
 
@@ -143,8 +145,22 @@ impl PublicKey {
 /// - Never transmit this over an insecure channel
 /// - Never log or print this value
 /// - Store securely (encrypted at rest)
-/// - The `Zeroize` trait ensures memory is cleared on drop
-#[derive(Clone, PartialEq, Eq, BorshSerialize)]
+/// - The `Zeroize` trait ensures memory is cleared on drop — **per instance**: zeroization never
+///   reaches other copies (see *Cloning*)
+///
+/// # Cloning
+///
+/// Cloning is supported because protocol instances consume a share by
+/// value: each signing attempt's `ThresholdSigner` and a resharing
+/// session's `ResharingConfig` take ownership, so a holder that needs the
+/// share again must duplicate it first. **Every clone is a fully
+/// independent plaintext copy of all secret fields with its own
+/// zeroize-on-drop lifecycle**; dropping or zeroizing one copy does not
+/// erase the others. Each clone therefore carries the full custody
+/// obligations above. Clone deliberately — once per protocol instance
+/// that consumes it — and never into long-lived caches, logs, or
+/// diagnostics.
+#[derive(PartialEq, Eq, BorshSerialize)]
 pub struct PrivateKeyShare {
 	/// Party identifier (can be arbitrary u32, e.g., NEAR participant ID).
 	party_id: ParticipantId,
@@ -204,9 +220,9 @@ impl BorshDeserialize for PrivateKeyShare {
 				"PrivateKeyShare dkg_participants length does not match total_parties",
 			));
 		}
-		if dkg_participants.index_of(party_id).is_none() {
-			return Err(invalid("PrivateKeyShare party_id is not in dkg_participants"));
-		}
+		let my_dkg_index = dkg_participants
+			.index_of(party_id)
+			.ok_or_else(|| invalid("PrivateKeyShare party_id is not in dkg_participants"))?;
 
 		// Read shares map with bound check
 		let len = u32::deserialize_reader(reader)? as usize;
@@ -227,6 +243,28 @@ impl BorshDeserialize for PrivateKeyShare {
 			}
 			let value = SecretShareData::deserialize_reader(reader)?;
 			shares.insert(key, value);
+		}
+
+		// The share map keys must be exactly the holder-specific canonical
+		// set: every subset of size (total_parties - threshold + 1) whose
+		// mask contains the holder's DKG index. Every producer (dealer, DKG,
+		// resharing) emits exactly that set, and Round 3 share recovery
+		// (`translated_subset_masks` + `recover_share`) assumes the entries
+		// it needs exist — with a missing mask, a signer initializes, runs
+		// rounds 1-2, and only fails at Round 3; extraneous or non-holder
+		// masks are secret material recovery can never use.
+		let subset_size = (total_parties - threshold + 1) as usize;
+		let expected: BTreeSet<u16> = crate::protocol::secret_sharing::generate_subsets_of_size(
+			total_parties as usize,
+			subset_size,
+		)
+		.into_iter()
+		.filter(|mask| mask & (1u16 << my_dkg_index) != 0)
+		.collect();
+		if shares.len() != expected.len() || !shares.keys().all(|mask| expected.contains(mask)) {
+			return Err(invalid(
+				"PrivateKeyShare shares is not the complete subset-share set for the holder",
+			));
 		}
 
 		Ok(Self { party_id, total_parties, threshold, dkg_participants, key, rho, tr, shares })
@@ -328,6 +366,25 @@ impl PrivateKeyShare {
 	}
 }
 
+/// Duplication policy (see the type-level *Cloning* docs): the clone is an
+/// independent plaintext copy of every secret field, wiped only by its own
+/// drop. Implemented manually rather than derived so the policy is explicit
+/// and the secret-bearing field list is visible at the duplication site.
+impl Clone for PrivateKeyShare {
+	fn clone(&self) -> Self {
+		Self {
+			party_id: self.party_id,
+			total_parties: self.total_parties,
+			threshold: self.threshold,
+			dkg_participants: self.dkg_participants.clone(),
+			key: self.key,
+			rho: self.rho,
+			tr: self.tr,
+			shares: self.shares.clone(),
+		}
+	}
+}
+
 impl Zeroize for PrivateKeyShare {
 	fn zeroize(&mut self) {
 		self.party_id.zeroize();
@@ -426,6 +483,45 @@ mod tests {
 		assert!(!debug_str.contains("42")); // Should not contain the key bytes
 	}
 
+	/// Pins the documented cloning policy: a clone is a fully independent
+	/// plaintext copy with its own zeroization lifecycle. Wiping one copy
+	/// must leave the other intact (so a holder can hand one copy to a
+	/// protocol instance and keep another), and the wiped copy must hold no
+	/// secret material.
+	#[test]
+	fn test_private_key_share_clone_is_independent_plaintext_copy() {
+		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
+		let mut shares = BTreeMap::new();
+		for mask in [0b011u16, 0b101u16] {
+			let mut data = SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] };
+			data.s1[0][0] = 7;
+			shares.insert(mask, data);
+		}
+		let mut original = PrivateKeyShare::new(
+			0,
+			3,
+			2,
+			[0x42u8; 32],
+			[0x43u8; 32],
+			[0x44u8; TR_SIZE],
+			shares,
+			dkg_participants,
+		);
+
+		let copy = original.clone();
+		assert!(copy == original, "a clone must be a faithful copy");
+
+		original.zeroize();
+
+		// The original is wiped...
+		assert_eq!(original.key, [0u8; 32]);
+		assert!(original.shares.is_empty());
+		// ...and the clone is untouched: an independent lifecycle.
+		assert_eq!(copy.key, [0x42u8; 32], "zeroizing one copy must not erase another");
+		assert_eq!(copy.shares.len(), 2);
+		assert_eq!(copy.shares[&0b011].s1[0][0], 7);
+	}
+
 	#[test]
 	fn test_private_key_zeroize() {
 		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
@@ -476,11 +572,14 @@ mod tests {
 		assert!(result.is_err(), "share coefficient outside (-Q, Q) must be rejected at import");
 
 		// Boundary: exactly Q and -Q are invalid, Q-1 and -(Q-1) are valid.
+		// The map carries the holder's complete subset set so the valid cases
+		// pass the share-map completeness check.
 		for (value, valid) in [(Q, false), (-Q, false), (Q - 1, true), (-(Q - 1), true)] {
 			let mut shares = BTreeMap::new();
 			let mut data = SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] };
 			data.s2[K - 1][255] = value;
 			shares.insert(0b011u16, data);
+			shares.insert(0b101u16, SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] });
 			let share = PrivateKeyShare::new(
 				0,
 				3,
@@ -537,8 +636,9 @@ mod tests {
 			borsh::from_slice(&bytes)
 		};
 
-		// Baseline: consistent metadata imports fine.
-		assert!(roundtrip(0, 3, 2, &[0, 1, 2], &[0b011]).is_ok());
+		// Baseline: consistent metadata with the holder's complete share map
+		// (all size-2 subsets containing dkg index 0) imports fine.
+		assert!(roundtrip(0, 3, 2, &[0, 1, 2], &[0b011, 0b101]).is_ok());
 
 		// party_id not in dkg_participants: Round 3 recovery would fail late
 		// with InvalidConfiguration after rounds 1-2 already ran.
@@ -579,6 +679,68 @@ mod tests {
 		assert!(
 			roundtrip(0, 3, 2, &[0, 1, 2], &[0]).is_err(),
 			"empty share mask must be rejected at import"
+		);
+	}
+
+	/// Security review: the share map must be exactly the holder-specific
+	/// canonical subset set — every subset of size `n - t + 1` whose mask
+	/// contains the holder's DKG index. Every producer (dealer, DKG,
+	/// resharing) emits exactly that set, and `recover_share` assumes the
+	/// entries it needs exist; a tampered blob with a missing mask would
+	/// otherwise initialize a signer that runs rounds 1-2 and only fails at
+	/// Round 3 share recovery, and foreign masks would sit unused in secret
+	/// storage.
+	#[test]
+	fn test_private_key_share_borsh_rejects_wrong_share_map_key_set() {
+		let roundtrip = |party_id: u32,
+		                 masks: &[u16]|
+		 -> Result<PrivateKeyShare, borsh::io::Error> {
+			let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
+			let mut shares = BTreeMap::new();
+			for &mask in masks {
+				shares.insert(mask, SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] });
+			}
+			let share = PrivateKeyShare::new(
+				party_id,
+				3,
+				2,
+				[0x11u8; 32],
+				[0x22u8; 32],
+				[0x33u8; TR_SIZE],
+				shares,
+				dkg_participants,
+			);
+			let bytes = borsh::to_vec(&share).unwrap();
+			borsh::from_slice(&bytes)
+		};
+
+		// 2-of-3, party at dkg index 0: the canonical set is the size-2
+		// subsets containing bit 0, i.e. {0b011, 0b101}.
+		assert!(roundtrip(0, &[0b011, 0b101]).is_ok(), "the complete holder set must import");
+		// Same for dkg index 2: {0b101, 0b110}.
+		assert!(roundtrip(2, &[0b101, 0b110]).is_ok(), "the complete holder set must import");
+
+		// A required mask is missing.
+		assert!(
+			roundtrip(0, &[0b011]).is_err(),
+			"a share map missing a required subset mask must be rejected at import"
+		);
+		// Empty map.
+		assert!(roundtrip(0, &[]).is_err(), "an empty share map must be rejected at import");
+		// Complete set plus an extra mask that excludes the holder.
+		assert!(
+			roundtrip(0, &[0b011, 0b101, 0b110]).is_err(),
+			"a share map with a non-holder subset mask must be rejected at import"
+		);
+		// Complete set plus an extra mask of the wrong subset size.
+		assert!(
+			roundtrip(0, &[0b011, 0b101, 0b111]).is_err(),
+			"a share map with a wrong-size subset mask must be rejected at import"
+		);
+		// Right count, but one entry swapped for a non-holder mask.
+		assert!(
+			roundtrip(0, &[0b011, 0b110]).is_err(),
+			"a share map substituting a non-holder mask must be rejected at import"
 		);
 	}
 

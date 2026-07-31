@@ -2513,12 +2513,18 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		let rho = self.derive_rho();
 		// Reject partial PKs with non-canonical coefficients. An attacker-supplied
 		// coefficient near i32::MAX would otherwise overflow the i32 accumulation
-		// inside `pack_combined_pk` (panic in debug, silent wrap in release).
+		// inside `pack_combined_pk` (panic in debug, silent wrap in release). A
+		// degenerate (all-zero t1) recovered key is likewise rejected there.
 		let recovered = crate::protocol::partial_pk::pack_combined_pk(&rho, canonical.values())
-			.map_err(|_| {
-				ResharingProtocolError::ShareVerificationFailed(
-					"a Round 5 partial public key contains out-of-range coefficients".to_string(),
-				)
+			.map_err(|e| {
+				use crate::protocol::partial_pk::PackCombinedPkError;
+				ResharingProtocolError::ShareVerificationFailed(match e {
+					PackCombinedPkError::CoefficientOutOfRange =>
+						"a Round 5 partial public key contains out-of-range coefficients"
+							.to_string(),
+					PackCombinedPkError::DegenerateCombinedKey =>
+						"the recovered public key is degenerate (all-zero t1)".to_string(),
+				})
 			})?;
 		if recovered.as_bytes() != self.config.public_key().as_bytes() {
 			return Err(ResharingProtocolError::ShareVerificationFailed(
@@ -2675,30 +2681,46 @@ fn partial_secret_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
 		let c = binomial(parties, threshold - 1) as f64;
 		(c / threshold as f64).ceil()
 	};
-	partial_secret_norm_bound_with_num_secrets(threshold, parties, nu, num_secrets)
+	(TAU as f64).sqrt() * secret_norm_envelope(threshold, parties, nu, num_secrets)
 }
 
 /// Norm bound for a single stored RSS subset share (`B_G` analog).
 ///
-/// Uses the same Mithril §3.4 calibration as [`partial_secret_norm_bound`], but
-/// with `num_secrets = 1` because each stored subset share aggregates one base
-/// secret's worth of material rather than the `⌈C(N,T−1)/T⌉` shares summed at
-/// signing recovery time.
+/// Uses the same base dimensioning as [`partial_secret_norm_bound`] with
+/// `num_secrets = 1` (each stored subset share aggregates one base secret's
+/// worth of material), but with two deliberate differences matching what the
+/// guard actually measures:
+///
+/// - **No `√τ` challenge amplification.** The recovered-partial guard multiplies its measured norm
+///   by `√τ` to match `B`'s challenge-shifted convention; [`verify_stored_new_share_norms`]
+///   compares the *raw* [`single_share_weighted_norm`]. Inheriting `√τ` here loosened the
+///   single-share envelope by ~7.75× on ML-DSA-87, letting a malicious dealer inflate individual
+///   stored shares while public-key and recovered-partial checks still passed.
+/// - **κ is kept.** Honest resharing inflates individual stored shares too: the mean-subtracted
+///   coset noise adds per-share variance that only partially cancels in recovered sums. Measured
+///   over 20 chained reshares (steady state), honest stored-share norms reach ~1.24× the keygen
+///   single-share norm on (4,6) — nearly the full 1.3 base headroom — so the envelope needs the
+///   same per-config enlargement as the recovered-partial bound. Worst honest norm/bound ratio
+///   observed with κ: 0.83 (κ ≤ 1.5, so the envelope stays ~√τ tighter than before).
 fn stored_subset_share_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
-	partial_secret_norm_bound_with_num_secrets(threshold, parties, nu, 1.0)
+	secret_norm_envelope(threshold, parties, nu, 1.0)
 }
 
-fn partial_secret_norm_bound_with_num_secrets(
-	threshold: u32,
-	parties: u32,
-	nu: f64,
-	num_secrets: f64,
-) -> f64 {
+/// Raw (unchallenged) ν-weighted norm envelope of `num_secrets` base secrets'
+/// worth of η-bounded material, κ-enlarged for honest resharing inflation:
+///
+/// ```text
+/// 1.3 · √(n·(k + ℓ/ν²) · Var(U(−η,η)) · num_secrets) · κ
+/// ```
+///
+/// Shared core of both Round 5 norm bounds; the recovered-partial bound `B`
+/// additionally multiplies by the `√τ` challenge amplification, the
+/// stored-share bound does not (it guards a raw stored-share norm).
+fn secret_norm_envelope(threshold: u32, parties: u32, nu: f64, num_secrets: f64) -> f64 {
 	let n = N as f64;
 	let dim = n * (K as f64 + L as f64 / (nu * nu));
 	let var_eta = ETA as f64 * (ETA as f64 + 1.0) / 3.0;
-	let base = 1.3 * (TAU as f64).sqrt() * (dim * var_eta * num_secrets).sqrt();
-	base * resharing_norm_enlargement(threshold, parties)
+	1.3 * (dim * var_eta * num_secrets).sqrt() * resharing_norm_enlargement(threshold, parties)
 }
 
 fn single_share_weighted_norm(share: &NewShareData, nu: f64) -> f64 {
@@ -3804,6 +3826,66 @@ mod tests {
 			.expect_err("oversized recovered partial must be rejected");
 		assert!(
 			err.to_string().contains("exceeds partial-secret norm bound"),
+			"unexpected error: {}",
+			err
+		);
+	}
+
+	/// Security review: the stored-share guard measures a *raw* (unchallenged)
+	/// single-share norm, so its envelope must not inherit the √τ
+	/// challenge-amplification factor from the recovered-partial calibration —
+	/// that factor loosened the intended single-share envelope ~√τ× (≈7.75 on
+	/// ML-DSA-87), letting a malicious dealer inflate individual stored shares
+	/// while keeping public-key and recovered-partial checks satisfied.
+	#[test]
+	fn test_stored_share_norm_guard_rejects_single_share_inflation() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[7u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(1, &[0, 1, 2]),
+			[1u8; 32],
+			&[2u8; 32],
+			0,
+		);
+
+		// Craft a share at 3x the honest single-share envelope
+		// 1.3 * sqrt(dim * var_eta): far above what one base secret's worth of
+		// material can honestly reach (honest resharing overshoot is covered
+		// by κ ≤ 1.5), yet well below the old √τ-inflated bound, which
+		// accepted it.
+		let (_, _, nu) = crate::protocol::signing::get_hyperball_params(2, 3)
+			.expect("hyperball params for (2, 3)");
+		let dim = N as f64 * (K as f64 + L as f64 / (nu * nu));
+		let var_eta = ETA as f64 * (ETA as f64 + 1.0) / 3.0;
+		let honest_envelope = 1.3 * (dim * var_eta).sqrt();
+
+		// Constant s2 coefficients: weighted norm = coeff * sqrt(K * N).
+		let coeff = (3.0 * honest_envelope / ((K as f64) * (N as f64)).sqrt()).ceil() as i32;
+		let mut inflated = NewShareData::new();
+		for poly in inflated.s2.iter_mut() {
+			for c in poly.iter_mut() {
+				*c = coeff;
+			}
+		}
+		protocol.new_shares.insert(0b011, inflated);
+
+		let err = protocol.verify_stored_new_share_norms().expect_err(
+			"a stored share inflated 3x past the single-share envelope must be rejected",
+		);
+		assert!(
+			err.to_string().contains("exceeds single-share norm bound"),
 			"unexpected error: {}",
 			err
 		);

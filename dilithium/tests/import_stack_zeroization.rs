@@ -89,7 +89,7 @@ macro_rules! import_stack_zeroization_tests {
 
 			#[test]
 			fn key_import_and_serialize_leave_no_secret_copies_on_the_stack() {
-				let keypair = Keypair::generate((&mut [0x5Au8; 32]).into());
+				let keypair = Keypair::generate(&mut (&mut [0x5Au8; 32]).into());
 				let kp_bytes = keypair.to_bytes();
 				let sk_bytes = keypair.secret().to_bytes();
 				let pattern = sk_pattern(sk_bytes.as_slice());

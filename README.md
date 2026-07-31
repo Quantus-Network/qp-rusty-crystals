@@ -17,7 +17,7 @@ This implementation provides enterprise-grade memory security:
 // Secure by design - entropy is zeroized after conversion
 let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).unwrap();
-let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
+let keypair = ml_dsa_87::Keypair::generate(&mut (&mut entropy).into());
 // entropy is now [0,0,0,...] - no sensitive data left in memory
 
 // If you genuinely need a second copy of a keypair, you must opt in explicitly:
@@ -56,7 +56,7 @@ let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
 
 // Generate keypair
-let keypair = ml_dsa_87::Keypair::generate((&mut entropy).into());
+let keypair = ml_dsa_87::Keypair::generate(&mut (&mut entropy).into());
 
 // Sign message
 let message = b"Hello, post-quantum world!";

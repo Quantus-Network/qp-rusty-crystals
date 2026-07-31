@@ -30,8 +30,10 @@ hex.workspace = true
 serde.workspace = true
 zeroize = { workspace = true, features = ["alloc"] }
 
-# Dependencies for hderive module (ported from nam-tiny-hderive)
-hmac = { version = "0.12", default-features = false }
+# Dependency for hderive module (ported from nam-tiny-hderive). The HMAC
+# construction is implemented in-crate with zeroizing buffers; the `hmac`
+# crate's non-zeroizing state objects leaked secrets into dead stack memory
+# (security review), so it is intentionally not used here.
 sha2 = { version = "0.10", default-features = false }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
@@ -41,6 +43,9 @@ getrandom = { workspace = true, features = ["js"] }
 hex-literal.workspace = true
 rand.workspace = true
 rand_core.workspace = true
+# Reference HMAC implementation for the stack-zeroization regression test.
+hmac = { version = "0.12", default-features = false }
+psm = "=0.1.31"
 
 [features]
 default = ["ml-dsa-87", "std"]

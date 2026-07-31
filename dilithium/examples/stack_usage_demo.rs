@@ -137,8 +137,8 @@ fn main() {
 	println!("=== ML-DSA Stack Usage Analysis ===\n");
 
 	// Pre-generate test data for all variants
-	let entropy = get_random_bytes();
-	let ml87_keypair = ml_dsa_87::Keypair::generate(entropy);
+	let mut entropy = get_random_bytes();
+	let ml87_keypair = ml_dsa_87::Keypair::generate(&mut entropy);
 	let ml87_keypair_bytes = ml87_keypair.to_bytes();
 
 	let test_msg = b"stack usage test message";
@@ -166,7 +166,7 @@ fn main() {
 	for &size_kb in &stack_sizes {
 		// Test ML-DSA-87
 		let ml87_keygen = test_keygen_with_stack_size(size_kb, "ml-dsa-87", move || {
-			let _kp = ml_dsa_87::Keypair::generate((&mut [1u8; 32]).into());
+			let _kp = ml_dsa_87::Keypair::generate(&mut (&mut [1u8; 32]).into());
 			true
 		});
 
@@ -245,7 +245,7 @@ mod tests {
 	fn test_all_variants_4kb_stack() {
 		assert!(
 			test_keygen_with_stack_size(4, "ml-dsa-87", || {
-				let _kp = ml_dsa_87::Keypair::generate((&mut [1u8; 32]).into());
+				let _kp = ml_dsa_87::Keypair::generate(&mut (&mut [1u8; 32]).into());
 				true
 			}),
 			"ML-DSA-87 key generation should work with 4KB stack"

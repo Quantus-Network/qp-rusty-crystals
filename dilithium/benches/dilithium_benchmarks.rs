@@ -25,14 +25,14 @@ macro_rules! bench_ml_dsa {
 		#[cfg(feature = $feature)]
 		{
 			use qp_rusty_crystals_dilithium::$mod_name::Keypair;
-			let keypair = Keypair::generate((&mut [2u8; 32]).into());
+			let keypair = Keypair::generate(&mut (&mut [2u8; 32]).into());
 			let msg = b"";
 			let sig = keypair.sign(msg, None, None).expect("Signing should succeed");
 			bench_variant(
 				$c,
 				$label,
 				|| {
-					let _ = Keypair::generate((&mut [1u8; 32]).into());
+					let _ = Keypair::generate(&mut (&mut [1u8; 32]).into());
 				},
 				|| {
 					let _ = keypair.sign(msg, None, None);

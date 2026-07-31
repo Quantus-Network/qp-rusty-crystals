@@ -9,18 +9,21 @@ use alloc::string::ToString;
 const MNEMONIC: &str = "rocket primary way job input cactus submit menu zoo burger rent impose";
 const PATH: &str = "m/44'/189189'/0'/0'/0'";
 
+/// Test helper: stretch [`MNEMONIC`] into a fresh seed.
+fn test_seed() -> crate::SensitiveBytes64 {
+	let mut seed = crate::SensitiveBytes64::zeroed();
+	crate::mnemonic_to_seed(MNEMONIC.to_string(), None, &mut seed).expect("valid mnemonic");
+	seed
+}
+
 /// Per-variant coverage: derivation is deterministic, mnemonic and seed
 /// entrypoints agree, and the derived keypair signs and verifies.
 macro_rules! variant_tests {
 	($mod_name:ident, $feature:literal) => {
 		#[cfg(feature = $feature)]
 		mod $mod_name {
-			use super::{MNEMONIC, PATH};
-			use crate::{mnemonic_to_seed, $mod_name::derive_key_from_mnemonic};
-			// Not inherited from the parent module: `use` items don't
-			// propagate into child modules, and this file must build without
-			// `std` (CI always enables it, so the breakage was latent).
-			use alloc::string::ToString;
+			use super::{test_seed, MNEMONIC, PATH};
+			use crate::$mod_name::derive_key_from_mnemonic;
 
 			#[test]
 			fn derivation_is_deterministic_and_matches_seed_entrypoint() {
@@ -29,9 +32,7 @@ macro_rules! variant_tests {
 				assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
 				assert_eq!(key1.public().bytes, key2.public().bytes);
 
-				let mut seed = mnemonic_to_seed(MNEMONIC.to_string(), None).unwrap();
-				let key3 =
-					crate::$mod_name::derive_key_from_seed((&mut seed).into(), PATH).unwrap();
+				let key3 = crate::$mod_name::derive_key_from_seed(test_seed(), PATH).unwrap();
 				assert_eq!(key1.secret().to_bytes(), key3.secret().to_bytes());
 			}
 
@@ -97,14 +98,11 @@ fn top_level_api_is_ml_dsa_87() {
 /// on builds with no ML-DSA feature at all.
 #[test]
 fn variant_independent_surface_available() {
-	let mut seed = crate::mnemonic_to_seed(MNEMONIC.to_string(), None).unwrap();
-	let pair = crate::generate_wormhole_from_seed((&mut seed).into(), "m/44'/189189189'/0'/0'/0'")
-		.unwrap();
+	let pair =
+		crate::generate_wormhole_from_seed(test_seed(), "m/44'/189189189'/0'/0'/0'").unwrap();
 	// Determinism of the variant-independent path.
-	let mut seed2 = crate::mnemonic_to_seed(MNEMONIC.to_string(), None).unwrap();
 	let pair2 =
-		crate::generate_wormhole_from_seed((&mut seed2).into(), "m/44'/189189189'/0'/0'/0'")
-			.unwrap();
+		crate::generate_wormhole_from_seed(test_seed(), "m/44'/189189189'/0'/0'/0'").unwrap();
 	assert_eq!(pair.address, pair2.address);
 }
 

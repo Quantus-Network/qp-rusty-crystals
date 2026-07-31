@@ -69,8 +69,8 @@
 //!
 //! The protocol uses a leader-based approach for Round 4 (signature combination):
 //!
-//! - The **leader** (party with lowest ID among participants) combines signature shares. On success
-//!   it broadcasts `Round4Complete(signature)`; on failure it returns
+//! - The **leader** (party with lowest ID among participants; enforced by the constructor) combines
+//!   signature shares. On success it broadcasts `Round4Complete(signature)`; on failure it returns
 //!   `SignProtocolError::ProtocolFailed`, ending the protocol instance. The caller is responsible
 //!   for starting a fresh attempt with new randomness.
 //! - **Followers** verify the leader's signature before accepting it. This removes the leader trust
@@ -80,8 +80,8 @@
 //! - A malicious leader cannot forge signatures (requires threshold parties to collude).
 //! - A malicious leader cannot send invalid signatures (followers verify before accepting).
 //! - A malicious leader CAN cause denial-of-signature by aborting; in that case the caller (e.g.
-//!   NEAR MPC) will retry with a fresh protocol instance, potentially with a different leader
-//!   selected by the application layer.
+//!   NEAR MPC) will retry with a fresh protocol instance. Selecting a different signing set for the
+//!   retry changes the leader (the lowest ID of the new set), routing around the aborter.
 //!
 //! ## Message Buffering
 //!
@@ -590,7 +590,10 @@ impl DilithiumSignProtocol {
 	/// * `message` - The message to sign
 	/// * `context` - The context string (can be empty, max 255 bytes)
 	/// * `participants` - All participant IDs in this signing session (can be arbitrary u32 values)
-	/// * `leader_id` - The leader's identifier (responsible for combine/retry decisions)
+	/// * `leader_id` - The leader's identifier (responsible for combine/retry decisions). Must be
+	///   the lowest ID in `participants` — the protocol's documented leader-election rule, which
+	///   every party derives independently; the explicit parameter makes the caller state the
+	///   leader it expects rather than discover a disagreement as a Round 4 stall
 	/// * `round1_seed` - A 32-byte cryptographically random seed for Round 1
 	/// * `attempt_nonce` - A 32-byte nonce unique to this signing attempt (must be agreed upon by
 	///   all participants, e.g., derived from the transport layer's session/channel ID)
@@ -606,7 +609,7 @@ impl DilithiumSignProtocol {
 	/// Returns `Err(SignProtocolError::InvalidConfig)` if:
 	/// - `participants` contains duplicates
 	/// - the signer share's `party_id()` is not in `participants`
-	/// - `leader_id` is not in `participants`
+	/// - `leader_id` is not the lowest ID in `participants`
 	/// - Any participant is not in the original DKG participant set
 	///
 	/// # Security Warning
@@ -640,10 +643,21 @@ impl DilithiumSignProtocol {
 			)));
 		}
 
-		if !participant_list.contains(leader_id) {
-			return Err(SignProtocolError::InvalidConfig(
-				"leader_id is not in participants".to_string(),
-			));
+		// The protocol contract fixes the leader as the lowest-ID member of
+		// the signing set (module Trust Model; the local signing helper and
+		// the resharing session leader derive it the same way). Any other
+		// choice is a misconfiguration: peers deriving the leader per the
+		// documented rule would disagree about who may combine and broadcast
+		// Round4Complete, stalling the attempt. This also subsumes the
+		// membership check.
+		let expected_leader = participant_list
+			.get(0)
+			.expect("participant_list is non-empty: it contains my_participant_id");
+		if leader_id != expected_leader {
+			return Err(SignProtocolError::InvalidConfig(format!(
+				"leader_id ({}) must be the lowest ID in participants ({})",
+				leader_id, expected_leader
+			)));
 		}
 
 		// Validate all signing participants are valid DKG participants
@@ -1619,6 +1633,52 @@ mod tests {
 		);
 
 		assert!(matches!(result, Err(SignProtocolError::InvalidConfig(_))));
+	}
+
+	/// Security review: the protocol contract (module Trust Model, README)
+	/// fixes the leader as the lowest-ID member of the signing set, and every
+	/// in-tree leader derivation (the local signing helper, the resharing
+	/// session leader) follows that rule. The constructor accepted any in-set
+	/// `leader_id`, so an integration could create a session whose leader
+	/// disagrees with peers deriving it per the documented rule — leaving
+	/// the set with no party (or two parties) claiming Round 4 combination
+	/// and stalling the attempt.
+	#[test]
+	fn test_protocol_rejects_non_lowest_id_leader() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		// Party 1 is in the signing set {0, 1}, but the documented leader is 0.
+		let signer = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+		let result = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			1, // in the set, but not the lowest ID
+			[0xAA; 32],
+			[0xBB; 32],
+		);
+		assert!(
+			matches!(result, Err(SignProtocolError::InvalidConfig(_))),
+			"an in-set leader_id that is not the lowest participant ID must be rejected"
+		);
+
+		// The lowest-ID leader is accepted, including when the signing set
+		// does not start at party 0.
+		let signer = ThresholdSigner::new(shares[1].clone(), pk, config).unwrap();
+		let protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![1, 2],
+			1,
+			[0xAA; 32],
+			[0xBB; 32],
+		)
+		.unwrap();
+		assert_eq!(protocol.leader_id(), 1);
+		assert!(protocol.is_leader());
 	}
 
 	#[test]

@@ -179,8 +179,13 @@ pub fn generate_with_dealer(
 	let mut pk_packed = [0u8; PUBLIC_KEY_SIZE];
 	packing::pack_pk(&mut pk_packed, &rho, &t1);
 
-	// Create public key (TR is computed internally)
-	let public_key = PublicKey::new(pk_packed);
+	// Create public key (TR is computed internally). Validation is practically
+	// unreachable for an honestly seeded dealer (t1 = 0 requires astronomically
+	// unlikely entropy), but internal construction enforces the same parser
+	// rules as every import boundary.
+	let public_key = PublicKey::new(pk_packed).map_err(|_| {
+		ThresholdError::InvalidData("dealer generated a degenerate public key (all-zero t1)".into())
+	})?;
 
 	// 8. Compute TR = SHAKE256(pk) for private key shares
 	let tr = *public_key.tr();

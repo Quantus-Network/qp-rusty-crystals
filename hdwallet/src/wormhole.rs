@@ -34,6 +34,7 @@ use qp_poseidon_core::{
 extern crate alloc;
 use alloc::vec::Vec;
 use qp_rusty_crystals_dilithium::SensitiveBytes32;
+use zeroize::Zeroize;
 
 /// Salt used when deriving wormhole addresses.
 pub const ADDRESS_SALT: &str = "wormhole";
@@ -92,11 +93,18 @@ impl Eq for WormholePair {}
 
 impl WormholePair {
 	/// Generates a new `WormholePair` from user-supplied entropy.
-	pub fn generate_new(seed: SensitiveBytes32) -> WormholePair {
+	///
+	/// The seed is borrowed mutably and zeroized in place after use
+	/// (security review): taking it by value would move — i.e. copy — it
+	/// through a dead stack slot that is never dropped, so `ZeroizeOnDrop`
+	/// could not wipe it. The caller's value is all zeros afterwards; the
+	/// entropy stack-residue regression test pins this.
+	pub fn generate_new(seed: &mut SensitiveBytes32) -> WormholePair {
 		let mut hashed_seed = hash_bytes(seed.as_bytes());
 		let secret = SensitiveBytes32::new(&mut hashed_seed);
+		seed.as_mut_bytes().zeroize();
 
-		// seed and secret are automatically zeroized when it drops
+		// secret is automatically zeroized when it drops
 		WormholePair::generate_pair_from_secret(secret)
 	}
 
@@ -273,7 +281,7 @@ mod tests {
 	fn test_generate_new_produces_valid_pair() {
 		let mut seed = [55u8; 32];
 		// Act
-		let pair = WormholePair::generate_new((&mut seed).into());
+		let pair = WormholePair::generate_new(&mut (&mut seed).into());
 
 		// The secret should not be all zeros
 		assert_ne!(pair.secret.as_bytes(), &[0u8; 32]);
