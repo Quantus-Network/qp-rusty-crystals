@@ -1,8 +1,10 @@
 use alloc::vec::Vec;
 use core::{ops::Deref, str::FromStr};
-use hmac::{Hmac, Mac};
-use sha2::Sha512;
-use zeroize::Zeroize;
+use sha2::{
+	digest::{generic_array::GenericArray, Digest},
+	Sha512,
+};
+use zeroize::Zeroizing;
 
 use crate::{SensitiveBytes32, MAX_DERIVATION_DEPTH, MAX_DERIVATION_PATH_BYTES};
 
@@ -17,6 +19,59 @@ pub enum Error {
 }
 
 const HARDENED_BIT: u32 = 1 << 31;
+
+/// SHA-512 block and output sizes (bytes), fixed by the hash function.
+const HMAC_BLOCK_BYTES: usize = 128;
+const HMAC_OUTPUT_BYTES: usize = 64;
+
+/// HMAC-SHA512 over `key` and the concatenation of `message_parts`, writing
+/// the tag into `out`.
+///
+/// This replaces the `hmac` crate, whose 0.12 state objects have no zeroizing
+/// drop semantics (security review): its key-schedule local leaves
+/// `key ^ opad` — and, depending on codegen, the raw key — in a dead stack
+/// frame, its block buffer holds message bytes verbatim, and its consuming
+/// `finalize(self)` moves all of that around the stack unwiped. Here every
+/// secret-bearing buffer is under our control: the ipad/opad key blocks are
+/// self-wiping, the hashers are only driven through `&mut` methods (never
+/// moved), and their flat state — which includes a block buffer still holding
+/// message bytes verbatim — is volatile-wiped in place before drop.
+///
+/// Only keys up to one block are supported (the longer-key hashing step of
+/// RFC 2104 is intentionally omitted); both callers pass 14 or 32 bytes.
+fn hmac_sha512(key: &[u8], message_parts: &[&[u8]], out: &mut [u8; HMAC_OUTPUT_BYTES]) {
+	debug_assert!(key.len() <= HMAC_BLOCK_BYTES, "keys longer than one block are unsupported");
+
+	let mut ipad = Zeroizing::new([0x36u8; HMAC_BLOCK_BYTES]);
+	let mut opad = Zeroizing::new([0x5cu8; HMAC_BLOCK_BYTES]);
+	for (i, b) in key.iter().enumerate() {
+		ipad[i] ^= *b;
+		opad[i] ^= *b;
+	}
+
+	// The pads are always passed as slices: passing the (Copy) arrays by
+	// value would leave unwiped copies of key material on the stack.
+	let mut inner = Sha512::new();
+	inner.update(ipad.as_slice());
+	for part in message_parts {
+		inner.update(part);
+	}
+	let mut inner_hash = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
+	inner.finalize_into_reset(GenericArray::from_mut_slice(&mut inner_hash[..]));
+
+	let mut outer = Sha512::new();
+	outer.update(opad.as_slice());
+	outer.update(inner_hash.as_slice());
+	outer.finalize_into_reset(GenericArray::from_mut_slice(&mut out[..]));
+
+	// SAFETY: `Sha512` is a flat struct (word state, length counter, block
+	// buffer, position), containing no pointers or Drop glue, so writing
+	// zeros over it is sound and it may be dropped afterwards.
+	unsafe {
+		zeroize::zeroize_flat_type(&mut inner);
+		zeroize::zeroize_flat_type(&mut outer);
+	}
+}
 
 /// Master-seed length bounds (bytes), per BIP32 (128..=512 bits). The
 /// higher-level wrappers always pass a fixed 64-byte BIP39 seed; this bound
@@ -160,21 +215,17 @@ impl ExtendedPrivKey {
 			return Err(Error::InvalidSeedLength(seed.len()));
 		}
 
-		let mut hmac: Hmac<Sha512> =
-			Hmac::new_from_slice(b"Dilithium seed").expect("seed is always correct; qed");
-		hmac.update(seed);
-
-		// `into_bytes()` yields a 64-byte buffer holding secret_key || chain_code.
-		// It is not a zeroizing type, so wipe it once the halves are copied into
-		// the self-zeroizing `SensitiveBytes32` fields.
-		let mut result = hmac.finalize().into_bytes();
+		// `result` holds secret_key || chain_code; the self-wiping buffer is
+		// zeroized on drop, after the halves are copied into the
+		// self-zeroizing `SensitiveBytes32` fields.
+		let mut result = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
+		hmac_sha512(b"Dilithium seed", &[seed], &mut result);
 		let (secret_key, chain_code) = result.split_at(32);
 
 		let mut sk = ExtendedPrivKey {
 			secret_key: SensitiveBytes32::from(&mut secret_key.try_into().unwrap()),
 			chain_code: SensitiveBytes32::from(&mut chain_code.try_into().unwrap()),
 		};
-		result.as_mut_slice().zeroize();
 
 		for child in path.as_ref() {
 			sk = sk.child(*child)?;
@@ -188,27 +239,22 @@ impl ExtendedPrivKey {
 	}
 
 	pub fn child(&self, child: ChildNumber) -> Result<ExtendedPrivKey, Error> {
-		let mut hmac: Hmac<Sha512> = Hmac::new_from_slice(self.chain_code.as_bytes())
-			.map_err(|_| Error::InvalidChildNumber)?;
-
-		hmac.update(&[0]);
 		// Feed the HMAC directly from the stored secret rather than
 		// `self.secret()`, which would materialize a throwaway `[u8; 32]` copy
-		// on the stack that is never wiped.
-		hmac.update(self.secret_key.as_bytes());
-
-		hmac.update(&child.to_bytes());
-
-		// See `derive`: wipe the 64-byte secret_key || chain_code buffer once
-		// its halves are copied into the self-zeroizing fields below.
-		let mut result = hmac.finalize().into_bytes();
+		// on the stack that is never wiped. See `derive` for the lifecycle of
+		// the self-wiping `result` buffer.
+		let mut result = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
+		hmac_sha512(
+			self.chain_code.as_bytes(),
+			&[&[0], self.secret_key.as_bytes(), &child.to_bytes()],
+			&mut result,
+		);
 		let (secret_key, chain_code) = result.split_at(32);
 
 		let child = ExtendedPrivKey {
 			secret_key: SensitiveBytes32::from(&mut secret_key.try_into().unwrap()),
 			chain_code: SensitiveBytes32::from(&mut chain_code.try_into().unwrap()),
 		};
-		result.as_mut_slice().zeroize();
 		Ok(child)
 	}
 }
@@ -237,6 +283,95 @@ mod tests {
 		let account = ExtendedPrivKey::derive(&seed, "m/44'/60'/0'/0'/0'").unwrap();
 
 		assert_eq!(expected_secret_key, &account.secret(), "Secret key is invalid");
+	}
+
+	// The in-crate zeroizing HMAC must be a correct HMAC-SHA512. Pin it to the
+	// official RFC 4231 test vectors (cases 1-4; the remaining cases use
+	// truncated outputs or keys longer than one block, which this
+	// implementation intentionally does not support).
+	#[test]
+	fn hmac_sha512_matches_rfc4231_vectors() {
+		use hex_literal::hex;
+
+		let cases: &[(&[u8], &[u8], [u8; 64])] = &[
+			(
+				&[0x0b; 20],
+				b"Hi There",
+				hex!(
+					"87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cde"
+					"daa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854"
+				),
+			),
+			(
+				b"Jefe",
+				b"what do ya want for nothing?",
+				hex!(
+					"164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea250554"
+					"9758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737"
+				),
+			),
+			(
+				&[0xaa; 20],
+				&[0xdd; 50],
+				hex!(
+					"fa73b0089d56a284efb0f0756c890be9b1b5dbdd8ee81a3655f83e33b2279d39"
+					"bf3e848279a722c806b485a47e67c807b946a337bee8942674278859e13292fb"
+				),
+			),
+			(
+				&hex!("0102030405060708090a0b0c0d0e0f10111213141516171819"),
+				&[0xcd; 50],
+				hex!(
+					"b0ba465637458c6990e5a8c5f61d4af7e576d97ff94b872de76f8050361ee3db"
+					"a91ca5c11aa25eb4d679275cc5788063a5f19741120c4f2de2adebeb10a298dd"
+				),
+			),
+		];
+
+		for (i, (key, data, expected)) in cases.iter().enumerate() {
+			let mut out = [0u8; 64];
+			hmac_sha512(key, &[data], &mut out);
+			assert_eq!(&out, expected, "RFC 4231 test case {} failed", i + 1);
+		}
+	}
+
+	// Cross-check against the `hmac` crate (the previous implementation, kept
+	// as a dev-dependency) across key lengths up to a full block and across
+	// message-part splits, including boundary-straddling ones. This covers the
+	// exact shapes used by `derive` (14-byte key, one part) and `child`
+	// (32-byte key, three parts) and everything in between.
+	#[test]
+	fn hmac_sha512_matches_reference_implementation() {
+		use hmac::{Hmac, Mac};
+
+		let msg: Vec<u8> = (0..200u32).map(|i| (i.wrapping_mul(31) ^ 0x5f) as u8).collect();
+		for key_len in [0usize, 1, 14, 32, 63, 64, 65, 127, 128] {
+			let key: Vec<u8> = (0..key_len as u32).map(|i| (i.wrapping_mul(7) + 3) as u8).collect();
+
+			let mut reference: Hmac<sha2::Sha512> = Hmac::new_from_slice(&key).unwrap();
+			reference.update(&msg);
+			let expected = reference.finalize().into_bytes();
+
+			let splits: &[&[&[u8]]] = &[
+				&[&msg],
+				&[&msg[..1], &msg[1..]],
+				&[&msg[..37], &msg[37..37], &msg[37..]],
+				// straddles the first SHA-512 block boundary of the inner
+				// hash (128-byte ipad block + 64 message bytes)
+				&[&msg[..64], &msg[64..]],
+				&[&msg[..128], &msg[128..]],
+			];
+			for parts in splits {
+				let mut out = [0u8; 64];
+				hmac_sha512(&key, parts, &mut out);
+				assert_eq!(
+					out[..],
+					expected[..],
+					"mismatch vs reference for key_len={key_len}, {} part(s)",
+					parts.len()
+				);
+			}
+		}
 	}
 
 	#[test]

@@ -838,6 +838,7 @@ dependencies = [
  "hex",
  "hex-literal",
  "hmac",
+ "psm",
  "qp-poseidon-core",
  "qp-rusty-crystals-dilithium",
  "rand",
