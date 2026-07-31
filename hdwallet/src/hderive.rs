@@ -461,9 +461,20 @@ mod tests {
 		);
 	}
 
+	// Hardened-only is the documented contract (README "Why Hardened Keys
+	// Only?"): lattice keys have no public-derivability, so an unhardened
+	// level cannot mean what BIP-32 implies. This pins both sides of the
+	// contract — the documented standard path parses, and any unhardened
+	// spelling of it is rejected before derivation.
 	#[test]
 	fn non_hardened_path_rejected() {
+		assert!("m/44'/189189'/0'/0'/0'".parse::<DerivationPath>().is_ok());
+
 		assert_eq!("m/44'/60'/0".parse::<DerivationPath>().unwrap_err(), Error::NotHardened);
+		assert_eq!(
+			"m/44'/189189'/0'/0/0".parse::<DerivationPath>().unwrap_err(),
+			Error::NotHardened
+		);
 		assert_eq!("0".parse::<ChildNumber>().unwrap_err(), Error::NotHardened);
 	}
 

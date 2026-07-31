@@ -8,7 +8,7 @@ Hierarchical Deterministic (HD) wallet implementation for post-quantum ML-DSA ke
 - **BIP-32 HD Derivation** - Hierarchical deterministic key derivation
 - **BIP-44 Compatible** - Standard derivation paths
 - **Post-Quantum** - Uses ML-DSA (Dilithium) signatures
-- **Hardened First 3 Levels** - Require hardened `purpose'`, `coin_type'`, `account'`; later levels optional
+- **Hardened Derivation Only** - Every path level must be hardened (e.g. `m/44'/189189'/0'/0'/0'`)
 
 ## Parameter sets
 
@@ -35,7 +35,7 @@ and the wormhole module work regardless of which ML-DSA features are enabled.
 
 ## Standard expected derivation path
 We use 44 for purpose, 189189 for coin type (Quantus), and account index for account
-Example: "m/44'/189189'/{account_index}'/0/0"
+Example: "m/44'/189189'/{account_index}'/0'/0'"
 
 ## Usage
 
@@ -98,9 +98,9 @@ println!("Address: {}", hex::encode(pair.address));
 
 ### Derivation Paths
 
-Standard BIP-44 derivation paths are supported:
+BIP-44-shaped derivation paths are supported, with every level hardened:
 ```
-m / purpose' / coin_type' / account' / change / address_index
+m / purpose' / coin_type' / account' / change' / address_index'
 ```
 
 Example paths:
@@ -108,11 +108,11 @@ Example paths:
 - `m/44'/189189'/1'/0'/0'` - First address of second account
 - `m/44'/189189'/0'/1'/0'` - First change address
 
-**Note**: For security, the first three indices must be hardened (`purpose'`, `coin_type'`, `account'`). Subsequent indices (`change`, `address_index`) may be unhardened.
+**Note**: Every index must be hardened. A path with an unhardened segment (e.g. `m/44'/189189'/0'/0/0`) is rejected with a `NotHardened` error before any derivation runs.
 
 ## Why Hardened Keys Only?
 
-Non-hardened key derivation relies on elliptic curve properties not present in lattice-based cryptography. For security, this implementation requires hardened derivation for the first three indices and permits flexibility for deeper levels.
+Non-hardened (public) child derivation relies on elliptic curve properties that lattice-based cryptography does not have, so an "unhardened" level cannot provide the public-derivability it implies. Like SLIP-10's ed25519 hierarchy, this implementation therefore requires hardened derivation at every level.
 
 ## Testing
 
