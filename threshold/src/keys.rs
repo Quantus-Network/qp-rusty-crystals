@@ -145,8 +145,22 @@ impl PublicKey {
 /// - Never transmit this over an insecure channel
 /// - Never log or print this value
 /// - Store securely (encrypted at rest)
-/// - The `Zeroize` trait ensures memory is cleared on drop
-#[derive(Clone, PartialEq, Eq, BorshSerialize)]
+/// - The `Zeroize` trait ensures memory is cleared on drop — **per
+///   instance**: zeroization never reaches other copies (see *Cloning*)
+///
+/// # Cloning
+///
+/// Cloning is supported because protocol instances consume a share by
+/// value: each signing attempt's `ThresholdSigner` and a resharing
+/// session's `ResharingConfig` take ownership, so a holder that needs the
+/// share again must duplicate it first. **Every clone is a fully
+/// independent plaintext copy of all secret fields with its own
+/// zeroize-on-drop lifecycle**; dropping or zeroizing one copy does not
+/// erase the others. Each clone therefore carries the full custody
+/// obligations above. Clone deliberately — once per protocol instance
+/// that consumes it — and never into long-lived caches, logs, or
+/// diagnostics.
+#[derive(PartialEq, Eq, BorshSerialize)]
 pub struct PrivateKeyShare {
 	/// Party identifier (can be arbitrary u32, e.g., NEAR participant ID).
 	party_id: ParticipantId,
@@ -352,6 +366,25 @@ impl PrivateKeyShare {
 	}
 }
 
+/// Duplication policy (see the type-level *Cloning* docs): the clone is an
+/// independent plaintext copy of every secret field, wiped only by its own
+/// drop. Implemented manually rather than derived so the policy is explicit
+/// and the secret-bearing field list is visible at the duplication site.
+impl Clone for PrivateKeyShare {
+	fn clone(&self) -> Self {
+		Self {
+			party_id: self.party_id,
+			total_parties: self.total_parties,
+			threshold: self.threshold,
+			dkg_participants: self.dkg_participants.clone(),
+			key: self.key,
+			rho: self.rho,
+			tr: self.tr,
+			shares: self.shares.clone(),
+		}
+	}
+}
+
 impl Zeroize for PrivateKeyShare {
 	fn zeroize(&mut self) {
 		self.party_id.zeroize();
@@ -448,6 +481,45 @@ mod tests {
 		let debug_str = format!("{:?}", pk_share);
 		assert!(debug_str.contains("REDACTED"));
 		assert!(!debug_str.contains("42")); // Should not contain the key bytes
+	}
+
+	/// Pins the documented cloning policy: a clone is a fully independent
+	/// plaintext copy with its own zeroization lifecycle. Wiping one copy
+	/// must leave the other intact (so a holder can hand one copy to a
+	/// protocol instance and keep another), and the wiped copy must hold no
+	/// secret material.
+	#[test]
+	fn test_private_key_share_clone_is_independent_plaintext_copy() {
+		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
+		let mut shares = BTreeMap::new();
+		for mask in [0b011u16, 0b101u16] {
+			let mut data = SecretShareData { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] };
+			data.s1[0][0] = 7;
+			shares.insert(mask, data);
+		}
+		let mut original = PrivateKeyShare::new(
+			0,
+			3,
+			2,
+			[0x42u8; 32],
+			[0x43u8; 32],
+			[0x44u8; TR_SIZE],
+			shares,
+			dkg_participants,
+		);
+
+		let copy = original.clone();
+		assert!(copy == original, "a clone must be a faithful copy");
+
+		original.zeroize();
+
+		// The original is wiped...
+		assert_eq!(original.key, [0u8; 32]);
+		assert!(original.shares.is_empty());
+		// ...and the clone is untouched: an independent lifecycle.
+		assert_eq!(copy.key, [0x42u8; 32], "zeroizing one copy must not erase another");
+		assert_eq!(copy.shares.len(), 2);
+		assert_eq!(copy.shares[&0b011].s1[0][0], 7);
 	}
 
 	#[test]
