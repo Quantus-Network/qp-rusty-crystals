@@ -200,6 +200,28 @@ pub(crate) fn public_key_from_secret_var<
 		&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk,
 	);
 
+	// Lightweight structural pre-check gating the keygen-scale work below
+	// (security review, DoS amplification): `unpack_sk` already reports whether
+	// every packed s1/s2 coefficient is canonical (in [-ETA, ETA]). A random /
+	// garbage blob of the correct length almost always has at least one
+	// out-of-range slot, so bailing here avoids the expensive path that
+	// follows — SHAKE128 expansion of the whole K×L matrix A, forward and
+	// inverse NTT, power2round, and the SHAKE256 public-key re-hash. Honest
+	// keys are always in range and take the full path unchanged, so this adds
+	// no cost to the legitimate case and leaks nothing secret (the range of an
+	// imported blob is known to whoever supplied it). Note this only cheapens
+	// the common garbage case: a blob crafted with canonical coefficients but
+	// an inconsistent t0/tr still pays one full derivation, which is inherent
+	// to correspondence checking — callers importing untrusted key material
+	// must still rate-limit or authenticate (see the import-path docs).
+	if !s_in_range {
+		key.zeroize();
+		s1.zeroize();
+		s2.zeroize();
+		t0.zeroize();
+		return None;
+	}
+
 	let (t1, mut t0_derived) = derive_public_components(&rho, &s1, &s2);
 
 	let t1_nonzero = !t1.vec.iter().all(|p| p.coeffs().iter().all(|&c| c == 0));
@@ -223,7 +245,8 @@ pub(crate) fn public_key_from_secret_var<
 	t0.zeroize();
 	t0_derived.zeroize();
 
-	if s_in_range && t0_consistent && tr_consistent && t1_nonzero {
+	// `s_in_range` was already enforced above (we returned early otherwise).
+	if t0_consistent && tr_consistent && t1_nonzero {
 		Some(pk)
 	} else {
 		None
