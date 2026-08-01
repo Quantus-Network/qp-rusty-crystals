@@ -1937,7 +1937,19 @@ fn verify_party_broadcast<S: TranscriptSigner>(
 	Ok(())
 }
 
-/// Verify a single partial PK matches its commitment and (if possible) the shared secret.
+/// Verify a single partial PK against its Round-3 commitment and, when the
+/// verifier holds the subset's shared secret, against the prescribed η-bounded
+/// derivation.
+///
+/// The algebraic recomputation is only possible for a subset the verifier is a
+/// member of (it needs `K_S`). For a subset with no honest member the check
+/// necessarily reduces to the commitment the leader itself chose: `t_S` alone is
+/// an LWE sample, testing it for an η-bounded preimage is LWE/SIS-hard, and the
+/// preimage cannot be revealed without exposing the secret. This is an accepted
+/// secure-with-abort limitation (no forgery or secret recovery results; the
+/// worst case is a signing-time abort/retry or a bounded distribution skew).
+/// See the "Partial-key η-binding" limitation in this module's docs
+/// (`dkg/mod.rs`).
 fn verify_partial_pk_commitment(
 	ssid: &[u8; DKG_SSID_SIZE],
 	shared_secrets: &BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,

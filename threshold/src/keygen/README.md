@@ -90,7 +90,27 @@ Example for (2, 3):
 2. **No Trusted Dealer**: No single party ever knows the complete secret key
 3. **Commitment Scheme**: Parties commit before revealing, preventing adaptive attacks
 4. **Transcript Signing**: Provides non-repudiation and detects tampering
-5. **PK Commitment Verification**: Non-leaders verify partial PKs before signing
+5. **PK Commitment Verification**: Members of a subset verify that subset's partial PK before signing
+
+### Integrity Model (secure-with-abort)
+
+A subset's partial public key `t_S` can be checked against the prescribed
+η-bounded derivation only by a party that holds `K_S` — i.e. a member of `S`.
+On its own `t_S` is an LWE sample, and testing it for an η-bounded preimage is
+LWE/SIS-hard; the preimage cannot be revealed for checking without exposing the
+secret (`s = Σ_S s_S`). DKG therefore produces a provably η-distributed key only
+when **every subset contains at least one honest party**.
+
+A sub-threshold adversary that fully controls a subset — which includes *any
+single party* in an n-of-n config, since every subset is then a singleton
+(`k = n - t + 1 = 1`) — can commit to a non-η `t_S` that no honest party
+detects. This does **not** enable forgery or leak honest shares: the Round 3/4
+commit-reveal binds the leader to `t_S` before any honest `t` is revealed, so the
+aggregate key cannot be adaptively steered. The worst effect is a signing-time
+abort/retry or a bounded widening of the secret distribution (absorbed by the
+hyperball headroom). Deployments that require robust completion against a
+fully-corrupt subset must add a zero-knowledge proof of short preimage to each
+partial key (not implemented).
 
 ### Supported Configurations
 
