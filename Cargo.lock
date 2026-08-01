@@ -862,6 +862,7 @@ dependencies = [
  "hex-literal",
  "libm",
  "log",
+ "psm",
  "qp-rusty-crystals-dilithium",
  "rand",
  "zeroize",

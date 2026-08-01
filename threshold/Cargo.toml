@@ -32,6 +32,8 @@ criterion = { workspace = true }
 hex = { workspace = true }
 hex-literal = { workspace = true }
 rand = { workspace = true }
+# Painted-stack probe for the dealer stack-zeroization regression test.
+psm = "=0.1.31"
 
 [features]
 default = ["ml-dsa-87", "std"]
