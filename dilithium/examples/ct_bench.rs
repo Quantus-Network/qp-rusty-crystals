@@ -33,6 +33,9 @@
 //! - `sign_norm_check`          — the infinity-norm rejection check on z = y + c*s1
 //! - `sign_make_hint`           — hint computation from secret-derived w0/w1
 //! - `ntt_pointwise`            — core polynomial arithmetic on secret operands
+//! - `secret_ct_eq`             — the constant-time 32-byte comparison behind
+//!   `SensitiveBytes32::ct_eq` and `WormholePair`'s `PartialEq` (matching vs mismatching operands;
+//!   a prefix-dependent compare would separate the classes)
 //!
 //! Intentionally not tested:
 //!
@@ -395,6 +398,37 @@ fn ntt_pointwise(runner: &mut CtRunner, rng: &mut BenchRng) {
 	}
 }
 
+/// The constant-time secret comparison (`ct_eq_32`).
+///
+/// Class Left compares two *equal* arrays (worst case for a short-circuiting
+/// compare: full scan), Class Right compares against fresh random bytes
+/// (which differ in the first byte with probability 255/256, the best case
+/// for an early exit). A prefix-dependent implementation would show a large
+/// timing gap between the classes; the fold must not.
+fn secret_ct_eq(runner: &mut CtRunner, rng: &mut BenchRng) {
+	const SAMPLES: usize = 200_000;
+	const BATCH: usize = 32;
+
+	let mut fixed = [0u8; 32];
+	rng.fill_bytes(&mut fixed);
+	let mut scratch = [0u8; 32];
+	let mut operand = [0u8; 32];
+
+	for _ in 0..SAMPLES {
+		let (is_left, class) = random_class(rng);
+		// Identical prep for both classes: RNG fill, then memcpy.
+		rng.fill_bytes(&mut scratch);
+		operand.copy_from_slice(if is_left { &fixed } else { &scratch });
+		runner.run_one(class, || {
+			for _ in 0..BATCH {
+				let eq =
+					qp_rusty_crystals_dilithium::ct_eq_32(black_box(&fixed), black_box(&operand));
+				black_box(eq);
+			}
+		});
+	}
+}
+
 ctbench_main!(
 	keygen_s1s2_sampling_eta2,
 	keygen_s1s2_sampling_eta4,
@@ -404,5 +438,6 @@ ctbench_main!(
 	sign_mask_expansion,
 	sign_norm_check,
 	sign_make_hint,
-	ntt_pointwise
+	ntt_pointwise,
+	secret_ct_eq
 );

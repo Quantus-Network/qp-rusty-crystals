@@ -33,7 +33,7 @@ use qp_poseidon_core::{
 };
 extern crate alloc;
 use alloc::vec::Vec;
-use qp_rusty_crystals_dilithium::SensitiveBytes32;
+use qp_rusty_crystals_dilithium::{ct_eq_32, SensitiveBytes32};
 use zeroize::Zeroize;
 
 /// Salt used when deriving wormhole addresses.
@@ -77,15 +77,21 @@ pub struct WormholePair {
 }
 
 // `secret` is a `SensitiveBytes32` (which is not `PartialEq`), so equality is
-// implemented by hand over the raw bytes to preserve the previous derived
-// semantics. The address alone determines identity; the secret is compared for
-// completeness. `SensitiveBytes32` already zeroizes itself on drop, so no
-// `ZeroizeOnDrop` derive is needed on `WormholePair`.
+// implemented by hand. Every field is compared in constant time and the
+// results are combined with non-short-circuiting `&` (security review): `==`
+// on the raw bytes may bail out at the first differing byte, and short-
+// circuiting between fields skips later comparisons entirely, so comparison
+// time would depend on the length of the matching prefix — a timing oracle
+// against the secret. `first_hash` gets the same treatment as `secret`: the
+// address is the double hash of the same preimage, so the single hash is a
+// reveal value, not public data. `SensitiveBytes32` already zeroizes itself
+// on drop, so no `ZeroizeOnDrop` derive is needed on `WormholePair`.
 impl PartialEq for WormholePair {
 	fn eq(&self, other: &Self) -> bool {
-		self.address == other.address &&
-			self.first_hash == other.first_hash &&
-			self.secret.as_bytes() == other.secret.as_bytes()
+		let address_eq = ct_eq_32(&self.address, &other.address);
+		let first_hash_eq = ct_eq_32(&self.first_hash, &other.first_hash);
+		let secret_eq = self.secret.ct_eq(&other.secret);
+		address_eq & first_hash_eq & secret_eq
 	}
 }
 
@@ -293,6 +299,40 @@ mod tests {
 		let mut secret_for_verify = *pair.secret.as_bytes();
 		let verification = WormholePair::verify(pair.address, (&mut secret_for_verify).into());
 		assert!(verification);
+	}
+
+	/// Pins the semantics of the constant-time `PartialEq` (security review):
+	/// equality must hold exactly when all three fields match, including a
+	/// difference in *any single* field — the non-short-circuiting fold must
+	/// not drop any comparison.
+	#[test]
+	fn test_pair_equality_covers_every_field() {
+		let make_pair = |address: [u8; 32], first_hash: [u8; 32], secret: [u8; 32]| {
+			let mut secret = secret;
+			WormholePair { address, first_hash, secret: SensitiveBytes32::new(&mut secret) }
+		};
+
+		// `WormholePair` has no `Debug` (it would print the secret), so plain
+		// `assert!` is used instead of `assert_eq!`/`assert_ne!`.
+		let base = make_pair([1u8; 32], [2u8; 32], [3u8; 32]);
+		assert!(base == make_pair([1u8; 32], [2u8; 32], [3u8; 32]));
+
+		assert!(base != make_pair([9u8; 32], [2u8; 32], [3u8; 32]), "address ignored by eq");
+		assert!(base != make_pair([1u8; 32], [9u8; 32], [3u8; 32]), "first_hash ignored by eq");
+		assert!(base != make_pair([1u8; 32], [2u8; 32], [9u8; 32]), "secret ignored by eq");
+
+		// A difference in only the last byte of the secret must be detected:
+		// a truncated comparison would miss it.
+		let mut tail_diff = [3u8; 32];
+		tail_diff[31] ^= 1;
+		assert!(base != make_pair([1u8; 32], [2u8; 32], tail_diff));
+
+		// Pairs derived from the same secret compare equal end-to-end.
+		let mut s1 = [42u8; 32];
+		let mut s2 = [42u8; 32];
+		let p1 = WormholePair::generate_pair_from_secret((&mut s1).into());
+		let p2 = WormholePair::generate_pair_from_secret((&mut s2).into());
+		assert!(p1 == p2);
 	}
 
 	#[test]

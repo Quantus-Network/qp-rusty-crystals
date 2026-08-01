@@ -24,6 +24,25 @@ extern crate std;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// Compares two 32-byte arrays in constant time.
+///
+/// `==` on byte arrays is *allowed* to short-circuit at the first differing
+/// byte, making the comparison time depend on the length of the matching
+/// prefix — a timing oracle that lets an attacker recover a secret
+/// incrementally (security review). Whether the compiler actually emits an
+/// early exit varies by target and optimization level, so secret material
+/// must never rely on it. This routine unconditionally folds the XOR of every
+/// byte pair into an accumulator; `black_box` denies the optimizer knowledge
+/// of the accumulated value so it cannot reintroduce a value-dependent exit.
+#[must_use]
+pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
+	let mut diff = 0u8;
+	for (x, y) in a.iter().zip(b.iter()) {
+		diff |= x ^ y;
+	}
+	core::hint::black_box(diff) == 0
+}
+
 /// Wrapper for sensitive 32-byte data that enforces move semantics and automatic zeroization
 ///
 /// Both `new()` and `from()` take mutable references and zeroize the input data,
@@ -71,6 +90,17 @@ impl SensitiveBytes32 {
 
 	pub fn into_bytes(self) -> [u8; 32] {
 		self.0
+	}
+
+	/// Constant-time equality with another secret.
+	///
+	/// `PartialEq` is intentionally not implemented for this type: a plain
+	/// `==` on the wrapped bytes may short-circuit and leak the length of the
+	/// matching prefix through timing. Callers that genuinely need to compare
+	/// secrets must do so explicitly through this method (see [`ct_eq_32`]).
+	#[must_use]
+	pub fn ct_eq(&self, other: &Self) -> bool {
+		ct_eq_32(&self.0, &other.0)
 	}
 }
 
@@ -158,6 +188,36 @@ mod acvp;
 
 #[cfg(test)]
 mod tests {
+	use crate::{ct_eq_32, SensitiveBytes32};
+
+	#[test]
+	fn ct_eq_32_semantics() {
+		let a = [0xA5u8; 32];
+		assert!(ct_eq_32(&a, &a));
+
+		// Differences at the first, last, and a middle byte must all be
+		// detected — the fold must cover the entire array.
+		for idx in [0usize, 15, 31] {
+			let mut b = a;
+			b[idx] ^= 1;
+			assert!(!ct_eq_32(&a, &b), "difference at byte {idx} not detected");
+		}
+
+		assert!(!ct_eq_32(&[0u8; 32], &[0xFFu8; 32]));
+	}
+
+	#[test]
+	fn sensitive_bytes_ct_eq() {
+		let mut raw1 = [7u8; 32];
+		let mut raw2 = [7u8; 32];
+		let mut raw3 = [8u8; 32];
+		let a = SensitiveBytes32::new(&mut raw1);
+		let b = SensitiveBytes32::new(&mut raw2);
+		let c = SensitiveBytes32::new(&mut raw3);
+		assert!(a.ct_eq(&b));
+		assert!(!a.ct_eq(&c));
+	}
+
 	#[test]
 	fn params() {
 		assert_eq!(crate::params::Q, 8380417);
