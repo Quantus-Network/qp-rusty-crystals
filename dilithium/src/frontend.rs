@@ -118,20 +118,25 @@ macro_rules! define_ml_dsa {
 			/// consumed in the practical sense: it is all zeros afterwards.
 			pub fn generate(entropy: &mut SensitiveBytes32) -> Keypair {
 				let mut pk = [0u8; PUBLICKEYBYTES];
-				let mut sk = [0u8; SECRETKEYBYTES];
+				// The packed secret key lives in a self-wiping buffer, and the
+				// Keypair is built in tail position rather than through a named
+				// local that is returned afterwards (security review): binding
+				// the struct first and returning it later moves it out of this
+				// frame, and the dead source copy of the full packed key is
+				// beyond the reach of any zeroize call (the release-mode
+				// `sign_stack_zeroization` probe found two such copies). The
+				// same tail-construction shape keeps `from_bytes` clean under
+				// the `import_stack_zeroization` probes.
+				let mut sk = Zeroizing::new([0u8; SECRETKEYBYTES]);
 				$crate::sign::keypair_var::<K, L, ETA, PUBLICKEYBYTES, SECRETKEYBYTES>(
 					&mut pk, &mut sk, entropy,
 				);
 				entropy.as_mut_bytes().zeroize();
-				let keypair = Keypair {
-					// Constructed directly rather than via `SecretKey::from_bytes`:
-					// a freshly generated key is consistent by construction, and the
-					// import-path validation would redo the keygen-scale derivation.
-					secret: SecretKey { bytes: sk },
-					public: PublicKey::from_bytes(&pk).expect("Should never fail"),
-				};
-				sk.zeroize();
-				keypair
+				let public = PublicKey::from_bytes(&pk).expect("Should never fail");
+				// Constructed directly rather than via `SecretKey::from_bytes`:
+				// a freshly generated key is consistent by construction, and the
+				// import-path validation would redo the keygen-scale derivation.
+				Keypair { secret: SecretKey { bytes: *sk }, public }
 			}
 
 			/// The secret half.
