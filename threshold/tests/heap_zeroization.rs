@@ -170,6 +170,27 @@ fn hyperball_stream_pattern(ssid: &[u8; 32], seed: &[u8; 32]) -> [u8; 32] {
 	pattern
 }
 
+/// The 32-byte per-party key seed the dealer squeezes for party 0, recomputed
+/// through the public fips202 API in the exact absorb/squeeze order of
+/// `generate_with_dealer`: absorb the dealer seed, `[K, L]`, and the `(t, n)`
+/// policy binding, then squeeze rho (public matrix seed, discarded) followed
+/// by party 0's key seed.
+fn dealer_party0_seed_pattern(seed: &[u8; 32], threshold: u32, parties: u32) -> [u8; 32] {
+	use qp_rusty_crystals_threshold::params::{K, L};
+
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, seed);
+	fips202::shake256_absorb(&mut state, &[K as u8, L as u8]);
+	fips202::shake256_absorb(&mut state, &threshold.to_le_bytes());
+	fips202::shake256_absorb(&mut state, &parties.to_le_bytes());
+	fips202::shake256_finalize(&mut state);
+	let mut rho = [0u8; 32];
+	fips202::shake256_squeeze(&mut rho, &mut state);
+	let mut key0 = [0u8; 32];
+	fips202::shake256_squeeze(&mut key0, &mut state);
+	key0
+}
+
 /// Run a deterministic 2-of-2 -> 2-of-2 resharing locally and return the new
 /// share of party 0 plus the last 32 bytes of the first Round 4 transport
 /// frame (raw sub-share s2 coefficients). All seeds are fixed, and the leader
@@ -447,6 +468,27 @@ fn secret_intermediates_are_wiped_before_their_heap_memory_is_freed() {
 		dkg_ks_pattern,
 		|| {
 			let _ = run_local_dkg_2of3();
+		},
+	);
+
+	// Scenario 7: dealer per-party key seeds (party_keys Vec).
+	// generate_with_dealer squeezes each party's 32-byte key seed into a
+	// Vec<[u8; 32]> and copies one into each returned PrivateKeyShare. The
+	// returned shares wipe their copy on drop, but the dealer-side Vec used
+	// to be a plain vector freed unwiped at function return, leaving every
+	// party's seed in allocator memory — contradicting the dealer's
+	// documented obligation to delete all distributed secret material. The
+	// derivation is deterministic, so the pattern (party 0's seed) is
+	// recomputed independently through the public XOF API.
+	let dealer_seed = [0x64u8; 32];
+	assert_no_secret_bearing_free(
+		"generate_with_dealer (party_keys buffer)",
+		dealer_party0_seed_pattern(&dealer_seed, 2, 3),
+		|| {
+			let config = ThresholdConfig::new(2, 3).expect("valid config");
+			let (_pk, shares) =
+				generate_with_dealer(&dealer_seed, config).expect("keygen succeeds");
+			drop(shares);
 		},
 	);
 }

@@ -7,7 +7,7 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 
 use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
 	config::ThresholdConfig,
@@ -126,12 +126,17 @@ pub fn generate_with_dealer(
 	let mut rho = [0u8; 32];
 	fips202::shake256_squeeze(&mut rho, &mut h);
 
-	// 2. Squeeze party keys
-	let mut party_keys = Vec::with_capacity(parties as usize);
+	// 2. Squeeze party keys. Each seed is copied into a returned share (which
+	// wipes its copy on drop), but this dealer-side vector also holds every
+	// party's seed; `Zeroizing` wipes it on every exit path (security review)
+	// rather than freeing the plaintext seeds with the allocation.
+	let mut party_keys: Zeroizing<Vec<[u8; 32]>> =
+		Zeroizing::new(Vec::with_capacity(parties as usize));
 	for _ in 0..parties {
 		let mut key = [0u8; 32];
 		fips202::shake256_squeeze(&mut key, &mut h);
 		party_keys.push(key);
+		key.zeroize();
 	}
 
 	// 3. Generate threshold shares
@@ -214,6 +219,14 @@ pub fn generate_with_dealer(
 			}
 
 			shares_data.insert(subset_id, SecretShareData { s1: s1_data, s2: s2_data });
+
+			// The arrays are Copy, so the struct literal above duplicated them
+			// and these locals are now dead plaintext copies of the share
+			// coefficients; wipe them instead of leaving them on the stack
+			// (security review). The copies inside `shares_data` are owned by
+			// `SecretShareData`, which zeroizes on drop.
+			s1_data.zeroize();
+			s2_data.zeroize();
 		}
 
 		// For dealer-generated keys, participants have sequential IDs (0, 1, 2, ..., n-1)
