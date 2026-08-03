@@ -63,9 +63,20 @@ pub struct SensitiveBytes32([u8; 32]);
 impl SensitiveBytes32 {
 	// Note this zeroizes the input bytes so that the struct takes practical ownership of the input.
 	pub fn new(bytes: &mut [u8; 32]) -> Self {
-		let result = Self(*bytes);
+		// Fill a zeroed wrapper in place, then `replace` it out (security
+		// review): `Self(*bytes)` can leave a `Copy` temporary the returned
+		// wrapper does not own, and a plain `let result = ...; result` return
+		// moves the secret out while leaving the named local's stack slot
+		// intact — beyond `ZeroizeOnDrop`. Writing into the wrapper and then
+		// swapping it with a zeroed value means (1) the only live secret is
+		// the return value and (2) the local is zeros when this frame drops
+		// (caught by the release-mode `sensitive_bytes_stack_zeroization`
+		// probe). Prefer [`Self::zeroed`] + [`Self::as_mut_bytes`] when the
+		// secret can be written directly into an already-placed wrapper.
+		let mut result = Self::zeroed();
+		result.0.copy_from_slice(bytes);
 		bytes.zeroize();
-		result
+		core::mem::replace(&mut result, Self::zeroed())
 	}
 
 	/// All-zero value, intended to be filled in place via [`Self::as_mut_bytes`].
@@ -106,9 +117,8 @@ impl SensitiveBytes32 {
 
 impl From<&mut [u8; 32]> for SensitiveBytes32 {
 	fn from(bytes: &mut [u8; 32]) -> Self {
-		let result = Self(*bytes);
-		bytes.zeroize();
-		result
+		// Same in-place fill + replace as [`SensitiveBytes32::new`].
+		Self::new(bytes)
 	}
 }
 
@@ -124,9 +134,13 @@ pub struct SensitiveBytes64([u8; 64]);
 impl SensitiveBytes64 {
 	// Note this zeroizes the input bytes so that the struct takes practical ownership of the input.
 	pub fn new(bytes: &mut [u8; 64]) -> Self {
-		let result = Self(*bytes);
+		// Same in-place fill + replace as [`SensitiveBytes32::new`] (security
+		// review): avoids both the `Self(*bytes)` Copy temporary and the
+		// moved-from local left behind by a plain by-value return.
+		let mut result = Self::zeroed();
+		result.0.copy_from_slice(bytes);
 		bytes.zeroize();
-		result
+		core::mem::replace(&mut result, Self::zeroed())
 	}
 
 	/// All-zero value, intended to be filled in place via [`Self::as_mut_bytes`].
@@ -156,9 +170,8 @@ impl SensitiveBytes64 {
 
 impl From<&mut [u8; 64]> for SensitiveBytes64 {
 	fn from(bytes: &mut [u8; 64]) -> Self {
-		let result = Self(*bytes);
-		bytes.zeroize();
-		result
+		// Same in-place fill + replace as [`SensitiveBytes64::new`].
+		Self::new(bytes)
 	}
 }
 
