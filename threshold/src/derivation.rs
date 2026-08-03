@@ -49,10 +49,16 @@
 //! # Security
 //!
 //! The contribution input is bound to the share's actual secret polynomials
-//! (`s1`, `s2`), which are the only true secret material in a `PrivateKeyShare`.
-//! The legacy `key` byte string is *not* used here, because in the DKG path it is
-//! derived deterministically from public values (`rho`, `party_id`) and therefore
-//! provides no secrecy.
+//! (`s1`, `s2`), which are the ground-truth secret of the threshold scheme.
+//! The `key` byte string is *not* used here, even though current code derives
+//! it from secret material and it must itself be treated as secret (the
+//! dealer squeezes it from the secret master seed; the DKG and resharing
+//! paths bind it to the secret subset shares under `dkg-party-key-v2` /
+//! `reshare-party-key-v2` — never log, cache, or expose it). The reason is
+//! share vintage: shares serialized by pre-v2 code derived `key` from the
+//! public `rho` and `party_id` only, so a contribution bound to `key` would
+//! carry no secrecy for those shares, while binding to the polynomials is
+//! sound for every share ever produced.
 
 use alloc::vec::Vec;
 
@@ -111,7 +117,12 @@ const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v3"
 /// parameter set (same discipline as the DKG / signing / resharing SSIDs).
 pub fn derive_dkg_contribution(master_share: &PrivateKeyShare, tweak: &[u8; 32]) -> [u8; 32] {
 	let party_id_bytes = master_share.party_id().to_le_bytes();
-	let shares_digest = hash_secret_shares(master_share);
+	// The digest is secret-share-derived keying material, so it lives in a
+	// self-wiping buffer filled in place (security review): a plain local —
+	// or a by-value return from the hash — would leave an unwipeable copy in
+	// dead stack memory (pinned by `shares_digest_never_survives_derivation`).
+	let mut shares_digest = Zeroizing::new([0u8; 64]);
+	hash_secret_shares(master_share, &mut shares_digest);
 
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, DKG_CONTRIBUTION_DOMAIN);
@@ -119,7 +130,7 @@ pub fn derive_dkg_contribution(master_share: &PrivateKeyShare, tweak: &[u8; 32])
 	fips202::shake256_absorb(&mut state, &SUITE_ID.to_le_bytes());
 	fips202::shake256_absorb(&mut state, &party_id_bytes);
 	fips202::shake256_absorb(&mut state, tweak);
-	fips202::shake256_absorb(&mut state, &shares_digest);
+	fips202::shake256_absorb(&mut state, &*shares_digest);
 	fips202::shake256_finalize(&mut state);
 
 	let mut contribution = [0u8; 32];
@@ -128,11 +139,15 @@ pub fn derive_dkg_contribution(master_share: &PrivateKeyShare, tweak: &[u8; 32])
 	contribution
 }
 
-/// Hash all secret share polynomials into a 64-byte digest for use as keying material.
+/// Hash all secret share polynomials into `digest` (64 bytes of keying material).
 ///
 /// `BTreeMap` iteration is deterministic by key, so the digest is stable across calls
 /// and across machines holding the same share data.
-pub(crate) fn hash_secret_shares(master_share: &PrivateKeyShare) -> [u8; 64] {
+///
+/// Writes into a caller-provided buffer instead of returning by value so the
+/// caller can keep the (secret-derived) digest in a zeroizing container with
+/// no dead by-value copy left in this frame.
+pub(crate) fn hash_secret_shares(master_share: &PrivateKeyShare, digest: &mut [u8; 64]) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, b"threshold-share-digest-v1");
 	fips202::shake256_absorb(&mut state, &master_share.party_id().to_le_bytes());
@@ -160,9 +175,7 @@ pub(crate) fn hash_secret_shares(master_share: &PrivateKeyShare) -> [u8; 64] {
 	}
 
 	fips202::shake256_finalize(&mut state);
-	let mut digest = [0u8; 64];
-	fips202::shake256_squeeze(&mut digest, &mut state);
-	digest
+	fips202::shake256_squeeze(digest, &mut state);
 }
 
 /// Identifier for a derived key, used for storage lookup.
@@ -260,6 +273,66 @@ mod tests {
 		tweak
 	}
 
+	/// Regression probe (security review): the 64-byte secret-share digest
+	/// must not survive in dead stack memory after `derive_dkg_contribution`
+	/// returns — it lets a memory-disclosure attacker reproduce the party's
+	/// contribution for any tweak. Painted-stack technique as in the
+	/// `*_stack_zeroization` integration tests; release-only because the
+	/// assertion is about codegen.
+	// Unsafe is required for the raw painted-stack buffer; scoped to this
+	// test only (the crate otherwise denies unsafe_code).
+	#[allow(unsafe_code)]
+	#[cfg(not(debug_assertions))]
+	#[test]
+	fn shares_digest_never_survives_derivation() {
+		use alloc::alloc::{alloc, dealloc, Layout};
+
+		const PAINT: u8 = 0xAA;
+		const STACK_BYTES: usize = 1024 * 1024;
+		const ALIGN: usize = 4096;
+
+		fn probe_stack_for<F: FnOnce()>(pattern: &[u8], f: F) -> bool {
+			let layout = Layout::from_size_align(STACK_BYTES, ALIGN).unwrap();
+			unsafe {
+				let base = alloc(layout);
+				assert!(!base.is_null(), "probe stack allocation failed");
+				core::ptr::write_bytes(base, PAINT, STACK_BYTES);
+
+				psm::on_stack(base, STACK_BYTES, f);
+
+				let region = core::slice::from_raw_parts(base, STACK_BYTES);
+				let found = region.windows(pattern.len()).any(|w| w == pattern);
+				dealloc(base, layout);
+				found
+			}
+		}
+
+		let share = create_test_share(0, 42);
+		let tweak = [0x5Au8; 32];
+		// Reference digest, computed outside the probed region.
+		let mut digest = Zeroizing::new([0u8; 64]);
+		hash_secret_shares(&share, &mut digest);
+
+		// Sanity: the technique detects an unwiped copy.
+		assert!(
+			probe_stack_for(&*digest, || {
+				let leaked: [u8; 64] = *digest;
+				core::hint::black_box(&leaked);
+			}),
+			"probe self-check: a deliberately leaked digest copy was not detected"
+		);
+
+		let leaked = probe_stack_for(&*digest, || {
+			let contribution = derive_dkg_contribution(&share, &tweak);
+			core::hint::black_box(&contribution);
+		});
+		assert!(
+			!leaked,
+			"the secret-share digest survived in dead stack memory after \
+			 derive_dkg_contribution returned"
+		);
+	}
+
 	#[test]
 	fn test_derive_dkg_contribution_deterministic() {
 		let share = create_test_share(0, 42);
@@ -277,7 +350,8 @@ mod tests {
 		let share = create_test_share(0, 42);
 		let tweak = [0x11u8; 32];
 		let real = derive_dkg_contribution(&share, &tweak);
-		let shares_digest = hash_secret_shares(&share);
+		let mut shares_digest = Zeroizing::new([0u8; 64]);
+		hash_secret_shares(&share, &mut shares_digest);
 
 		let mut state = fips202::KeccakState::default();
 		fips202::shake256_absorb(&mut state, DKG_CONTRIBUTION_DOMAIN);
@@ -285,7 +359,7 @@ mod tests {
 		fips202::shake256_absorb(&mut state, &(SUITE_ID ^ 0xDEAD).to_le_bytes());
 		fips202::shake256_absorb(&mut state, &share.party_id().to_le_bytes());
 		fips202::shake256_absorb(&mut state, &tweak);
-		fips202::shake256_absorb(&mut state, &shares_digest);
+		fips202::shake256_absorb(&mut state, &*shares_digest);
 		fips202::shake256_finalize(&mut state);
 		let mut other_suite = [0u8; 32];
 		fips202::shake256_squeeze(&mut other_suite, &mut state);
@@ -331,9 +405,10 @@ mod tests {
 
 	#[test]
 	fn test_contribution_independent_of_legacy_key_field() {
-		// Two shares that differ ONLY in the publicly-derivable `key` byte string
-		// must still produce the same contribution, because security comes from the
-		// secret polynomial shares, not from `key`.
+		// Two shares that differ ONLY in the `key` byte string must still
+		// produce the same contribution: the binding comes from the secret
+		// polynomial shares directly, not from the derived `key` (which
+		// pre-v2 code computed from public inputs only).
 		let dkg_participants = ParticipantList::new(&[0, 1, 2]).unwrap();
 		let mut shares = BTreeMap::new();
 		shares.insert(
