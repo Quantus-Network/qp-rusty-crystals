@@ -30,6 +30,33 @@
 //! NEAR MPC satisfies these requirements by generating `round1_seed` via `rand::random()` and
 //! using unique `ChannelId`s per attempt.
 //!
+//! # Transport Requirements (Caller Responsibility)
+//!
+//! This protocol carries **no per-frame authenticator** (no signature or MAC);
+//! like [`Dkg::message`](crate::keygen::dkg::Dkg::message), sender
+//! authentication is delegated to the transport (security review). The `from`
+//! argument to [`DilithiumSignProtocol::message`] is trusted: it MUST be the
+//! transport-authenticated identity of the sending peer, never derived from
+//! attacker-controllable packet contents. On such a transport the in-protocol
+//! `party_id == from` check completes the binding: a malicious participant
+//! cannot claim another participant's identity.
+//!
+//! On an **unauthenticated** transport the exposure is denial-of-signature,
+//! not forgery or secret loss: round buffers keep the first message received
+//! per sender (a replay/memory defense), so an injected frame that arrives
+//! before the honest one occupies that participant's slot and the honest
+//! frame is ignored. The forgery is caught by commit-reveal verification —
+//! commitments are hashes, reveals are checked against the Round 1 hashes
+//! frozen at Round 2, and followers verify the leader's final signature — but
+//! only as a late abort, so repeated injection denies completion. In-protocol
+//! authenticators are deliberately not used to plug this: signing parties
+//! share no suitable pairwise keys (and long-term share material must not
+//! double as transport keys), and an attacker positioned to inject frames on
+//! an unauthenticated transport can drop frames outright, so a MAC cannot
+//! restore liveness. (The DKG, by contrast, signs its transcript via
+//! `TranscriptSigner` because it establishes long-term keys; signing sessions
+//! are ephemeral and abort/retry, driven externally by the caller.)
+//!
 //! # No in-protocol retries
 //!
 //! Earlier revisions of this protocol included a `Round4Retry` message that allowed
@@ -1111,9 +1138,20 @@ impl DilithiumSignProtocol {
 	/// based on the message type. Messages from self, non-participants,
 	/// or in terminal states are ignored with `Ok(())`.
 	///
+	/// # Sender authentication contract
+	///
+	/// `from` is trusted: it MUST be the transport-authenticated identity of
+	/// the sending peer (e.g. the identity bound to an authenticated channel),
+	/// never a value read from the frame itself. The protocol verifies that
+	/// the payload's claimed `party_id` matches `from`, which is meaningful
+	/// only if `from` is authenticated — there is no per-frame signature or
+	/// MAC. See the module-level "Transport Requirements" section for what an
+	/// unauthenticated transport costs (denial-of-signature via first-write-
+	/// wins slot poisoning; never forgery or secret exposure).
+	///
 	/// # Arguments
 	///
-	/// * `from` - The participant ID that sent the message
+	/// * `from` - The transport-authenticated participant ID that sent the message
 	/// * `data` - The serialized message bytes
 	///
 	/// # Errors
