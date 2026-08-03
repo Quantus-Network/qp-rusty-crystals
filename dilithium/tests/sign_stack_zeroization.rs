@@ -110,8 +110,7 @@ macro_rules! sign_stack_zeroization_tests {
 				let mut hedge_raw = hedge_pattern;
 				let hedge = qp_rusty_crystals_dilithium::SensitiveBytes32::new(&mut hedge_raw);
 				let sign_leaked_hedge = probe_stack_for(super::STACK_BYTES, &hedge_pattern, || {
-					let sig =
-						keypair.sign(message, None, Some(&hedge)).expect("signing succeeds");
+					let sig = keypair.sign(message, None, Some(&hedge)).expect("signing succeeds");
 					core::hint::black_box(&sig);
 				});
 
