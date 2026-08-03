@@ -71,7 +71,7 @@ assert!(is_valid);
 ### Hedged Signing (Deterministic with Entropy)
 
 ```rust
-use qp_rusty_crystals_dilithium::ml_dsa_87;
+use qp_rusty_crystals_dilithium::{ml_dsa_87, SensitiveBytes32};
 
 let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
@@ -81,9 +81,12 @@ let message = b"Message to sign";
 
 let mut hedge_entropy = [0u8; 32];
 getrandom::getrandom(&mut hedge_entropy).expect("Failed to generate hedge entropy");
+// Move the hedge into a self-wiping wrapper (this zeroes `hedge_entropy`);
+// `sign` borrows it, so no unwiped copy of the randomizer is left behind.
+let hedge = SensitiveBytes32::new(&mut hedge_entropy);
 
 let signature = keypair
-	.sign(message, None, Some(hedge_entropy))
+	.sign(message, None, Some(&hedge))
 	.expect("Signing should succeed");
 let is_valid = keypair.verify(message, signature.as_slice(), None);
 assert!(is_valid);

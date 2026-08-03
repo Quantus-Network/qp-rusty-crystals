@@ -93,7 +93,10 @@ fn verify_test_vector<K, FGen, FFromBytes>(
 
 	let mut hedge = [0u8; 32];
 	assert!(drbg.randombytes(&mut hedge, 32).is_ok());
-	let our_signature = keypair.sign_msg(&test.msg, Some(hedge));
+	// Move the DRBG output into a self-wiping wrapper (zeroes `hedge`);
+	// `sign` borrows the hedge instead of taking it by value.
+	let hedge = SensitiveBytes32::new(&mut hedge);
+	let our_signature = keypair.sign_msg(&test.msg, Some(&hedge));
 	assert_eq!(
 		our_signature.as_slice(),
 		nist_signature,
@@ -158,7 +161,7 @@ trait HasNistKatApi {
 	fn public_bytes(&self) -> Vec<u8>;
 	fn secret_bytes(&self) -> Vec<u8>;
 	fn verify_msg(&self, msg: &[u8], sig: &[u8]) -> bool;
-	fn sign_msg(&self, msg: &[u8], hedge: Option<[u8; 32]>) -> Vec<u8>;
+	fn sign_msg(&self, msg: &[u8], hedge: Option<&SensitiveBytes32>) -> Vec<u8>;
 }
 
 macro_rules! impl_has_nist_kat_api {
@@ -176,7 +179,7 @@ macro_rules! impl_has_nist_kat_api {
 				self.verify(msg, sig, None)
 			}
 
-			fn sign_msg(&self, msg: &[u8], hedge: Option<[u8; 32]>) -> Vec<u8> {
+			fn sign_msg(&self, msg: &[u8], hedge: Option<&SensitiveBytes32>) -> Vec<u8> {
 				self.sign(msg, None, hedge).expect("Signing should succeed").to_vec()
 			}
 		}

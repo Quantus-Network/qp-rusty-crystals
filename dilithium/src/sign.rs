@@ -389,16 +389,23 @@ fn prepare_signing_context<const K: usize, const L: usize>(
 	unpacked_sk: &UnpackedSecretKey<K, L>,
 	domain_prefix: &[u8],
 	message: &[u8],
-	hedge_randomness: Option<[u8; params::SEEDBYTES]>,
+	hedge_randomness: Option<&SensitiveBytes32>,
 ) -> SigningContext {
 	let message_hash_mu =
 		derive_message_hash(&unpacked_sk.public_key_hash_tr, domain_prefix, message);
 
-	let mut hedge_bytes = hedge_randomness.unwrap_or([0u8; params::SEEDBYTES]);
+	// The hedge `rnd` is only ever *borrowed* out of the caller's
+	// self-wiping wrapper (security review): the previous by-value
+	// `Option<[u8; SEEDBYTES]>` plumbing smeared bare `Copy` duplicates of
+	// rnd through every parameter slot on the call chain, none of which any
+	// zeroize call could reach. rnd feeds ρ' = H(K || rnd || μ), so a
+	// recovered rnd plus a compromised K reconstructs the mask seed — the
+	// exact known-mask attack hedging exists to prevent. Deterministic mode
+	// (FIPS 204) absorbs rnd = 0^32, which is public.
+	const ZERO_RND: [u8; params::SEEDBYTES] = [0u8; params::SEEDBYTES];
+	let hedge_bytes = hedge_randomness.map_or(&ZERO_RND, SensitiveBytes32::as_bytes);
 	let mut signing_entropy_rho_prime =
-		derive_mask_seed(&unpacked_sk.private_key_seed, &hedge_bytes, &message_hash_mu);
-
-	hedge_bytes.zeroize();
+		derive_mask_seed(&unpacked_sk.private_key_seed, hedge_bytes, &message_hash_mu);
 
 	let public_seed_rho = unpacked_sk.public_seed_rho;
 
@@ -566,7 +573,7 @@ pub(crate) fn signature_var<
 	domain_prefix: &[u8],
 	message: &[u8],
 	secret_key_bytes: &[u8; SK],
-	hedge: Option<[u8; params::SEEDBYTES]>,
+	hedge: Option<&SensitiveBytes32>,
 ) {
 	const {
 		assert_sign_params::<K, L, ETA, GAMMA1, GAMMA2, OMEGA, CD, PZ, W1, KW1, PK, SK, SIG>();
@@ -777,7 +784,7 @@ fn signature(
 	domain_prefix: &[u8],
 	message: &[u8],
 	secret_key_bytes: &[u8; params::SECRETKEYBYTES],
-	hedge: Option<[u8; params::SEEDBYTES]>,
+	hedge: Option<&SensitiveBytes32>,
 ) {
 	signature_var::<
 		{ params::K },
@@ -854,7 +861,7 @@ mod tests {
 		let msg = get_random_msg();
 		let mut sig = [0u8; crate::params::SIGNBYTES];
 		let hedge = get_random_bytes();
-		super::signature(&mut sig, &[], &msg, &sk, Some(hedge.0));
+		super::signature(&mut sig, &[], &msg, &sk, Some(&hedge));
 		assert!(super::verify(&sig, &[], &msg, &pk));
 	}
 
@@ -917,8 +924,8 @@ mod tests {
 
 		let hedge = get_random_bytes();
 
-		super::signature(&mut sig1, &[], msg, &sk, Some(hedge.0));
-		super::signature(&mut sig2, &[], msg, &sk, Some(hedge.0));
+		super::signature(&mut sig1, &[], msg, &sk, Some(&hedge));
+		super::signature(&mut sig2, &[], msg, &sk, Some(&hedge));
 
 		// Deterministic signing should produce identical signatures
 		assert_eq!(sig1, sig2);
@@ -939,8 +946,8 @@ mod tests {
 		let hedge1 = get_random_bytes();
 		let hedge2 = get_random_bytes();
 
-		super::signature(&mut sig1, &[], msg, &sk, Some(hedge1.0));
-		super::signature(&mut sig2, &[], msg, &sk, Some(hedge2.0));
+		super::signature(&mut sig1, &[], msg, &sk, Some(&hedge1));
+		super::signature(&mut sig2, &[], msg, &sk, Some(&hedge2));
 
 		// Hedged signing should produce different signatures (with high probability)
 		assert_ne!(sig1, sig2);

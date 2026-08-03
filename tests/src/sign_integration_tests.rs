@@ -1,7 +1,7 @@
 // tests/sign_integration_tests.rs
 
 use qp_rusty_crystals_hdwallet::{
-	derive_key_from_seed, generate_mnemonic, mnemonic_to_seed, SensitiveBytes64,
+	derive_key_from_seed, generate_mnemonic, mnemonic_to_seed, SensitiveBytes32, SensitiveBytes64,
 };
 use rand::{Rng, RngExt};
 
@@ -87,11 +87,11 @@ fn test_hedged_vs_deterministic_signing() {
 	// Deterministic signatures should be identical
 	assert_eq!(sig1_det, sig2_det, "Deterministic signatures should be identical");
 
-	// Test hedged signing
-	let hedge1 = get_random_bytes();
-	let hedge2 = get_random_bytes();
-	let sig1_hedge = dilithium_keypair.sign(message, None, Some(hedge1)).unwrap();
-	let sig2_hedge = dilithium_keypair.sign(message, None, Some(hedge2)).unwrap();
+	// Test hedged signing (the hedge is borrowed from a self-wiping wrapper)
+	let hedge1 = SensitiveBytes32::new(&mut get_random_bytes());
+	let hedge2 = SensitiveBytes32::new(&mut get_random_bytes());
+	let sig1_hedge = dilithium_keypair.sign(message, None, Some(&hedge1)).unwrap();
+	let sig2_hedge = dilithium_keypair.sign(message, None, Some(&hedge2)).unwrap();
 
 	// Hedged signatures should be different (with very high probability)
 	assert_ne!(sig1_hedge, sig2_hedge, "Hedged signatures should be different");

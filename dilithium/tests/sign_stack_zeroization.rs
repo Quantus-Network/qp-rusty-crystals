@@ -96,6 +96,25 @@ macro_rules! sign_stack_zeroization_tests {
 					core::hint::black_box(&sig);
 				});
 
+				// Scenario B2 (security review): *hedged* signing must not
+				// leave the caller's hedge randomness `rnd` in stack memory.
+				// ρ' = H(K || rnd || μ), so an attacker who recovers rnd from
+				// dead stack memory and also obtains K can reconstruct the
+				// mask seed and mount the known-mask attack on z = y + c*s1 —
+				// defeating exactly the K-compromise protection hedging is
+				// for. The wrapper is built outside the probe (like the
+				// keygen seed holders) so the closure captures only
+				// references and cannot plant a match itself. Distinctive
+				// pattern for the same reason as SEED.
+				let hedge_pattern: [u8; 32] = *b"hedge-randomness-stack-pattern!!";
+				let mut hedge_raw = hedge_pattern;
+				let hedge = qp_rusty_crystals_dilithium::SensitiveBytes32::new(&mut hedge_raw);
+				let sign_leaked_hedge = probe_stack_for(super::STACK_BYTES, &hedge_pattern, || {
+					let sig =
+						keypair.sign(message, None, Some(&hedge)).expect("signing succeeds");
+					core::hint::black_box(&sig);
+				});
+
 				// Scenario C: key generation. Same seed => identical key, so
 				// the reference patterns apply. The seed holder is built
 				// outside the probe (the closure captures only a reference),
@@ -127,6 +146,10 @@ macro_rules! sign_stack_zeroization_tests {
 
 				assert!(!sign_leaked_k, "signing left the signing key K in stack memory");
 				assert!(!sign_leaked_s1, "signing left a packed secret-key copy in stack memory");
+				assert!(
+					!sign_leaked_hedge,
+					"hedged signing left the hedge randomness rnd in stack memory"
+				);
 				assert!(!keygen_leaked_k, "key generation left the signing key K in stack memory");
 				assert!(
 					!keygen_leaked_s1,
