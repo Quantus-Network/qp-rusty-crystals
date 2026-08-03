@@ -786,14 +786,27 @@ impl BorshDeserialize for ResharingAccept {
 /// verifying keys of (at least) every new committee member. Only new
 /// committee members produce acceptance signatures, but every participant
 /// verifies them, so every participant needs the new committee's keys.
+///
+/// Construct via [`ResharingSignerConfig::new`]. The fields are private
+/// (security review, mirroring [`DkgConfig`](crate::keygen::dkg::DkgConfig)):
+/// the long-term transcript signer is secret-adjacent capability material,
+/// and exposing it publicly would let downstream code extract it from the
+/// config and sign arbitrary payloads with it.
+///
+/// ```compile_fail
+/// use qp_rusty_crystals_threshold::resharing::{ResharingSignerConfig, TranscriptSigner};
+/// fn steal_signer<S: TranscriptSigner>(cfg: &ResharingSignerConfig<S>) -> &S {
+///     &cfg.my_signer // ERROR: private — the signer is not exposed
+/// }
+/// ```
 #[derive(Clone)]
 pub struct ResharingSignerConfig<S: crate::keygen::dkg::TranscriptSigner> {
 	/// This party's signer for transcript acceptance (used only if this party
 	/// is in the new committee).
-	pub my_signer: S,
+	pub(crate) my_signer: S,
 	/// Verifying keys, keyed by participant ID. Must cover every new
 	/// committee member; extra entries are ignored.
-	pub verifying_keys: BTreeMap<ParticipantId, S::PublicKey>,
+	pub(crate) verifying_keys: BTreeMap<ParticipantId, S::PublicKey>,
 }
 
 impl<S: crate::keygen::dkg::TranscriptSigner> ResharingSignerConfig<S> {
@@ -1138,6 +1151,18 @@ pub type SubsetPair = (SubsetMask, SubsetMask);
 ///
 /// Transmitting this message over an unencrypted channel exposes sub-shares to
 /// eavesdroppers and compromises the threshold scheme's security.
+///
+/// The routing metadata (`ssid`, `from_party_id`, `to_party_id`) is public,
+/// but the `contributions` map carries the plaintext sub-shares and is
+/// therefore not part of the public API (security review): the protocol
+/// fills and consumes it internally, and downstream code has no legitimate
+/// reason to inspect it.
+///
+/// ```compile_fail
+/// fn read_subshares(msg: &qp_rusty_crystals_threshold::resharing::ResharingRound4Message) {
+///     let _ = &msg.contributions; // ERROR: private — sub-shares are opaque
+/// }
+/// ```
 #[derive(Clone, BorshSerialize)]
 pub struct ResharingRound4Message {
 	/// Session identifier binding this message to the resharing session.
@@ -1147,7 +1172,18 @@ pub struct ResharingRound4Message {
 	/// Party ID of the recipient.
 	pub to_party_id: ParticipantId,
 	/// Per-`(old_subset, new_subset)` contributions destined for the recipient.
-	pub contributions: BTreeMap<SubsetPair, NewShareData>,
+	pub(crate) contributions: BTreeMap<SubsetPair, NewShareData>,
+}
+
+/// Test-only escape hatch for the crate's adversary-simulation tests
+/// (replacing or stripping a dealer's in-flight contributions). See
+/// [`NewShareData`]'s test helpers for the gating rationale.
+#[cfg(feature = "internal-test-helpers")]
+impl ResharingRound4Message {
+	#[doc(hidden)]
+	pub fn testing_contributions_mut(&mut self) -> &mut BTreeMap<SubsetPair, NewShareData> {
+		&mut self.contributions
+	}
 }
 
 impl BorshDeserialize for ResharingRound4Message {
@@ -1197,12 +1233,52 @@ impl fmt::Debug for ResharingRound4Message {
 }
 
 /// New share data for a specific subset.
+///
+/// The coefficient arrays are secret share material and are deliberately
+/// not part of the public API (security review): exposing them invited
+/// downstream code to read, log, or retain plaintext copies outside the
+/// value's `ZeroizeOnDrop` lifecycle. The crate's convention (see
+/// [`crate::PrivateKeyShare`]) is that share-bearing types are opaque to
+/// consumers; the protocol constructs, verifies, and consumes them
+/// internally.
+///
+/// ```compile_fail
+/// fn read_coefficients(share: &qp_rusty_crystals_threshold::resharing::NewShareData) -> i32 {
+///     share.s1[0][0] // ERROR: `s1` is private — sub-shares are opaque
+/// }
+/// ```
 #[derive(Clone, BorshSerialize, BorshDeserialize, Zeroize, ZeroizeOnDrop)]
 pub struct NewShareData {
 	/// Share of s1 polynomial vector (exactly L polynomials).
-	pub s1: [[i32; N as usize]; L],
+	pub(crate) s1: [[i32; N as usize]; L],
 	/// Share of s2 polynomial vector (exactly K polynomials).
-	pub s2: [[i32; N as usize]; K],
+	pub(crate) s2: [[i32; N as usize]; K],
+}
+
+/// Test-only escape hatches for the crate's adversary-simulation tests
+/// (forging malicious sub-shares, recomputing commitments over them).
+/// Gated behind the non-default `internal-test-helpers` feature — enabled
+/// only for this crate's own test builds via a self-referential
+/// dev-dependency — and hidden from docs. Not a stable API.
+#[cfg(feature = "internal-test-helpers")]
+impl NewShareData {
+	#[doc(hidden)]
+	pub fn testing_from_coefficients(
+		s1: [[i32; N as usize]; L],
+		s2: [[i32; N as usize]; K],
+	) -> Self {
+		Self { s1, s2 }
+	}
+
+	#[doc(hidden)]
+	pub fn testing_s1(&self) -> &[[i32; N as usize]; L] {
+		&self.s1
+	}
+
+	#[doc(hidden)]
+	pub fn testing_s2(&self) -> &[[i32; N as usize]; K] {
+		&self.s2
+	}
 }
 
 impl NewShareData {
