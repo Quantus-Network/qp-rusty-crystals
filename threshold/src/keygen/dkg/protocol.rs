@@ -471,7 +471,16 @@ pub struct Dkg<S: TranscriptSigner> {
 	/// Round 1 private messages awaiting delivery, held as zeroizing
 	/// [`Round1Private`] structs (not pre-serialized byte buffers) so the queued
 	/// K_S material is wiped on drop rather than left in a freed `Vec<u8>`.
-	pending_privates: Vec<(ParticipantId, Round1Private)>,
+	///
+	/// Each private is boxed (security review): `Vec` growth copies elements
+	/// bytewise into a new buffer and frees the old one without dropping or
+	/// wiping the source slots, so storing `Round1Private` inline stranded
+	/// K_S in freed buffers whenever the queue reallocated (`ZeroizeOnDrop`
+	/// only wipes live elements in their final resting place). With a box per
+	/// element the vector's buffer holds only pointers, and the secret lives
+	/// at a stable heap address that is wiped in place when the box drops.
+	/// The realloc regression test pins this.
+	pending_privates: Vec<(ParticipantId, Box<Round1Private>)>,
 	/// Buffer for messages that arrive before we're ready to process them.
 	message_buffer: DkgMessageBuffer,
 }
@@ -553,10 +562,12 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 	/// Pop the next queued Round 1 private without leaving K_S behind.
 	///
-	/// `Vec::pop` alone moves the element out but leaves its bytes intact in
-	/// the buffer beyond the shrunken length, where the drop-time wipe (which
-	/// only covers live elements) cannot reach them. Clone the element out and
-	/// wipe the slot in place before shrinking.
+	/// The queue elements are boxed, so `Vec::pop` moves only the pointer;
+	/// the stale slot beyond the shrunken length holds no secret bytes. The
+	/// private is *cloned* out of the box rather than moved (`*boxed` would
+	/// relocate the value and free the box's allocation unwiped); dropping
+	/// the box then wipes the heap copy in place (`ZeroizeOnDrop`) before
+	/// the allocation is released.
 	///
 	/// Known residual (heap is covered, stack is not): the clone returned
 	/// here moves by value through `poke` into `serialize_round1_private`,
@@ -569,13 +580,10 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// probe; tracked as follow-up, not covered by the heap-zeroization
 	/// tests.
 	fn pop_pending_private(&mut self) -> Option<(ParticipantId, Round1Private)> {
-		let (to, private) = {
-			let (to, slot) = self.pending_privates.last_mut()?;
-			let out = (*to, slot.clone());
-			slot.zeroize();
-			out
-		};
-		self.pending_privates.pop();
+		let (to, boxed) = self.pending_privates.pop()?;
+		let private = (*boxed).clone();
+		// `boxed` drops here: ZeroizeOnDrop wipes the boxed copy in place
+		// before its allocation is freed.
 		Some((to, private))
 	}
 
@@ -1167,7 +1175,9 @@ impl<S: TranscriptSigner> Dkg<S> {
 						};
 						// Queue the zeroizing struct; serialize only when popped for
 						// sending, so K_S is never parked in a plain byte buffer.
-						self.pending_privates.push((party, private));
+						// Boxed so queue growth relocates pointers, not K_S bytes
+						// (see the field's doc comment).
+						self.pending_privates.push((party, Box::new(private)));
 					}
 				}
 			}
