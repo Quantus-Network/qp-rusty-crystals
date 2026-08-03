@@ -292,7 +292,16 @@ struct DkgMessageBuffer {
 	/// Round 1 private messages received while still in Initialized phase.
 	/// Key is (from_party_id, subset_mask) to allow multiple subsets per sender.
 	/// Messages are validated before buffering to prevent DoS via invalid subset masks.
-	round1_privates: BTreeMap<(ParticipantId, SubsetMask), Round1Private>,
+	///
+	/// Values are boxed (security review hardening): B-tree node splits move
+	/// entries bytewise between nodes, leaving stale copies in the source
+	/// slots beyond the live length, where the drop-time wipe (live entries
+	/// only) cannot reach them before the node is freed. Supported committees
+	/// (n <= 6) cap this map at 10 entries — inside a single 11-entry node,
+	/// so no split can occur today — but boxing keeps K_S at a stable heap
+	/// address wiped in place on drop, so the invariant does not silently
+	/// break if larger committees are ever enabled (`SubsetMask` allows 16).
+	round1_privates: BTreeMap<(ParticipantId, SubsetMask), Box<Round1Private>>,
 	/// Round 2 broadcasts received while still in Round 1.
 	round2: BTreeMap<ParticipantId, Round2Broadcast>,
 	/// Round 3 broadcasts received while still in Round 1-2.
@@ -320,7 +329,11 @@ impl DkgMessageBuffer {
 	/// Callers MUST validate the message before buffering (subset_mask validity,
 	/// sender is leader, receiver is member). This function does not validate.
 	fn buffer_round1_private(&mut self, msg: Round1Private) {
-		self.round1_privates.entry((msg.from_party_id, msg.subset_mask)).or_insert(msg);
+		// Boxed so map rebalancing relocates pointers, not K_S bytes (see the
+		// field's doc comment). A rejected duplicate drops the box, wiping it.
+		self.round1_privates
+			.entry((msg.from_party_id, msg.subset_mask))
+			.or_insert_with(|| Box::new(msg));
 	}
 
 	/// Buffer a Round 2 broadcast for later processing.
@@ -347,7 +360,9 @@ impl DkgMessageBuffer {
 	}
 
 	/// Take all buffered Round 1 private messages.
-	fn take_round1_privates(&mut self) -> BTreeMap<(ParticipantId, SubsetMask), Round1Private> {
+	fn take_round1_privates(
+		&mut self,
+	) -> BTreeMap<(ParticipantId, SubsetMask), Box<Round1Private>> {
 		mem::take(&mut self.round1_privates)
 	}
 
@@ -1085,11 +1100,12 @@ impl<S: TranscriptSigner> Dkg<S> {
 			}
 		}
 
-		// Drain buffered Round 1 private messages with validation. Iterate by
-		// mutable reference rather than by value: consuming the map would move
-		// each Copy `Round1Private` out while leaving its K_S bytes intact in
-		// the freed map nodes. Every entry — including ones discarded by
-		// validation — is wiped in place before the map is dropped.
+		// Drain buffered Round 1 private messages with validation. The values
+		// are boxed, so the map nodes hold only pointers; iterate by mutable
+		// reference and wipe every entry — including ones discarded by
+		// validation — in place before the map is dropped (each box's
+		// ZeroizeOnDrop would also cover this; the explicit sweep keeps the
+		// wipe visible and unconditional).
 		let mut buffered_privates = self.message_buffer.take_round1_privates();
 		for (&(from_party_id, subset_mask), private) in buffered_privates.iter_mut() {
 			// Validate subset_mask is valid
