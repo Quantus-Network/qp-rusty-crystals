@@ -2157,8 +2157,8 @@ mod pack_stack_zeroization_tests {
 	const STACK_BYTES: usize = 256 * 1024;
 	const ALIGN: usize = 4096;
 
-	/// Run `f` on a freshly painted stack buffer, then scan the buffer for
-	/// `pattern` and return whether it was found.
+	// Local copy: unit tests cannot take a `dev-dependency`, so this cannot
+	// call `qp_rusty_crystals_test_utils` (used by the integration probes).
 	fn probe_stack_for<F: FnOnce()>(pattern: &[u8], f: F) -> bool {
 		let layout = Layout::from_size_align(STACK_BYTES, ALIGN).unwrap();
 		unsafe {

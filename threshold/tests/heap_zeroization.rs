@@ -28,7 +28,6 @@ use std::{
 	sync::Mutex,
 };
 
-use qp_rusty_crystals_dilithium::fips202;
 use qp_rusty_crystals_threshold::{
 	derive_dkg_contribution, generate_with_dealer,
 	keygen::dkg::{
@@ -39,6 +38,9 @@ use qp_rusty_crystals_threshold::{
 };
 
 mod common;
+#[path = "common/stack_patterns.rs"]
+mod stack_patterns;
+use stack_patterns::{dealer_party0_seed_pattern, hyperball_stream_pattern};
 
 /// The 32-byte pattern the allocator currently scans for. Updated between
 /// scenarios (only while scanning is off, so `try_lock` in the hook never
@@ -144,30 +146,6 @@ fn share_with_planted_coefficients() -> PrivateKeyShare {
 	let tail = blob.len() - 32;
 	blob[tail..].copy_from_slice(&share_coefficient_pattern());
 	borsh::from_slice(&blob).expect("planted share re-imports")
-}
-
-/// First 32 bytes of the SHAKE256 stream `sample_hyperball` squeezes into its
-/// scratch buffer for iteration 0 of `round1_commit_with_seed(ssid, seed)`.
-/// Recomputed here through the public fips202 API, mirroring the derivation in
-/// `protocol/signing.rs` (iteration 0 leaves the seed unmodified).
-fn hyperball_stream_pattern(ssid: &[u8; 32], seed: &[u8; 32]) -> [u8; 32] {
-	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, seed);
-	fips202::shake256_absorb(&mut state, ssid);
-	fips202::shake256_absorb(&mut state, b"rho_prime");
-	fips202::shake256_absorb(&mut state, &[0u8]);
-	fips202::shake256_finalize(&mut state);
-	let mut iter_rho_prime = [0u8; 64];
-	fips202::shake256_squeeze(&mut iter_rho_prime, &mut state);
-
-	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, b"H");
-	fips202::shake256_absorb(&mut state, &iter_rho_prime);
-	fips202::shake256_absorb(&mut state, &0u16.to_le_bytes());
-	fips202::shake256_finalize(&mut state);
-	let mut pattern = [0u8; 32];
-	fips202::shake256_squeeze(&mut pattern, &mut state);
-	pattern
 }
 
 /// Run a deterministic 2-of-2 -> 2-of-2 resharing locally and return the new
@@ -447,6 +425,27 @@ fn secret_intermediates_are_wiped_before_their_heap_memory_is_freed() {
 		dkg_ks_pattern,
 		|| {
 			let _ = run_local_dkg_2of3();
+		},
+	);
+
+	// Scenario 7: dealer per-party key seeds (party_keys Vec).
+	// generate_with_dealer squeezes each party's 32-byte key seed into a
+	// Vec<[u8; 32]> and copies one into each returned PrivateKeyShare. The
+	// returned shares wipe their copy on drop, but the dealer-side Vec used
+	// to be a plain vector freed unwiped at function return, leaving every
+	// party's seed in allocator memory — contradicting the dealer's
+	// documented obligation to delete all distributed secret material. The
+	// derivation is deterministic, so the pattern (party 0's seed) is
+	// recomputed independently through the public XOF API.
+	let dealer_seed = [0x64u8; 32];
+	assert_no_secret_bearing_free(
+		"generate_with_dealer (party_keys buffer)",
+		dealer_party0_seed_pattern(&dealer_seed, 2, 3),
+		|| {
+			let config = ThresholdConfig::new(2, 3).expect("valid config");
+			let (_pk, shares) =
+				generate_with_dealer(&dealer_seed, config).expect("keygen succeeds");
+			drop(shares);
 		},
 	);
 }

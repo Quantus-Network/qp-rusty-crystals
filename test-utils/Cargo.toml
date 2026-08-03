@@ -1,0 +1,9 @@
+[package]
+name = "qp-rusty-crystals-test-utils"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Shared test helpers for painted-stack zeroization probes"
+
+[dependencies]
+psm = "=0.1.31"

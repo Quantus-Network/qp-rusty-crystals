@@ -200,6 +200,28 @@ pub(crate) fn public_key_from_secret_var<
 		&mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, sk,
 	);
 
+	// Lightweight structural pre-check gating the keygen-scale work below
+	// (security review, DoS amplification): `unpack_sk` already reports whether
+	// every packed s1/s2 coefficient is canonical (in [-ETA, ETA]). A random /
+	// garbage blob of the correct length almost always has at least one
+	// out-of-range slot, so bailing here avoids the expensive path that
+	// follows — SHAKE128 expansion of the whole K×L matrix A, forward and
+	// inverse NTT, power2round, and the SHAKE256 public-key re-hash. Honest
+	// keys are always in range and take the full path unchanged, so this adds
+	// no cost to the legitimate case and leaks nothing secret (the range of an
+	// imported blob is known to whoever supplied it). Note this only cheapens
+	// the common garbage case: a blob crafted with canonical coefficients but
+	// an inconsistent t0/tr still pays one full derivation, which is inherent
+	// to correspondence checking — callers importing untrusted key material
+	// must still rate-limit or authenticate (see the import-path docs).
+	if !s_in_range {
+		key.zeroize();
+		s1.zeroize();
+		s2.zeroize();
+		t0.zeroize();
+		return None;
+	}
+
 	let (t1, mut t0_derived) = derive_public_components(&rho, &s1, &s2);
 
 	let t1_nonzero = !t1.vec.iter().all(|p| p.coeffs().iter().all(|&c| c == 0));
@@ -223,7 +245,8 @@ pub(crate) fn public_key_from_secret_var<
 	t0.zeroize();
 	t0_derived.zeroize();
 
-	if s_in_range && t0_consistent && tr_consistent && t1_nonzero {
+	// `s_in_range` was already enforced above (we returned early otherwise).
+	if t0_consistent && tr_consistent && t1_nonzero {
 		Some(pk)
 	} else {
 		None
@@ -238,6 +261,26 @@ struct UnpackedSecretKey<const K: usize, const L: usize> {
 	secret_poly_t0_ntt: Polyvec<K>,
 	secret_poly_s1_ntt: Polyvec<L>,
 	secret_poly_s2_ntt: Polyvec<K>,
+}
+
+impl<const K: usize, const L: usize> UnpackedSecretKey<K, L> {
+	/// All-zero placeholder to be filled in place by
+	/// [`unpack_secret_key_for_signing`]. Constructed by the caller so the
+	/// secret-bearing value never has to be returned by value: a by-value
+	/// return moves the struct out of the callee's frame, and the dead source
+	/// copy — containing the signing key `K` and the NTT-form secret
+	/// polynomials — is beyond the reach of `ZeroizeOnDrop` (caught by the
+	/// release-mode `sign_stack_zeroization` probe).
+	fn zeroed() -> Self {
+		Self {
+			public_seed_rho: [0u8; params::SEEDBYTES],
+			public_key_hash_tr: [0u8; params::TR_BYTES],
+			private_key_seed: [0u8; params::SEEDBYTES],
+			secret_poly_t0_ntt: Polyvec::default(),
+			secret_poly_s1_ntt: Polyvec::default(),
+			secret_poly_s2_ntt: Polyvec::default(),
+		}
+	}
 }
 
 /// Signing context containing precomputed values.
@@ -258,57 +301,46 @@ impl Drop for SigningContext {
 	}
 }
 
+/// Unpack a secret key into `unpacked` (an [`UnpackedSecretKey::zeroed`]
+/// placeholder owned by the caller), converting the secret polynomials to
+/// NTT form in place.
+///
+/// Out-parameter style on purpose (security review): the struct is filled
+/// through `&mut` — `unpack_sk` writes each field directly and the NTT runs
+/// in place — so no secret ever lives in a local of this frame and nothing
+/// secret-bearing is moved or returned by value. The previous by-value
+/// return left a dead stack copy of the whole struct (signing key `K`
+/// included) in this frame whenever the compiler did not elide the move.
 fn unpack_secret_key_for_signing<
 	const K: usize,
 	const L: usize,
 	const ETA: usize,
 	const SK: usize,
 >(
+	unpacked: &mut UnpackedSecretKey<K, L>,
 	secret_key_bytes: &[u8; SK],
-) -> UnpackedSecretKey<K, L> {
+) {
 	const {
 		assert!(SK == params::secretkeybytes(K, L, ETA));
 	}
-	let mut public_seed_rho = [0u8; params::SEEDBYTES];
-	let mut public_key_hash_tr = [0u8; params::TR_BYTES];
-	let mut private_key_seed = [0u8; params::SEEDBYTES];
-	let mut secret_poly_t0 = Polyvec::<K>::default();
-	let mut secret_poly_s1 = Polyvec::<L>::default();
-	let mut secret_poly_s2 = Polyvec::<K>::default();
-
 	// Every signing entry point receives key bytes that already passed the
 	// import validation (`SecretKey`'s storage is private and only filled by
 	// `generate`/`from_bytes`), so a non-canonical encoding here is a crate
 	// bug, not reachable attacker input.
 	let canonical = packing::unpack_sk::<K, L, ETA, SK>(
-		&mut public_seed_rho,
-		&mut public_key_hash_tr,
-		&mut private_key_seed,
-		&mut secret_poly_t0,
-		&mut secret_poly_s1,
-		&mut secret_poly_s2,
+		&mut unpacked.public_seed_rho,
+		&mut unpacked.public_key_hash_tr,
+		&mut unpacked.private_key_seed,
+		&mut unpacked.secret_poly_t0_ntt,
+		&mut unpacked.secret_poly_s1_ntt,
+		&mut unpacked.secret_poly_s2_ntt,
 		secret_key_bytes,
 	);
 	debug_assert!(canonical, "signing with a secret key that failed import validation");
 
-	polyvec::ntt(&mut secret_poly_s1);
-	polyvec::ntt(&mut secret_poly_s2);
-	polyvec::ntt(&mut secret_poly_t0);
-
-	let unpacked = UnpackedSecretKey {
-		public_seed_rho,
-		public_key_hash_tr,
-		private_key_seed,
-		secret_poly_t0_ntt: secret_poly_t0,
-		secret_poly_s1_ntt: secret_poly_s1,
-		secret_poly_s2_ntt: secret_poly_s2,
-	};
-	// `private_key_seed` is `Copy`, so the field init above left a copy of the
-	// secret seed in this stack local. `UnpackedSecretKey` is `ZeroizeOnDrop`,
-	// but this source is not (rho/tr are public; the polyvecs are moved, not
-	// copied), so wipe it.
-	private_key_seed.zeroize();
-	unpacked
+	polyvec::ntt(&mut unpacked.secret_poly_s1_ntt);
+	polyvec::ntt(&mut unpacked.secret_poly_s2_ntt);
+	polyvec::ntt(&mut unpacked.secret_poly_t0_ntt);
 }
 
 /// Compute the message representative μ = H(tr || pre || M).
@@ -540,7 +572,8 @@ pub(crate) fn signature_var<
 		assert_sign_params::<K, L, ETA, GAMMA1, GAMMA2, OMEGA, CD, PZ, W1, KW1, PK, SK, SIG>();
 	}
 
-	let unpacked_sk = unpack_secret_key_for_signing::<K, L, ETA, SK>(secret_key_bytes);
+	let mut unpacked_sk = UnpackedSecretKey::<K, L>::zeroed();
+	unpack_secret_key_for_signing::<K, L, ETA, SK>(&mut unpacked_sk, secret_key_bytes);
 	let signing_ctx = prepare_signing_context(&unpacked_sk, domain_prefix, message, hedge);
 
 	// Fiat-Shamir with aborts. The *number* of rejection-sampling attempts is
@@ -1069,8 +1102,11 @@ mod tests {
 			{ params::SIGNBYTES },
 		>(&mut challenge_seed, &mut z, &mut h, sig));
 
-		let unpacked =
-			unpack_secret_key_for_signing::<K, L, { params::ETA }, { params::SECRETKEYBYTES }>(sk); // s1 already in NTT domain
+		let mut unpacked = UnpackedSecretKey::<K, L>::zeroed();
+		unpack_secret_key_for_signing::<K, L, { params::ETA }, { params::SECRETKEYBYTES }>(
+			&mut unpacked,
+			sk,
+		); // s1 already in NTT domain
 		let mut challenge_poly = Poly::default();
 		poly::challenge::<{ params::TAU }, { params::C_DASH_BYTES }>(
 			&mut challenge_poly,

@@ -7,7 +7,7 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 
 use qp_rusty_crystals_dilithium::{fips202, packing, poly, polyvec};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
 	config::ThresholdConfig,
@@ -66,6 +66,14 @@ const DEALER_SUBSHARE_DOMAIN: &[u8] = b"threshold-dealer-subshare-v1";
 /// - The seed is securely erased
 /// - Each share is only accessible to its designated party
 /// - The dealer does not retain copies of any shares
+///
+/// Internally, every secret-bearing intermediate is wiped before its memory
+/// is released: the aggregate-secret locals (`s2_total`, `s1h_total`, `t`,
+/// `t0`) are `Polyvec`s and the NTT accumulator wipes itself, all of which
+/// zeroize on drop; the per-party key seeds and transient stack copies are
+/// explicitly zeroized. The usual Rust caveat applies: the compiler may leave
+/// stale copies behind when values are moved, which no `zeroize`-based
+/// discipline can prevent.
 ///
 /// # Coefficient Distribution
 ///
@@ -126,16 +134,21 @@ pub fn generate_with_dealer(
 	let mut rho = [0u8; 32];
 	fips202::shake256_squeeze(&mut rho, &mut h);
 
-	// 2. Squeeze party keys
-	let mut party_keys = Vec::with_capacity(parties as usize);
+	// 2. Squeeze party keys. Each seed is copied into a returned share (which
+	// wipes its copy on drop), but this dealer-side vector also holds every
+	// party's seed; `Zeroizing` wipes it on every exit path (security review)
+	// rather than freeing the plaintext seeds with the allocation.
+	let mut party_keys: Zeroizing<Vec<[u8; 32]>> =
+		Zeroizing::new(Vec::with_capacity(parties as usize));
 	for _ in 0..parties {
 		let mut key = [0u8; 32];
 		fips202::shake256_squeeze(&mut key, &mut h);
 		party_keys.push(key);
+		key.zeroize();
 	}
 
 	// 3. Generate threshold shares
-	let (_s1_total, s2_total, s1h_total, party_shares) =
+	let (s2_total, s1h_total, party_shares) =
 		generate_threshold_shares(&mut h, threshold, parties)?;
 
 	// 4. Generate matrix A from rho
@@ -214,6 +227,14 @@ pub fn generate_with_dealer(
 			}
 
 			shares_data.insert(subset_id, SecretShareData { s1: s1_data, s2: s2_data });
+
+			// The arrays are Copy, so the struct literal above duplicated them
+			// and these locals are now dead plaintext copies of the share
+			// coefficients; wipe them instead of leaving them on the stack
+			// (security review). The copies inside `shares_data` are owned by
+			// `SecretShareData`, which zeroizes on drop.
+			s1_data.zeroize();
+			s2_data.zeroize();
 		}
 
 		// For dealer-generated keys, participants have sequential IDs (0, 1, 2, ..., n-1)
@@ -245,16 +266,13 @@ struct SecretShare {
 }
 
 /// Result type for threshold share generation containing:
-/// - s1_total: Polyvec<L>
 /// - s2_total: Polyvec<K>
-/// - s1h_total: Polyvec<L> (NTT form)
+/// - s1h_total: Polyvec<L> (NTT form; the non-NTT aggregate s1 is deliberately never materialized —
+///   `t = A*s1 + s2` only needs the NTT form, and every extra full copy of the aggregate secret is
+///   another buffer to leak)
 /// - party_shares: BTreeMap<u32, BTreeMap<u16, SecretShare>> (u16 subset masks)
-type ThresholdSharesResult = (
-	polyvec::Polyvec<L>,
-	polyvec::Polyvec<K>,
-	polyvec::Polyvec<L>,
-	BTreeMap<u32, BTreeMap<u16, SecretShare>>,
-);
+type ThresholdSharesResult =
+	(polyvec::Polyvec<K>, polyvec::Polyvec<L>, BTreeMap<u32, BTreeMap<u16, SecretShare>>);
 
 /// Generate threshold shares for all subset combinations.
 fn generate_threshold_shares(
@@ -268,8 +286,9 @@ fn generate_threshold_shares(
 		party_shares.insert(i, BTreeMap::new());
 	}
 
-	// Total secrets (η-bounded, safe with i32)
-	let mut s1_total = polyvec::Polyvec::<L>::default();
+	// Total s2 secret (η-bounded sums, safe with i32). The aggregate s1 is
+	// accumulated only in NTT form (below); a non-NTT total was previously
+	// also built here but was never consumed by any caller.
 	let mut s2_total = polyvec::Polyvec::<K>::default();
 
 	// NTT-domain accumulator uses u64 to avoid overflow for large configurations.
@@ -337,17 +356,9 @@ fn generate_threshold_shares(
 			}
 		}
 
-		// Add η-bounded shares to totals.
+		// Add η-bounded shares to the s2 total.
 		// η-bounded coefficients are in [-2, 2], so even with 6435 subsets (max for 15 parties),
 		// the sum is bounded by ±12870, well within i32 range.
-		for (total_poly, share_poly) in s1_total.vec.iter_mut().zip(s1_share.vec.iter()).take(L) {
-			for (total_coeff, share_coeff) in
-				total_poly.coeffs_mut().iter_mut().zip(share_poly.coeffs().iter())
-			{
-				*total_coeff += *share_coeff;
-			}
-		}
-
 		for (total_poly, share_poly) in s2_total.vec.iter_mut().zip(s2_share.vec.iter()).take(K) {
 			for (total_coeff, share_coeff) in
 				total_poly.coeffs_mut().iter_mut().zip(share_poly.coeffs().iter())
@@ -365,15 +376,6 @@ fn generate_threshold_shares(
 	// Finalize NTT accumulator (reduces mod Q)
 	let s1h_total = s1h_acc.finalize_l();
 
-	// Normalize s1_total (η-bounded sums)
-	for total_poly in s1_total.vec.iter_mut().take(L) {
-		for total_coeff in total_poly.coeffs_mut().iter_mut() {
-			let coeff_u32 =
-				if *total_coeff < 0 { (*total_coeff + Q) as u32 } else { *total_coeff as u32 };
-			*total_coeff = mod_q(coeff_u32) as i32;
-		}
-	}
-
 	// Normalize s2_total (η-bounded sums)
 	for total_poly in s2_total.vec.iter_mut().take(K) {
 		for total_coeff in total_poly.coeffs_mut().iter_mut() {
@@ -383,7 +385,7 @@ fn generate_threshold_shares(
 		}
 	}
 
-	Ok((s1_total, s2_total, s1h_total, party_shares))
+	Ok((s2_total, s1h_total, party_shares))
 }
 
 #[cfg(test)]

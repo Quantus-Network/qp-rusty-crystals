@@ -24,6 +24,25 @@ extern crate std;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// Compares two 32-byte arrays in constant time.
+///
+/// `==` on byte arrays is *allowed* to short-circuit at the first differing
+/// byte, making the comparison time depend on the length of the matching
+/// prefix — a timing oracle that lets an attacker recover a secret
+/// incrementally (security review). Whether the compiler actually emits an
+/// early exit varies by target and optimization level, so secret material
+/// must never rely on it. This routine unconditionally folds the XOR of every
+/// byte pair into an accumulator; `black_box` denies the optimizer knowledge
+/// of the accumulated value so it cannot reintroduce a value-dependent exit.
+#[must_use]
+pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
+	let mut diff = 0u8;
+	for (x, y) in a.iter().zip(b.iter()) {
+		diff |= x ^ y;
+	}
+	core::hint::black_box(diff) == 0
+}
+
 /// Wrapper for sensitive 32-byte data that enforces move semantics and automatic zeroization
 ///
 /// Both `new()` and `from()` take mutable references and zeroize the input data,
@@ -44,9 +63,20 @@ pub struct SensitiveBytes32([u8; 32]);
 impl SensitiveBytes32 {
 	// Note this zeroizes the input bytes so that the struct takes practical ownership of the input.
 	pub fn new(bytes: &mut [u8; 32]) -> Self {
-		let result = Self(*bytes);
+		// Fill a zeroed wrapper in place, then `replace` it out (security
+		// review): `Self(*bytes)` can leave a `Copy` temporary the returned
+		// wrapper does not own, and a plain `let result = ...; result` return
+		// moves the secret out while leaving the named local's stack slot
+		// intact — beyond `ZeroizeOnDrop`. Writing into the wrapper and then
+		// swapping it with a zeroed value means (1) the only live secret is
+		// the return value and (2) the local is zeros when this frame drops
+		// (caught by the release-mode `sensitive_bytes_stack_zeroization`
+		// probe). Prefer [`Self::zeroed`] + [`Self::as_mut_bytes`] when the
+		// secret can be written directly into an already-placed wrapper.
+		let mut result = Self::zeroed();
+		result.0.copy_from_slice(bytes);
 		bytes.zeroize();
-		result
+		core::mem::replace(&mut result, Self::zeroed())
 	}
 
 	/// All-zero value, intended to be filled in place via [`Self::as_mut_bytes`].
@@ -69,16 +99,30 @@ impl SensitiveBytes32 {
 		&self.0
 	}
 
-	pub fn into_bytes(self) -> [u8; 32] {
-		self.0
+	// There is deliberately no `into_bytes(self) -> [u8; 32]` (security
+	// review): extracting the inner array hands the secret back as a plain
+	// `Copy` value with no erasure obligation, silently re-creating every
+	// hazard this wrapper exists to prevent. Borrow via [`Self::as_bytes`],
+	// or transfer ownership of the wrapper itself (e.g. with
+	// `core::mem::replace(&mut src, Self::zeroed())` to keep the vacated
+	// slot clean).
+
+	/// Constant-time equality with another secret.
+	///
+	/// `PartialEq` is intentionally not implemented for this type: a plain
+	/// `==` on the wrapped bytes may short-circuit and leak the length of the
+	/// matching prefix through timing. Callers that genuinely need to compare
+	/// secrets must do so explicitly through this method (see [`ct_eq_32`]).
+	#[must_use]
+	pub fn ct_eq(&self, other: &Self) -> bool {
+		ct_eq_32(&self.0, &other.0)
 	}
 }
 
 impl From<&mut [u8; 32]> for SensitiveBytes32 {
 	fn from(bytes: &mut [u8; 32]) -> Self {
-		let result = Self(*bytes);
-		bytes.zeroize();
-		result
+		// Same in-place fill + replace as [`SensitiveBytes32::new`].
+		Self::new(bytes)
 	}
 }
 
@@ -94,9 +138,13 @@ pub struct SensitiveBytes64([u8; 64]);
 impl SensitiveBytes64 {
 	// Note this zeroizes the input bytes so that the struct takes practical ownership of the input.
 	pub fn new(bytes: &mut [u8; 64]) -> Self {
-		let result = Self(*bytes);
+		// Same in-place fill + replace as [`SensitiveBytes32::new`] (security
+		// review): avoids both the `Self(*bytes)` Copy temporary and the
+		// moved-from local left behind by a plain by-value return.
+		let mut result = Self::zeroed();
+		result.0.copy_from_slice(bytes);
 		bytes.zeroize();
-		result
+		core::mem::replace(&mut result, Self::zeroed())
 	}
 
 	/// All-zero value, intended to be filled in place via [`Self::as_mut_bytes`].
@@ -119,16 +167,13 @@ impl SensitiveBytes64 {
 		&self.0
 	}
 
-	pub fn into_bytes(self) -> [u8; 64] {
-		self.0
-	}
+	// No `into_bytes`; see the note on [`SensitiveBytes32`].
 }
 
 impl From<&mut [u8; 64]> for SensitiveBytes64 {
 	fn from(bytes: &mut [u8; 64]) -> Self {
-		let result = Self(*bytes);
-		bytes.zeroize();
-		result
+		// Same in-place fill + replace as [`SensitiveBytes64::new`].
+		Self::new(bytes)
 	}
 }
 
@@ -158,6 +203,36 @@ mod acvp;
 
 #[cfg(test)]
 mod tests {
+	use crate::{ct_eq_32, SensitiveBytes32};
+
+	#[test]
+	fn ct_eq_32_semantics() {
+		let a = [0xA5u8; 32];
+		assert!(ct_eq_32(&a, &a));
+
+		// Differences at the first, last, and a middle byte must all be
+		// detected — the fold must cover the entire array.
+		for idx in [0usize, 15, 31] {
+			let mut b = a;
+			b[idx] ^= 1;
+			assert!(!ct_eq_32(&a, &b), "difference at byte {idx} not detected");
+		}
+
+		assert!(!ct_eq_32(&[0u8; 32], &[0xFFu8; 32]));
+	}
+
+	#[test]
+	fn sensitive_bytes_ct_eq() {
+		let mut raw1 = [7u8; 32];
+		let mut raw2 = [7u8; 32];
+		let mut raw3 = [8u8; 32];
+		let a = SensitiveBytes32::new(&mut raw1);
+		let b = SensitiveBytes32::new(&mut raw2);
+		let c = SensitiveBytes32::new(&mut raw3);
+		assert!(a.ct_eq(&b));
+		assert!(!a.ct_eq(&c));
+	}
+
 	#[test]
 	fn params() {
 		assert_eq!(crate::params::Q, 8380417);

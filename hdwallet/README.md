@@ -93,7 +93,7 @@ parameter set. It requires the wormhole coin type (`189189189'`) in the path:
 use qp_rusty_crystals_hdwallet::derive_wormhole_from_mnemonic;
 
 let pair = derive_wormhole_from_mnemonic(&mnemonic, None, "m/44'/189189189'/0'/0'/0'")?;
-println!("Address: {}", hex::encode(pair.address));
+println!("Address: {}", hex::encode(pair.address()));
 ```
 
 ### Derivation Paths

@@ -157,9 +157,10 @@ pub const DKG_SSID_SIZE: usize = 32;
 /// a config: the state machine (including quorum arithmetic such as the
 /// crate-internal `all_broadcasts_received`) trusts that `all_participants`
 /// is non-empty, sorted, duplicate-free, matches the threshold
-/// configuration's party count, contains `my_party_id`, and has a verifying
-/// key for every participant. A struct literal bypassing those checks does
-/// not compile:
+/// configuration's party count, contains `my_party_id`, has a verifying
+/// key for every participant, and registers `my_signer`'s own public key
+/// under `my_party_id` (so peers can actually verify our transcript
+/// signature). A struct literal bypassing those checks does not compile:
 ///
 /// ```compile_fail
 /// use qp_rusty_crystals_threshold::keygen::dkg::{DkgConfig, TranscriptSigner};
@@ -221,6 +222,17 @@ impl<S: TranscriptSigner> DkgConfig<S> {
 			if !participant_public_keys.contains_key(p) {
 				return Err("missing public key for participant");
 			}
+		}
+		// Peers verify this party's Round 4 transcript signature against the
+		// key *registered* in participant_public_keys, not against whatever
+		// my_signer holds. A mismatch (security review) can't forge anything,
+		// but it guarantees every peer rejects our signature and the session
+		// aborts only at transcript validation — after all four rounds. Fail
+		// at configuration time instead. (The lookup is Some: my_party_id is
+		// in all_participants and every participant has a key, both checked
+		// above.)
+		if participant_public_keys.get(&my_party_id) != Some(&my_signer.public_key()) {
+			return Err("my_signer public key doesn't match the key registered for my_party_id");
 		}
 
 		let mut sorted_participants = all_participants;
@@ -1087,6 +1099,30 @@ mod tests {
 
 		assert!(result.is_err());
 		assert_eq!(result.unwrap_err(), "duplicate participant ID in all_participants");
+	}
+
+	/// The config must reject a local signer whose public key differs from the
+	/// key registered for `my_party_id` in the shared map. Peers verify this
+	/// party's Round 4 transcript signature against the *registered* key, so a
+	/// mismatch means every peer rejects the signature and the session aborts
+	/// only after all four rounds. Misconfiguration must fail at construction
+	/// time instead.
+	#[test]
+	fn test_config_rejects_signer_key_mismatch() {
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let mut public_keys = BTreeMap::new();
+		public_keys.insert(0, 99u32); // registered key for party 0 != TestSigner{0}'s key
+		public_keys.insert(1, 1u32);
+		public_keys.insert(2, 2u32);
+
+		let result: Result<DkgConfig<TestSigner>, _> =
+			DkgConfig::new(threshold_config, 0, vec![0, 1, 2], TestSigner { id: 0 }, public_keys);
+
+		assert!(result.is_err(), "signer/registered key mismatch must be rejected");
+		assert_eq!(
+			result.unwrap_err(),
+			"my_signer public key doesn't match the key registered for my_party_id"
+		);
 	}
 
 	#[test]

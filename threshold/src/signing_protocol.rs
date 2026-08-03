@@ -30,6 +30,33 @@
 //! NEAR MPC satisfies these requirements by generating `round1_seed` via `rand::random()` and
 //! using unique `ChannelId`s per attempt.
 //!
+//! # Transport Requirements (Caller Responsibility)
+//!
+//! This protocol carries **no per-frame authenticator** (no signature or MAC);
+//! like [`Dkg::message`](crate::keygen::dkg::Dkg::message), sender
+//! authentication is delegated to the transport (security review). The `from`
+//! argument to [`DilithiumSignProtocol::message`] is trusted: it MUST be the
+//! transport-authenticated identity of the sending peer, never derived from
+//! attacker-controllable packet contents. On such a transport the in-protocol
+//! `party_id == from` check completes the binding: a malicious participant
+//! cannot claim another participant's identity.
+//!
+//! On an **unauthenticated** transport the exposure is denial-of-signature,
+//! not forgery or secret loss: round buffers keep the first message received
+//! per sender (a replay/memory defense), so an injected frame that arrives
+//! before the honest one occupies that participant's slot and the honest
+//! frame is ignored. The forgery is caught by commit-reveal verification —
+//! commitments are hashes, reveals are checked against the Round 1 hashes
+//! frozen at Round 2, and followers verify the leader's final signature — but
+//! only as a late abort, so repeated injection denies completion. In-protocol
+//! authenticators are deliberately not used to plug this: signing parties
+//! share no suitable pairwise keys (and long-term share material must not
+//! double as transport keys), and an attacker positioned to inject frames on
+//! an unauthenticated transport can drop frames outright, so a MAC cannot
+//! restore liveness. (The DKG, by contrast, signs its transcript via
+//! `TranscriptSigner` because it establishes long-term keys; signing sessions
+//! are ephemeral and abort/retry, driven externally by the caller.)
+//!
 //! # No in-protocol retries
 //!
 //! Earlier revisions of this protocol included a `Round4Retry` message that allowed
@@ -146,7 +173,7 @@ use zeroize::Zeroize;
 
 use crate::{
 	broadcast::{Round1Broadcast, Round2Broadcast, Round3Broadcast, Signature, SSID_SIZE},
-	params::SINGLE_COMMITMENT_SIZE,
+	params::{L, POLYZ_PACKEDBYTES, SINGLE_COMMITMENT_SIZE},
 	participants::{ParticipantId, ParticipantList},
 	protocol::signing::compute_ssid,
 	signer::ThresholdSigner,
@@ -1111,9 +1138,20 @@ impl DilithiumSignProtocol {
 	/// based on the message type. Messages from self, non-participants,
 	/// or in terminal states are ignored with `Ok(())`.
 	///
+	/// # Sender authentication contract
+	///
+	/// `from` is trusted: it MUST be the transport-authenticated identity of
+	/// the sending peer (e.g. the identity bound to an authenticated channel),
+	/// never a value read from the frame itself. The protocol verifies that
+	/// the payload's claimed `party_id` matches `from`, which is meaningful
+	/// only if `from` is authenticated — there is no per-frame signature or
+	/// MAC. See the module-level "Transport Requirements" section for what an
+	/// unauthenticated transport costs (denial-of-signature via first-write-
+	/// wins slot poisoning; never forgery or secret exposure).
+	///
 	/// # Arguments
 	///
-	/// * `from` - The participant ID that sent the message
+	/// * `from` - The transport-authenticated participant ID that sent the message
 	/// * `data` - The serialized message bytes
 	///
 	/// # Errors
@@ -1247,10 +1285,12 @@ impl DilithiumSignProtocol {
 						SignProtocolState::Round3Waiting
 				) {
 					if !self.round2_matches_stored_round1(&r2) {
+						// Attribute to `from` (transport-authenticated), not
+						// `r2.party_id` (unauthenticated payload).
 						warn!(
 							"Signing: Rejecting Round 2 from party {} - commitment hash does not \
-							 match stored Round 1 (likely stale/replayed)",
-							r2.party_id
+							 match stored Round 1 (likely stale/replayed; payload claims party {})",
+							from, r2.party_id
 						);
 						return Ok(());
 					}
@@ -1267,11 +1307,39 @@ impl DilithiumSignProtocol {
 				}
 			},
 			SigningMessage::Round3(r3) => {
+				// Exact-length gate at intake (security review): a response that
+				// is not the size this session's configuration produces can only
+				// ever fail `unpack_responses` inside the leader's combine(),
+				// where the abort is indistinguishable from ordinary rejection-
+				// sampling failure. Rejecting it here keeps it out of the
+				// sender's first-wins slot (and the early-round buffer) and
+				// attributes the misbehavior to the sender at receive time.
+				if !self.round3_response_well_formed(&r3) {
+					// Attribute to `from` (transport-authenticated), not
+					// `r3.party_id` (unauthenticated payload).
+					warn!(
+						"Signing: Rejecting Round 3 from party {} - response length {} does not \
+						 match this session's expected share size (payload claims party {})",
+						from,
+						r3.response.len(),
+						r3.party_id
+					);
+					return Ok(());
+				}
 				// Accept Round 3 messages during Round 3 waiting or later.
-				// The Round 3 response is implicitly bound to the same attempt's Round 1
-				// and Round 2 because it's verified during combine() against
-				// the aggregated commitments (which only validate if r3 was computed
-				// from the same c = SampleInBall(H(mu || HighBits(w))) the honest party
+				//
+				// No "Round 2 seen from this party" prerequisite is needed: the
+				// states below are only reachable after have_enough_r2(), and a
+				// session runs with exactly `threshold` participants, so by then
+				// r2_broadcasts already holds a hash-bound Round 2 from every
+				// participant (buffered Round 3s are likewise only drained by
+				// process_buffered_round3 on the transition into Round 3).
+				//
+				// Beyond length, the Round 3 response is bound to the same
+				// attempt's Round 1 and Round 2 because it's verified during
+				// combine() against the aggregated commitments (which only
+				// validate if r3 was computed from the same
+				// c = SampleInBall(H(mu || HighBits(w))) the honest party
 				// derived from the now-fixed r2_broadcasts in this instance).
 				if matches!(
 					self.state,
@@ -1360,6 +1428,21 @@ impl DilithiumSignProtocol {
 		)
 	}
 
+	/// Check that a Round 3 response is exactly the size this session's
+	/// configuration produces: `k_iterations * L * POLYZ_PACKEDBYTES`, the
+	/// same bound `unpack_responses` enforces when the leader combines.
+	///
+	/// This is the Round 3 counterpart of the exact-length check inside
+	/// [`Self::round2_matches_stored_round1`]: it cannot prove the response
+	/// is honest (only combine() can, against the aggregated commitments),
+	/// but it drops in O(1) every message that is *structurally guaranteed*
+	/// to fail later, so such a message can never occupy the sender's
+	/// first-wins slot in `r3_broadcasts` or the early-round buffer.
+	fn round3_response_well_formed(&self, r3: &Round3Broadcast) -> bool {
+		let expected_len = self.signer.config().k_iterations() as usize * L * POLYZ_PACKEDBYTES;
+		r3.response.len() == expected_len
+	}
+
 	/// Process buffered Round 2 messages after transitioning to Round 2.
 	///
 	/// Buffered Round 2 messages still need the commitment-hash binding check
@@ -1382,6 +1465,11 @@ impl DilithiumSignProtocol {
 	}
 
 	/// Process buffered Round 3 messages after transitioning to Round 3.
+	///
+	/// Unlike `process_buffered_round2`, no re-validation is needed on drain:
+	/// the exact-length gate in `message()` runs before `buffer_round3`, and
+	/// (unlike the Round 2 hash-binding check) it doesn't depend on state that
+	/// arrives later, so everything in the buffer already passed it.
 	fn process_buffered_round3(&mut self) {
 		let buffered = self.message_buffer.take_round3();
 		for r3 in buffered {
@@ -2049,8 +2137,11 @@ mod tests {
 		let _ = protocol.poke().unwrap();
 		assert!(matches!(protocol.state(), SignProtocolState::Round1Waiting));
 
-		// Simulate receiving a Round 3 message while still in Round 1
-		let r3 = Round3Broadcast::new(*protocol.ssid(), 1, vec![10, 20, 30, 40]);
+		// Simulate receiving a Round 3 message while still in Round 1. The
+		// response must be well-formed (exact per-session length) or the
+		// intake gate drops it before buffering.
+		let response_len = protocol.signer.config().k_iterations() as usize * L * POLYZ_PACKEDBYTES;
+		let r3 = Round3Broadcast::new(*protocol.ssid(), 1, vec![0x1A; response_len]);
 		let msg = SigningMessage::Round3(r3);
 		let data = protocol.serialize_message(&msg).unwrap();
 
@@ -2463,6 +2554,86 @@ mod tests {
 		assert!(
 			!protocol.r2_broadcasts.contains_key(&1),
 			"hash-bound but wrong-length Round 2 reveal must be dropped at intake"
+		);
+	}
+
+	/// A Round 3 response that is not exactly the size this session's
+	/// configuration produces (`k_iterations * L * POLYZ_PACKEDBYTES`, the
+	/// same bound `unpack_responses` enforces during `combine`) must be
+	/// dropped at intake. Accepted, it occupies the sender's first-wins r3
+	/// slot with data that is guaranteed to fail — but only inside the
+	/// leader's `combine`, where the failure is indistinguishable from an
+	/// ordinary rejection-sampling abort and can no longer be attributed to
+	/// the misbehaving sender.
+	#[test]
+	fn test_round3_with_wrong_length_response_is_dropped() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
+		)
+		.unwrap();
+
+		let _ = protocol.poke().unwrap();
+		let ssid = *protocol.ssid();
+		protocol.state = SignProtocolState::Round3Waiting;
+
+		let bad_r3 = Round3Broadcast::new(ssid, 1, vec![0xA5u8; 64]);
+		let msg = SigningMessage::Round3(bad_r3);
+		let data = protocol.serialize_message(&msg).unwrap();
+		protocol.message(1, data).unwrap();
+
+		assert!(
+			!protocol.r3_broadcasts.contains_key(&1),
+			"wrong-length Round 3 response must be dropped at intake, not left to fail combine"
+		);
+	}
+
+	/// The same exact-length gate must protect the early-round buffer path: a
+	/// wrong-length Round 3 arriving before this party reaches Round 3 must
+	/// not be buffered and later promoted into r3_broadcasts by
+	/// process_buffered_round3.
+	#[test]
+	fn test_round3_with_wrong_length_response_is_not_buffered() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test".to_vec(),
+			b"ctx".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xBB; 32], // attempt_nonce
+		)
+		.unwrap();
+
+		// In Round1Waiting, a well-formed Round 3 would be buffered for later.
+		let _ = protocol.poke().unwrap();
+		let ssid = *protocol.ssid();
+		let bad_r3 = Round3Broadcast::new(ssid, 1, vec![0xA5u8; 64]);
+		let msg = SigningMessage::Round3(bad_r3);
+		let data = protocol.serialize_message(&msg).unwrap();
+		protocol.message(1, data).unwrap();
+
+		assert!(
+			!protocol.message_buffer.round3.contains_key(&1),
+			"wrong-length Round 3 response must be rejected before buffering"
+		);
+		protocol.process_buffered_round3();
+		assert!(
+			!protocol.r3_broadcasts.contains_key(&1),
+			"wrong-length Round 3 response must never reach r3_broadcasts"
 		);
 	}
 

@@ -62,7 +62,9 @@
 //! ## Provided guarantees
 //! - Each party contributes randomness, so no single party controls the key
 //! - Commitment scheme (Round 1/2) prevents parties from adapting r_i based on others
-//! - Algebraic verification (Round 4) detects inconsistent partial public keys
+//! - Algebraic verification (Round 4) detects an inconsistent partial public key for any subset in
+//!   which the verifier is a member (see the partial-key η-binding limitation below for subsets
+//!   with no honest member)
 //! - Transcript signing provides non-repudiation
 //!
 //! ## Known limitations
@@ -88,6 +90,49 @@
 //! - Adding reputation/staking mechanisms at the application layer
 //! - Implementing leader rotation on repeated failures
 //! - Using a complaint round with blame attribution (not currently implemented)
+//!
+//! **Partial-key η-binding requires an honest subset member (secure-with-abort):**
+//!
+//! Round 4 verifies a leader's partial public key `t_S` against the prescribed
+//! η-bounded derivation only when the verifier is itself a member of subset `S`
+//! and therefore holds `K_S`: it re-derives `s_S = H_keygen(S, K_S, R)` and
+//! checks `t_S == A·s_S`. A verifier outside `S` holds no `K_S`, and `t_S`
+//! alone is an LWE sample — deciding whether it has an η-bounded preimage is the
+//! LWE/SIS problem, so an outsider cannot check it. Detecting the bound would
+//! require revealing the preimage `s_S`, but the full secret is `s = Σ_S s_S`,
+//! so publishing every `s_S` would expose the entire key; the only parties
+//! entitled to learn `s_S` are `S`'s members, who can already verify. There is
+//! thus no "reveal-and-check" that closes the gap without a zero-knowledge proof
+//! of short preimage.
+//!
+//! Consequently, for a subset with **no honest member** a malicious leader can
+//! commit to (and later reveal) a `t_S` that is not the prescribed η-bounded
+//! derivation, and no honest party detects it. This is reachable *below* the
+//! signing threshold:
+//! - every subset in an n-of-n config is a singleton `{i}` (subset size `k = n - t + 1 = 1`), so a
+//!   single malicious party owns its own subset;
+//! - in configs with `k ≤ t - 1` (e.g. 3-of-4) a sub-threshold coalition can fully own a subset.
+//!
+//! The impact is bounded and consistent with the secure-with-abort model:
+//! - **No forgery, no secret recovery.** The Round 3 commitment is opened only in Round 4, so a
+//!   leader is bound to its `t_S` before any honest `t` is revealed; it cannot adaptively steer the
+//!   aggregate `Σ_S t_S` toward a chosen or self-signable key, and it never learns honest subsets'
+//!   shares.
+//! - **Worst case is abort/retry or a bounded distribution skew.** A bogus `t_S` either fails the
+//!   signing-time norm checks (persistent signing failure → abort and retry with a fresh
+//!   session/participant set) or, if the leader picks a short-but-not-η preimage that still passes
+//!   those checks, widens the aggregate secret distribution within the hyperball headroom.
+//! - **No new halting power.** In exactly the configs where a subset can be fully corrupt below
+//!   threshold, that adversary already lies in every signing quorum covering the subset (any `t`
+//!   parties intersect every size-`(n − t + 1)` subset), so it can already force an abort by
+//!   withholding.
+//!
+//! DKG therefore yields a provably η-distributed key only when every subset
+//! contains at least one honest party. Where that does not hold, integrity
+//! degrades to detect-and-abort rather than robust completion. Deployments that
+//! require a guaranteed η-distributed output despite a fully-corrupt subset must
+//! attach a zero-knowledge proof of short preimage to each partial key (not
+//! implemented).
 //!
 //! **Coefficient distribution deviates from standard ML-DSA:**
 //!

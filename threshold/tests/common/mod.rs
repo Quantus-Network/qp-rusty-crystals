@@ -1,4 +1,8 @@
 //! Shared test helpers for integration tests.
+//!
+//! Stack/heap secret-pattern helpers live in `stack_patterns.rs` and are
+//! pulled in only by the zeroization probes (via `#[path = ...]`), so this
+//! module stays free of items unused by resharing/coverage suites.
 
 use std::collections::BTreeMap;
 

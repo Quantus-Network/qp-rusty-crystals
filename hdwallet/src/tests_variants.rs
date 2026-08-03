@@ -103,7 +103,7 @@ fn variant_independent_surface_available() {
 	// Determinism of the variant-independent path.
 	let pair2 =
 		crate::generate_wormhole_from_seed(test_seed(), "m/44'/189189189'/0'/0'/0'").unwrap();
-	assert_eq!(pair.address, pair2.address);
+	assert_eq!(pair.address(), pair2.address());
 }
 
 /// Fixed (mnemonic, path) cases shared by the 44/65 golden-vector suites.

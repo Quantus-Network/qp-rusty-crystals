@@ -46,6 +46,7 @@ rand_core.workspace = true
 # Reference HMAC implementation for the stack-zeroization regression test.
 hmac = { version = "0.12", default-features = false }
 psm = "=0.1.31"
+qp-rusty-crystals-test-utils = { workspace = true }
 
 [features]
 default = ["ml-dsa-87", "std"]

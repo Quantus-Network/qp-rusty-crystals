@@ -813,9 +813,9 @@ dependencies = [
 
 [[package]]
 name = "qp-poseidon-core"
-version = "3.0.2"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55e32db7b3a5d70086f82f198ecfc021f17cb7ec70a416512dba3488f4a116c1"
+checksum = "5872607e25ea4ee5fb37e64bf1462168e1a36a4e719cdc8a105533c708253918"
 
 [[package]]
 name = "qp-rusty-crystals-dilithium"
@@ -825,6 +825,7 @@ dependencies = [
  "dudect-bencher",
  "hex",
  "psm",
+ "qp-rusty-crystals-test-utils",
  "rand",
  "serde_json",
  "zeroize",
@@ -842,6 +843,7 @@ dependencies = [
  "psm",
  "qp-poseidon-core",
  "qp-rusty-crystals-dilithium",
+ "qp-rusty-crystals-test-utils",
  "rand",
  "rand_core",
  "serde",
@@ -850,6 +852,13 @@ dependencies = [
  "thiserror",
  "unicode-normalization",
  "zeroize",
+]
+
+[[package]]
+name = "qp-rusty-crystals-test-utils"
+version = "0.1.0"
+dependencies = [
+ "psm",
 ]
 
 [[package]]
@@ -862,7 +871,9 @@ dependencies = [
  "hex-literal",
  "libm",
  "log",
+ "psm",
  "qp-rusty-crystals-dilithium",
+ "qp-rusty-crystals-test-utils",
  "rand",
  "zeroize",
 ]

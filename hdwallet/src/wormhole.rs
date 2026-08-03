@@ -12,7 +12,8 @@
 //!
 //! - You can:
 //!     - Generate new wormhole identities using random entropy (`generate_new`).
-//!     - Verify if a given secret or pre-hashed secret matches a wormhole address.
+//!     - Verify a secret against an address by re-deriving (derivation is deterministic, so re-run
+//!       `generate_new` with the same input and compare the resulting `address`).
 //!
 //! The hashing strategy ensures determinism while hiding the original secret.
 //!
@@ -33,7 +34,7 @@ use qp_poseidon_core::{
 };
 extern crate alloc;
 use alloc::vec::Vec;
-use qp_rusty_crystals_dilithium::SensitiveBytes32;
+use qp_rusty_crystals_dilithium::{ct_eq_32, SensitiveBytes32};
 use zeroize::Zeroize;
 
 /// Salt used when deriving wormhole addresses.
@@ -58,34 +59,44 @@ fn zeroize_felts(felts: &mut [Goldilocks]) {
 
 /// A struct representing a wormhole identity pair: address + secret.
 ///
-/// `Clone` is intentionally not derived because `secret` is sensitive. The
-/// secret is stored as a [`SensitiveBytes32`] wrapper rather than a bare
-/// `[u8; 32]`: a plain array is `Copy`, so `pair.secret` could silently
-/// duplicate the secret (leaving copies in stack frames, logs, or crash dumps)
-/// that the pair's own drop-time zeroization can never scrub. The wrapper is
-/// move-only and zeroizes on drop, so any duplication must be explicit
-/// (`pair.secret.as_bytes()`), making it visible at the call site. Prefer
+/// Fields are private (security review) so `address` and `first_hash` are
+/// always the values derived from `secret` — a struct literal or field
+/// assignment can't assemble an inconsistent tuple. Read via the accessors.
+///
+/// `Clone` is intentionally not derived because the secret is sensitive. It
+/// is stored as a [`SensitiveBytes32`] wrapper rather than a bare `[u8; 32]`:
+/// a plain array is `Copy`, so it could silently duplicate the secret
+/// (leaving copies in stack frames, logs, or crash dumps) that the pair's
+/// own drop-time zeroization can never scrub. The wrapper is move-only and
+/// zeroizes on drop, so any duplication must be explicit
+/// (`pair.secret().as_bytes()`), making it visible at the call site. Prefer
 /// passing `&WormholePair` instead.
 pub struct WormholePair {
 	/// Deterministic Poseidon-derived address.
-	pub address: [u8; 32],
+	address: [u8; 32],
 	/// First hash of secret
-	pub first_hash: [u8; 32],
+	first_hash: [u8; 32],
 	/// The hashed secret used to generate this address. Move-only and zeroized
-	/// on drop; read the raw bytes via `secret.as_bytes()`.
-	pub secret: SensitiveBytes32,
+	/// on drop; read the raw bytes via `secret().as_bytes()`.
+	secret: SensitiveBytes32,
 }
 
 // `secret` is a `SensitiveBytes32` (which is not `PartialEq`), so equality is
-// implemented by hand over the raw bytes to preserve the previous derived
-// semantics. The address alone determines identity; the secret is compared for
-// completeness. `SensitiveBytes32` already zeroizes itself on drop, so no
-// `ZeroizeOnDrop` derive is needed on `WormholePair`.
+// implemented by hand. Every field is compared in constant time and the
+// results are combined with non-short-circuiting `&` (security review): `==`
+// on the raw bytes may bail out at the first differing byte, and short-
+// circuiting between fields skips later comparisons entirely, so comparison
+// time would depend on the length of the matching prefix — a timing oracle
+// against the secret. `first_hash` gets the same treatment as `secret`: the
+// address is the double hash of the same preimage, so the single hash is a
+// reveal value, not public data. `SensitiveBytes32` already zeroizes itself
+// on drop, so no `ZeroizeOnDrop` derive is needed on `WormholePair`.
 impl PartialEq for WormholePair {
 	fn eq(&self, other: &Self) -> bool {
-		self.address == other.address &&
-			self.first_hash == other.first_hash &&
-			self.secret.as_bytes() == other.secret.as_bytes()
+		let address_eq = ct_eq_32(&self.address, &other.address);
+		let first_hash_eq = ct_eq_32(&self.first_hash, &other.first_hash);
+		let secret_eq = self.secret.ct_eq(&other.secret);
+		address_eq & first_hash_eq & secret_eq
 	}
 }
 
@@ -101,26 +112,40 @@ impl WormholePair {
 	/// entropy stack-residue regression test pins this.
 	pub fn generate_new(seed: &mut SensitiveBytes32) -> WormholePair {
 		let mut hashed_seed = hash_bytes(seed.as_bytes());
-		let secret = SensitiveBytes32::new(&mut hashed_seed);
+		let mut secret = SensitiveBytes32::new(&mut hashed_seed);
 		seed.as_mut_bytes().zeroize();
 
-		// secret is automatically zeroized when it drops
-		WormholePair::generate_pair_from_secret(secret)
+		// Lend the secret rather than moving it (security review): a
+		// by-value argument copies the wrapper into the callee's frame and
+		// leaves this local's slot dead but never dropped, beyond
+		// `ZeroizeOnDrop`. The callee swaps the secret into the returned
+		// pair, so `secret` holds zeros when this frame drops (pinned by the
+		// release-mode `wormhole_stack_zeroization` probe).
+		WormholePair::generate_pair_from_secret(&mut secret)
 	}
 
-	/// Verifies whether the given raw secret generates the specified wormhole address.
-	///
-	/// # Arguments
-	/// * `address` - The expected wormhole address.
-	/// * `secret` - Raw secret to verify.
-	///
-	/// # Returns
-	/// `true` if the address matches the derived one, `false` otherwise.
-	pub fn verify(address: [u8; 32], secret: SensitiveBytes32) -> bool {
-		let generated_address = Self::generate_pair_from_secret(secret).address;
-		// Note: secret is automatically zeroized when the SensitiveBytes32 wrapper drops
-		generated_address == address
+	/// The deterministic Poseidon-derived address (public data).
+	pub fn address(&self) -> &[u8; 32] {
+		&self.address
 	}
+
+	/// The single hash of the salted preimage. This is a reveal value used
+	/// when proving, not public data — borrowed so a copy is an explicit
+	/// `*` at the call site.
+	pub fn first_hash(&self) -> &[u8; 32] {
+		&self.first_hash
+	}
+
+	/// Borrow the secret; the pair keeps ownership (and wipes it on drop).
+	pub fn secret(&self) -> &SensitiveBytes32 {
+		&self.secret
+	}
+
+	// There is deliberately no `verify(address, secret)` helper (security
+	// review): it took the secret by value (a move that leaves a dead,
+	// never-dropped stack copy of the wrapper) and no consumer used it —
+	// verification is re-derivation plus an address comparison, which
+	// callers that hold the secret can do directly.
 
 	/// Internal function that generates a `WormholePair` from a given secret.
 	///
@@ -128,10 +153,15 @@ impl WormholePair {
 	/// to derive the wormhole address.
 	///
 	/// # Security Note
-	/// This function takes ownership of the secret for security (move semantics).
-	/// The secret parameter is zeroized before returning.
-	fn generate_pair_from_secret(secret: SensitiveBytes32) -> WormholePair {
-		let mut secret_bytes = secret.into_bytes();
+	/// The secret never leaves its [`SensitiveBytes32`] wrapper (security
+	/// review): it is borrowed for the felt encoding and then *swapped* into
+	/// the returned pair, leaving the caller's wrapper zeroed. The previous
+	/// shape — take the wrapper by value, unwrap it with `into_bytes`, and
+	/// re-wrap into a named `result` — left three dead stack copies of the
+	/// secret (the moved-from parameter, the extracted plain array's source,
+	/// and the moved-from `result`), all beyond `ZeroizeOnDrop`'s reach. The
+	/// release-mode `wormhole_stack_zeroization` probe pins the fixed shape.
+	fn generate_pair_from_secret(secret: &mut SensitiveBytes32) -> WormholePair {
 		let salt_felt = string_to_felts(ADDRESS_SALT);
 		// Encode the 32-byte secret as 4 felts via the 8-bytes/felt `bytes_to_digest_lossy`.
 		// This encoding is non-injective (limbs ≥ the Goldilocks prime are reduced),
@@ -139,7 +169,7 @@ impl WormholePair {
 		// felt-tuple, and a collision would only alias the holder's own secret —
 		// it cannot forge another user's address without their secret. The same
 		// encoding is used when proving, so derivation stays consistent.
-		let mut secret_felt = bytes_to_digest_lossy(&secret_bytes);
+		let mut secret_felt = bytes_to_digest_lossy(secret.as_bytes());
 		// Exact capacity: growing the vector after the secret felts are in it
 		// would reallocate and free a block still holding the secret.
 		let mut preimage_felts = Vec::with_capacity(salt_felt.len() + secret_felt.len());
@@ -148,22 +178,21 @@ impl WormholePair {
 		let inner_hash = hash_to_bytes(&preimage_felts);
 		let second_hash = hash_twice(&preimage_felts);
 
-		// Move the secret into the move-only, self-zeroizing wrapper.
-		// `SensitiveBytes32::new` copies the bytes into the wrapper and zeroizes
-		// `secret_bytes` in place, so no separate scrub of it is needed.
-		let result = WormholePair {
-			address: second_hash,
-			first_hash: inner_hash,
-			secret: SensitiveBytes32::new(&mut secret_bytes),
-		};
-
 		// Wipe the felt-encoded copies of the secret before their backing
 		// memory is released: `clear()`/drop alone would hand the allocator a
 		// block that still contains the secret limbs.
 		zeroize_felts(&mut secret_felt);
 		zeroize_felts(&mut preimage_felts);
 
-		result
+		// Tail construction, with the secret swapped straight from the
+		// caller's wrapper into the pair: no named local holds the pair (a
+		// later return would leave a moved-from copy), and the caller's
+		// wrapper is left zeroed rather than dead-with-plaintext.
+		WormholePair {
+			address: second_hash,
+			first_hash: inner_hash,
+			secret: core::mem::replace(secret, SensitiveBytes32::zeroed()),
+		}
 	}
 }
 
@@ -179,7 +208,7 @@ mod tests {
 		let mut secret = [42u8; 32];
 
 		// Act
-		let pair = WormholePair::generate_pair_from_secret((&mut secret).into());
+		let pair = WormholePair::generate_pair_from_secret(&mut (&mut secret).into());
 
 		// Assert secret was zeroized and pair.secret was not zeroized
 		assert_eq!(secret, [0u8; 32]);
@@ -192,36 +221,24 @@ mod tests {
 
 		// Verify determinism
 		let mut secret2 = [42u8; 32];
-		let pair2 = WormholePair::generate_pair_from_secret((&mut secret2).into());
+		let pair2 = WormholePair::generate_pair_from_secret(&mut (&mut secret2).into());
 		assert_eq!(pair.address, pair2.address);
 	}
 
+	/// Verification is re-derivation: the same secret must reproduce the
+	/// address, and a different secret must not.
 	#[test]
-	fn test_verify_valid_secret() {
-		// Arrange
+	fn test_rederivation_verifies_secret() {
 		let mut secret = [1u8; 32];
-		let pair = WormholePair::generate_pair_from_secret((&mut secret).into());
+		let pair = WormholePair::generate_pair_from_secret(&mut (&mut secret).into());
 
-		// Act
-		let mut secret_for_verify = [1u8; 32];
-		let result = WormholePair::verify(pair.address, (&mut secret_for_verify).into());
+		let mut same_secret = [1u8; 32];
+		let rederived = WormholePair::generate_pair_from_secret(&mut (&mut same_secret).into());
+		assert_eq!(pair.address, rederived.address);
 
-		// Assert
-		assert!(result);
-	}
-
-	#[test]
-	fn test_verify_invalid_secret() {
-		// Arrange
-		let mut secret = [1u8; 32];
 		let mut wrong_secret = [2u8; 32];
-		let pair = WormholePair::generate_pair_from_secret((&mut secret).into());
-
-		// Act
-		let result = WormholePair::verify(pair.address, (&mut wrong_secret).into());
-
-		// Assert
-		assert!(!result);
+		let mismatched = WormholePair::generate_pair_from_secret(&mut (&mut wrong_secret).into());
+		assert_ne!(pair.address, mismatched.address);
 	}
 
 	#[test]
@@ -232,20 +249,23 @@ mod tests {
 
 		// Act - Generate the pair
 		let mut secret_copy = secret;
-		let pair = WormholePair::generate_pair_from_secret((&mut secret_copy).into());
+		let pair = WormholePair::generate_pair_from_secret(&mut (&mut secret_copy).into());
 
 		// Assert
 		// 1. Verify that the secret is stored correctly
 		assert_eq!(pair.secret.as_bytes(), &secret);
 
-		// 2. Verify that the derived address is consistent with our verification method
+		// 2. Verify that re-deriving from the same secret reproduces the address
 		let mut secret_for_verify = secret;
-		assert!(WormholePair::verify(pair.address, (&mut secret_for_verify).into()));
+		let rederived =
+			WormholePair::generate_pair_from_secret(&mut (&mut secret_for_verify).into());
+		assert_eq!(pair.address, rederived.address);
 
 		// 3. Verify that even a small change in the secret produces a different address
 		let mut altered_secret = secret;
 		altered_secret[0] ^= 1; // Flip one bit in the first byte
-		let altered_pair = WormholePair::generate_pair_from_secret((&mut altered_secret).into());
+		let altered_pair =
+			WormholePair::generate_pair_from_secret(&mut (&mut altered_secret).into());
 		assert_ne!(pair.address, altered_pair.address);
 
 		// 4. Verify that the process uses the salt
@@ -270,8 +290,8 @@ mod tests {
 		let mut secret2 = [6u8; 32];
 
 		// Act
-		let pair1 = WormholePair::generate_pair_from_secret((&mut secret1).into());
-		let pair2 = WormholePair::generate_pair_from_secret((&mut secret2).into());
+		let pair1 = WormholePair::generate_pair_from_secret(&mut (&mut secret1).into());
+		let pair2 = WormholePair::generate_pair_from_secret(&mut (&mut secret2).into());
 
 		// Assert
 		assert_ne!(pair1.address, pair2.address);
@@ -289,10 +309,45 @@ mod tests {
 		// Address should not be zero
 		assert_ne!(pair.address, [0u8; 32]);
 
-		// Verification should work with the generated secret
+		// Re-deriving from the stored secret must reproduce the address
 		let mut secret_for_verify = *pair.secret.as_bytes();
-		let verification = WormholePair::verify(pair.address, (&mut secret_for_verify).into());
-		assert!(verification);
+		let rederived =
+			WormholePair::generate_pair_from_secret(&mut (&mut secret_for_verify).into());
+		assert_eq!(pair.address, rederived.address);
+	}
+
+	/// Pins the semantics of the constant-time `PartialEq` (security review):
+	/// equality must hold exactly when all three fields match, including a
+	/// difference in *any single* field — the non-short-circuiting fold must
+	/// not drop any comparison.
+	#[test]
+	fn test_pair_equality_covers_every_field() {
+		let make_pair = |address: [u8; 32], first_hash: [u8; 32], secret: [u8; 32]| {
+			let mut secret = secret;
+			WormholePair { address, first_hash, secret: SensitiveBytes32::new(&mut secret) }
+		};
+
+		// `WormholePair` has no `Debug` (it would print the secret), so plain
+		// `assert!` is used instead of `assert_eq!`/`assert_ne!`.
+		let base = make_pair([1u8; 32], [2u8; 32], [3u8; 32]);
+		assert!(base == make_pair([1u8; 32], [2u8; 32], [3u8; 32]));
+
+		assert!(base != make_pair([9u8; 32], [2u8; 32], [3u8; 32]), "address ignored by eq");
+		assert!(base != make_pair([1u8; 32], [9u8; 32], [3u8; 32]), "first_hash ignored by eq");
+		assert!(base != make_pair([1u8; 32], [2u8; 32], [9u8; 32]), "secret ignored by eq");
+
+		// A difference in only the last byte of the secret must be detected:
+		// a truncated comparison would miss it.
+		let mut tail_diff = [3u8; 32];
+		tail_diff[31] ^= 1;
+		assert!(base != make_pair([1u8; 32], [2u8; 32], tail_diff));
+
+		// Pairs derived from the same secret compare equal end-to-end.
+		let mut s1 = [42u8; 32];
+		let mut s2 = [42u8; 32];
+		let p1 = WormholePair::generate_pair_from_secret(&mut (&mut s1).into());
+		let p2 = WormholePair::generate_pair_from_secret(&mut (&mut s2).into());
+		assert!(p1 == p2);
 	}
 
 	#[test]
@@ -306,7 +361,8 @@ mod tests {
 
 		// Generate a pair normally (with salt)
 		let mut secret_copy = secret;
-		let pair_with_salt = WormholePair::generate_pair_from_secret((&mut secret_copy).into());
+		let pair_with_salt =
+			WormholePair::generate_pair_from_secret(&mut (&mut secret_copy).into());
 
 		// Simulate address generation without salt or with different salt
 		let different_salt = b"diffrent";
