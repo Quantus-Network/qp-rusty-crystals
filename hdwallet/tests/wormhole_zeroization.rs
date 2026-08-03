@@ -65,7 +65,7 @@ fn wormhole_derivation_never_frees_heap_memory_containing_the_secret() {
 	// Reference run (scanner off) to learn the derived secret bytes.
 	let mut seed = SEED_PATTERN;
 	let reference = WormholePair::generate_new(&mut (&mut seed).into());
-	DERIVED_SECRET.set(*reference.secret.as_bytes()).expect("set once");
+	DERIVED_SECRET.set(*reference.secret().as_bytes()).expect("set once");
 	drop(reference);
 
 	let mut seed = SEED_PATTERN;

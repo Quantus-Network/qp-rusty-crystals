@@ -74,7 +74,7 @@ fn seed_holder() -> SensitiveBytes32 {
 fn reference_secret() -> [u8; 32] {
 	let mut seed = seed_holder();
 	let pair = WormholePair::generate_new(&mut seed);
-	*pair.secret.as_bytes()
+	*pair.secret().as_bytes()
 }
 
 #[test]

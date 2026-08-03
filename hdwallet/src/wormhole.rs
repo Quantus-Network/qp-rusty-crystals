@@ -59,22 +59,26 @@ fn zeroize_felts(felts: &mut [Goldilocks]) {
 
 /// A struct representing a wormhole identity pair: address + secret.
 ///
-/// `Clone` is intentionally not derived because `secret` is sensitive. The
-/// secret is stored as a [`SensitiveBytes32`] wrapper rather than a bare
-/// `[u8; 32]`: a plain array is `Copy`, so `pair.secret` could silently
-/// duplicate the secret (leaving copies in stack frames, logs, or crash dumps)
-/// that the pair's own drop-time zeroization can never scrub. The wrapper is
-/// move-only and zeroizes on drop, so any duplication must be explicit
-/// (`pair.secret.as_bytes()`), making it visible at the call site. Prefer
+/// Fields are private (security review) so `address` and `first_hash` are
+/// always the values derived from `secret` — a struct literal or field
+/// assignment can't assemble an inconsistent tuple. Read via the accessors.
+///
+/// `Clone` is intentionally not derived because the secret is sensitive. It
+/// is stored as a [`SensitiveBytes32`] wrapper rather than a bare `[u8; 32]`:
+/// a plain array is `Copy`, so it could silently duplicate the secret
+/// (leaving copies in stack frames, logs, or crash dumps) that the pair's
+/// own drop-time zeroization can never scrub. The wrapper is move-only and
+/// zeroizes on drop, so any duplication must be explicit
+/// (`pair.secret().as_bytes()`), making it visible at the call site. Prefer
 /// passing `&WormholePair` instead.
 pub struct WormholePair {
 	/// Deterministic Poseidon-derived address.
-	pub address: [u8; 32],
+	address: [u8; 32],
 	/// First hash of secret
-	pub first_hash: [u8; 32],
+	first_hash: [u8; 32],
 	/// The hashed secret used to generate this address. Move-only and zeroized
-	/// on drop; read the raw bytes via `secret.as_bytes()`.
-	pub secret: SensitiveBytes32,
+	/// on drop; read the raw bytes via `secret().as_bytes()`.
+	secret: SensitiveBytes32,
 }
 
 // `secret` is a `SensitiveBytes32` (which is not `PartialEq`), so equality is
@@ -118,6 +122,22 @@ impl WormholePair {
 		// pair, so `secret` holds zeros when this frame drops (pinned by the
 		// release-mode `wormhole_stack_zeroization` probe).
 		WormholePair::generate_pair_from_secret(&mut secret)
+	}
+
+	/// The deterministic Poseidon-derived address (public data).
+	pub fn address(&self) -> [u8; 32] {
+		self.address
+	}
+
+	/// The single hash of the salted preimage. This is a reveal value used
+	/// when proving, not public data; disclose it deliberately.
+	pub fn first_hash(&self) -> [u8; 32] {
+		self.first_hash
+	}
+
+	/// Borrow the secret; the pair keeps ownership (and wipes it on drop).
+	pub fn secret(&self) -> &SensitiveBytes32 {
+		&self.secret
 	}
 
 	// There is deliberately no `verify(address, secret)` helper (security
@@ -243,7 +263,8 @@ mod tests {
 		// 3. Verify that even a small change in the secret produces a different address
 		let mut altered_secret = secret;
 		altered_secret[0] ^= 1; // Flip one bit in the first byte
-		let altered_pair = WormholePair::generate_pair_from_secret(&mut (&mut altered_secret).into());
+		let altered_pair =
+			WormholePair::generate_pair_from_secret(&mut (&mut altered_secret).into());
 		assert_ne!(pair.address, altered_pair.address);
 
 		// 4. Verify that the process uses the salt
@@ -339,7 +360,8 @@ mod tests {
 
 		// Generate a pair normally (with salt)
 		let mut secret_copy = secret;
-		let pair_with_salt = WormholePair::generate_pair_from_secret(&mut (&mut secret_copy).into());
+		let pair_with_salt =
+			WormholePair::generate_pair_from_secret(&mut (&mut secret_copy).into());
 
 		// Simulate address generation without salt or with different salt
 		let different_salt = b"diffrent";
