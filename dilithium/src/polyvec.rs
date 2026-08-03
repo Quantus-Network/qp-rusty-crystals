@@ -208,8 +208,16 @@ pub fn ntt<const N: usize>(v: &mut Polyvec<N>) {
 }
 
 /// Inverse NTT and multiplication by 2^{32} of polynomials
-/// in vector of length N. Input coefficients need to be less
-/// than 2*Q.
+/// in vector of length N.
+///
+/// # Preconditions
+///
+/// Input coefficients must be less than Q in absolute value — the same
+/// contract as the per-polynomial [`poly::invntt_tomont`] this delegates to
+/// (this doc previously promised `< 2*Q`, which can overflow the inverse
+/// butterflies; security review). Checked there with `debug_assert!`.
+/// Forward-NTT output (which can reach 8*Q) must be brought back into range
+/// with [`reduce`] before being passed here.
 pub fn invntt_tomont<const N: usize>(v: &mut Polyvec<N>) {
 	for i in 0..N {
 		poly::invntt_tomont(&mut v.vec[i]);
@@ -512,6 +520,21 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	/// The wrapper's documented contract must match the per-polynomial
+	/// implementation it delegates to: coefficients below Q in absolute
+	/// value. The doc previously promised `< 2*Q` (security review); a
+	/// coefficient in `[Q, 2*Q)` — permitted by that stale contract — must
+	/// fail loudly wherever debug assertions are on rather than silently
+	/// overflowing the inverse butterflies in release builds.
+	#[test]
+	#[cfg(debug_assertions)]
+	#[should_panic(expected = "invntt_tomont precondition violated")]
+	fn invntt_tomont_rejects_coefficients_between_q_and_2q() {
+		let mut v = Polyvec::<L>::default();
+		v.vec[0].coeffs[0] = params::Q; // in [Q, 2*Q): allowed by the old doc
+		invntt_tomont(&mut v);
 	}
 
 	#[test]
