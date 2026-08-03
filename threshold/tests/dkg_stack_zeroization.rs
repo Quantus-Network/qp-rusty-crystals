@@ -24,16 +24,13 @@
 //! assertion is only meaningful once those are elided.
 #![cfg(not(debug_assertions))]
 
-mod common;
-
 use std::collections::BTreeMap;
 
+use qp_rusty_crystals_test_utils::probe_stack_for;
 use qp_rusty_crystals_threshold::{
 	keygen::dkg::{Dkg, DkgAction, DkgConfig, TranscriptSigner},
 	ThresholdConfig,
 };
-
-use common::probe_stack_for;
 
 // 16 MiB: the DKG state machine drives keygen-scale work (K x L matrix
 // expansion, NTT chains) for three parties plus serialization buffers.

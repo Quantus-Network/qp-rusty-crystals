@@ -26,11 +26,12 @@
 //! assertion is only meaningful once those are elided.
 #![cfg(not(debug_assertions))]
 
-mod common;
+#[path = "common/stack_patterns.rs"]
+mod stack_patterns;
 
+use qp_rusty_crystals_test_utils::probe_stack_for;
 use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig, ThresholdSigner};
-
-use common::{hyperball_stream_pattern, probe_stack_for};
+use stack_patterns::hyperball_stream_pattern;
 
 // 16 MiB: Round 1 drives hyperball rejection sampling across all commitment
 // iterations plus the packing of the commitment hash input.

@@ -26,12 +26,13 @@
 //! assertion is only meaningful once those are elided.
 #![cfg(not(debug_assertions))]
 
-mod common;
+#[path = "common/stack_patterns.rs"]
+mod stack_patterns;
 
+use qp_rusty_crystals_test_utils::probe_stack_for;
 use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig};
+use stack_patterns::dealer_party0_seed_pattern;
 use zeroize::Zeroize;
-
-use common::{dealer_party0_seed_pattern, probe_stack_for};
 
 // 4 MiB: comfortably above the dealer's frame (matrix A alone is K x L
 // polynomials, ~57 KiB, plus the polyvec locals).

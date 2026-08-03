@@ -38,7 +38,9 @@ use qp_rusty_crystals_threshold::{
 };
 
 mod common;
-use common::{dealer_party0_seed_pattern, hyperball_stream_pattern};
+#[path = "common/stack_patterns.rs"]
+mod stack_patterns;
+use stack_patterns::{dealer_party0_seed_pattern, hyperball_stream_pattern};
 
 /// The 32-byte pattern the allocator currently scans for. Updated between
 /// scenarios (only while scanning is off, so `try_lock` in the hook never
