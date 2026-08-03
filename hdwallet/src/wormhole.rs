@@ -125,14 +125,15 @@ impl WormholePair {
 	}
 
 	/// The deterministic Poseidon-derived address (public data).
-	pub fn address(&self) -> [u8; 32] {
-		self.address
+	pub fn address(&self) -> &[u8; 32] {
+		&self.address
 	}
 
 	/// The single hash of the salted preimage. This is a reveal value used
-	/// when proving, not public data; disclose it deliberately.
-	pub fn first_hash(&self) -> [u8; 32] {
-		self.first_hash
+	/// when proving, not public data — borrowed so a copy is an explicit
+	/// `*` at the call site.
+	pub fn first_hash(&self) -> &[u8; 32] {
+		&self.first_hash
 	}
 
 	/// Borrow the secret; the pair keeps ownership (and wipes it on drop).

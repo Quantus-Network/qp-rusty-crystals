@@ -1285,10 +1285,12 @@ impl DilithiumSignProtocol {
 						SignProtocolState::Round3Waiting
 				) {
 					if !self.round2_matches_stored_round1(&r2) {
+						// Attribute to `from` (transport-authenticated), not
+						// `r2.party_id` (unauthenticated payload).
 						warn!(
 							"Signing: Rejecting Round 2 from party {} - commitment hash does not \
-							 match stored Round 1 (likely stale/replayed)",
-							r2.party_id
+							 match stored Round 1 (likely stale/replayed; payload claims party {})",
+							from, r2.party_id
 						);
 						return Ok(());
 					}
@@ -1313,11 +1315,14 @@ impl DilithiumSignProtocol {
 				// sender's first-wins slot (and the early-round buffer) and
 				// attributes the misbehavior to the sender at receive time.
 				if !self.round3_response_well_formed(&r3) {
+					// Attribute to `from` (transport-authenticated), not
+					// `r3.party_id` (unauthenticated payload).
 					warn!(
 						"Signing: Rejecting Round 3 from party {} - response length {} does not \
-						 match this session's expected share size",
-						r3.party_id,
-						r3.response.len()
+						 match this session's expected share size (payload claims party {})",
+						from,
+						r3.response.len(),
+						r3.party_id
 					);
 					return Ok(());
 				}

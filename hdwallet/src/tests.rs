@@ -326,12 +326,12 @@ mod hdwallet_tests {
 		let w = derive_wormhole_from_mnemonic(mnemonic, None, "m/44'/189189189'/0'").unwrap();
 
 		assert_eq!(
-			w.address(),
+			*w.address(),
 			hex!("6a2f0d3abe4390e0b05f6dea4ba10670676cda7c00d49526ddde59f16c85269f"),
 			"wormhole address derivation changed"
 		);
 		assert_eq!(
-			w.first_hash(),
+			*w.first_hash(),
 			hex!("890ff21aa4fda75dc56c6c322c164d3c21a18ca7853d368c28cf158affc8b5b1"),
 			"wormhole first_hash derivation changed"
 		);
@@ -349,8 +349,8 @@ mod hdwallet_tests {
 		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
 		let w = derive_wormhole_from_mnemonic(mnemonic, None, "m/44'/189189189'/0'").unwrap();
 		let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
-		println!("address    = {}", hex(&w.address()));
-		println!("first_hash = {}", hex(&w.first_hash()));
+		println!("address    = {}", hex(w.address()));
+		println!("first_hash = {}", hex(w.first_hash()));
 		println!("secret     = {}", hex(w.secret().as_bytes()));
 	}
 
@@ -519,7 +519,7 @@ mod hdwallet_tests {
 		assert_eq!(wormhole.address().len(), 32);
 		assert_eq!(wormhole.first_hash().len(), 32);
 		assert_ne!(wormhole.secret().as_bytes(), &[0u8; 32]);
-		assert_ne!(wormhole.address(), [0u8; 32]);
+		assert_ne!(*wormhole.address(), [0u8; 32]);
 	}
 
 	#[test]
