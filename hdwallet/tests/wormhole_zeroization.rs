@@ -14,14 +14,23 @@
 //! concurrent allocations can race the scanner.
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::{
+	alloc::{GlobalAlloc, Layout, System},
+	sync::OnceLock,
+};
 
 use qp_rusty_crystals_hdwallet::wormhole::WormholePair;
 
-/// Distinctive 32-byte secret. Each 8-byte little-endian limb is below the
-/// Goldilocks prime (high byte is ASCII < 0x80), so `bytes_to_digest_lossy`
-/// stores the limbs verbatim and the felt buffer contains these exact bytes.
-const SECRET_PATTERN: [u8; 32] = *b"wormhole-heap-zeroize-pattern-32";
+/// Seed for `generate_new`. The scanned pattern is not the seed itself but
+/// the *derived* secret (`hash_bytes(seed)`): that is what the derivation
+/// felt-encodes into the heap-backed Poseidon preimage, and its 8-byte
+/// little-endian limbs are canonical field elements by construction, so
+/// `bytes_to_digest_lossy` stores them verbatim in the felt buffer.
+const SEED_PATTERN: [u8; 32] = *b"wormhole-heap-zeroize-pattern-32";
+
+/// The derived secret, learned from a reference run with the scanner off.
+/// Derivation is deterministic, so the probed run reproduces these bytes.
+static DERIVED_SECRET: OnceLock<[u8; 32]> = OnceLock::new();
 
 static SCANNING: AtomicBool = AtomicBool::new(false);
 static SECRET_FREED_UNCLEARED: AtomicBool = AtomicBool::new(false);
@@ -34,10 +43,14 @@ unsafe impl GlobalAlloc for SecretScanningAllocator {
 	}
 
 	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-		if SCANNING.load(Ordering::SeqCst) && layout.size() >= SECRET_PATTERN.len() {
-			let block = unsafe { core::slice::from_raw_parts(ptr, layout.size()) };
-			if block.windows(SECRET_PATTERN.len()).any(|w| w == SECRET_PATTERN) {
-				SECRET_FREED_UNCLEARED.store(true, Ordering::SeqCst);
+		if SCANNING.load(Ordering::SeqCst) {
+			if let Some(pattern) = DERIVED_SECRET.get() {
+				if layout.size() >= pattern.len() {
+					let block = unsafe { core::slice::from_raw_parts(ptr, layout.size()) };
+					if block.windows(pattern.len()).any(|w| w == pattern) {
+						SECRET_FREED_UNCLEARED.store(true, Ordering::SeqCst);
+					}
+				}
 			}
 		}
 		unsafe { System.dealloc(ptr, layout) }
@@ -49,10 +62,16 @@ static ALLOCATOR: SecretScanningAllocator = SecretScanningAllocator;
 
 #[test]
 fn wormhole_derivation_never_frees_heap_memory_containing_the_secret() {
-	let mut secret = SECRET_PATTERN;
+	// Reference run (scanner off) to learn the derived secret bytes.
+	let mut seed = SEED_PATTERN;
+	let reference = WormholePair::generate_new(&mut (&mut seed).into());
+	DERIVED_SECRET.set(*reference.secret.as_bytes()).expect("set once");
+	drop(reference);
 
+	let mut seed = SEED_PATTERN;
 	SCANNING.store(true, Ordering::SeqCst);
-	let pair = WormholePair::verify([0u8; 32], (&mut secret).into());
+	let pair = WormholePair::generate_new(&mut (&mut seed).into());
+	drop(pair);
 	SCANNING.store(false, Ordering::SeqCst);
 
 	assert!(
@@ -61,7 +80,4 @@ fn wormhole_derivation_never_frees_heap_memory_containing_the_secret() {
 		 (felt-encoded preimage); the secret grants control of the derived \
 		 address, so it must be zeroized before its memory is released"
 	);
-
-	// Sanity: the pattern secret does not verify against a zero address.
-	assert!(!pair);
 }

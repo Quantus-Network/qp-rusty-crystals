@@ -99,9 +99,13 @@ impl SensitiveBytes32 {
 		&self.0
 	}
 
-	pub fn into_bytes(self) -> [u8; 32] {
-		self.0
-	}
+	// There is deliberately no `into_bytes(self) -> [u8; 32]` (security
+	// review): extracting the inner array hands the secret back as a plain
+	// `Copy` value with no erasure obligation, silently re-creating every
+	// hazard this wrapper exists to prevent. Borrow via [`Self::as_bytes`],
+	// or transfer ownership of the wrapper itself (e.g. with
+	// `core::mem::replace(&mut src, Self::zeroed())` to keep the vacated
+	// slot clean).
 
 	/// Constant-time equality with another secret.
 	///
@@ -163,9 +167,7 @@ impl SensitiveBytes64 {
 		&self.0
 	}
 
-	pub fn into_bytes(self) -> [u8; 64] {
-		self.0
-	}
+	// No `into_bytes`; see the note on [`SensitiveBytes32`].
 }
 
 impl From<&mut [u8; 64]> for SensitiveBytes64 {
