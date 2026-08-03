@@ -21,8 +21,6 @@ mod hdwallet_tests {
 	#[cfg(test)]
 	extern crate std;
 	#[cfg(test)]
-	use std::dbg;
-	#[cfg(test)]
 	use std::println;
 
 	/// Test helper: stretch a known-valid mnemonic into a fresh seed.
@@ -58,14 +56,14 @@ mod hdwallet_tests {
 	fn test_mnemonic_creation() {
 		let mut entropy = [43u8; 32];
 
-		// Test generating new mnemonic
-		let mnemonic = dbg!(generate_mnemonic((&mut entropy).into()).unwrap());
+		// Test generating new mnemonic (returned inside a Zeroizing wrapper)
+		let mnemonic = generate_mnemonic((&mut entropy).into()).unwrap();
 		assert_eq!(mnemonic.split_whitespace().count(), 24);
 
 		// Test creating seeds from mnemonic - demonstrate explicit copying
-		let seed1 = seed_from(mnemonic.clone(), None);
-		let seed2 = seed_from(mnemonic.clone(), None);
-		let seed3 = seed_from(mnemonic.clone(), Some("password"));
+		let seed1 = seed_from(mnemonic.to_string(), None);
+		let seed2 = seed_from(mnemonic.to_string(), None);
+		let seed3 = seed_from(mnemonic.to_string(), Some("password"));
 
 		// Seeds from same mnemonic should be identical
 		assert_eq!(
@@ -96,7 +94,7 @@ mod hdwallet_tests {
 		);
 
 		// Derive a different path - need a fresh seed since seed1 was already consumed
-		let seed_for_derive = seed_from(mnemonic.clone(), None);
+		let seed_for_derive = seed_from(mnemonic.to_string(), None);
 		let derived_key = derive_key_from_seed(seed_for_derive, "m/0'/2147483647'/1'").unwrap();
 		assert_ne!(
 			master_key1.secret().to_bytes(),
@@ -143,9 +141,9 @@ mod hdwallet_tests {
 				rng.fill_bytes(&mut seed);
 				let mnemonic = generate_mnemonic((&mut seed).into()).unwrap();
 				let path = generate_random_path();
-				let seed = seed_from(mnemonic.clone(), None);
+				let seed = seed_from(mnemonic.to_string(), None);
 				let k = derive_key_from_seed(seed, &path).unwrap();
-				(k, mnemonic, path)
+				(k, mnemonic.to_string(), path)
 			})
 			.collect()
 	}
@@ -585,7 +583,7 @@ mod hdwallet_tests {
 
 		// Use the wrapped data - this should move it
 		let mnemonic = generate_mnemonic(sensitive_entropy).unwrap();
-		let seed_from_mnemonic = seed_from(mnemonic, None);
+		let seed_from_mnemonic = seed_from(mnemonic.to_string(), None);
 		let _key = derive_key_from_seed(sensitive_seed, "m/44'/0'/0'/0'/0'").unwrap();
 
 		// After this point, sensitive_entropy and sensitive_seed should be consumed

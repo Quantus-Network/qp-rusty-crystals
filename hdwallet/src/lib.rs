@@ -419,15 +419,28 @@ fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 /// This function takes ownership of the entropy for security (move semantics).
 /// The entropy parameter is zeroized before returning.
 ///
+/// The phrase is returned inside a [`Zeroizing`] wrapper (security review):
+/// the recovery phrase yields the entire HD wallet, so it must not outlive
+/// its logical lifetime in freed heap memory. A plain `String` return left
+/// erasure to the caller with no type-level hint; `Zeroizing<String>` wipes
+/// the backing allocation when the caller drops it. (Moving the wrapper only
+/// copies the pointer/len/cap triple — the secret heap contents are never
+/// duplicated — so returning it by value is safe, unlike fixed-size secret
+/// arrays, which are wiped in place via out-parameters elsewhere in this
+/// crate.) The heap-zeroization regression test pins this.
+///
 /// # Security Note
 /// Always use cryptographically secure random entropy (e.g., from `getrandom::getrandom()`).
 /// Never use predictable strings, timestamps, or user input as entropy sources.
-pub fn generate_mnemonic(entropy: SensitiveBytes32) -> Result<String, HDLatticeError> {
+pub fn generate_mnemonic(entropy: SensitiveBytes32) -> Result<Zeroizing<String>, HDLatticeError> {
 	// Create mnemonic from entropy
 	let mnemonic = Mnemonic::from_entropy(entropy.as_bytes())
 		.map_err(|e| HDLatticeError::MnemonicDerivationFailed(e.to_string()))?;
 
-	let result = mnemonic.words().collect::<Vec<&str>>().join(" ");
+	// `join` allocates the phrase exactly once (the Vec holds `&str`
+	// references into the static word list, not copies), and moving the
+	// String into `Zeroizing::new` transfers the same allocation.
+	let result = Zeroizing::new(mnemonic.words().collect::<Vec<&str>>().join(" "));
 
 	// entropy is automatically zeroized when it drops
 

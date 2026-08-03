@@ -80,7 +80,7 @@ use qp_rusty_crystals_hdwallet::{generate_mnemonic, HDLattice};
 let mut seed = [0u8; 32];
 getrandom::getrandom(&mut seed).expect("Failed to generate seed");
 
-// Generate mnemonic
+// Generate mnemonic (returned as a self-wiping Zeroizing<String>)
 let mnemonic = generate_mnemonic((&mut seed).into())?;
 
 // Create HD wallet
