@@ -1552,6 +1552,28 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		Ok(Action::SendPrivate(to_party, data))
 	}
 
+	/// Buffer a dealer's Round 4 private sub-share message, first-message-wins.
+	///
+	/// Content verification (commitment match, coefficient bounds) is
+	/// deliberately deferred to Round 5: it needs the dealer's Round 3
+	/// commitments, which may legitimately arrive *after* the Round 4
+	/// private message on an out-of-order transport.
+	///
+	/// First-wins without pre-verification is safe under the crate's
+	/// documented transport requirements (sender-authenticated channels,
+	/// see the module docs), and is the anti-equivocation choice
+	/// (security review):
+	/// - an attacker cannot occupy another party's slot, because it cannot send with a forged
+	///   `from` on an authenticated transport;
+	/// - an honest dealer sends exactly one Round 4 message per recipient, so there is never an
+	///   honest "correction" for a duplicate to drop (benign retransmits carry identical content
+	///   and are idempotent);
+	/// - a malicious dealer poisoning *its own* slot is no stronger than withholding: deferred
+	///   verification fails with the dealer attributed (`DealerDeliveryFailed`) and the session
+	///   aborts for a restart, exactly like a dealer that goes silent (see README);
+	/// - replace-on-later-message policies would be *worse*: they would let a dealer observe
+	///   protocol traffic and swap its contribution adaptively. First-wins pins each sender to a
+	///   single contribution.
 	fn handle_round4_message(&mut self, from: ParticipantId, msg: ResharingRound4Message) {
 		if matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
 			return;
@@ -1565,8 +1587,15 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		if msg.to_party_id != self.config.my_party_id() {
 			return;
 		}
-		// Reject duplicates from the same dealer.
+		// Reject duplicates from the same dealer. Logged for observability
+		// only; the content is not compared (it is secret share material —
+		// a retransmit is indistinguishable from equivocation here, and
+		// either way the stored first message stays authoritative).
 		if self.round4_messages.contains_key(&from) {
+			log::debug!(
+				"Resharing: ignoring duplicate Round 4 message from dealer {} (first-message-wins)",
+				from
+			);
 			return;
 		}
 		self.round4_messages.insert(from, msg);
@@ -1943,6 +1972,17 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		Ok(Action::Return(output))
 	}
 
+	/// Buffer a new committee member's acceptance signature, first-message-wins.
+	///
+	/// First-wins without pre-verification is safe under the crate's
+	/// documented transport requirements (sender-authenticated channels)
+	/// and pins each attester to a single signature (security review): an
+	/// attacker cannot occupy another party's slot, an honest member sends
+	/// exactly one accept (retransmits are identical and idempotent), and a
+	/// member poisoning its own slot with a garbage signature is no
+	/// stronger than withholding its accept — `AcceptWaiting` fails with
+	/// that party attributed, where a withheld accept stalls the session
+	/// instead. Both need the same recovery: a restart.
 	fn handle_accept_message(&mut self, from: ParticipantId, msg: ResharingAccept) {
 		if matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
 			return;
@@ -1952,7 +1992,17 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			return;
 		}
 		// First message wins; duplicates ignored (matches other rounds).
-		if self.accepts.contains_key(&from) {
+		// Signatures are public values, so a differing duplicate can be
+		// safely detected and surfaced: it is evidence of sender
+		// equivocation (or transport misbehavior), not a benign retransmit.
+		if let Some(stored) = self.accepts.get(&from) {
+			if *stored != msg.signature {
+				log::warn!(
+					"Resharing: party {} sent conflicting acceptance signatures \
+					 (equivocation?); keeping the first (first-message-wins)",
+					from
+				);
+			}
 			return;
 		}
 		// Signature verification is deferred to `AcceptWaiting`, where our own
@@ -3985,6 +4035,65 @@ mod tests {
 		assert!(
 			!msg.chars().any(|c| c.is_ascii_digit()),
 			"wire reason embeds digits (possible secret leak): {msg}"
+		);
+	}
+
+	/// Security review: the first-message-wins duplicate policy must hold — a
+	/// later, conflicting message from the same (transport-authenticated)
+	/// sender never displaces the stored first message, for both Round 4
+	/// sub-share deliveries and Round 6 acceptance signatures. A
+	/// replace-on-duplicate policy would let a malicious sender observe
+	/// protocol traffic and swap its contribution adaptively; see the
+	/// handler doc comments for the full argument.
+	#[test]
+	fn duplicate_round4_and_accept_messages_never_displace_the_first() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[17u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(1, &[0, 1, 2]),
+			[3u8; 32],
+			&[4u8; 32],
+			0,
+		);
+		let ssid = protocol.ssid;
+
+		// Round 4: dealer 0's first message pins its slot.
+		let mk_r4 = |coeff: i32| {
+			let mut share = NewShareData::new();
+			share.s1[0][0] = coeff;
+			let mut contributions: BTreeMap<SubsetPair, NewShareData> = BTreeMap::new();
+			contributions.insert((0b011, 0b011), share);
+			ResharingRound4Message { ssid, from_party_id: 0, to_party_id: 1, contributions }
+		};
+		protocol.handle_round4_message(0, mk_r4(7));
+		protocol.handle_round4_message(0, mk_r4(8)); // conflicting duplicate
+		let stored = protocol.round4_messages.get(&0).expect("first message stored");
+		assert_eq!(
+			stored.contributions.get(&(0b011, 0b011)).expect("contribution").s1[0][0],
+			7,
+			"a duplicate Round 4 message must not displace the first"
+		);
+
+		// Round 6: party 2's first acceptance signature pins its slot.
+		let mk_accept = |sig: Vec<u8>| ResharingAccept { ssid, party_id: 2, signature: sig };
+		protocol.handle_accept_message(2, mk_accept(vec![1, 2, 3]));
+		protocol.handle_accept_message(2, mk_accept(vec![9, 9, 9])); // conflicting duplicate
+		assert_eq!(
+			protocol.accepts.get(&2).expect("first accept stored"),
+			&vec![1, 2, 3],
+			"a duplicate acceptance must not displace the first"
 		);
 	}
 
