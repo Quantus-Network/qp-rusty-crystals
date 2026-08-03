@@ -13,7 +13,7 @@
 //! wrapper (no extraction API), lends it to the derivation by reference, and
 //! swaps it into the tail-constructed pair, so every dead slot holds zeros.
 //!
-//! This test also depends on `qp-poseidon-core >= 3.0.3` (its own
+//! This test also depends on `qp-poseidon-core >= 3.1.0` (its own
 //! `tests/stack_zeroization.rs`): the secret *is* a Poseidon digest, and
 //! before that version the hasher's self-consuming finalize chain left dead
 //! copies of it in the sponge frames, out of this crate's reach.
