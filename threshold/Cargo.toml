@@ -32,8 +32,10 @@ criterion = { workspace = true }
 hex = { workspace = true }
 hex-literal = { workspace = true }
 rand = { workspace = true }
-# Painted-stack probe for the dealer stack-zeroization regression test.
+# Painted-stack probe for stack-zeroization regression tests (also used
+# directly by the unit-test probe in `derivation.rs`).
 psm = "=0.1.31"
+qp-rusty-crystals-test-utils = { workspace = true }
 
 [features]
 default = ["ml-dsa-87", "std"]

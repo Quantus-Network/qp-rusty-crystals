@@ -25,39 +25,11 @@
 //! only compiled for optimized builds (`cargo test --release`).
 #![cfg(all(not(debug_assertions), feature = "ml-dsa-87"))]
 
-use std::alloc::{alloc, dealloc, Layout};
-
 use qp_rusty_crystals_hdwallet::{SensitiveBytes32, WormholePair};
+use qp_rusty_crystals_test_utils::probe_stack_for;
 
-const PAINT: u8 = 0xAA;
 // The wormhole path only computes Poseidon hashes; 1 MiB is ample.
 const STACK_BYTES: usize = 1024 * 1024;
-const ALIGN: usize = 4096;
-
-/// Run `f` on a freshly painted stack buffer, then scan the buffer for
-/// `pattern` and return whether it was found.
-fn probe_stack_for<F: FnOnce()>(pattern: &[u8], f: F) -> bool {
-	let layout = Layout::from_size_align(STACK_BYTES, ALIGN).unwrap();
-	unsafe {
-		let base = alloc(layout);
-		assert!(!base.is_null(), "probe stack allocation failed");
-		std::ptr::write_bytes(base, PAINT, STACK_BYTES);
-
-		psm::on_stack(base, STACK_BYTES, f);
-
-		let region = std::slice::from_raw_parts(base, STACK_BYTES);
-		let offsets: Vec<usize> = region
-			.windows(pattern.len())
-			.enumerate()
-			.filter(|(_, w)| w == &pattern)
-			.map(|(i, _)| i)
-			.collect();
-		eprintln!("probe: {} match(es) at offsets {:?}", offsets.len(), offsets);
-		let found = !offsets.is_empty();
-		dealloc(base, layout);
-		found
-	}
-}
 
 /// Distinctive ASCII seed so a match can only come from a verbatim copy.
 const SEED: [u8; 32] = *b"wormhole-probe-seed-0123456789AB";
@@ -83,7 +55,7 @@ fn wormhole_secret_never_survives_pair_drop() {
 
 	// Sanity: the technique detects an unwiped copy.
 	assert!(
-		probe_stack_for(&secret, || {
+		probe_stack_for(STACK_BYTES, &secret, || {
 			let leaked: [u8; 32] = secret;
 			core::hint::black_box(&leaked);
 		}),
@@ -92,7 +64,7 @@ fn wormhole_secret_never_survives_pair_drop() {
 
 	// Generate a pair and drop it inside the probed region. The pair's own
 	// wrapper zeroizes the live secret on drop; nothing else may retain it.
-	let leaked = probe_stack_for(&secret, || {
+	let leaked = probe_stack_for(STACK_BYTES, &secret, || {
 		let mut seed = SensitiveBytes32::zeroed();
 		seed.as_mut_bytes().copy_from_slice(&SEED);
 		let pair = WormholePair::generate_new(&mut seed);

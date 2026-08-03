@@ -36,38 +36,11 @@
 //! which no source-level fix can wipe.
 #![cfg(not(debug_assertions))]
 
-use std::alloc::{alloc, dealloc, Layout};
+use qp_rusty_crystals_test_utils::probe_stack_for;
 
-const PAINT: u8 = 0xAA;
 // 4 MiB: comfortably above the keygen/signing frames (matrix expansion,
 // NTT chains, rejection-sampling loops).
 const STACK_BYTES: usize = 4 * 1024 * 1024;
-const ALIGN: usize = 4096;
-
-/// Run `f` on a freshly painted stack buffer, then scan the buffer for
-/// `pattern` and return whether it was found.
-fn probe_stack_for<F: FnOnce()>(pattern: &[u8; 32], f: F) -> bool {
-	let layout = Layout::from_size_align(STACK_BYTES, ALIGN).unwrap();
-	unsafe {
-		let base = alloc(layout);
-		assert!(!base.is_null(), "probe stack allocation failed");
-		std::ptr::write_bytes(base, PAINT, STACK_BYTES);
-
-		psm::on_stack(base, STACK_BYTES, f);
-
-		let region = std::slice::from_raw_parts(base, STACK_BYTES);
-		let offsets: Vec<usize> = region
-			.windows(pattern.len())
-			.enumerate()
-			.filter(|(_, w)| w == pattern)
-			.map(|(i, _)| i)
-			.collect();
-		eprintln!("probe: {} match(es) at offsets {:?}", offsets.len(), offsets);
-		let found = !offsets.is_empty();
-		dealloc(base, layout);
-		found
-	}
-}
 
 /// A 32-byte window of the packed secret key. SK layout (identical prefix for
 /// every parameter set): rho (32) || key (32) || tr (64) || s1 || s2 || t0.
@@ -102,7 +75,7 @@ macro_rules! sign_stack_zeroization_tests {
 				// that deliberately leaves K in a dead stack frame must be
 				// seen.
 				assert!(
-					probe_stack_for(&k_pattern, || {
+					probe_stack_for(super::STACK_BYTES, &k_pattern, || {
 						let leaked: [u8; 32] = k_pattern;
 						core::hint::black_box(&leaked);
 					}),
@@ -111,7 +84,7 @@ macro_rules! sign_stack_zeroization_tests {
 
 				// Scenario A: signing must wipe its copy of the signing key K
 				// (copied out of the packed key to derive the mask seed rho').
-				let sign_leaked_k = probe_stack_for(&k_pattern, || {
+				let sign_leaked_k = probe_stack_for(super::STACK_BYTES, &k_pattern, || {
 					let sig = keypair.sign(message, None, None).expect("signing succeeds");
 					core::hint::black_box(&sig);
 				});
@@ -119,7 +92,7 @@ macro_rules! sign_stack_zeroization_tests {
 				// Scenario B: signing reads the packed key through a
 				// reference; no full packed-key copy may be smeared onto the
 				// stack and dropped unwiped.
-				let sign_leaked_s1 = probe_stack_for(&s1_pattern, || {
+				let sign_leaked_s1 = probe_stack_for(super::STACK_BYTES, &s1_pattern, || {
 					let sig = keypair.sign(message, None, None).expect("signing succeeds");
 					core::hint::black_box(&sig);
 				});
@@ -134,20 +107,20 @@ macro_rules! sign_stack_zeroization_tests {
 					let mut generated = Keypair::generate(&mut sensitive);
 					generated.zeroize();
 				};
-				let keygen_leaked_k = probe_stack_for(&k_pattern, keygen_closure);
+				let keygen_leaked_k = probe_stack_for(super::STACK_BYTES, &k_pattern, keygen_closure);
 
 				// Scenario D/E: keygen must not leave the packed-s1 window or
 				// the raw input seed behind either. Fresh runs per pattern
 				// (each needs its own seed holder; generate consumes it).
 				let mut seed_third = SEED;
 				let mut sensitive_third = (&mut seed_third).into();
-				let keygen_leaked_s1 = probe_stack_for(&s1_pattern, || {
+				let keygen_leaked_s1 = probe_stack_for(super::STACK_BYTES, &s1_pattern, || {
 					let mut generated = Keypair::generate(&mut sensitive_third);
 					generated.zeroize();
 				});
 				let mut seed_fourth = SEED;
 				let mut sensitive_fourth = (&mut seed_fourth).into();
-				let keygen_leaked_seed = probe_stack_for(&SEED, || {
+				let keygen_leaked_seed = probe_stack_for(super::STACK_BYTES, &SEED, || {
 					let mut generated = Keypair::generate(&mut sensitive_fourth);
 					generated.zeroize();
 				});

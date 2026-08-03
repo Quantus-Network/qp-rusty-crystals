@@ -26,16 +26,13 @@
 //! source-level fix can wipe.
 #![cfg(not(debug_assertions))]
 
-use std::alloc::{alloc, dealloc, Layout};
-
 use hmac::{Hmac, Mac};
 use qp_rusty_crystals_hdwallet::hderive::{ChildNumber, ExtendedPrivKey};
+use qp_rusty_crystals_test_utils::probe_stack_for_named;
 use sha2::Sha512;
 
-const PAINT: u8 = 0xAA;
 // 4 MiB: comfortably above what a single HMAC-SHA512 derivation step needs.
 const STACK_BYTES: usize = 4 * 1024 * 1024;
-const ALIGN: usize = 4096;
 
 /// HMAC ipad/opad constants (RFC 2104). `Hmac::new_from_slice` leaves
 /// `key ^ OPAD` in its dropped key-block local, so a scan for these XOR
@@ -43,36 +40,6 @@ const ALIGN: usize = 4096;
 /// never appears verbatim.
 const IPAD: u8 = 0x36;
 const OPAD: u8 = 0x5c;
-
-/// Run `f` on a freshly painted stack buffer, then scan the buffer for each
-/// named pattern and return the names of those found.
-fn probe_stack_for<F: FnOnce()>(patterns: &[(&str, [u8; 32])], f: F) -> Vec<String> {
-	let layout = Layout::from_size_align(STACK_BYTES, ALIGN).unwrap();
-	unsafe {
-		let base = alloc(layout);
-		assert!(!base.is_null(), "probe stack allocation failed");
-		std::ptr::write_bytes(base, PAINT, STACK_BYTES);
-
-		psm::on_stack(base, STACK_BYTES, f);
-
-		let region = std::slice::from_raw_parts(base, STACK_BYTES);
-		let mut found = Vec::new();
-		for (name, pattern) in patterns {
-			let offsets: Vec<usize> = region
-				.windows(pattern.len())
-				.enumerate()
-				.filter(|(_, w)| w == pattern)
-				.map(|(i, _)| i)
-				.collect();
-			if !offsets.is_empty() {
-				eprintln!("probe: pattern {name:?} found at offsets {offsets:?}");
-				found.push(name.to_string());
-			}
-		}
-		dealloc(base, layout);
-		found
-	}
-}
 
 /// Distinctive 64-byte seed; each 32-byte half is a scan pattern. ASCII, so a
 /// match cannot come from the byte-swapped u64 words inside the SHA-512
@@ -103,12 +70,10 @@ fn hderive_leaves_no_secret_material_on_the_stack() {
 
 	// Sanity: the technique detects an unwiped copy. A closure that
 	// deliberately leaves the seed in a dead stack frame must be seen.
-	let seed_patterns = [
-		("seed[0..32]", SEED[..32].try_into().unwrap()),
-		("seed[32..64]", SEED[32..].try_into().unwrap()),
-	];
+	let seed_patterns: [(&str, &[u8]); 2] =
+		[("seed[0..32]", &SEED[..32]), ("seed[32..64]", &SEED[32..])];
 	assert!(
-		!probe_stack_for(&seed_patterns, || {
+		!probe_stack_for_named(STACK_BYTES, &seed_patterns, || {
 			let leaked: [u8; 64] = SEED;
 			core::hint::black_box(&leaked);
 		})
@@ -119,7 +84,7 @@ fn hderive_leaves_no_secret_material_on_the_stack() {
 	// Scenario A: master derivation. The seed is fed into the HMAC step and
 	// must not survive anywhere on the stack once the derived key (which is
 	// self-zeroizing) has been dropped.
-	let derive_leaks = probe_stack_for(&seed_patterns, || {
+	let derive_leaks = probe_stack_for_named(STACK_BYTES, &seed_patterns, || {
 		let mut key = ExtendedPrivKey::zeroed();
 		ExtendedPrivKey::derive(&SEED, "m", &mut key).unwrap();
 		core::hint::black_box(&key);
@@ -128,14 +93,16 @@ fn hderive_leaves_no_secret_material_on_the_stack() {
 	// Scenario B: child derivation. The parent secret key is the HMAC message
 	// and the parent chain code is the HMAC key; neither the raw values nor
 	// their ipad/opad-XORed key blocks may survive on the stack.
-	let child_patterns = [
-		("parent secret_key", master_secret),
-		("parent chain_code", master_chain),
-		("parent chain_code ^ ipad", xor_pattern(&master_chain, IPAD)),
-		("parent chain_code ^ opad", xor_pattern(&master_chain, OPAD)),
+	let chain_ipad = xor_pattern(&master_chain, IPAD);
+	let chain_opad = xor_pattern(&master_chain, OPAD);
+	let child_patterns: [(&str, &[u8]); 4] = [
+		("parent secret_key", &master_secret),
+		("parent chain_code", &master_chain),
+		("parent chain_code ^ ipad", &chain_ipad),
+		("parent chain_code ^ opad", &chain_opad),
 	];
 	let child_number: ChildNumber = "0'".parse().unwrap();
-	let child_leaks = probe_stack_for(&child_patterns, || {
+	let child_leaks = probe_stack_for_named(STACK_BYTES, &child_patterns, || {
 		let mut key = ExtendedPrivKey::zeroed();
 		ExtendedPrivKey::derive(&SEED, "m", &mut key).unwrap();
 		key.child_in_place(child_number);
@@ -173,12 +140,10 @@ fn derive_and_secret_access_leave_no_unwiped_copies() {
 	let mut reference: Hmac<Sha512> = Hmac::new_from_slice(b"Dilithium seed").unwrap();
 	reference.update(&SEED);
 	let reference = reference.finalize().into_bytes();
-	let patterns = [
-		("master secret_key", reference[..32].try_into().unwrap()),
-		("master chain_code", reference[32..].try_into().unwrap()),
-	];
+	let patterns: [(&str, &[u8]); 2] =
+		[("master secret_key", &reference[..32]), ("master chain_code", &reference[32..])];
 
-	let leaks = probe_stack_for(&patterns, || {
+	let leaks = probe_stack_for_named(STACK_BYTES, &patterns, || {
 		let mut key = ExtendedPrivKey::zeroed();
 		ExtendedPrivKey::derive(&SEED, "m", &mut key).unwrap();
 		let secret = key.secret();

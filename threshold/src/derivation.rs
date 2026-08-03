@@ -279,7 +279,8 @@ mod tests {
 	/// contribution for any tweak. Painted-stack technique as in the
 	/// `*_stack_zeroization` integration tests; release-only because the
 	/// assertion is about codegen.
-	// Unsafe is required for the raw painted-stack buffer; scoped to this
+	// Local probe copy: unit tests cannot take a `dev-dependency`, so this
+	// cannot call `qp_rusty_crystals_test_utils`. Unsafe is scoped to this
 	// test only (the crate otherwise denies unsafe_code).
 	#[allow(unsafe_code)]
 	#[cfg(not(debug_assertions))]

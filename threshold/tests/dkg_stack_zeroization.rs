@@ -24,46 +24,20 @@
 //! assertion is only meaningful once those are elided.
 #![cfg(not(debug_assertions))]
 
-use std::{
-	alloc::{alloc, dealloc, Layout},
-	collections::BTreeMap,
-};
+mod common;
+
+use std::collections::BTreeMap;
 
 use qp_rusty_crystals_threshold::{
 	keygen::dkg::{Dkg, DkgAction, DkgConfig, TranscriptSigner},
 	ThresholdConfig,
 };
 
-const PAINT: u8 = 0xAA;
+use common::probe_stack_for;
+
 // 16 MiB: the DKG state machine drives keygen-scale work (K x L matrix
 // expansion, NTT chains) for three parties plus serialization buffers.
 const STACK_BYTES: usize = 16 * 1024 * 1024;
-const ALIGN: usize = 4096;
-
-/// Run `f` on a freshly painted stack buffer, then scan the buffer for
-/// `pattern` and return whether it was found.
-fn probe_stack_for<F: FnOnce()>(pattern: &[u8; 32], f: F) -> bool {
-	let layout = Layout::from_size_align(STACK_BYTES, ALIGN).unwrap();
-	unsafe {
-		let base = alloc(layout);
-		assert!(!base.is_null(), "probe stack allocation failed");
-		std::ptr::write_bytes(base, PAINT, STACK_BYTES);
-
-		psm::on_stack(base, STACK_BYTES, f);
-
-		let region = std::slice::from_raw_parts(base, STACK_BYTES);
-		let offsets: Vec<usize> = region
-			.windows(pattern.len())
-			.enumerate()
-			.filter(|(_, w)| w == pattern)
-			.map(|(i, _)| i)
-			.collect();
-		eprintln!("probe: {} match(es) at offsets {:?}", offsets.len(), offsets);
-		let found = !offsets.is_empty();
-		dealloc(base, layout);
-		found
-	}
-}
 
 /// Simple test signer for DKG transcript signing.
 #[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
@@ -185,7 +159,7 @@ fn dkg_leaves_no_shared_secret_copies_on_the_stack() {
 	// Sanity: the technique detects an unwiped copy. A closure that
 	// deliberately leaves K_S in a dead stack frame must be seen.
 	assert!(
-		probe_stack_for(&pattern, || {
+		probe_stack_for(STACK_BYTES, &pattern, || {
 			let leaked: [u8; 32] = pattern;
 			core::hint::black_box(&leaked);
 		}),
@@ -196,7 +170,7 @@ fn dkg_leaves_no_shared_secret_copies_on_the_stack() {
 	// stack. Every legitimate copy of K_S lives in heap-backed state that
 	// is wiped on drop (verified by heap_zeroization); anything left in the
 	// painted region is a stack copy the protocol failed to wipe.
-	let leaked = probe_stack_for(&pattern, || {
+	let leaked = probe_stack_for(STACK_BYTES, &pattern, || {
 		let _ = run_local_dkg_2of3(false);
 	});
 	assert!(!leaked, "the DKG left a plaintext subset shared secret K_S in stack memory");

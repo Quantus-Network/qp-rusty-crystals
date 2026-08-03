@@ -20,42 +20,14 @@
 //! source-level fix can wipe.
 #![cfg(not(debug_assertions))]
 
-use std::alloc::{alloc, dealloc, Layout};
-
 use bip39::Language;
 use qp_rusty_crystals_hdwallet::{
 	generate_mnemonic, mnemonic_to_seed, SensitiveBytes32, SensitiveBytes64,
 };
+use qp_rusty_crystals_test_utils::probe_stack_for;
 
-const PAINT: u8 = 0xAA;
 // 4 MiB: comfortably above what PBKDF2 seed stretching needs.
 const STACK_BYTES: usize = 4 * 1024 * 1024;
-const ALIGN: usize = 4096;
-
-/// Run `f` on a freshly painted stack buffer, then scan the buffer for
-/// `pattern` and return whether it was found.
-fn probe_stack_for<F: FnOnce()>(pattern: &[u8], f: F) -> bool {
-	let layout = Layout::from_size_align(STACK_BYTES, ALIGN).unwrap();
-	unsafe {
-		let base = alloc(layout);
-		assert!(!base.is_null(), "probe stack allocation failed");
-		std::ptr::write_bytes(base, PAINT, STACK_BYTES);
-
-		psm::on_stack(base, STACK_BYTES, f);
-
-		let region = std::slice::from_raw_parts(base, STACK_BYTES);
-		let offsets: Vec<usize> = region
-			.windows(pattern.len())
-			.enumerate()
-			.filter(|(_, w)| w == &pattern)
-			.map(|(i, _)| i)
-			.collect();
-		eprintln!("probe: {} match(es) at offsets {:?}", offsets.len(), offsets);
-		let found = !offsets.is_empty();
-		dealloc(base, layout);
-		found
-	}
-}
 
 /// The in-memory image of `Mnemonic`'s `words: [u16; 24]` buffer for `phrase`:
 /// each word's index into the English word list, in native endianness.
@@ -84,7 +56,7 @@ fn mnemonic_word_indices_never_survive_on_the_stack() {
 	// Sanity: the technique detects an unwiped Mnemonic. A closure that
 	// parses one and skips its destructor must be seen.
 	assert!(
-		probe_stack_for(&pattern, || {
+		probe_stack_for(STACK_BYTES, &pattern, || {
 			let mnemonic = bip39::Mnemonic::parse_in_normalized(Language::English, PHRASE).unwrap();
 			core::mem::forget(mnemonic);
 		}),
@@ -94,7 +66,7 @@ fn mnemonic_word_indices_never_survive_on_the_stack() {
 	// Scenario A: seed stretching. The Mnemonic parsed inside is dropped
 	// after PBKDF2; its word-index buffer must not survive.
 	let phrase = PHRASE.to_string();
-	let seed_stretch_leaked = probe_stack_for(&pattern, move || {
+	let seed_stretch_leaked = probe_stack_for(STACK_BYTES, &pattern, move || {
 		let mut seed = SensitiveBytes64::zeroed();
 		mnemonic_to_seed(phrase, None, &mut seed).unwrap();
 		core::hint::black_box(&seed);
@@ -107,7 +79,7 @@ fn mnemonic_word_indices_never_survive_on_the_stack() {
 	let entropy = [0x27u8; 32];
 	let generated = generate_mnemonic(SensitiveBytes32::from(&mut { entropy })).unwrap();
 	let generated_pattern = word_index_pattern(&generated);
-	let generation_leaked = probe_stack_for(&generated_pattern, || {
+	let generation_leaked = probe_stack_for(STACK_BYTES, &generated_pattern, || {
 		let phrase = generate_mnemonic(SensitiveBytes32::from(&mut { entropy })).unwrap();
 		core::hint::black_box(&phrase);
 	});
@@ -143,7 +115,7 @@ fn seed_produced_by_mnemonic_to_seed_wipes_itself_on_drop() {
 	let expected = *expected_holder.as_bytes();
 
 	let phrase = PHRASE.to_string();
-	let leaked = probe_stack_for(&expected[..], move || {
+	let leaked = probe_stack_for(STACK_BYTES, &expected[..], move || {
 		let mut seed = SensitiveBytes64::zeroed();
 		mnemonic_to_seed(phrase, None, &mut seed).unwrap();
 		core::hint::black_box(&seed);

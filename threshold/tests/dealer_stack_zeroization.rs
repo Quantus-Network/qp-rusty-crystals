@@ -26,63 +26,16 @@
 //! assertion is only meaningful once those are elided.
 #![cfg(not(debug_assertions))]
 
-use std::alloc::{alloc, dealloc, Layout};
+mod common;
 
-use qp_rusty_crystals_dilithium::fips202;
 use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig};
 use zeroize::Zeroize;
 
-const PAINT: u8 = 0xAA;
+use common::{dealer_party0_seed_pattern, probe_stack_for};
+
 // 4 MiB: comfortably above the dealer's frame (matrix A alone is K x L
 // polynomials, ~57 KiB, plus the polyvec locals).
 const STACK_BYTES: usize = 4 * 1024 * 1024;
-const ALIGN: usize = 4096;
-
-/// Run `f` on a freshly painted stack buffer, then scan the buffer for
-/// `pattern` and return whether it was found.
-fn probe_stack_for<F: FnOnce()>(pattern: &[u8; 32], f: F) -> bool {
-	let layout = Layout::from_size_align(STACK_BYTES, ALIGN).unwrap();
-	unsafe {
-		let base = alloc(layout);
-		assert!(!base.is_null(), "probe stack allocation failed");
-		std::ptr::write_bytes(base, PAINT, STACK_BYTES);
-
-		psm::on_stack(base, STACK_BYTES, f);
-
-		let region = std::slice::from_raw_parts(base, STACK_BYTES);
-		let offsets: Vec<usize> = region
-			.windows(pattern.len())
-			.enumerate()
-			.filter(|(_, w)| w == pattern)
-			.map(|(i, _)| i)
-			.collect();
-		eprintln!("probe: {} match(es) at offsets {:?}", offsets.len(), offsets);
-		let found = !offsets.is_empty();
-		dealloc(base, layout);
-		found
-	}
-}
-
-/// The 32-byte per-party key seed the dealer squeezes for party 0, recomputed
-/// through the public fips202 API in the exact absorb/squeeze order of
-/// `generate_with_dealer`: absorb the dealer seed, `[K, L]`, and the `(t, n)`
-/// policy binding, then squeeze rho (public matrix seed, discarded) followed
-/// by party 0's key seed.
-fn dealer_party0_seed_pattern(seed: &[u8; 32], threshold: u32, parties: u32) -> [u8; 32] {
-	use qp_rusty_crystals_threshold::params::{K, L};
-
-	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, seed);
-	fips202::shake256_absorb(&mut state, &[K as u8, L as u8]);
-	fips202::shake256_absorb(&mut state, &threshold.to_le_bytes());
-	fips202::shake256_absorb(&mut state, &parties.to_le_bytes());
-	fips202::shake256_finalize(&mut state);
-	let mut rho = [0u8; 32];
-	fips202::shake256_squeeze(&mut rho, &mut state);
-	let mut key0 = [0u8; 32];
-	fips202::shake256_squeeze(&mut key0, &mut state);
-	key0
-}
 
 #[test]
 fn dealer_keygen_leaves_no_party_seed_copies_on_the_stack() {
@@ -92,7 +45,7 @@ fn dealer_keygen_leaves_no_party_seed_copies_on_the_stack() {
 	// Sanity: the technique detects an unwiped copy. A closure that
 	// deliberately leaves the seed in a dead stack frame must be seen.
 	assert!(
-		probe_stack_for(&pattern, || {
+		probe_stack_for(STACK_BYTES, &pattern, || {
 			let leaked: [u8; 32] = pattern;
 			core::hint::black_box(&leaked);
 		}),
@@ -104,7 +57,7 @@ fn dealer_keygen_leaves_no_party_seed_copies_on_the_stack() {
 	// are wiped in place through a reference (so the probe itself never moves
 	// a secret and cannot smear its own copies around). Anything left in the
 	// painted region afterwards is a stack copy the dealer failed to wipe.
-	let leaked = probe_stack_for(&pattern, || {
+	let leaked = probe_stack_for(STACK_BYTES, &pattern, || {
 		let config = ThresholdConfig::new(2, 3).expect("valid config");
 		let (_pk, mut shares) =
 			generate_with_dealer(&dealer_seed, config).expect("keygen succeeds");

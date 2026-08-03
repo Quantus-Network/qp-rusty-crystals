@@ -823,6 +823,7 @@ dependencies = [
  "dudect-bencher",
  "hex",
  "psm",
+ "qp-rusty-crystals-test-utils",
  "rand",
  "serde_json",
  "zeroize",
@@ -840,6 +841,7 @@ dependencies = [
  "psm",
  "qp-poseidon-core",
  "qp-rusty-crystals-dilithium",
+ "qp-rusty-crystals-test-utils",
  "rand",
  "rand_core",
  "serde",
@@ -848,6 +850,13 @@ dependencies = [
  "thiserror",
  "unicode-normalization",
  "zeroize",
+]
+
+[[package]]
+name = "qp-rusty-crystals-test-utils"
+version = "0.1.0"
+dependencies = [
+ "psm",
 ]
 
 [[package]]
@@ -862,6 +871,7 @@ dependencies = [
  "log",
  "psm",
  "qp-rusty-crystals-dilithium",
+ "qp-rusty-crystals-test-utils",
  "rand",
  "zeroize",
 ]

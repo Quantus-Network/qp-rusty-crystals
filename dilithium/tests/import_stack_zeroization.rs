@@ -37,37 +37,10 @@
 //! zero-copy assertion is only meaningful once those are elided.
 #![cfg(not(debug_assertions))]
 
-use std::alloc::{alloc, dealloc, Layout};
+use qp_rusty_crystals_test_utils::probe_stack_for;
 
-const PAINT: u8 = 0xAA;
 // 4 MiB: comfortably above the keygen-scale derivation the import paths run.
 const STACK_BYTES: usize = 4 * 1024 * 1024;
-const ALIGN: usize = 4096;
-
-/// Run `f` on a freshly painted stack buffer, then scan the buffer for
-/// `pattern` and return whether it was found.
-fn probe_stack_for<F: FnOnce()>(pattern: &[u8; 32], f: F) -> bool {
-	let layout = Layout::from_size_align(STACK_BYTES, ALIGN).unwrap();
-	unsafe {
-		let base = alloc(layout);
-		assert!(!base.is_null(), "probe stack allocation failed");
-		std::ptr::write_bytes(base, PAINT, STACK_BYTES);
-
-		psm::on_stack(base, STACK_BYTES, f);
-
-		let region = std::slice::from_raw_parts(base, STACK_BYTES);
-		let offsets: Vec<usize> = region
-			.windows(pattern.len())
-			.enumerate()
-			.filter(|(_, w)| w == pattern)
-			.map(|(i, _)| i)
-			.collect();
-		eprintln!("probe: {} match(es) at offsets {:?}", offsets.len(), offsets);
-		let found = !offsets.is_empty();
-		dealloc(base, layout);
-		found
-	}
-}
 
 /// A distinctive 32-byte window from the packed s1 region of the secret key.
 /// SK layout (identical prefix for every parameter set): rho (32) || key (32)
@@ -98,7 +71,7 @@ macro_rules! import_stack_zeroization_tests {
 				// deliberately leaves the secret key in a dead stack frame must
 				// be seen.
 				assert!(
-					probe_stack_for(&pattern, || {
+					probe_stack_for(super::STACK_BYTES, &pattern, || {
 						let leaked: [u8; SECRETKEYBYTES] = *sk_bytes;
 						core::hint::black_box(&leaked);
 					}),
@@ -110,7 +83,7 @@ macro_rules! import_stack_zeroization_tests {
 				// never moves the secret and cannot smear its own copies
 				// around); anything left afterwards is a copy the import path
 				// failed to wipe.
-				let keypair_import_leaked = probe_stack_for(&pattern, || {
+				let keypair_import_leaked = probe_stack_for(super::STACK_BYTES, &pattern, || {
 					let mut imported = Keypair::from_bytes(kp_bytes.as_slice());
 					if let Ok(kp) = imported.as_mut() {
 						kp.zeroize();
@@ -118,7 +91,7 @@ macro_rules! import_stack_zeroization_tests {
 				});
 
 				// Scenario B: SecretKey::from_bytes, same contract.
-				let secret_key_import_leaked = probe_stack_for(&pattern, || {
+				let secret_key_import_leaked = probe_stack_for(super::STACK_BYTES, &pattern, || {
 					let mut imported = SecretKey::from_bytes(sk_bytes.as_slice());
 					if let Ok(sk) = imported.as_mut() {
 						sk.zeroize();
@@ -131,13 +104,13 @@ macro_rules! import_stack_zeroization_tests {
 				// hygiene would — must leave nothing. Any surviving match is
 				// either an internal temporary the library dropped unwiped or
 				// a caller-side copy the API failed to self-wipe.
-				let serialize_leaked = probe_stack_for(&pattern, || {
+				let serialize_leaked = probe_stack_for(super::STACK_BYTES, &pattern, || {
 					let serialized = keypair.to_bytes();
 					core::hint::black_box(&serialized);
 				});
 
 				// Scenario D: SecretKey::to_bytes, same contract as C.
-				let sk_serialize_leaked = probe_stack_for(&pattern, || {
+				let sk_serialize_leaked = probe_stack_for(super::STACK_BYTES, &pattern, || {
 					let serialized = keypair.secret().to_bytes();
 					core::hint::black_box(&serialized);
 				});

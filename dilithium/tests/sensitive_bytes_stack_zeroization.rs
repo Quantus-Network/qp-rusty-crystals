@@ -22,48 +22,20 @@
 //! can wipe.
 #![cfg(not(debug_assertions))]
 
-use std::alloc::{alloc, dealloc, Layout};
-
 use qp_rusty_crystals_dilithium::{SensitiveBytes32, SensitiveBytes64};
+use qp_rusty_crystals_test_utils::probe_stack_for;
 use zeroize::Zeroize;
 
-const PAINT: u8 = 0xAA;
 const STACK_BYTES: usize = 1024 * 1024;
-const ALIGN: usize = 4096;
 
 const PATTERN32: [u8; 32] = *b"sensitive-bytes-32-stack-pattern";
 const PATTERN64: [u8; 64] = *b"sensitive-bytes-64-stack-residue-probe-pattern-unique-abcdefghij";
-
-/// Run `f` on a freshly painted stack buffer, then scan the buffer for
-/// `pattern` and return whether it was found.
-fn probe_stack_for<F: FnOnce()>(pattern: &[u8], f: F) -> bool {
-	let layout = Layout::from_size_align(STACK_BYTES, ALIGN).unwrap();
-	unsafe {
-		let base = alloc(layout);
-		assert!(!base.is_null(), "probe stack allocation failed");
-		std::ptr::write_bytes(base, PAINT, STACK_BYTES);
-
-		psm::on_stack(base, STACK_BYTES, f);
-
-		let region = std::slice::from_raw_parts(base, STACK_BYTES);
-		let offsets: Vec<usize> = region
-			.windows(pattern.len())
-			.enumerate()
-			.filter(|(_, w)| *w == pattern)
-			.map(|(i, _)| i)
-			.collect();
-		eprintln!("probe: {} match(es) at offsets {:?}", offsets.len(), offsets);
-		let found = !offsets.is_empty();
-		dealloc(base, layout);
-		found
-	}
-}
 
 #[test]
 fn sensitive_bytes_constructors_leave_no_secret_copies_on_the_stack() {
 	// Sanity: the technique detects an unwiped copy.
 	assert!(
-		probe_stack_for(&PATTERN32, || {
+		probe_stack_for(STACK_BYTES, &PATTERN32, || {
 			let leaked = PATTERN32;
 			core::hint::black_box(&leaked);
 		}),
@@ -74,28 +46,28 @@ fn sensitive_bytes_constructors_leave_no_secret_copies_on_the_stack() {
 	// them by `&mut`, so the harness never places the pattern on the probed
 	// stack. Each constructor zeroizes its source, so refill before reuse.
 	let mut src32 = PATTERN32;
-	let new32_leaked = probe_stack_for(&PATTERN32, || {
+	let new32_leaked = probe_stack_for(STACK_BYTES, &PATTERN32, || {
 		let mut w = SensitiveBytes32::new(&mut src32);
 		w.as_mut_bytes().zeroize();
 		core::hint::black_box(&w);
 	});
 
 	let mut src32 = PATTERN32;
-	let from32_leaked = probe_stack_for(&PATTERN32, || {
+	let from32_leaked = probe_stack_for(STACK_BYTES, &PATTERN32, || {
 		let mut w = SensitiveBytes32::from(&mut src32);
 		w.as_mut_bytes().zeroize();
 		core::hint::black_box(&w);
 	});
 
 	let mut src64 = PATTERN64;
-	let new64_leaked = probe_stack_for(&PATTERN64, || {
+	let new64_leaked = probe_stack_for(STACK_BYTES, &PATTERN64, || {
 		let mut w = SensitiveBytes64::new(&mut src64);
 		w.as_mut_bytes().zeroize();
 		core::hint::black_box(&w);
 	});
 
 	let mut src64 = PATTERN64;
-	let from64_leaked = probe_stack_for(&PATTERN64, || {
+	let from64_leaked = probe_stack_for(STACK_BYTES, &PATTERN64, || {
 		let mut w = SensitiveBytes64::from(&mut src64);
 		w.as_mut_bytes().zeroize();
 		core::hint::black_box(&w);
