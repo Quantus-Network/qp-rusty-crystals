@@ -819,7 +819,7 @@ checksum = "5872607e25ea4ee5fb37e64bf1462168e1a36a4e719cdc8a105533c708253918"
 
 [[package]]
 name = "qp-rusty-crystals-dilithium"
-version = "4.0.0"
+version = "4.1.0"
 dependencies = [
  "criterion",
  "dudect-bencher",
