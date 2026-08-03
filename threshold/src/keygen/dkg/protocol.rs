@@ -1922,6 +1922,24 @@ fn verify_party_broadcast<S: TranscriptSigner>(
 			continue;
 		}
 
+		// Skip valid subsets this party does not lead (security review): only
+		// the leader's PK is ever aggregated — collect_and_verify_all_partial_pks
+		// drops non-leader PKs right after this returns — and a sender's
+		// Round 3 legitimately carries commitments only for its led subsets,
+		// so "verifying" a non-led entry could only fail with MissingData.
+		// Without this filter, a malicious party could abort the session
+		// after all four rounds by appending one extra valid subset mask to
+		// its otherwise-honest broadcast. Ignore the entry instead, exactly
+		// as the aggregation step would.
+		if config.get_leader(subset) != Some(party_id) {
+			log::warn!(
+				"DKG: Ignoring partial PK for non-led subset {:b} from party {} during Round 4 verification",
+				subset,
+				party_id
+			);
+			continue;
+		}
+
 		verify_partial_pk_commitment(
 			ssid,
 			shared_secrets,
@@ -4346,6 +4364,175 @@ mod tests {
 		// 2. All parties get the same public key
 		// 3. The leadership logic is correct
 		// The code now filters out non-leader PKs with a warning log.
+	}
+
+	/// A Round 4 broadcast that includes a partial PK for a *valid* subset the
+	/// sender does not lead must not abort the session. Non-leader PKs are
+	/// never aggregated (collect_and_verify_all_partial_pks drops them), and a
+	/// sender's Round 3 legitimately carries commitments only for its led
+	/// subsets — so verifying such an entry can only fail with MissingData.
+	/// Without the leader filter in verify_party_broadcast, a malicious party
+	/// could kill the session after all four rounds by appending one extra
+	/// valid subset mask to its otherwise-honest broadcast.
+	#[test]
+	fn test_extra_valid_nonled_subset_in_round4_does_not_abort() {
+		// 2-of-3: subsets 0b011 (leader 0), 0b101 (leader 0), 0b110 (leader 1).
+		let signers: Vec<TestSigner> = (0..3).map(|id| TestSigner { id }).collect();
+		let seed = [77u8; 32];
+
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = (0..3).collect();
+
+		let mut pk_map: BTreeMap<ParticipantId, u32> = BTreeMap::new();
+		for i in 0..3u32 {
+			pk_map.insert(i as ParticipantId, i);
+		}
+
+		let mut dkgs: Vec<Dkg<TestSigner>> = signers
+			.into_iter()
+			.enumerate()
+			.map(|(i, signer)| {
+				let config = DkgConfig::new(
+					threshold_config,
+					i as ParticipantId,
+					participants.clone(),
+					signer,
+					pk_map.clone(),
+				)
+				.unwrap();
+				Dkg::new(config, seed, &TEST_SESSION_NONCE)
+			})
+			.collect();
+
+		// Run the protocol, holding back party 1's Round 4 broadcast to party 0
+		// so we can deliver a tampered version instead.
+		let mut pending_messages: Vec<Vec<(ParticipantId, Vec<u8>)>> = vec![Vec::new(); 3];
+		let mut intercepted_round4: Option<Round4Broadcast> = None;
+
+		'outer: for _ in 0..100 {
+			for party_id in 0..3 {
+				let messages = mem::take(&mut pending_messages[party_id]);
+				for (from, data) in messages {
+					if party_id == 0 && from == 1 {
+						if let Ok(DkgMessage::Round4Broadcast(r4)) =
+							borsh::from_slice::<DkgMessage>(&data)
+						{
+							intercepted_round4 = Some(r4);
+							continue;
+						}
+					}
+					dkgs[party_id].message(from, data).unwrap();
+				}
+			}
+
+			for (party_id, dkg) in dkgs.iter_mut().enumerate() {
+				match dkg.poke().unwrap() {
+					DkgAction::SendMany(data) => {
+						for (other, pending) in pending_messages.iter_mut().enumerate() {
+							if other != party_id {
+								pending.push((party_id as ParticipantId, data.clone()));
+							}
+						}
+					},
+					DkgAction::SendPrivate(to, data) => {
+						pending_messages[to as usize]
+							.push((party_id as ParticipantId, data.to_vec()));
+					},
+					DkgAction::Wait => {},
+					DkgAction::Return(_) => {},
+				}
+			}
+
+			if intercepted_round4.is_some() &&
+				dkgs[0].state.phase == DkgPhase::Round4 &&
+				dkgs[0].state.broadcast_sent
+			{
+				break 'outer;
+			}
+		}
+
+		let honest_r4 = intercepted_round4.expect("should have intercepted party 1's Round 4");
+
+		// Party 1 honestly leads only subset 0b110. Append its genuine PK
+		// under subset 0b011 as well — a valid subset led by party 0, so
+		// party 1's Round 3 has no commitment for it.
+		let mut tampered_pks = honest_r4.partial_public_keys.clone();
+		let donor = tampered_pks.get(&0b110).expect("party 1 leads subset 0b110").clone();
+		tampered_pks
+			.insert(0b011, PartialPublicKey { subset_mask: 0b011, t: donor.t });
+
+		// Re-sign the tampered PK set with party 1's key so the transcript
+		// signature check passes (a malicious party 1 signs whatever it sends).
+		let transcript_hash = {
+			let round1_broadcasts = dkgs[0].state.round1_broadcasts.as_ref().unwrap();
+			let round2_broadcasts = dkgs[0].state.round2_broadcasts.as_ref().unwrap();
+			let round3_broadcasts = dkgs[0].state.round3_broadcasts.as_ref().unwrap();
+			compute_transcript_hash(
+				&dkgs[0].ssid,
+				round1_broadcasts,
+				round2_broadcasts,
+				round3_broadcasts,
+			)
+		};
+		let partial_output_hash = compute_partial_output_hash(&tampered_pks);
+		let signing_message = compute_signing_message(&transcript_hash, &partial_output_hash);
+		let signature = TestSigner { id: 1 }.sign(&signing_message);
+
+		let tampered_r4 = Round4Broadcast {
+			ssid: honest_r4.ssid,
+			party_id: 1,
+			partial_public_keys: tampered_pks,
+			transcript_signature: signature,
+		};
+		let tampered_data = borsh::to_vec(&DkgMessage::Round4Broadcast(tampered_r4)).unwrap();
+		dkgs[0].message(1, tampered_data).unwrap();
+
+		// The extra non-led entry must be ignored, not abort the session.
+		dkgs[0]
+			.complete()
+			.expect("extra valid-but-non-led subset in Round 4 must not abort the DKG");
+		let output = dkgs[0].state.output.take().expect("completed DKG must have an output");
+
+		// The aggregated key must come from the real leaders' PKs only: it must
+		// match what the untampered parties compute.
+		let mut outputs: Vec<Option<DkgOutput>> = vec![None; 3];
+		for _ in 0..50 {
+			for party_id in 0..3 {
+				let messages = mem::take(&mut pending_messages[party_id]);
+				for (from, data) in messages {
+					dkgs[party_id].message(from, data).unwrap();
+				}
+			}
+			for party_id in 1..3 {
+				if outputs[party_id].is_some() {
+					continue;
+				}
+				match dkgs[party_id].poke().unwrap() {
+					DkgAction::Return(out) => outputs[party_id] = Some(*out),
+					DkgAction::SendMany(data) => {
+						for (other, pending) in pending_messages.iter_mut().enumerate() {
+							if other != party_id {
+								pending.push((party_id as ParticipantId, data.clone()));
+							}
+						}
+					},
+					DkgAction::SendPrivate(to, data) => {
+						pending_messages[to as usize]
+							.push((party_id as ParticipantId, data.to_vec()));
+					},
+					_ => {},
+				}
+			}
+			if outputs[1].is_some() && outputs[2].is_some() {
+				break;
+			}
+		}
+		let out1 = outputs[1].take().expect("party 1 should complete");
+		assert_eq!(
+			output.public_key.as_bytes(),
+			out1.public_key.as_bytes(),
+			"tampered view must still aggregate the same public key as honest parties"
+		);
 	}
 
 	#[test]
