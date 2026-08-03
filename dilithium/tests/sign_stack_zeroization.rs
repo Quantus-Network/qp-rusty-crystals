@@ -17,11 +17,10 @@
 //! we own, so the read is sound — for distinctive 32-byte windows of the
 //! secret key. Scanned windows:
 //!
-//! - `K` at offset 64..96 of the packed key (rho || key || tr || s1 ...):
-//!   high-entropy XOF output that the signing path must copy to derive ρ'.
-//! - the packed-s1 window at 128..160: signing unpacks the key through a
-//!   reference, so this window appearing on the stack would mean a full
-//!   packed-key copy was smeared and dropped unwiped.
+//! - `K` at offset 64..96 of the packed key (rho || key || tr || s1 ...): high-entropy XOF output
+//!   that the signing path must copy to derive ρ'.
+//! - the packed-s1 window at 128..160: signing unpacks the key through a reference, so this window
+//!   appearing on the stack would mean a full packed-key copy was smeared and dropped unwiped.
 //! - the keygen input seed, which deterministically derives the entire key.
 //!
 //! Key generation is seed-deterministic, so the reference keypair generated
@@ -107,7 +106,8 @@ macro_rules! sign_stack_zeroization_tests {
 					let mut generated = Keypair::generate(&mut sensitive);
 					generated.zeroize();
 				};
-				let keygen_leaked_k = probe_stack_for(super::STACK_BYTES, &k_pattern, keygen_closure);
+				let keygen_leaked_k =
+					probe_stack_for(super::STACK_BYTES, &k_pattern, keygen_closure);
 
 				// Scenario D/E: keygen must not leave the packed-s1 window or
 				// the raw input seed behind either. Fresh runs per pattern

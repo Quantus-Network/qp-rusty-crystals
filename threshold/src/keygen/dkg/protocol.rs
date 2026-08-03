@@ -4458,8 +4458,7 @@ mod tests {
 		// party 1's Round 3 has no commitment for it.
 		let mut tampered_pks = honest_r4.partial_public_keys.clone();
 		let donor = tampered_pks.get(&0b110).expect("party 1 leads subset 0b110").clone();
-		tampered_pks
-			.insert(0b011, PartialPublicKey { subset_mask: 0b011, t: donor.t });
+		tampered_pks.insert(0b011, PartialPublicKey { subset_mask: 0b011, t: donor.t });
 
 		// Re-sign the tampered PK set with party 1's key so the transcript
 		// signature check passes (a malicious party 1 signs whatever it sends).

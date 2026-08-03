@@ -267,9 +267,9 @@ struct SecretShare {
 
 /// Result type for threshold share generation containing:
 /// - s2_total: Polyvec<K>
-/// - s1h_total: Polyvec<L> (NTT form; the non-NTT aggregate s1 is deliberately
-///   never materialized — `t = A*s1 + s2` only needs the NTT form, and every
-///   extra full copy of the aggregate secret is another buffer to leak)
+/// - s1h_total: Polyvec<L> (NTT form; the non-NTT aggregate s1 is deliberately never materialized —
+///   `t = A*s1 + s2` only needs the NTT form, and every extra full copy of the aggregate secret is
+///   another buffer to leak)
 /// - party_shares: BTreeMap<u32, BTreeMap<u16, SecretShare>> (u16 subset masks)
 type ThresholdSharesResult =
 	(polyvec::Polyvec<K>, polyvec::Polyvec<L>, BTreeMap<u32, BTreeMap<u16, SecretShare>>);

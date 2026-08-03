@@ -12,8 +12,8 @@
 //!
 //! - You can:
 //!     - Generate new wormhole identities using random entropy (`generate_new`).
-//!     - Verify a secret against an address by re-deriving (derivation is deterministic, so
-//!       re-run `generate_new` with the same input and compare the resulting `address`).
+//!     - Verify a secret against an address by re-deriving (derivation is deterministic, so re-run
+//!       `generate_new` with the same input and compare the resulting `address`).
 //!
 //! The hashing strategy ensures determinism while hiding the original secret.
 //!

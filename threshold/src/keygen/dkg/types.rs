@@ -1115,13 +1115,8 @@ mod tests {
 		public_keys.insert(1, 1u32);
 		public_keys.insert(2, 2u32);
 
-		let result: Result<DkgConfig<TestSigner>, _> = DkgConfig::new(
-			threshold_config,
-			0,
-			vec![0, 1, 2],
-			TestSigner { id: 0 },
-			public_keys,
-		);
+		let result: Result<DkgConfig<TestSigner>, _> =
+			DkgConfig::new(threshold_config, 0, vec![0, 1, 2], TestSigner { id: 0 }, public_keys);
 
 		assert!(result.is_err(), "signer/registered key mismatch must be rejected");
 		assert_eq!(

@@ -91,12 +91,13 @@ macro_rules! import_stack_zeroization_tests {
 				});
 
 				// Scenario B: SecretKey::from_bytes, same contract.
-				let secret_key_import_leaked = probe_stack_for(super::STACK_BYTES, &pattern, || {
-					let mut imported = SecretKey::from_bytes(sk_bytes.as_slice());
-					if let Ok(sk) = imported.as_mut() {
-						sk.zeroize();
-					}
-				});
+				let secret_key_import_leaked =
+					probe_stack_for(super::STACK_BYTES, &pattern, || {
+						let mut imported = SecretKey::from_bytes(sk_bytes.as_slice());
+						if let Ok(sk) = imported.as_mut() {
+							sk.zeroize();
+						}
+					});
 
 				// Scenario C: Keypair::to_bytes. The returned serialization
 				// necessarily contains the secret key, but it is `Zeroizing`,

@@ -62,9 +62,9 @@
 //! ## Provided guarantees
 //! - Each party contributes randomness, so no single party controls the key
 //! - Commitment scheme (Round 1/2) prevents parties from adapting r_i based on others
-//! - Algebraic verification (Round 4) detects an inconsistent partial public
-//!   key for any subset in which the verifier is a member (see the partial-key
-//!   η-binding limitation below for subsets with no honest member)
+//! - Algebraic verification (Round 4) detects an inconsistent partial public key for any subset in
+//!   which the verifier is a member (see the partial-key η-binding limitation below for subsets
+//!   with no honest member)
 //! - Transcript signing provides non-repudiation
 //!
 //! ## Known limitations
@@ -109,25 +109,23 @@
 //! commit to (and later reveal) a `t_S` that is not the prescribed η-bounded
 //! derivation, and no honest party detects it. This is reachable *below* the
 //! signing threshold:
-//! - every subset in an n-of-n config is a singleton `{i}` (subset size
-//!   `k = n - t + 1 = 1`), so a single malicious party owns its own subset;
-//! - in configs with `k ≤ t - 1` (e.g. 3-of-4) a sub-threshold coalition can
-//!   fully own a subset.
+//! - every subset in an n-of-n config is a singleton `{i}` (subset size `k = n - t + 1 = 1`), so a
+//!   single malicious party owns its own subset;
+//! - in configs with `k ≤ t - 1` (e.g. 3-of-4) a sub-threshold coalition can fully own a subset.
 //!
 //! The impact is bounded and consistent with the secure-with-abort model:
-//! - **No forgery, no secret recovery.** The Round 3 commitment is opened only
-//!   in Round 4, so a leader is bound to its `t_S` before any honest `t` is
-//!   revealed; it cannot adaptively steer the aggregate `Σ_S t_S` toward a
-//!   chosen or self-signable key, and it never learns honest subsets' shares.
-//! - **Worst case is abort/retry or a bounded distribution skew.** A bogus
-//!   `t_S` either fails the signing-time norm checks (persistent signing
-//!   failure → abort and retry with a fresh session/participant set) or, if the
-//!   leader picks a short-but-not-η preimage that still passes those checks,
-//!   widens the aggregate secret distribution within the hyperball headroom.
-//! - **No new halting power.** In exactly the configs where a subset can be
-//!   fully corrupt below threshold, that adversary already lies in every signing
-//!   quorum covering the subset (any `t` parties intersect every
-//!   size-`(n − t + 1)` subset), so it can already force an abort by withholding.
+//! - **No forgery, no secret recovery.** The Round 3 commitment is opened only in Round 4, so a
+//!   leader is bound to its `t_S` before any honest `t` is revealed; it cannot adaptively steer the
+//!   aggregate `Σ_S t_S` toward a chosen or self-signable key, and it never learns honest subsets'
+//!   shares.
+//! - **Worst case is abort/retry or a bounded distribution skew.** A bogus `t_S` either fails the
+//!   signing-time norm checks (persistent signing failure → abort and retry with a fresh
+//!   session/participant set) or, if the leader picks a short-but-not-η preimage that still passes
+//!   those checks, widens the aggregate secret distribution within the hyperball headroom.
+//! - **No new halting power.** In exactly the configs where a subset can be fully corrupt below
+//!   threshold, that adversary already lies in every signing quorum covering the subset (any `t`
+//!   parties intersect every size-`(n − t + 1)` subset), so it can already force an abort by
+//!   withholding.
 //!
 //! DKG therefore yields a provably η-distributed key only when every subset
 //! contains at least one honest party. Where that does not hold, integrity
