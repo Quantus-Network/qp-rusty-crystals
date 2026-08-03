@@ -543,7 +543,9 @@ fn make_hint_single(z0: i32, r1: i32) -> i32 {
 ///
 /// The buffer length is enforced by the type (fixed-size array reference)
 /// rather than a runtime assert, so there is no release-mode panic path;
-/// callers carve exact chunks with `as_chunks_mut`.
+/// callers carve exact chunks with `as_chunks_mut`. The buffer's prior
+/// contents are ignored: it is fully overwritten, so callers may reuse a
+/// dirty scratch buffer.
 ///
 /// # Panics
 ///
@@ -557,6 +559,12 @@ pub(crate) fn poly_pack_w(p: &poly::Poly, buf: &mut [u8; POLY_Q_PACKEDBYTES]) {
 		p.coeffs().iter().all(|&c| (0..Q).contains(&c)),
 		"poly_pack_w precondition violated: coefficient outside [0, Q)"
 	);
+
+	// The bit loop below ORs each coefficient into place, which is only
+	// correct over zeroed bytes. Clearing here (security review) makes the
+	// function self-contained instead of a serializer whose correctness
+	// silently depends on every caller pre-zeroing its buffer.
+	buf.fill(0);
 
 	let mut bit_pos = 0usize;
 	for i in 0..N as usize {
@@ -816,6 +824,30 @@ mod tests {
 		for i in 0..N as usize {
 			assert_eq!(p.coeffs()[i], p2.coeffs()[i], "Mismatch at index {}", i);
 		}
+	}
+
+	/// `poly_pack_w` is a serializer, not an accumulator: its output must not
+	/// depend on the buffer's prior contents. Packing into a dirty (all-0xFF)
+	/// buffer must be byte-identical to packing into a fresh one; otherwise
+	/// any future caller that reuses a scratch buffer ORs new bits into stale
+	/// ones and silently serializes a corrupt commitment.
+	#[test]
+	fn test_poly_pack_w_overwrites_dirty_buffer() {
+		let mut p = poly::Poly::default();
+		for i in 0..N as usize {
+			p.coeffs_mut()[i] = (i * 7919) as i32 % Q;
+		}
+
+		let mut clean = [0u8; POLY_Q_PACKEDBYTES];
+		poly_pack_w(&p, &mut clean);
+
+		let mut dirty = [0xFFu8; POLY_Q_PACKEDBYTES];
+		poly_pack_w(&p, &mut dirty);
+
+		assert_eq!(
+			clean, dirty,
+			"poly_pack_w output must not depend on the buffer's prior contents"
+		);
 	}
 
 	/// `poly_pack_w`'s docs promise a debug-build panic on any coefficient
