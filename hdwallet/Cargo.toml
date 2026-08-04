@@ -40,6 +40,10 @@ sha2 = { version = "0.10", default-features = false }
 getrandom = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
+# Same bip39 instance as the library: the word-pointer heap-zeroization test
+# reconstructs the fat-pointer sequence into bip39's static word list to scan
+# freed blocks for it.
+bip39.workspace = true
 hex-literal.workspace = true
 rand.workspace = true
 rand_core.workspace = true
