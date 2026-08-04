@@ -1584,14 +1584,14 @@ fn forge_consistent_commitment(i_mask: u16, j_mask: u16, r: &NewShareData) -> [u
 	fips202::shake256_absorb(&mut state, &i_mask.to_le_bytes());
 	fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes());
 	let mut buf: Vec<u8> = Vec::new();
-	for poly in &r.s1 {
+	for poly in r.testing_s1() {
 		buf.clear();
 		for c in poly {
 			buf.extend_from_slice(&c.to_le_bytes());
 		}
 		fips202::shake256_absorb(&mut state, &buf);
 	}
-	for poly in &r.s2 {
+	for poly in r.testing_s2() {
 		buf.clear();
 		for c in poly {
 			buf.extend_from_slice(&c.to_le_bytes());
@@ -1686,7 +1686,8 @@ fn test_resharing_detects_round2_payload_mismatch() {
 	}
 
 	let target_pair = (0b011u16, 0b011u16);
-	let bogus_r = NewShareData { s1: [[99i32; N_USIZE]; L], s2: [[13i32; N_USIZE]; K] };
+	let bogus_r =
+		NewShareData::testing_from_coefficients([[99i32; N_USIZE]; L], [[13i32; N_USIZE]; K]);
 
 	let bogus_r_capt = bogus_r.clone();
 	let tamper: TamperFn = Box::new(move |sender, _recipient, data| {
@@ -1699,8 +1700,10 @@ fn test_resharing_detects_round2_payload_mismatch() {
 		};
 		let modified = match msg {
 			ResharingMessage::Round4(mut m) => {
-				if m.from_party_id == 0 && m.contributions.contains_key(&target_pair) {
-					m.contributions.insert(target_pair, bogus_r_capt.clone());
+				if m.from_party_id == 0 && m.testing_contributions_mut().contains_key(&target_pair)
+				{
+					m.testing_contributions_mut()
+						.insert(target_pair, Box::new(bogus_r_capt.clone()));
 				}
 				ResharingMessage::Round4(m)
 			},
@@ -1755,7 +1758,8 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 		old_shares.insert(share.party_id(), share.clone());
 	}
 
-	let bogus_r = NewShareData { s1: [[42i32; N_USIZE]; L], s2: [[7i32; N_USIZE]; K] };
+	let bogus_r =
+		NewShareData::testing_from_coefficients([[42i32; N_USIZE]; L], [[7i32; N_USIZE]; K]);
 	let target_pair = (0b01u16, 0b10u16);
 	let bogus_commit = forge_consistent_commitment(target_pair.0, target_pair.1, &bogus_r);
 
@@ -1778,8 +1782,10 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 				}
 			},
 			ResharingMessage::Round4(mut m) => {
-				if m.from_party_id == 0 && m.contributions.contains_key(&target_pair) {
-					m.contributions.insert(target_pair, bogus_r_capt.clone());
+				if m.from_party_id == 0 && m.testing_contributions_mut().contains_key(&target_pair)
+				{
+					m.testing_contributions_mut()
+						.insert(target_pair, Box::new(bogus_r_capt.clone()));
 					ResharingMessage::Round4(m)
 				} else {
 					ResharingMessage::Round4(m)
@@ -2978,7 +2984,8 @@ fn test_resharing_aborts_on_round4_omission() {
 			// Strip all contributions from the Round 4 message
 			if let ResharingMessage::Round4(mut r4) = msg {
 				*dropped_count_clone.borrow_mut() += 1;
-				r4.contributions.clear(); // Empty contributions = dealer didn't deliver
+				// Empty contributions = dealer didn't deliver
+				r4.testing_contributions_mut().clear();
 				return borsh::to_vec(&ResharingMessage::Round4(r4))
 					.expect("re-serialize tampered msg");
 			}

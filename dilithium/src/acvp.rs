@@ -122,10 +122,14 @@ macro_rules! acvp_for {
 						let message = hexs(test, "message");
 						let sk = fixed::<SECRETKEYBYTES>(&hexs(test, "sk"), "sk");
 						let expected_sig = hexs(test, "signature");
+						// Move the vector's rnd into a self-wiping wrapper:
+						// `signature_var` borrows the hedge instead of taking
+						// it by value (see `prepare_signing_context`).
 						let hedge = if deterministic {
 							None
 						} else {
-							Some(fixed::<32>(&hexs(test, "rnd"), "rnd"))
+							let mut rnd = fixed::<32>(&hexs(test, "rnd"), "rnd");
+							Some(crate::SensitiveBytes32::new(&mut rnd))
 						};
 
 						let mut sig = [0u8; SIGNBYTES];
@@ -144,7 +148,7 @@ macro_rules! acvp_for {
 							PUBLICKEYBYTES,
 							SECRETKEYBYTES,
 							SIGNBYTES,
-						>(&mut sig, &[], &message, &sk, hedge);
+						>(&mut sig, &[], &message, &sk, hedge.as_ref());
 
 						assert_eq!(
 							sig.as_slice(),

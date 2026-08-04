@@ -874,6 +874,7 @@ dependencies = [
  "psm",
  "qp-rusty-crystals-dilithium",
  "qp-rusty-crystals-test-utils",
+ "qp-rusty-crystals-threshold",
  "rand",
  "zeroize",
 ]

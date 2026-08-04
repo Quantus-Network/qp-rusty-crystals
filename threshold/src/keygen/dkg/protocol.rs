@@ -292,7 +292,16 @@ struct DkgMessageBuffer {
 	/// Round 1 private messages received while still in Initialized phase.
 	/// Key is (from_party_id, subset_mask) to allow multiple subsets per sender.
 	/// Messages are validated before buffering to prevent DoS via invalid subset masks.
-	round1_privates: BTreeMap<(ParticipantId, SubsetMask), Round1Private>,
+	///
+	/// Values are boxed (security review hardening): B-tree node splits move
+	/// entries bytewise between nodes, leaving stale copies in the source
+	/// slots beyond the live length, where the drop-time wipe (live entries
+	/// only) cannot reach them before the node is freed. Supported committees
+	/// (n <= 6) cap this map at 10 entries — inside a single 11-entry node,
+	/// so no split can occur today — but boxing keeps K_S at a stable heap
+	/// address wiped in place on drop, so the invariant does not silently
+	/// break if larger committees are ever enabled (`SubsetMask` allows 16).
+	round1_privates: BTreeMap<(ParticipantId, SubsetMask), Box<Round1Private>>,
 	/// Round 2 broadcasts received while still in Round 1.
 	round2: BTreeMap<ParticipantId, Round2Broadcast>,
 	/// Round 3 broadcasts received while still in Round 1-2.
@@ -320,7 +329,11 @@ impl DkgMessageBuffer {
 	/// Callers MUST validate the message before buffering (subset_mask validity,
 	/// sender is leader, receiver is member). This function does not validate.
 	fn buffer_round1_private(&mut self, msg: Round1Private) {
-		self.round1_privates.entry((msg.from_party_id, msg.subset_mask)).or_insert(msg);
+		// Boxed so map rebalancing relocates pointers, not K_S bytes (see the
+		// field's doc comment). A rejected duplicate drops the box, wiping it.
+		self.round1_privates
+			.entry((msg.from_party_id, msg.subset_mask))
+			.or_insert_with(|| Box::new(msg));
 	}
 
 	/// Buffer a Round 2 broadcast for later processing.
@@ -347,7 +360,9 @@ impl DkgMessageBuffer {
 	}
 
 	/// Take all buffered Round 1 private messages.
-	fn take_round1_privates(&mut self) -> BTreeMap<(ParticipantId, SubsetMask), Round1Private> {
+	fn take_round1_privates(
+		&mut self,
+	) -> BTreeMap<(ParticipantId, SubsetMask), Box<Round1Private>> {
 		mem::take(&mut self.round1_privates)
 	}
 
@@ -471,7 +486,16 @@ pub struct Dkg<S: TranscriptSigner> {
 	/// Round 1 private messages awaiting delivery, held as zeroizing
 	/// [`Round1Private`] structs (not pre-serialized byte buffers) so the queued
 	/// K_S material is wiped on drop rather than left in a freed `Vec<u8>`.
-	pending_privates: Vec<(ParticipantId, Round1Private)>,
+	///
+	/// Each private is boxed (security review): `Vec` growth copies elements
+	/// bytewise into a new buffer and frees the old one without dropping or
+	/// wiping the source slots, so storing `Round1Private` inline stranded
+	/// K_S in freed buffers whenever the queue reallocated (`ZeroizeOnDrop`
+	/// only wipes live elements in their final resting place). With a box per
+	/// element the vector's buffer holds only pointers, and the secret lives
+	/// at a stable heap address that is wiped in place when the box drops.
+	/// The realloc regression test pins this.
+	pending_privates: Vec<(ParticipantId, Box<Round1Private>)>,
 	/// Buffer for messages that arrive before we're ready to process them.
 	message_buffer: DkgMessageBuffer,
 }
@@ -553,10 +577,12 @@ impl<S: TranscriptSigner> Dkg<S> {
 
 	/// Pop the next queued Round 1 private without leaving K_S behind.
 	///
-	/// `Vec::pop` alone moves the element out but leaves its bytes intact in
-	/// the buffer beyond the shrunken length, where the drop-time wipe (which
-	/// only covers live elements) cannot reach them. Clone the element out and
-	/// wipe the slot in place before shrinking.
+	/// The queue elements are boxed, so `Vec::pop` moves only the pointer;
+	/// the stale slot beyond the shrunken length holds no secret bytes. The
+	/// private is *cloned* out of the box rather than moved (`*boxed` would
+	/// relocate the value and free the box's allocation unwiped); dropping
+	/// the box then wipes the heap copy in place (`ZeroizeOnDrop`) before
+	/// the allocation is released.
 	///
 	/// Known residual (heap is covered, stack is not): the clone returned
 	/// here moves by value through `poke` into `serialize_round1_private`,
@@ -569,13 +595,10 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// probe; tracked as follow-up, not covered by the heap-zeroization
 	/// tests.
 	fn pop_pending_private(&mut self) -> Option<(ParticipantId, Round1Private)> {
-		let (to, private) = {
-			let (to, slot) = self.pending_privates.last_mut()?;
-			let out = (*to, slot.clone());
-			slot.zeroize();
-			out
-		};
-		self.pending_privates.pop();
+		let (to, boxed) = self.pending_privates.pop()?;
+		let private = (*boxed).clone();
+		// `boxed` drops here: ZeroizeOnDrop wipes the boxed copy in place
+		// before its allocation is freed.
 		Some((to, private))
 	}
 
@@ -1077,11 +1100,12 @@ impl<S: TranscriptSigner> Dkg<S> {
 			}
 		}
 
-		// Drain buffered Round 1 private messages with validation. Iterate by
-		// mutable reference rather than by value: consuming the map would move
-		// each Copy `Round1Private` out while leaving its K_S bytes intact in
-		// the freed map nodes. Every entry — including ones discarded by
-		// validation — is wiped in place before the map is dropped.
+		// Drain buffered Round 1 private messages with validation. The values
+		// are boxed, so the map nodes hold only pointers; iterate by mutable
+		// reference and wipe every entry — including ones discarded by
+		// validation — in place before the map is dropped (each box's
+		// ZeroizeOnDrop would also cover this; the explicit sweep keeps the
+		// wipe visible and unconditional).
 		let mut buffered_privates = self.message_buffer.take_round1_privates();
 		for (&(from_party_id, subset_mask), private) in buffered_privates.iter_mut() {
 			// Validate subset_mask is valid
@@ -1167,7 +1191,9 @@ impl<S: TranscriptSigner> Dkg<S> {
 						};
 						// Queue the zeroizing struct; serialize only when popped for
 						// sending, so K_S is never parked in a plain byte buffer.
-						self.pending_privates.push((party, private));
+						// Boxed so queue growth relocates pointers, not K_S bytes
+						// (see the field's doc comment).
+						self.pending_privates.push((party, Box::new(private)));
 					}
 				}
 			}

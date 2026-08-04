@@ -86,23 +86,49 @@ jobs:
             cargo test --locked -p qp-rusty-crystals-hdwallet --no-default-features --features "std,$variant"
             echo "::endgroup::"
           done
-      # The stack-zeroization guard is gated to optimized builds
+      # The stack-zeroization guards are gated to optimized builds
       # (#![cfg(not(debug_assertions))]): debug codegen materializes compiler
       # temporaries of the secret key that no source-level fix can wipe, so the
-      # debug `cargo test` above compiles this file to zero tests. The property
-      # it guards is entirely a function of codegen, making it the test most
-      # likely to silently regress on a toolchain bump — run it in release, and
-      # fail if zero tests ran so a gating/rename change can't turn the guard
-      # back into documentation.
+      # debug `cargo test` above compiles these files to zero tests. The
+      # property they guard is entirely a function of codegen, making them the
+      # tests most likely to silently regress on a toolchain bump — run every
+      # probe in release (security review: only the import probe used to run,
+      # leaving the sign/keygen/hedge and all threshold/hdwallet probes
+      # unexecuted by any job), and fail per probe if zero tests ran so a
+      # gating/rename change can't turn a guard back into documentation.
+      # Dilithium probes run --all-features, which stamps every ML-DSA
+      # parameter set into the binary; threshold/hdwallet probes run under the
+      # default (priority) set, matching what ships.
       - name: Optimized-build regression tests (stack zeroization)
         run: |
           set -o pipefail
-          cargo test --release --locked -p qp-rusty-crystals-dilithium --all-features \
-            --test import_stack_zeroization 2>&1 | tee stack-zeroization.log
-          grep -Eq "test result: ok\. [1-9][0-9]* passed" stack-zeroization.log || {
-            echo "::error::stack-zeroization tests were filtered out (0 tests ran)"
-            exit 1
+          run_probe() {
+            echo "::group::$*"
+            cargo test --release --locked "$@" 2>&1 | tee stack-zeroization.log
+            grep -Eq "test result: ok\. [1-9][0-9]* passed" stack-zeroization.log || {
+              echo "::error::stack-zeroization probe ($*) was filtered out (0 tests ran)"
+              exit 1
+            }
+            echo "::endgroup::"
           }
+          for probe in import_stack_zeroization sign_stack_zeroization sensitive_bytes_stack_zeroization; do
+            run_probe -p qp-rusty-crystals-dilithium --all-features --test "$probe"
+          done
+          for probe in dkg_stack_zeroization signing_stack_zeroization dealer_stack_zeroization; do
+            run_probe -p qp-rusty-crystals-threshold --test "$probe"
+          done
+          # Release-gated unit test inside the threshold lib (painted-stack
+          # probe over the derivation digest).
+          run_probe -p qp-rusty-crystals-threshold --lib shares_digest_never_survives_derivation
+          # The two mnemonic heap probes also run in the debug job, but the
+          # word-pointer scrub in generate_mnemonic is plain (safe) stores
+          # ahead of a free — exactly what dead-store elimination targets —
+          # so they must additionally pass under optimized codegen.
+          for probe in bip39_stack_zeroization entropy_stack_zeroization \
+              hderive_stack_zeroization wormhole_stack_zeroization \
+              mnemonic_heap_zeroization mnemonic_word_pointer_zeroization; do
+            run_probe -p qp-rusty-crystals-hdwallet --test "$probe"
+          done
 
   no-std-build:
     name: 📦 no_std Build (wasm32v1-none)

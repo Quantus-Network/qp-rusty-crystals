@@ -32,7 +32,7 @@ mod tests {
 		let mut entropy = get_random_bytes();
 		let keys = Keypair::generate(&mut entropy);
 		let hedge = get_random_bytes();
-		let sig = keys.sign(&msg, None, Some(hedge.0)).unwrap();
+		let sig = keys.sign(&msg, None, Some(&hedge)).unwrap();
 		assert!(keys.verify(&msg, &sig, None));
 	}
 
@@ -42,7 +42,7 @@ mod tests {
 		let mut entropy = get_random_bytes();
 		let keys = Keypair::generate(&mut entropy);
 		let hedge = get_random_bytes();
-		let sig = keys.sign(&msg, None, Some(hedge.0)).unwrap();
+		let sig = keys.sign(&msg, None, Some(&hedge)).unwrap();
 		assert!(keys.verify(&msg, &sig, None));
 	}
 
@@ -55,7 +55,7 @@ mod tests {
 
 		// Sign with context "test1"
 		let ctx1 = b"test1";
-		let sig = keys.sign(&msg, Some(ctx1), Some(hedge.0)).unwrap();
+		let sig = keys.sign(&msg, Some(ctx1), Some(&hedge)).unwrap();
 
 		// Try to verify with different context "test2" - should fail
 		let ctx2 = b"test2";

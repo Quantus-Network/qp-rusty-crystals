@@ -272,11 +272,19 @@ macro_rules! define_ml_dsa {
 			///   byte-reproducible signatures are required, especially when key-blob storage
 			///   integrity cannot be guaranteed (see [`SecretKey::from_bytes`] on the unvalidatable
 			///   `K`).
+			///
+			/// The hedge is taken as a borrowed `SensitiveBytes32` rather than bare
+			/// bytes (security review): building the wrapper (via `SensitiveBytes32::new`)
+			/// wipes the caller's raw buffer, the wrapper zeroizes itself on drop, and
+			/// signing only ever *borrows* the bytes — so no unwiped `Copy` of `rnd` is
+			/// smeared through parameter slots on the call chain. A recovered `rnd` plus
+			/// a compromised `K` reconstructs ρ' and enables the known-mask attack
+			/// hedging is meant to prevent.
 			pub fn sign(
 				&self,
 				msg: &[u8],
 				ctx: Option<&[u8]>,
-				hedge: Option<[u8; SEEDBYTES]>,
+				hedge: Option<&$crate::SensitiveBytes32>,
 			) -> Result<Signature, SignatureError> {
 				self.secret.sign(msg, ctx, hedge)
 			}
@@ -363,12 +371,13 @@ macro_rules! define_ml_dsa {
 			/// Compute a signature for a given message.
 			///
 			/// See [`Keypair::sign`] for the argument contract, in particular the
-			/// deterministic-vs-hedged trade-off of `hedge`.
+			/// deterministic-vs-hedged trade-off of `hedge` and why it is passed
+			/// as a borrowed self-wiping wrapper.
 			pub fn sign(
 				&self,
 				msg: &[u8],
 				ctx: Option<&[u8]>,
-				hedge: Option<[u8; SEEDBYTES]>,
+				hedge: Option<&$crate::SensitiveBytes32>,
 			) -> Result<Signature, SignatureError> {
 				if msg.len() > MAX_MESSAGE_SIZE {
 					return Err(SignatureError::MessageTooLong);
@@ -499,8 +508,8 @@ macro_rules! basic_variant_tests {
 			let msg = b"ctx";
 			let h1 = basic_test_entropy();
 			let h2 = basic_test_entropy();
-			let s1 = keys.sign(msg, Some(b"a"), Some(h1.0)).unwrap();
-			let s2 = keys.sign(msg, Some(b"a"), Some(h2.0)).unwrap();
+			let s1 = keys.sign(msg, Some(b"a"), Some(&h1)).unwrap();
+			let s2 = keys.sign(msg, Some(b"a"), Some(&h2)).unwrap();
 			assert_ne!(s1, s2);
 			assert!(keys.verify(msg, &s1, Some(b"a")));
 			assert!(!keys.verify(msg, &s1, Some(b"b")));

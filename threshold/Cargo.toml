@@ -36,6 +36,12 @@ rand = { workspace = true }
 # directly by the unit-test probe in `derivation.rs`).
 psm = "=0.1.31"
 qp-rusty-crystals-test-utils = { workspace = true }
+# Self-referential dev-dependency: enables the internal-test-helpers feature
+# for this crate's own test builds only, so the adversary-simulation
+# integration tests can forge/tamper secret-bearing wire types while the
+# production API keeps them opaque. Path-only dev-dependencies are stripped
+# on publish.
+qp-rusty-crystals-threshold = { path = ".", features = ["internal-test-helpers"] }
 
 [features]
 default = ["ml-dsa-87", "std"]
@@ -43,6 +49,10 @@ std = ["zeroize/std"]
 ml-dsa-44 = ["qp-rusty-crystals-dilithium/ml-dsa-44"]
 ml-dsa-65 = ["qp-rusty-crystals-dilithium/ml-dsa-65"]
 ml-dsa-87 = ["qp-rusty-crystals-dilithium/ml-dsa-87"]
+# Test-only escape hatches (doc(hidden) constructors/accessors) for
+# secret-bearing resharing wire types, used by this crate's own
+# adversary-simulation tests. NEVER enable in production builds.
+internal-test-helpers = []
 
 [[bench]]
 name = "threshold_benchmarks"

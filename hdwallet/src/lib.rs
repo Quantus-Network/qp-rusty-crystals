@@ -419,15 +419,51 @@ fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 /// This function takes ownership of the entropy for security (move semantics).
 /// The entropy parameter is zeroized before returning.
 ///
+/// The phrase is returned inside a [`Zeroizing`] wrapper (security review):
+/// the recovery phrase yields the entire HD wallet, so it must not outlive
+/// its logical lifetime in freed heap memory. A plain `String` return left
+/// erasure to the caller with no type-level hint; `Zeroizing<String>` wipes
+/// the backing allocation when the caller drops it. (Moving the wrapper only
+/// copies the pointer/len/cap triple — the secret heap contents are never
+/// duplicated — so returning it by value is safe, unlike fixed-size secret
+/// arrays, which are wiped in place via out-parameters elsewhere in this
+/// crate.) The heap-zeroization regression test pins this.
+///
 /// # Security Note
 /// Always use cryptographically secure random entropy (e.g., from `getrandom::getrandom()`).
 /// Never use predictable strings, timestamps, or user input as entropy sources.
-pub fn generate_mnemonic(entropy: SensitiveBytes32) -> Result<String, HDLatticeError> {
+pub fn generate_mnemonic(entropy: SensitiveBytes32) -> Result<Zeroizing<String>, HDLatticeError> {
 	// Create mnemonic from entropy
 	let mnemonic = Mnemonic::from_entropy(entropy.as_bytes())
 		.map_err(|e| HDLatticeError::MnemonicDerivationFailed(e.to_string()))?;
 
-	let result = mnemonic.words().collect::<Vec<&str>>().join(" ");
+	// Collect the word pointers in one tight pass, then `join` — do NOT
+	// stream `words()` straight into a growing String: keeping that
+	// iterator (which borrows the mnemonic's secret word-index buffer)
+	// alive across String appends made release codegen spill an unwiped
+	// copy of the index array into a dead stack slot (caught by the bip39
+	// stack probe). `join` allocates the phrase exactly once and moving it
+	// into `Zeroizing::new` transfers the same allocation.
+	let mut words: Vec<&str> = mnemonic.words().collect();
+	let result = Zeroizing::new(words.join(" "));
+
+	// The Vec buffer now holds 24 fat pointers into bip39's *static* word
+	// list. The addresses are fixed per process image, so the freed pointer
+	// sequence decodes right back to the phrase — an alternate
+	// representation the byte-level phrase probe cannot see (the
+	// word-pointer heap-zeroization test pins it). Scrub the buffer in
+	// place before the Vec frees it by overwriting every slot with the
+	// empty string (a valid `&str`, so no unsafe needed). Plain stores
+	// right before a deallocation are candidates for dead-store
+	// elimination, so `black_box` forces the compiler to assume the buffer
+	// is observed after the overwrite; the word-pointer heap probe runs in
+	// CI against both debug and optimized builds to pin that this scrub
+	// actually reaches memory.
+	for word in words.iter_mut() {
+		*word = "";
+	}
+	core::hint::black_box(&mut words);
+	drop(words);
 
 	// entropy is automatically zeroized when it drops
 

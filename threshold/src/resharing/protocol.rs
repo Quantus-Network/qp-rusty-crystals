@@ -433,7 +433,15 @@ pub struct ResharingProtocol<S: TranscriptSigner> {
 	// ========================================================================
 	/// Pre-computed sub-shares we are responsible for dealing.
 	/// Keyed by `(old_subset, new_subset)`.
-	my_subshares: BTreeMap<SubsetPair, NewShareData>,
+	///
+	/// Values are `Box`ed (security review): a dealer for all subsets
+	/// containing it holds up to 150 entries at supported sizes (e.g.
+	/// 3-of-6 → 3-of-6), far past the B-tree's 11-entry node capacity, so
+	/// node splits are guaranteed — and splits copy entries byte-wise,
+	/// stranding coefficients in freed node memory beyond `ZeroizeOnDrop`'s
+	/// reach. Boxing keeps each secret in one heap home, wiped in place on
+	/// drop; node operations move only pointers.
+	my_subshares: BTreeMap<SubsetPair, Box<NewShareData>>,
 	/// Our Round 3 broadcast (commitments for subsets we deal).
 	my_round3: Option<ResharingRound3Broadcast>,
 	/// Round 3 broadcasts received from other old committee members.
@@ -454,7 +462,8 @@ pub struct ResharingProtocol<S: TranscriptSigner> {
 	round5_broadcasts: BTreeMap<ParticipantId, ResharingRound5Broadcast>,
 
 	/// Computed new shares: `new_subset -> s_J^new`. Populated in Round 5.
-	new_shares: BTreeMap<SubsetMask, NewShareData>,
+	/// Values are `Box`ed for the same node-split reason as `my_subshares`.
+	new_shares: BTreeMap<SubsetMask, Box<NewShareData>>,
 	/// Final output (cached so `take_output` can return it after Combining).
 	completed_output: Option<ResharingOutput>,
 
@@ -1552,6 +1561,28 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		Ok(Action::SendPrivate(to_party, data))
 	}
 
+	/// Buffer a dealer's Round 4 private sub-share message, first-message-wins.
+	///
+	/// Content verification (commitment match, coefficient bounds) is
+	/// deliberately deferred to Round 5: it needs the dealer's Round 3
+	/// commitments, which may legitimately arrive *after* the Round 4
+	/// private message on an out-of-order transport.
+	///
+	/// First-wins without pre-verification is safe under the crate's
+	/// documented transport requirements (sender-authenticated channels,
+	/// see the module docs), and is the anti-equivocation choice
+	/// (security review):
+	/// - an attacker cannot occupy another party's slot, because it cannot send with a forged
+	///   `from` on an authenticated transport;
+	/// - an honest dealer sends exactly one Round 4 message per recipient, so there is never an
+	///   honest "correction" for a duplicate to drop (benign retransmits carry identical content
+	///   and are idempotent);
+	/// - a malicious dealer poisoning *its own* slot is no stronger than withholding: deferred
+	///   verification fails with the dealer attributed (`DealerDeliveryFailed`) and the session
+	///   aborts for a restart, exactly like a dealer that goes silent (see README);
+	/// - replace-on-later-message policies would be *worse*: they would let a dealer observe
+	///   protocol traffic and swap its contribution adaptively. First-wins pins each sender to a
+	///   single contribution.
 	fn handle_round4_message(&mut self, from: ParticipantId, msg: ResharingRound4Message) {
 		if matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
 			return;
@@ -1565,8 +1596,15 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		if msg.to_party_id != self.config.my_party_id() {
 			return;
 		}
-		// Reject duplicates from the same dealer.
+		// Reject duplicates from the same dealer. Logged for observability
+		// only; the content is not compared (it is secret share material —
+		// a retransmit is indistinguishable from equivocation here, and
+		// either way the stored first message stays authoritative).
 		if self.round4_messages.contains_key(&from) {
+			log::debug!(
+				"Resharing: ignoring duplicate Round 4 message from dealer {} (first-message-wins)",
+				from
+			);
 			return;
 		}
 		self.round4_messages.insert(from, msg);
@@ -1943,6 +1981,17 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		Ok(Action::Return(output))
 	}
 
+	/// Buffer a new committee member's acceptance signature, first-message-wins.
+	///
+	/// First-wins without pre-verification is safe under the crate's
+	/// documented transport requirements (sender-authenticated channels)
+	/// and pins each attester to a single signature (security review): an
+	/// attacker cannot occupy another party's slot, an honest member sends
+	/// exactly one accept (retransmits are identical and idempotent), and a
+	/// member poisoning its own slot with a garbage signature is no
+	/// stronger than withholding its accept — `AcceptWaiting` fails with
+	/// that party attributed, where a withheld accept stalls the session
+	/// instead. Both need the same recovery: a restart.
 	fn handle_accept_message(&mut self, from: ParticipantId, msg: ResharingAccept) {
 		if matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
 			return;
@@ -1952,7 +2001,17 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			return;
 		}
 		// First message wins; duplicates ignored (matches other rounds).
-		if self.accepts.contains_key(&from) {
+		// Signatures are public values, so a differing duplicate can be
+		// safely detected and surfaced: it is evidence of sender
+		// equivocation (or transport misbehavior), not a benign retransmit.
+		if let Some(stored) = self.accepts.get(&from) {
+			if *stored != msg.signature {
+				log::warn!(
+					"Resharing: party {} sent conflicting acceptance signatures \
+					 (equivocation?); keeping the first (first-message-wins)",
+					from
+				);
+			}
 			return;
 		}
 		// Signature verification is deferred to `AcceptWaiting`, where our own
@@ -2003,13 +2062,17 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 				&session_seed,
 				self.old_subset_order.len(),
 			);
-			// Move each sub-share out with `mem::take` rather than
-			// `into_iter()`: consuming the Vec by value skips the elements'
-			// zeroizing drops, freeing the backing buffer with the raw
-			// coefficients still in it. Taking leaves zeros in the slots,
-			// which the Vec's (zeroizing) element drops then wipe redundantly.
+			// Move each sub-share out by swapping it into a freshly boxed
+			// zero share, rather than `into_iter()` (which would free the
+			// Vec's buffer with the raw coefficients still in it) or
+			// `mem::take` + `Box::new` (which would stage the 15 KiB secret
+			// in an unwiped stack temporary). The swap writes directly
+			// heap-to-heap, the Vec slot is left holding zeros, and the
+			// Vec's (zeroizing) element drops then wipe it redundantly.
 			for (j_mask, subshare) in new_subsets.iter().zip(subshares.iter_mut()) {
-				self.my_subshares.insert((i_mask, *j_mask), core::mem::take(subshare));
+				let mut boxed = Box::new(NewShareData::new());
+				core::mem::swap(&mut *boxed, subshare);
+				self.my_subshares.insert((i_mask, *j_mask), boxed);
 			}
 		}
 		Ok(())
@@ -2031,7 +2094,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// This mirrors the DKG pattern (`process_round1` skips self) and removes the
 	/// implicit "network must loopback SendPrivate(self, _)" requirement.
 	fn build_pending_round4_messages(&mut self) {
-		let mut by_recipient: BTreeMap<ParticipantId, BTreeMap<SubsetPair, NewShareData>> =
+		let mut by_recipient: BTreeMap<ParticipantId, BTreeMap<SubsetPair, Box<NewShareData>>> =
 			BTreeMap::new();
 		for (pair, share) in &self.my_subshares {
 			let j_mask = pair.1;
@@ -2094,14 +2157,16 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 				|| ResharingProtocolError::InternalError("not in new committee".into()),
 			)?;
 
-		// Collect every (I, J, dealer, r) we expect to use.
+		// Collect every (I, J, dealer, r) we expect to use. Boxed values for
+		// the same node-split reason as the `new_shares` field this map is
+		// drained into.
 		let new_subsets = &self.new_subset_order;
-		let mut s_new: BTreeMap<SubsetMask, NewShareData> = BTreeMap::new();
+		let mut s_new: BTreeMap<SubsetMask, Box<NewShareData>> = BTreeMap::new();
 		for &j_mask in new_subsets {
 			if (j_mask & (1 << my_idx)) == 0 {
 				continue;
 			}
-			s_new.insert(j_mask, NewShareData::new());
+			s_new.insert(j_mask, Box::new(NewShareData::new()));
 		}
 
 		for &i_mask in &self.old_subset_order {
@@ -3277,6 +3342,22 @@ mod tests {
 			.expect("keys cover participants")
 	}
 
+	/// Compile-time pin (security review): the share-bearing maps must keep
+	/// `Box`ed values so B-tree node splits move pointers, not coefficients —
+	/// at supported committee sizes these maps far exceed the 11-entry node
+	/// capacity, so splits (and byte-wise entry copies into freed-later
+	/// nodes) are guaranteed. If a refactor inlines the values again this
+	/// stops compiling; the heap probe in
+	/// `tests/newshare_btree_node_zeroization.rs` demonstrates the leak the
+	/// boxing prevents.
+	#[allow(dead_code)]
+	fn pin_boxed_share_maps<S: TranscriptSigner>(p: &ResharingProtocol<S>) {
+		let _: &BTreeMap<SubsetPair, Box<NewShareData>> = &p.my_subshares;
+		let _: &BTreeMap<SubsetMask, Box<NewShareData>> = &p.new_shares;
+		let _: Option<&BTreeMap<SubsetPair, Box<NewShareData>>> =
+			p.round4_messages.get(&0).map(|m| &m.contributions);
+	}
+
 	#[test]
 	fn test_generate_subset_masks() {
 		let s = generate_subset_masks(3, 2);
@@ -3597,7 +3678,7 @@ mod tests {
 		let contribution =
 			NewShareData { s1: [[coeff; N as usize]; L], s2: [[coeff; N as usize]; K] };
 		let mut contributions = BTreeMap::new();
-		contributions.insert((0b011, 0b101), contribution);
+		contributions.insert((0b011, 0b101), Box::new(contribution));
 		let msg = ResharingRound4Message {
 			// Non-marker ssid so the sanity check below matches sub-share
 			// bytes, not session metadata.
@@ -3818,8 +3899,8 @@ mod tests {
 		assert!(plus.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
 		assert!(minus.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
 
-		protocol.new_shares.insert(0b011, plus);
-		protocol.new_shares.insert(0b110, minus);
+		protocol.new_shares.insert(0b011, Box::new(plus));
+		protocol.new_shares.insert(0b110, Box::new(minus));
 
 		let err = protocol
 			.verify_recovered_partial_norms()
@@ -3879,7 +3960,7 @@ mod tests {
 				*c = coeff;
 			}
 		}
-		protocol.new_shares.insert(0b011, inflated);
+		protocol.new_shares.insert(0b011, Box::new(inflated));
 
 		let err = protocol.verify_stored_new_share_norms().expect_err(
 			"a stored share inflated 3x past the single-share envelope must be rejected",
@@ -3945,13 +4026,13 @@ mod tests {
 		};
 		let target_js = [0b011u16, 0b110u16];
 		for (dealer, i_masks) in [(0u32, &[0b011u16, 0b101u16][..]), (1u32, &[0b110u16][..])] {
-			let mut contributions: BTreeMap<SubsetPair, NewShareData> = BTreeMap::new();
+			let mut contributions: BTreeMap<SubsetPair, Box<NewShareData>> = BTreeMap::new();
 			let mut commitments: BTreeMap<SubsetPair, [u8; COMMITMENT_HASH_SIZE]> = BTreeMap::new();
 			for &i in i_masks {
 				for &j in &target_js {
 					let r = make(i, j);
 					commitments.insert((i, j), commit_subshare(i, j, &r));
-					contributions.insert((i, j), r);
+					contributions.insert((i, j), Box::new(r));
 				}
 			}
 			protocol.round3_broadcasts.insert(
@@ -3985,6 +4066,65 @@ mod tests {
 		assert!(
 			!msg.chars().any(|c| c.is_ascii_digit()),
 			"wire reason embeds digits (possible secret leak): {msg}"
+		);
+	}
+
+	/// Security review: the first-message-wins duplicate policy must hold — a
+	/// later, conflicting message from the same (transport-authenticated)
+	/// sender never displaces the stored first message, for both Round 4
+	/// sub-share deliveries and Round 6 acceptance signatures. A
+	/// replace-on-duplicate policy would let a malicious sender observe
+	/// protocol traffic and swap its contribution adaptively; see the
+	/// handler doc comments for the full argument.
+	#[test]
+	fn duplicate_round4_and_accept_messages_never_displace_the_first() {
+		let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+		let (public_key, shares) =
+			crate::keygen::generate_with_dealer(&[17u8; 32], config).expect("keygen");
+		let resharing_config = ResharingConfig::new(
+			Some(shares[1].clone()),
+			2,
+			vec![0, 1, 2],
+			2,
+			vec![0, 1, 2],
+			1,
+			public_key,
+		)
+		.expect("valid resharing config");
+		let mut protocol = ResharingProtocol::new(
+			resharing_config,
+			test_signer_config(1, &[0, 1, 2]),
+			[3u8; 32],
+			&[4u8; 32],
+			0,
+		);
+		let ssid = protocol.ssid;
+
+		// Round 4: dealer 0's first message pins its slot.
+		let mk_r4 = |coeff: i32| {
+			let mut share = NewShareData::new();
+			share.s1[0][0] = coeff;
+			let mut contributions: BTreeMap<SubsetPair, Box<NewShareData>> = BTreeMap::new();
+			contributions.insert((0b011, 0b011), Box::new(share));
+			ResharingRound4Message { ssid, from_party_id: 0, to_party_id: 1, contributions }
+		};
+		protocol.handle_round4_message(0, mk_r4(7));
+		protocol.handle_round4_message(0, mk_r4(8)); // conflicting duplicate
+		let stored = protocol.round4_messages.get(&0).expect("first message stored");
+		assert_eq!(
+			stored.contributions.get(&(0b011, 0b011)).expect("contribution").s1[0][0],
+			7,
+			"a duplicate Round 4 message must not displace the first"
+		);
+
+		// Round 6: party 2's first acceptance signature pins its slot.
+		let mk_accept = |sig: Vec<u8>| ResharingAccept { ssid, party_id: 2, signature: sig };
+		protocol.handle_accept_message(2, mk_accept(vec![1, 2, 3]));
+		protocol.handle_accept_message(2, mk_accept(vec![9, 9, 9])); // conflicting duplicate
+		assert_eq!(
+			protocol.accepts.get(&2).expect("first accept stored"),
+			&vec![1, 2, 3],
+			"a duplicate acceptance must not displace the first"
 		);
 	}
 
