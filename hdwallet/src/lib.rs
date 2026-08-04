@@ -24,7 +24,10 @@
 extern crate alloc;
 
 use crate::hderive::ExtendedPrivKey;
-use alloc::string::{String, ToString};
+use alloc::{
+	string::{String, ToString},
+	vec::Vec,
+};
 use bip39::{Language, Mnemonic};
 use core::str::FromStr;
 #[cfg(feature = "ml-dsa-87")]
@@ -434,29 +437,33 @@ pub fn generate_mnemonic(entropy: SensitiveBytes32) -> Result<Zeroizing<String>,
 	let mnemonic = Mnemonic::from_entropy(entropy.as_bytes())
 		.map_err(|e| HDLatticeError::MnemonicDerivationFailed(e.to_string()))?;
 
-	// Build the phrase directly into the Zeroizing-owned String (security
-	// review): the previous `words().collect::<Vec<&str>>().join(" ")`
-	// parked 24 fat pointers into bip39's *static* word list in a heap
-	// buffer that `join` freed unwiped. The word-list addresses are fixed
-	// per process image, so that pointer sequence decodes right back to
-	// the phrase — an alternate representation the byte-level phrase probe
-	// cannot see (the word-pointer heap-zeroization test pins it).
-	//
-	// The first pass computes the exact phrase length so the single
-	// allocation never grows: an under-sized String would reallocate while
-	// appending and strand unwiped partial-phrase prefixes in freed
-	// memory, trading one leak for another.
-	let word_bytes: usize = mnemonic.words().map(str::len).sum();
-	let phrase_len = word_bytes + mnemonic.words().count().saturating_sub(1);
+	// Collect the word pointers in one tight pass, then `join` — do NOT
+	// stream `words()` straight into a growing String: keeping that
+	// iterator (which borrows the mnemonic's secret word-index buffer)
+	// alive across String appends made release codegen spill an unwiped
+	// copy of the index array into a dead stack slot (caught by the bip39
+	// stack probe). `join` allocates the phrase exactly once and moving it
+	// into `Zeroizing::new` transfers the same allocation.
+	let mut words: Vec<&str> = mnemonic.words().collect();
+	let result = Zeroizing::new(words.join(" "));
 
-	let mut result = Zeroizing::new(String::with_capacity(phrase_len));
-	for (i, word) in mnemonic.words().enumerate() {
-		if i > 0 {
-			result.push(' ');
-		}
-		result.push_str(word);
+	// The Vec buffer now holds 24 fat pointers into bip39's *static* word
+	// list. The addresses are fixed per process image, so the freed pointer
+	// sequence decodes right back to the phrase — an alternate
+	// representation the byte-level phrase probe cannot see (the
+	// word-pointer heap-zeroization test pins it). Scrub the buffer in
+	// place before the Vec frees it by overwriting every slot with the
+	// empty string (a valid `&str`, so no unsafe needed). Plain stores
+	// right before a deallocation are candidates for dead-store
+	// elimination, so `black_box` forces the compiler to assume the buffer
+	// is observed after the overwrite; the word-pointer heap probe runs in
+	// CI against both debug and optimized builds to pin that this scrub
+	// actually reaches memory.
+	for word in words.iter_mut() {
+		*word = "";
 	}
-	debug_assert_eq!(result.len(), phrase_len, "phrase length precomputation must be exact");
+	core::hint::black_box(&mut words);
+	drop(words);
 
 	// entropy is automatically zeroized when it drops
 
