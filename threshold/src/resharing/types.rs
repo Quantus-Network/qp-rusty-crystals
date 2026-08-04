@@ -1172,7 +1172,16 @@ pub struct ResharingRound4Message {
 	/// Party ID of the recipient.
 	pub to_party_id: ParticipantId,
 	/// Per-`(old_subset, new_subset)` contributions destined for the recipient.
-	pub(crate) contributions: BTreeMap<SubsetPair, NewShareData>,
+	///
+	/// Values are `Box`ed (security review): at supported committee sizes a
+	/// recipient's map holds up to 100 entries — far past the B-tree's
+	/// 11-entry node capacity — and node splits copy entries byte-wise
+	/// between nodes, stranding sub-share coefficients in freed node memory
+	/// beyond the reach of `ZeroizeOnDrop` (which only wipes live values).
+	/// Boxing keeps each secret in exactly one heap allocation that is wiped
+	/// in place on drop; node operations move only pointers. Borsh
+	/// serializes `Box<T>` transparently, so the wire format is unchanged.
+	pub(crate) contributions: BTreeMap<SubsetPair, Box<NewShareData>>,
 }
 
 /// Test-only escape hatch for the crate's adversary-simulation tests
@@ -1181,7 +1190,7 @@ pub struct ResharingRound4Message {
 #[cfg(feature = "internal-test-helpers")]
 impl ResharingRound4Message {
 	#[doc(hidden)]
-	pub fn testing_contributions_mut(&mut self) -> &mut BTreeMap<SubsetPair, NewShareData> {
+	pub fn testing_contributions_mut(&mut self) -> &mut BTreeMap<SubsetPair, Box<NewShareData>> {
 		&mut self.contributions
 	}
 }
@@ -1204,7 +1213,9 @@ impl BorshDeserialize for ResharingRound4Message {
 		let mut contributions = BTreeMap::new();
 		for _ in 0..len {
 			let key = SubsetPair::deserialize_reader(reader)?;
-			let value = NewShareData::deserialize_reader(reader)?;
+			// Boxed straight away so the B-tree nodes hold pointers, not
+			// inline secrets (see the field docs).
+			let value = Box::new(NewShareData::deserialize_reader(reader)?);
 			contributions.insert(key, value);
 		}
 

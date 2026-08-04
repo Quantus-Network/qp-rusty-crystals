@@ -1702,7 +1702,8 @@ fn test_resharing_detects_round2_payload_mismatch() {
 			ResharingMessage::Round4(mut m) => {
 				if m.from_party_id == 0 && m.testing_contributions_mut().contains_key(&target_pair)
 				{
-					m.testing_contributions_mut().insert(target_pair, bogus_r_capt.clone());
+					m.testing_contributions_mut()
+						.insert(target_pair, Box::new(bogus_r_capt.clone()));
 				}
 				ResharingMessage::Round4(m)
 			},
@@ -1783,7 +1784,8 @@ fn test_resharing_detects_consistent_dealer_tamper_at_t_equals_n() {
 			ResharingMessage::Round4(mut m) => {
 				if m.from_party_id == 0 && m.testing_contributions_mut().contains_key(&target_pair)
 				{
-					m.testing_contributions_mut().insert(target_pair, bogus_r_capt.clone());
+					m.testing_contributions_mut()
+						.insert(target_pair, Box::new(bogus_r_capt.clone()));
 					ResharingMessage::Round4(m)
 				} else {
 					ResharingMessage::Round4(m)

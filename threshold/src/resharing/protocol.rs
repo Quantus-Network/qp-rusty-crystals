@@ -433,7 +433,15 @@ pub struct ResharingProtocol<S: TranscriptSigner> {
 	// ========================================================================
 	/// Pre-computed sub-shares we are responsible for dealing.
 	/// Keyed by `(old_subset, new_subset)`.
-	my_subshares: BTreeMap<SubsetPair, NewShareData>,
+	///
+	/// Values are `Box`ed (security review): a dealer for all subsets
+	/// containing it holds up to 150 entries at supported sizes (e.g.
+	/// 3-of-6 → 3-of-6), far past the B-tree's 11-entry node capacity, so
+	/// node splits are guaranteed — and splits copy entries byte-wise,
+	/// stranding coefficients in freed node memory beyond `ZeroizeOnDrop`'s
+	/// reach. Boxing keeps each secret in one heap home, wiped in place on
+	/// drop; node operations move only pointers.
+	my_subshares: BTreeMap<SubsetPair, Box<NewShareData>>,
 	/// Our Round 3 broadcast (commitments for subsets we deal).
 	my_round3: Option<ResharingRound3Broadcast>,
 	/// Round 3 broadcasts received from other old committee members.
@@ -454,7 +462,8 @@ pub struct ResharingProtocol<S: TranscriptSigner> {
 	round5_broadcasts: BTreeMap<ParticipantId, ResharingRound5Broadcast>,
 
 	/// Computed new shares: `new_subset -> s_J^new`. Populated in Round 5.
-	new_shares: BTreeMap<SubsetMask, NewShareData>,
+	/// Values are `Box`ed for the same node-split reason as `my_subshares`.
+	new_shares: BTreeMap<SubsetMask, Box<NewShareData>>,
 	/// Final output (cached so `take_output` can return it after Combining).
 	completed_output: Option<ResharingOutput>,
 
@@ -2053,13 +2062,17 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 				&session_seed,
 				self.old_subset_order.len(),
 			);
-			// Move each sub-share out with `mem::take` rather than
-			// `into_iter()`: consuming the Vec by value skips the elements'
-			// zeroizing drops, freeing the backing buffer with the raw
-			// coefficients still in it. Taking leaves zeros in the slots,
-			// which the Vec's (zeroizing) element drops then wipe redundantly.
+			// Move each sub-share out by swapping it into a freshly boxed
+			// zero share, rather than `into_iter()` (which would free the
+			// Vec's buffer with the raw coefficients still in it) or
+			// `mem::take` + `Box::new` (which would stage the 15 KiB secret
+			// in an unwiped stack temporary). The swap writes directly
+			// heap-to-heap, the Vec slot is left holding zeros, and the
+			// Vec's (zeroizing) element drops then wipe it redundantly.
 			for (j_mask, subshare) in new_subsets.iter().zip(subshares.iter_mut()) {
-				self.my_subshares.insert((i_mask, *j_mask), core::mem::take(subshare));
+				let mut boxed = Box::new(NewShareData::new());
+				core::mem::swap(&mut *boxed, subshare);
+				self.my_subshares.insert((i_mask, *j_mask), boxed);
 			}
 		}
 		Ok(())
@@ -2081,7 +2094,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// This mirrors the DKG pattern (`process_round1` skips self) and removes the
 	/// implicit "network must loopback SendPrivate(self, _)" requirement.
 	fn build_pending_round4_messages(&mut self) {
-		let mut by_recipient: BTreeMap<ParticipantId, BTreeMap<SubsetPair, NewShareData>> =
+		let mut by_recipient: BTreeMap<ParticipantId, BTreeMap<SubsetPair, Box<NewShareData>>> =
 			BTreeMap::new();
 		for (pair, share) in &self.my_subshares {
 			let j_mask = pair.1;
@@ -2144,14 +2157,16 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 				|| ResharingProtocolError::InternalError("not in new committee".into()),
 			)?;
 
-		// Collect every (I, J, dealer, r) we expect to use.
+		// Collect every (I, J, dealer, r) we expect to use. Boxed values for
+		// the same node-split reason as the `new_shares` field this map is
+		// drained into.
 		let new_subsets = &self.new_subset_order;
-		let mut s_new: BTreeMap<SubsetMask, NewShareData> = BTreeMap::new();
+		let mut s_new: BTreeMap<SubsetMask, Box<NewShareData>> = BTreeMap::new();
 		for &j_mask in new_subsets {
 			if (j_mask & (1 << my_idx)) == 0 {
 				continue;
 			}
-			s_new.insert(j_mask, NewShareData::new());
+			s_new.insert(j_mask, Box::new(NewShareData::new()));
 		}
 
 		for &i_mask in &self.old_subset_order {
@@ -3327,6 +3342,22 @@ mod tests {
 			.expect("keys cover participants")
 	}
 
+	/// Compile-time pin (security review): the share-bearing maps must keep
+	/// `Box`ed values so B-tree node splits move pointers, not coefficients —
+	/// at supported committee sizes these maps far exceed the 11-entry node
+	/// capacity, so splits (and byte-wise entry copies into freed-later
+	/// nodes) are guaranteed. If a refactor inlines the values again this
+	/// stops compiling; the heap probe in
+	/// `tests/newshare_btree_node_zeroization.rs` demonstrates the leak the
+	/// boxing prevents.
+	#[allow(dead_code)]
+	fn pin_boxed_share_maps<S: TranscriptSigner>(p: &ResharingProtocol<S>) {
+		let _: &BTreeMap<SubsetPair, Box<NewShareData>> = &p.my_subshares;
+		let _: &BTreeMap<SubsetMask, Box<NewShareData>> = &p.new_shares;
+		let _: Option<&BTreeMap<SubsetPair, Box<NewShareData>>> =
+			p.round4_messages.get(&0).map(|m| &m.contributions);
+	}
+
 	#[test]
 	fn test_generate_subset_masks() {
 		let s = generate_subset_masks(3, 2);
@@ -3647,7 +3678,7 @@ mod tests {
 		let contribution =
 			NewShareData { s1: [[coeff; N as usize]; L], s2: [[coeff; N as usize]; K] };
 		let mut contributions = BTreeMap::new();
-		contributions.insert((0b011, 0b101), contribution);
+		contributions.insert((0b011, 0b101), Box::new(contribution));
 		let msg = ResharingRound4Message {
 			// Non-marker ssid so the sanity check below matches sub-share
 			// bytes, not session metadata.
@@ -3868,8 +3899,8 @@ mod tests {
 		assert!(plus.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
 		assert!(minus.coefficients_within_bound(SUBSHARE_COEFF_BOUND));
 
-		protocol.new_shares.insert(0b011, plus);
-		protocol.new_shares.insert(0b110, minus);
+		protocol.new_shares.insert(0b011, Box::new(plus));
+		protocol.new_shares.insert(0b110, Box::new(minus));
 
 		let err = protocol
 			.verify_recovered_partial_norms()
@@ -3929,7 +3960,7 @@ mod tests {
 				*c = coeff;
 			}
 		}
-		protocol.new_shares.insert(0b011, inflated);
+		protocol.new_shares.insert(0b011, Box::new(inflated));
 
 		let err = protocol.verify_stored_new_share_norms().expect_err(
 			"a stored share inflated 3x past the single-share envelope must be rejected",
@@ -3995,13 +4026,13 @@ mod tests {
 		};
 		let target_js = [0b011u16, 0b110u16];
 		for (dealer, i_masks) in [(0u32, &[0b011u16, 0b101u16][..]), (1u32, &[0b110u16][..])] {
-			let mut contributions: BTreeMap<SubsetPair, NewShareData> = BTreeMap::new();
+			let mut contributions: BTreeMap<SubsetPair, Box<NewShareData>> = BTreeMap::new();
 			let mut commitments: BTreeMap<SubsetPair, [u8; COMMITMENT_HASH_SIZE]> = BTreeMap::new();
 			for &i in i_masks {
 				for &j in &target_js {
 					let r = make(i, j);
 					commitments.insert((i, j), commit_subshare(i, j, &r));
-					contributions.insert((i, j), r);
+					contributions.insert((i, j), Box::new(r));
 				}
 			}
 			protocol.round3_broadcasts.insert(
@@ -4073,8 +4104,8 @@ mod tests {
 		let mk_r4 = |coeff: i32| {
 			let mut share = NewShareData::new();
 			share.s1[0][0] = coeff;
-			let mut contributions: BTreeMap<SubsetPair, NewShareData> = BTreeMap::new();
-			contributions.insert((0b011, 0b011), share);
+			let mut contributions: BTreeMap<SubsetPair, Box<NewShareData>> = BTreeMap::new();
+			contributions.insert((0b011, 0b011), Box::new(share));
 			ResharingRound4Message { ssid, from_party_id: 0, to_party_id: 1, contributions }
 		};
 		protocol.handle_round4_message(0, mk_r4(7));
