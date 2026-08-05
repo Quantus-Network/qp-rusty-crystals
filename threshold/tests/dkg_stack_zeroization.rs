@@ -1,5 +1,6 @@
 //! Regression test (security review): a full DKG run must not leave plaintext
-//! copies of subset shared secrets K_S in dead stack memory.
+//! copies of subset shared secrets K_S — or the subset seeds derived from
+//! them via `h_keygen` — in dead stack memory.
 //!
 //! The companion heap test (`heap_zeroization.rs`) catches secret-bearing
 //! heap blocks freed unwiped (transport frames, map nodes, queue buffers);
@@ -7,15 +8,19 @@
 //! duplicated onto the stack every time it is squeezed, looked up out of a
 //! map (`let Some(&shared_secret) = ...`), passed by value, or folded into a
 //! derivation — copies that no drop reaches if codegen fails to elide them.
+//! The `[u8; SUBSET_SEED_SIZE]` seed `h_keygen` derives from K_S is equally
+//! sensitive (it deterministically expands to the subset's secret
+//! contribution) and is bound to locals in `compute_my_contributions` and
+//! `verify_partial_pk_commitment`, so it is probed with the same technique.
 //!
 //! Detection uses the same painted-stack technique as the dealer probe: run
 //! all three parties of a deterministic 2-of-3 DKG to completion on a
 //! sentinel-painted stack via `psm::on_stack`, then scan the buffer — which
-//! we own, so the read is sound — for a K_S learned from an identical,
+//! we own, so the read is sound — for secrets learned from an identical,
 //! unprobed first run (all randomness is SHAKE-derived from fixed per-party
 //! seeds and a fixed session nonce, so the two runs produce byte-identical
-//! secrets). The probed run never extracts K_S in harness code — capture is
-//! compiled in only for the reference run — so the probe machinery cannot
+//! secrets). The probed run never extracts secrets in harness code — capture
+//! is compiled in only for the reference run — so the probe machinery cannot
 //! plant a match itself.
 //!
 //! Only compiled for optimized builds (`cargo test --release`): unoptimized
@@ -26,9 +31,12 @@
 
 use std::collections::BTreeMap;
 
-use qp_rusty_crystals_test_utils::probe_stack_for;
+use qp_rusty_crystals_test_utils::probe_stack_for_named;
 use qp_rusty_crystals_threshold::{
-	keygen::dkg::{Dkg, DkgAction, DkgConfig, TranscriptSigner},
+	keygen::dkg::{
+		h_keygen, Dkg, DkgAction, DkgConfig, DkgMessage, SubsetMask, TranscriptSigner,
+		RANDOMNESS_SIZE, SHARED_SECRET_SIZE, SUBSET_SEED_SIZE,
+	},
 	ThresholdConfig,
 };
 
@@ -70,16 +78,26 @@ impl TranscriptSigner for TestSigner {
 	}
 }
 
+/// Secrets recovered from the reference run's wire frames: every subset
+/// shared secret K_S and every subset seed `h_keygen(S, K_S, R)` derived
+/// from it.
+struct CapturedSecrets {
+	shared_secrets: Vec<[u8; SHARED_SECRET_SIZE]>,
+	subset_seeds: Vec<[u8; SUBSET_SEED_SIZE]>,
+}
+
 /// Run a deterministic 2-of-3 DKG among three in-process parties. All
 /// randomness is SHAKE-derived from the fixed per-party seeds and session
 /// nonce, so every invocation produces byte-identical secrets and frames.
 ///
-/// With `capture` set, returns a subset shared secret K_S — the last 32
-/// bytes of the first Round 1 private frame (a subset leader delivering K_S
-/// to the other member of a size-2 subset). With `capture` unset, no harness
-/// code ever touches secret frame bytes, so the run is safe to execute
-/// inside the painted-stack probe without planting the pattern itself.
-fn run_local_dkg_2of3(capture: bool) -> Option<[u8; 32]> {
+/// With `capture` set, records a copy of every exchanged frame and, after
+/// completion, parses out each subset shared secret K_S (from the Round 1
+/// private messages) and recomputes each subset seed via the public
+/// `h_keygen` (global randomness R is the sorted concatenation of the
+/// Round 2 broadcasts). With `capture` unset, no harness code ever touches
+/// secret frame bytes, so the run is safe to execute inside the
+/// painted-stack probe without planting the patterns itself.
+fn run_local_dkg_2of3(capture: bool) -> Option<CapturedSecrets> {
 	let threshold_config = ThresholdConfig::new(2, 3).expect("valid config");
 	let participants: Vec<u32> = vec![0, 1, 2];
 	let pk_map: BTreeMap<u32, u32> = participants.iter().map(|&p| (p, p)).collect();
@@ -103,7 +121,7 @@ fn run_local_dkg_2of3(capture: bool) -> Option<[u8; 32]> {
 		.collect();
 
 	let mut queues: Vec<Vec<(u32, Vec<u8>)>> = vec![Vec::new(); participants.len()];
-	let mut ks_tail: Option<[u8; 32]> = None;
+	let mut captured_frames: Vec<Vec<u8>> = Vec::new();
 	let mut done = vec![false; participants.len()];
 	for _ in 0..1000 {
 		if done.iter().all(|&d| d) {
@@ -118,19 +136,22 @@ fn run_local_dkg_2of3(capture: bool) -> Option<[u8; 32]> {
 			}
 			match dkgs[i].poke().expect("poke succeeds") {
 				DkgAction::Wait => {},
-				DkgAction::SendMany(data) =>
+				DkgAction::SendMany(data) => {
+					if capture {
+						captured_frames.push(data.clone());
+					}
 					for (j, queue) in queues.iter_mut().enumerate() {
 						if j != i {
 							queue.push((i as u32, data.clone()));
 						}
-					},
+					}
+				},
 				DkgAction::SendPrivate(to, mut data) => {
-					// Round 1 private frames carry K_S; the serialized tail
-					// is the secret itself. Only the reference run extracts
-					// it — the probed run must never copy secret bytes into
-					// harness stack frames.
-					if capture && ks_tail.is_none() && data.len() >= 32 {
-						ks_tail = Some(data[data.len() - 32..].try_into().unwrap());
+					// Round 1 private frames carry K_S. Only the reference
+					// run copies them out — the probed run must never copy
+					// secret bytes into harness stack frames.
+					if capture {
+						captured_frames.push(data.to_vec());
 					}
 					queues[to as usize].push((i as u32, std::mem::take(&mut *data)));
 				},
@@ -142,33 +163,77 @@ fn run_local_dkg_2of3(capture: bool) -> Option<[u8; 32]> {
 	}
 	assert!(done.iter().all(|&d| d), "DKG must complete");
 	if capture {
-		Some(ks_tail.expect("a Round 1 private frame was exchanged"))
+		Some(extract_secrets(&captured_frames))
 	} else {
 		None
 	}
 }
 
+/// Parse the reference run's frames: pull each (subset, K_S) pair from the
+/// Round 1 private messages and each party's randomness from the Round 2
+/// broadcasts, then recompute every subset seed exactly as the protocol does
+/// (`R` = randomness concatenated in ascending party order).
+fn extract_secrets(frames: &[Vec<u8>]) -> CapturedSecrets {
+	let mut per_subset_ks: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]> = BTreeMap::new();
+	let mut randomness: BTreeMap<u32, [u8; RANDOMNESS_SIZE]> = BTreeMap::new();
+	for frame in frames {
+		match borsh::from_slice::<DkgMessage>(frame).expect("captured frame deserializes") {
+			DkgMessage::Round1Private(private) => {
+				per_subset_ks.insert(private.subset_mask, private.shared_secret);
+			},
+			DkgMessage::Round2Broadcast(broadcast) => {
+				randomness.insert(broadcast.party_id, broadcast.randomness);
+			},
+			_ => {},
+		}
+	}
+	assert_eq!(per_subset_ks.len(), 3, "2-of-3 DKG exchanges K_S for all three subsets");
+	assert_eq!(randomness.len(), 3, "all three parties broadcast randomness");
+
+	// BTreeMap iterates in ascending party order, matching the protocol's
+	// global-randomness construction.
+	let global_randomness: Vec<u8> = randomness.values().flatten().copied().collect();
+
+	let subset_seeds = per_subset_ks
+		.iter()
+		.map(|(&subset, ks)| h_keygen(subset, ks, &global_randomness))
+		.collect();
+	CapturedSecrets { shared_secrets: per_subset_ks.into_values().collect(), subset_seeds }
+}
+
 #[test]
-fn dkg_leaves_no_shared_secret_copies_on_the_stack() {
-	// Reference run (unprobed): learn the K_S the probed run must wipe.
-	let pattern = run_local_dkg_2of3(true).expect("reference run captures K_S");
+fn dkg_leaves_no_secret_copies_on_the_stack() {
+	// Reference run (unprobed): learn the secrets the probed run must wipe.
+	let secrets = run_local_dkg_2of3(true).expect("reference run captures secrets");
+	let mut patterns: Vec<(String, &[u8])> = Vec::new();
+	for (i, ks) in secrets.shared_secrets.iter().enumerate() {
+		patterns.push((format!("shared secret K_S #{i}"), ks.as_slice()));
+	}
+	for (i, seed) in secrets.subset_seeds.iter().enumerate() {
+		patterns.push((format!("subset seed #{i}"), seed.as_slice()));
+	}
+	let named: Vec<(&str, &[u8])> =
+		patterns.iter().map(|(name, bytes)| (name.as_str(), *bytes)).collect();
 
 	// Sanity: the technique detects an unwiped copy. A closure that
 	// deliberately leaves K_S in a dead stack frame must be seen.
+	let planted = secrets.shared_secrets[0];
 	assert!(
-		probe_stack_for(STACK_BYTES, &pattern, || {
-			let leaked: [u8; 32] = pattern;
+		!probe_stack_for_named(STACK_BYTES, &named, || {
+			let leaked: [u8; SHARED_SECRET_SIZE] = planted;
 			core::hint::black_box(&leaked);
-		}),
+		})
+		.is_empty(),
 		"probe self-check: a deliberately leaked stack copy was not detected"
 	);
 
 	// Real scenario: the identical DKG run, end to end, on the painted
-	// stack. Every legitimate copy of K_S lives in heap-backed state that
-	// is wiped on drop (verified by heap_zeroization); anything left in the
-	// painted region is a stack copy the protocol failed to wipe.
-	let leaked = probe_stack_for(STACK_BYTES, &pattern, || {
+	// stack. Every legitimate copy of K_S (and of the seeds derived from it)
+	// lives in heap-backed state that is wiped on drop (verified by
+	// heap_zeroization); anything left in the painted region is a stack copy
+	// the protocol failed to wipe.
+	let leaked = probe_stack_for_named(STACK_BYTES, &named, || {
 		let _ = run_local_dkg_2of3(false);
 	});
-	assert!(!leaked, "the DKG left a plaintext subset shared secret K_S in stack memory");
+	assert!(leaked.is_empty(), "the DKG left plaintext secrets in stack memory: {leaked:?}");
 }

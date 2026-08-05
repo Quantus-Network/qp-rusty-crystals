@@ -28,6 +28,9 @@ qp-rusty-crystals-dilithium = { workspace = true }
 libm = { workspace = true }
 
 [dev-dependencies]
+# Integration tests parse captured DKG wire frames (e.g. the stack
+# zeroization probes reconstruct subset seeds from Round 1/2 messages).
+borsh = { workspace = true }
 criterion = { workspace = true }
 hex = { workspace = true }
 hex-literal = { workspace = true }
