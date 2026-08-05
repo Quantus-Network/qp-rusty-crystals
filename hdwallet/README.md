@@ -72,8 +72,10 @@ e.g. `ml_dsa_44::derive_key_from_mnemonic` with the `ml-dsa-44` feature.
 ### Seed-based API
 
 If you already hold a BIP-39 seed (or want to stretch the mnemonic once and
-derive many keys), use the seed entrypoints. Seeds are passed by move as
-self-zeroizing types:
+derive many keys), use the seed entrypoints. Seeds live in self-zeroizing
+holders and are *borrowed* by the derivation functions — a by-value move
+would leave an unwiped copy of the seed in the caller's dead stack slot —
+so one holder can derive keys at many paths and wipes itself when dropped:
 
 ```rust
 use qp_rusty_crystals_hdwallet::{derive_key_from_seed, mnemonic_to_seed, SensitiveBytes64};
@@ -82,7 +84,9 @@ use qp_rusty_crystals_hdwallet::{derive_key_from_seed, mnemonic_to_seed, Sensiti
 // the mnemonic string is consumed and zeroized.
 let mut seed = SensitiveBytes64::zeroed();
 mnemonic_to_seed(mnemonic, None, &mut seed)?;
-let keypair = derive_key_from_seed(seed, "m/44'/189189'/0'/0'/0'")?;
+let keypair = derive_key_from_seed(&seed, "m/44'/189189'/0'/0'/0'")?;
+let another = derive_key_from_seed(&seed, "m/44'/189189'/1'/0'/0'")?;
+// `seed` zeroizes its storage when it goes out of scope.
 ```
 
 ### Wormhole pairs

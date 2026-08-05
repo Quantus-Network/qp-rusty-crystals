@@ -47,8 +47,8 @@ mod hdwallet_tests {
 		assert_eq!(seed1.as_bytes(), seed2.as_bytes());
 
 		// Should be able to derive same keys from same seed
-		let key1 = derive_key_from_seed(seed1, "m/44'/0'/0'/0'/0'").unwrap();
-		let key2 = derive_key_from_seed(seed2, "m/44'/0'/0'/0'/0'").unwrap();
+		let key1 = derive_key_from_seed(&seed1, "m/44'/0'/0'/0'/0'").unwrap();
+		let key2 = derive_key_from_seed(&seed2, "m/44'/0'/0'/0'/0'").unwrap();
 		assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
 	}
 
@@ -75,9 +75,9 @@ mod hdwallet_tests {
 		// Different passphrase should produce different seed
 		assert_ne!(seed1.as_bytes(), seed3.as_bytes(), "password should affect seed");
 
-		let master_key1 = derive_key_from_seed(seed1, "m/44'/0'/0'/0'/0'").unwrap();
-		let master_key2 = derive_key_from_seed(seed2, "m/44'/0'/0'/0'/0'").unwrap();
-		let master_key3 = derive_key_from_seed(seed3, "m/44'/0'/0'/0'/0'").unwrap();
+		let master_key1 = derive_key_from_seed(&seed1, "m/44'/0'/0'/0'/0'").unwrap();
+		let master_key2 = derive_key_from_seed(&seed2, "m/44'/0'/0'/0'/0'").unwrap();
+		let master_key3 = derive_key_from_seed(&seed3, "m/44'/0'/0'/0'/0'").unwrap();
 
 		// Keys from same seed should be identical
 		assert_eq!(
@@ -95,7 +95,7 @@ mod hdwallet_tests {
 
 		// Derive a different path - need a fresh seed since seed1 was already consumed
 		let seed_for_derive = seed_from(mnemonic.to_string(), None);
-		let derived_key = derive_key_from_seed(seed_for_derive, "m/0'/2147483647'/1'").unwrap();
+		let derived_key = derive_key_from_seed(&seed_for_derive, "m/0'/2147483647'/1'").unwrap();
 		assert_ne!(
 			master_key1.secret().to_bytes(),
 			derived_key.secret().to_bytes(),
@@ -124,8 +124,8 @@ mod hdwallet_tests {
 			let seed1 = seed_from(mnemonic1, None);
 			let seed2 = seed_from(mnemonic2, None);
 
-			let k1 = derive_key_from_seed(seed1, p).unwrap();
-			let k2 = derive_key_from_seed(seed2, p).unwrap();
+			let k1 = derive_key_from_seed(&seed1, p).unwrap();
+			let k2 = derive_key_from_seed(&seed2, p).unwrap();
 
 			assert_eq!(k1.secret().to_bytes(), k2.secret().to_bytes());
 			assert_eq!(k1.public().to_bytes(), k2.public().to_bytes());
@@ -142,7 +142,7 @@ mod hdwallet_tests {
 				let mnemonic = generate_mnemonic((&mut seed).into()).unwrap();
 				let path = generate_random_path();
 				let seed = seed_from(mnemonic.to_string(), None);
-				let k = derive_key_from_seed(seed, &path).unwrap();
+				let k = derive_key_from_seed(&seed, &path).unwrap();
 				(k, mnemonic.to_string(), path)
 			})
 			.collect()
@@ -154,9 +154,9 @@ mod hdwallet_tests {
 			let seed = seed_from(mnemonic_str.to_string(), None);
 			let generated_keys = if derivation_path.is_empty() || derivation_path == "m" {
 				// Use a default path for empty or "m" path
-				derive_key_from_seed(seed, "m/44'/0'/0'/0'/0'").unwrap()
+				derive_key_from_seed(&seed, "m/44'/0'/0'/0'/0'").unwrap()
 			} else {
-				derive_key_from_seed(seed, derivation_path).unwrap()
+				derive_key_from_seed(&seed, derivation_path).unwrap()
 			};
 
 			// Compare secret keys
@@ -234,7 +234,7 @@ mod hdwallet_tests {
 		let seed = seed_from(mnemonic, None);
 
 		// Attempt to derive a key with an invalid path
-		let result = derive_key_from_seed(seed, "abc");
+		let result = derive_key_from_seed(&seed, "abc");
 
 		assert_eq!(
 			result.err().unwrap(),
@@ -250,7 +250,7 @@ mod hdwallet_tests {
 		let seed = seed_from(mnemonic, None);
 
 		// Attempt to derive a key with an invalid index
-		let result = derive_key_from_seed(seed, "m/2147483648'"); // Index exceeds HARDENED_OFFSET (2^31)
+		let result = derive_key_from_seed(&seed, "m/2147483648'"); // Index exceeds HARDENED_OFFSET (2^31)
 
 		assert!(result.is_err());
 		assert_eq!(
@@ -267,7 +267,7 @@ mod hdwallet_tests {
 		let seed = seed_from(mnemonic, None);
 
 		// Invalid derivation path with non-integer components
-		let result = derive_key_from_seed(seed, "1/a/2");
+		let result = derive_key_from_seed(&seed, "1/a/2");
 
 		assert!(result.is_err());
 		assert_eq!(
@@ -284,10 +284,10 @@ mod hdwallet_tests {
 		let seed = seed_from(mnemonic.clone(), None);
 
 		// Test deriving at master path "m"
-		let key1 = derive_key_from_seed(seed, "m/44'/0'/0'/0'/0'").unwrap();
+		let key1 = derive_key_from_seed(&seed, "m/44'/0'/0'/0'/0'").unwrap();
 
 		let seed2 = seed_from(mnemonic, None);
-		let key2 = derive_key_from_seed(seed2, "m/44'/0'/0'/0'/0'").unwrap();
+		let key2 = derive_key_from_seed(&seed2, "m/44'/0'/0'/0'/0'").unwrap();
 
 		// Keys derived from same path should be identical
 		assert_eq!(
@@ -359,17 +359,17 @@ mod hdwallet_tests {
 
 		// Test invalid wormhole path (wrong chain ID)
 		let seed1 = seed_from(mnemonic.clone(), None);
-		let result = generate_wormhole_from_seed(seed1, "m/44'/60'/0'");
+		let result = generate_wormhole_from_seed(&seed1, "m/44'/60'/0'");
 		assert!(result.is_err());
 
 		// Test valid wormhole path
 		let seed2 = seed_from(mnemonic.clone(), None);
-		let result2 = generate_wormhole_from_seed(seed2, "m/44'/189189189'/0'");
+		let result2 = generate_wormhole_from_seed(&seed2, "m/44'/189189189'/0'");
 		assert!(result2.is_ok());
 
 		// Test another valid wormhole path
 		let seed3 = seed_from(mnemonic, None);
-		let result3 = generate_wormhole_from_seed(seed3, "m/44'/189189189'/1'");
+		let result3 = generate_wormhole_from_seed(&seed3, "m/44'/189189189'/1'");
 		assert!(result3.is_ok());
 	}
 
@@ -381,8 +381,8 @@ mod hdwallet_tests {
 		let seed2 = seed_from(mnemonic, None);
 
 		// Derive keys from master path - should be deterministic
-		let key1 = derive_key_from_seed(seed1, "m/44'/0'/0'/0'/0'").unwrap();
-		let key2 = derive_key_from_seed(seed2, "m/44'/0'/0'/0'/0'").unwrap();
+		let key1 = derive_key_from_seed(&seed1, "m/44'/0'/0'/0'/0'").unwrap();
+		let key2 = derive_key_from_seed(&seed2, "m/44'/0'/0'/0'/0'").unwrap();
 
 		assert_eq!(
 			key1.secret().to_bytes(),
@@ -476,8 +476,8 @@ mod hdwallet_tests {
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string(),
 			None,
 		);
-		let key1 = derive_key_from_seed(seed1, "m/44'/0'/0'/0'/0'").unwrap();
-		let key2 = derive_key_from_seed(seed2, "m/44'/0'/0'/0'/1'").unwrap();
+		let key1 = derive_key_from_seed(&seed1, "m/44'/0'/0'/0'/0'").unwrap();
+		let key2 = derive_key_from_seed(&seed2, "m/44'/0'/0'/0'/1'").unwrap();
 
 		// Keys should be different
 		assert_ne!(key1.secret().to_bytes(), key2.secret().to_bytes());
@@ -496,8 +496,8 @@ mod hdwallet_tests {
 		let seed1 = seed_from(mnemonic1, None);
 		let seed2 = seed_from(mnemonic2, None);
 
-		let key1 = derive_key_from_seed(seed1, path).unwrap();
-		let key2 = derive_key_from_seed(seed2, path).unwrap();
+		let key1 = derive_key_from_seed(&seed1, path).unwrap();
+		let key2 = derive_key_from_seed(&seed2, path).unwrap();
 
 		// Same seed and path should produce same keys
 		assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
@@ -510,7 +510,7 @@ mod hdwallet_tests {
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
 		let seed = seed_from(mnemonic, None);
 
-		let wormhole = generate_wormhole_from_seed(seed, "m/44'/189189189'/0'").unwrap();
+		let wormhole = generate_wormhole_from_seed(&seed, "m/44'/189189189'/0'").unwrap();
 
 		// Verify wormhole pair has expected structure
 		assert_eq!(wormhole.secret().as_bytes().len(), 32);
@@ -527,7 +527,7 @@ mod hdwallet_tests {
 		let seed = seed_from(mnemonic, None);
 
 		// Should fail with invalid wormhole chain ID
-		let result = generate_wormhole_from_seed(seed, "m/44'/60'/0'");
+		let result = generate_wormhole_from_seed(&seed, "m/44'/60'/0'");
 		assert!(result.is_err());
 		assert_eq!(
 			result.err().unwrap(),
@@ -541,7 +541,7 @@ mod hdwallet_tests {
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
 		let seed = seed_from(mnemonic, None);
 
-		let result = derive_key_from_seed(seed, "m/44/60/0");
+		let result = derive_key_from_seed(&seed, "m/44/60/0");
 		assert!(result.is_err());
 		assert_eq!(
 			result.err().unwrap(),
@@ -557,11 +557,11 @@ mod hdwallet_tests {
 
 		// First derivation
 		let seed1 = seed_from(mnemonic.to_string(), None);
-		let key1 = derive_key_from_seed(seed1, path).unwrap();
+		let key1 = derive_key_from_seed(&seed1, path).unwrap();
 
 		// Second derivation
 		let seed2 = seed_from(mnemonic.to_string(), None);
-		let key2 = derive_key_from_seed(seed2, path).unwrap();
+		let key2 = derive_key_from_seed(&seed2, path).unwrap();
 
 		// Should produce identical results
 		assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
@@ -581,18 +581,22 @@ mod hdwallet_tests {
 		let sensitive_entropy = SensitiveBytes32::from(&mut entropy);
 		let sensitive_seed = SensitiveBytes64::from(&mut seed_bytes);
 
-		// Use the wrapped data - this should move it
+		// Use the wrapped data - generate_mnemonic moves the entropy;
+		// derive_key_from_seed borrows the seed (security review: a by-value
+		// move would leave the caller's slot dead and unwiped), so the same
+		// seed holder can derive at several paths and is wiped when dropped.
 		let mnemonic = generate_mnemonic(sensitive_entropy).unwrap();
 		let seed_from_mnemonic = seed_from(mnemonic.to_string(), None);
-		let _key = derive_key_from_seed(sensitive_seed, "m/44'/0'/0'/0'/0'").unwrap();
+		let _key = derive_key_from_seed(&sensitive_seed, "m/44'/0'/0'/0'/0'").unwrap();
+		let _key_again = derive_key_from_seed(&sensitive_seed, "m/44'/0'/0'/0'/1'").unwrap();
 
-		// After this point, sensitive_entropy and sensitive_seed should be consumed
+		// After this point, sensitive_entropy is consumed.
 		// The following would not compile if uncommented:
-		// let _another_key = derive_key_from_seed(sensitive_seed, "m/44'/0'/0'/0/1");
+		// let _mnemonic2 = generate_mnemonic(sensitive_entropy);
 
 		// Test that regular arrays still work with auto-conversion
 		let mut raw_seed = [2u8; 64];
-		let _key2 = derive_key_from_seed((&mut raw_seed).into(), "m/44'/0'/0'/0'/0'").unwrap();
+		let _key2 = derive_key_from_seed(&(&mut raw_seed).into(), "m/44'/0'/0'/0'/0'").unwrap();
 		// raw_seed was zeroized by the conversion
 
 		assert_eq!(seed_from_mnemonic.as_bytes().len(), 64);
@@ -640,11 +644,11 @@ mod hdwallet_tests {
 		assert!(oversized.len() > MAX_DERIVATION_PATH_BYTES);
 
 		let seed1 = seed_from(mnemonic.clone(), None);
-		let err1 = derive_key_from_seed(seed1, &oversized).unwrap_err();
+		let err1 = derive_key_from_seed(&seed1, &oversized).unwrap_err();
 		assert!(matches!(err1, HDLatticeError::PathTooLong(_)), "got {err1:?}");
 
 		let seed2 = seed_from(mnemonic, None);
-		match generate_wormhole_from_seed(seed2, &oversized) {
+		match generate_wormhole_from_seed(&seed2, &oversized) {
 			Err(HDLatticeError::PathTooLong(_)) => {},
 			Err(other) => panic!("expected PathTooLong, got {other:?}"),
 			Ok(_) => panic!("expected PathTooLong, got Ok"),
@@ -663,11 +667,11 @@ mod hdwallet_tests {
 		}
 
 		let seed1 = seed_from(mnemonic.clone(), None);
-		let err1 = derive_key_from_seed(seed1, &too_deep).unwrap_err();
+		let err1 = derive_key_from_seed(&seed1, &too_deep).unwrap_err();
 		assert!(matches!(err1, HDLatticeError::PathTooDeep(_)), "got {err1:?}");
 
 		let seed2 = seed_from(mnemonic, None);
-		match generate_wormhole_from_seed(seed2, &too_deep) {
+		match generate_wormhole_from_seed(&seed2, &too_deep) {
 			Err(HDLatticeError::PathTooDeep(_)) => {},
 			Err(other) => panic!("expected PathTooDeep, got {other:?}"),
 			Ok(_) => panic!("expected PathTooDeep, got Ok"),
@@ -779,7 +783,7 @@ mod hdwallet_tests {
 		}
 
 		let seed = seed_from(mnemonic, None);
-		derive_key_from_seed(seed, &max_depth)
+		derive_key_from_seed(&seed, &max_depth)
 			.expect("path at exactly MAX_DERIVATION_DEPTH must succeed");
 	}
 }

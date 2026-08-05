@@ -276,16 +276,21 @@ macro_rules! mldsa_variant_module {
 			#[doc = concat!("Derive an ", $doc_name, " keypair from a seed at the given BIP44 path.")]
 			///
 			/// # Security Note
-			/// This function takes ownership of the seed for security (move semantics).
-			/// The seed parameter is zeroized before returning.
+			/// The seed is borrowed, not consumed (security review): taking
+			/// `SensitiveBytes64` by value moves it, and a move is a copy
+			/// that leaves the caller's original stack slot dead but never
+			/// dropped — outside the reach of `ZeroizeOnDrop`. Borrowing
+			/// keeps the seed in the caller's self-zeroizing storage, which
+			/// is wiped in place when the caller drops it (pinned by the
+			/// seed stack-zeroization probe).
 			pub fn derive_key_from_seed(
-				seed: SensitiveBytes64,
+				seed: &SensitiveBytes64,
 				path: &str,
 			) -> Result<Keypair, HDLatticeError> {
 				// The entropy is filled in place and lent to `generate`,
 				// which wipes it; it never crosses a boundary by value.
 				let mut entropy = SensitiveBytes32::zeroed();
-				crate::derive_entropy_from_seed(&seed, path, &mut entropy)?;
+				crate::derive_entropy_from_seed(seed, path, &mut entropy)?;
 				Ok(Keypair::generate(&mut entropy))
 			}
 
@@ -305,9 +310,13 @@ macro_rules! mldsa_variant_module {
 				path: &str,
 			) -> Result<Keypair, HDLatticeError> {
 				crate::check_derivation_path(path)?;
+				// The stretched seed is filled in place and lent to
+				// `derive_key_from_seed`; moving it there by value left this
+				// local's stack slot unwiped (pinned by the seed
+				// stack-zeroization probe). It drops — and wipes — here.
 				let mut seed = SensitiveBytes64::zeroed();
 				crate::parse_mnemonic_to_seed_into(mnemonic, passphrase, seed.as_mut_bytes())?;
-				derive_key_from_seed(seed, path)
+				derive_key_from_seed(&seed, path)
 			}
 		}
 	};
@@ -324,10 +333,16 @@ mldsa_variant_module!(ml_dsa_87, "ml-dsa-87", "ML-DSA-87");
 /// other parameter sets.
 ///
 /// # Security Note
-/// This function takes ownership of the seed for security (move semantics).
-/// The seed parameter is zeroized before returning.
+/// The seed is borrowed, not consumed: a by-value `SensitiveBytes64` would
+/// be moved — copied into the callee while the caller's original stack slot
+/// stays dead and unwiped, outside the reach of `ZeroizeOnDrop`. The seed
+/// stays in the caller's self-zeroizing storage and is wiped in place when
+/// the caller drops it.
 #[cfg(feature = "ml-dsa-87")]
-pub fn derive_key_from_seed(seed: SensitiveBytes64, path: &str) -> Result<Keypair, HDLatticeError> {
+pub fn derive_key_from_seed(
+	seed: &SensitiveBytes64,
+	path: &str,
+) -> Result<Keypair, HDLatticeError> {
 	ml_dsa_87::derive_key_from_seed(seed, path)
 }
 
@@ -369,18 +384,25 @@ pub fn derive_wormhole_from_mnemonic(
 	path: &str,
 ) -> Result<WormholePair, HDLatticeError> {
 	check_wormhole_path(path)?;
+	// The stretched seed is filled in place and lent to
+	// `generate_wormhole_from_seed`; moving it there by value left this
+	// local's stack slot unwiped (pinned by the seed stack-zeroization
+	// probe). It drops — and wipes — here.
 	let mut seed = SensitiveBytes64::zeroed();
 	parse_mnemonic_to_seed_into(mnemonic, passphrase, seed.as_mut_bytes())?;
-	generate_wormhole_from_seed(seed, path)
+	generate_wormhole_from_seed(&seed, path)
 }
 
 /// Generate a wormhole pair from a seed at the given path
 ///
 /// # Security Note
-/// This function takes ownership of the seed for security (move semantics).
-/// The seed parameter is zeroized before returning.
+/// The seed is borrowed, not consumed: a by-value `SensitiveBytes64` would
+/// be moved — copied into the callee while the caller's original stack slot
+/// stays dead and unwiped, outside the reach of `ZeroizeOnDrop`. The seed
+/// stays in the caller's self-zeroizing storage and is wiped in place when
+/// the caller drops it.
 pub fn generate_wormhole_from_seed(
-	seed: SensitiveBytes64,
+	seed: &SensitiveBytes64,
 	path: &str,
 ) -> Result<WormholePair, HDLatticeError> {
 	check_wormhole_path(path)?;
@@ -390,7 +412,7 @@ pub fn generate_wormhole_from_seed(
 	// the generic path validation `check_wormhole_path` already performed —
 	// cheap and idempotent.) Seed and entropy are self-zeroizing.
 	let mut entropy = SensitiveBytes32::zeroed();
-	derive_entropy_from_seed(&seed, path, &mut entropy)?;
+	derive_entropy_from_seed(seed, path, &mut entropy)?;
 	Ok(WormholePair::generate_new(&mut entropy))
 }
 
