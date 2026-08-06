@@ -1001,8 +1001,31 @@ impl DilithiumSignProtocol {
 	///
 	/// # Errors
 	///
-	/// Returns an error if the protocol fails or encounters an invalid state.
+	/// Returns an error if the protocol fails or encounters an invalid
+	/// state. Every error is **terminal** (security review): round inputs
+	/// are frozen first-write-wins, so failed generation or verification
+	/// work can only fail identically on retry. The session therefore
+	/// transitions to `Failed` before the error is returned, and later
+	/// pokes report `ProtocolFailed` instead of repeating the failing work
+	/// — recover by constructing a fresh instance, exactly as for a
+	/// combination failure.
 	pub fn poke(&mut self) -> Result<Action<Signature>, SignProtocolError> {
+		let result = self.poke_inner();
+		if let Err(err) = &result {
+			// Record terminal failure unless the session already is
+			// terminal: Done's AlreadyComplete probe must not re-label a
+			// completed session, and a Failed session keeps its original
+			// reason. (Most failure arms below set Failed with a tailored
+			// reason themselves; this catches the rest, e.g. generation
+			// and serialization errors.)
+			if !matches!(self.state, SignProtocolState::Done | SignProtocolState::Failed(_)) {
+				self.state = SignProtocolState::Failed(err.to_string());
+			}
+		}
+		result
+	}
+
+	fn poke_inner(&mut self) -> Result<Action<Signature>, SignProtocolError> {
 		match &self.state {
 			SignProtocolState::Round1Generate => {
 				// Generate Round 1 commitment using the round1 seed for this instance.
@@ -2389,6 +2412,114 @@ mod tests {
 		assert!(protocol0.message_buffer.round2.is_empty());
 		// And the Round 2 message from party 1 should now be in r2_broadcasts
 		assert!(protocol0.r2_broadcasts.contains_key(&1));
+	}
+
+	/// Boundary pin for the errors-are-terminal contract: terminality
+	/// applies to `poke` (local work on frozen inputs, deterministic on
+	/// retry) and must NOT extend to `message` — peer-supplied data is the
+	/// attacker-facing channel, so a compromised party feeding garbage
+	/// gets its frame rejected (surfaced as `MalformedMessage` for
+	/// logging/attribution) while the session stays live and completes
+	/// when the honest traffic arrives. If message errors ever became
+	/// terminal, one junk frame would be a one-packet denial-of-signature
+	/// primitive against every receiver.
+	#[test]
+	fn malformed_frame_does_not_terminate_the_session() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+		let signer0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer0,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xCC; 32],
+		)
+		.unwrap();
+		assert!(matches!(protocol.poke().unwrap(), Action::SendMany(_)));
+
+		// A compromised party 1 sends a frame with a valid header (right
+		// tag, right SSID — so it reaches the deserializer) but a garbage
+		// body.
+		let mut junk = Vec::new();
+		junk.push(0u8); // SigningMessage::Round1 tag
+		junk.extend_from_slice(protocol.ssid());
+		junk.extend_from_slice(&[0xFFu8; 7]); // truncated garbage body
+		let err = protocol.message(1, junk).expect_err("garbage body must be reported");
+		assert!(matches!(err, SignProtocolError::MalformedMessage { from: 1, .. }));
+
+		// The session is still live and waiting — not Failed.
+		assert!(matches!(protocol.poke().unwrap(), Action::Wait));
+		assert_eq!(protocol.state, SignProtocolState::Round1Waiting);
+
+		// The honest frame still completes the round.
+		let signer1 = ThresholdSigner::new(shares[1].clone(), pk, config).unwrap();
+		let mut peer = DilithiumSignProtocol::new(
+			signer1,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1],
+			0,
+			[0xBB; 32],
+			[0xCC; 32],
+		)
+		.unwrap();
+		let honest_r1 = match peer.poke().unwrap() {
+			Action::SendMany(d) => d,
+			other => panic!("expected SendMany, got {other:?}"),
+		};
+		protocol.message(1, honest_r1).unwrap();
+		assert!(
+			matches!(protocol.poke().unwrap(), Action::SendMany(_)),
+			"session must advance to Round 2 after the honest frame arrives"
+		);
+	}
+
+	/// Security review: an error escaping `poke` must leave the reactor in
+	/// the terminal `Failed` state. Generation inputs are frozen
+	/// first-write-wins, so a failed generation can only fail identically
+	/// on retry — yet `Round2Generate`/`Round3Generate` errors used to
+	/// leave the state unchanged, so a supervisor polling the instance
+	/// would re-execute the failing work forever and `is_failed()`-style
+	/// state checks could not tell an unrecoverable instance from one
+	/// awaiting input.
+	#[test]
+	fn generation_failure_is_terminal_not_silently_retried() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xCC; 32],
+		)
+		.unwrap();
+		assert!(matches!(protocol.poke().unwrap(), Action::SendMany(_)));
+
+		// Force Round 2 generation without the peer's Round 1 broadcast:
+		// the signer rejects the wrong party count — a local error whose
+		// inputs cannot change, so it is unrecoverable for this instance.
+		protocol.state = SignProtocolState::Round2Generate;
+		let err = protocol.poke().expect_err("round 2 generation must fail");
+		assert!(matches!(err, SignProtocolError::SigningError(_)), "unexpected error: {err}");
+		assert!(
+			matches!(protocol.state, SignProtocolState::Failed(_)),
+			"generation failure must be terminal, state is {:?}",
+			protocol.state
+		);
+
+		// A later poke reports the terminal failure instead of re-running
+		// the failed generation (which would surface as SigningError again).
+		match protocol.poke() {
+			Err(SignProtocolError::ProtocolFailed(_)) => {},
+			other => panic!("expected ProtocolFailed from a dead instance, got {other:?}"),
+		}
 	}
 
 	/// Security review: a silent peer must not leave a signing session

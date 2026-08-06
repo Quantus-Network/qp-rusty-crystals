@@ -887,7 +887,32 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	}
 
 	/// Advance the protocol state machine.
+	///
+	/// # Errors
+	///
+	/// Every error is **terminal** (security review): round inputs are
+	/// frozen first-write-wins, so failed generation or verification work
+	/// can only fail identically on retry. The session therefore
+	/// transitions to `Failed` before the error is returned — later pokes
+	/// report `InvalidState` instead of repeating the failing work, and an
+	/// old-committee member can still recover its share for a fresh
+	/// attempt via [`Self::abort_and_take_existing_share`].
 	pub fn poke(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
+		let result = self.poke_inner();
+		if let Err(err) = &result {
+			// Record terminal failure unless the session already is
+			// terminal: Done's and Failed's own InvalidState reports must
+			// not re-label the session. (Several failure paths set Failed
+			// with a tailored reason themselves; this catches the rest,
+			// e.g. the entropy commit-reveal check.)
+			if !matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
+				self.state = ResharingState::Failed(err.to_string());
+			}
+		}
+		result
+	}
+
+	fn poke_inner(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
 		match &self.state {
 			ResharingState::Round1Generate => self.handle_round1_generate(),
 			ResharingState::Round1Waiting => self.handle_round1_waiting(),
@@ -3660,6 +3685,46 @@ mod tests {
 		);
 		// Same nonce and epoch → reproducible (deterministic within a session).
 		assert_eq!(base.generate_entropy(), same_session.generate_entropy());
+	}
+
+	/// Security review: an error escaping `poke` must leave the reactor in
+	/// the terminal `Failed` state. A failed entropy-commitment check used
+	/// to propagate out of `handle_round2_waiting` while the state stayed
+	/// `Round2Waiting`, so a supervisor polling the instance would re-run
+	/// the same failing verification forever (the commit/reveal maps are
+	/// first-write-wins, so the outcome cannot change) and state-based
+	/// recovery could not tell the dead instance from one awaiting input.
+	#[test]
+	fn entropy_commitment_mismatch_is_terminal() {
+		let (mut protocol, _original) = share_recovery_fixture();
+
+		// Simulate an agreed active set {0, 1} where party 0's reveal does
+		// not match its Round 1 commitment.
+		let honest = [0x11u8; ENTROPY_SIZE];
+		protocol.state = ResharingState::Round2Waiting;
+		protocol.active_set = Some(vec![0, 1]);
+		protocol.round1_entropy_commits.insert(0, commit_entropy(&honest));
+		protocol.round1_entropy_commits.insert(1, commit_entropy(&honest));
+		protocol.round2_entropy_reveals.insert(0, [0x22u8; ENTROPY_SIZE]); // mismatch
+		protocol.round2_entropy_reveals.insert(1, honest);
+
+		let err = protocol.poke().expect_err("a mismatched entropy reveal must fail the session");
+		assert!(
+			matches!(err, ResharingProtocolError::CommitmentMismatch(0)),
+			"unexpected error: {err}"
+		);
+		assert!(
+			matches!(protocol.state, ResharingState::Failed(_)),
+			"verification failure must be terminal, state is {:?}",
+			protocol.state
+		);
+
+		// A later poke reports the terminal failure instead of re-running
+		// the failed verification...
+		assert!(matches!(protocol.poke(), Err(ResharingProtocolError::InvalidState(_))));
+		// ...and the old share stays recoverable for a retry, like any
+		// other failed session.
+		assert!(protocol.abort_and_take_existing_share().is_some());
 	}
 
 	/// Build a 2-of-3 old-committee protocol for party 1, returning the
