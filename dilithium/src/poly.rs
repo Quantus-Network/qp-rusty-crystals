@@ -251,18 +251,22 @@ pub fn invntt_tomont(a: &mut Poly) {
 /// # Preconditions
 ///
 /// For every index `i`, the product `a[i] * b[i]` must lie in
-/// [`reduce::montgomery_reduce`]'s input domain `[-2^31 * Q, 2^31 * Q]`;
-/// outside it the reduction returns a silently wrong residue (no overflow,
-/// no panic). NTT-domain values satisfy this comfortably (forward-NTT
-/// output is below `8*Q`, and `(8*Q)^2 < 2^31 * Q`). Checked with
-/// `debug_assert!`, matching the module's other bounded helpers.
+/// [`reduce::montgomery_reduce`]'s input domain `[-2^31 * Q, 2^31 * Q)` —
+/// half-open, since at exactly `2^31 * Q` the reduction returns the excluded
+/// representative `Q` (see the reduce docs); outside the domain it returns a
+/// silently wrong residue (no overflow, no panic). NTT-domain values satisfy
+/// this comfortably (forward-NTT output is below `8*Q`, and `(8*Q)^2 <
+/// 2^31 * Q`). Checked with `debug_assert!`, matching the module's other
+/// bounded helpers.
 pub fn pointwise_montgomery(c: &mut Poly, a: &Poly, b: &Poly) {
 	debug_assert!(
 		(0..N).all(|i| {
-			(a.coeffs[i] as i64 * b.coeffs[i] as i64).abs() <= (1i64 << 31) * params::Q as i64
+			let product = a.coeffs[i] as i64 * b.coeffs[i] as i64;
+			let bound = (1i64 << 31) * params::Q as i64;
+			-bound <= product && product < bound
 		}),
-		"poly::pointwise_montgomery precondition violated: |a[i] * b[i]| > 2^31 * Q \
-		 (outside montgomery_reduce's domain)"
+		"poly::pointwise_montgomery precondition violated: a[i] * b[i] outside \
+		 montgomery_reduce's domain [-2^31 * Q, 2^31 * Q)"
 	);
 	for i in 0..N {
 		c.coeffs[i] = reduce::montgomery_reduce(a.coeffs[i] as i64 * b.coeffs[i] as i64);
@@ -1167,8 +1171,27 @@ mod tests {
 		}
 	}
 
+	/// Security review: the domain's positive endpoint is exclusive. At a
+	/// product of exactly `2^31 * Q` — reachable through the raw coefficient
+	/// accessor with `a = -Q`, `b = i32::MIN` — `montgomery_reduce` returns
+	/// exactly `Q`, violating its strict `(-Q, Q)` output range and
+	/// downstream contracts such as `invntt_tomont`'s `|c| < Q`
+	/// precondition. The old inclusive `<=` debug check accepted it.
+	#[cfg(debug_assertions)]
+	#[test]
+	#[should_panic(expected = "pointwise_montgomery")]
+	fn test_pointwise_montgomery_rejects_inclusive_endpoint_product() {
+		let mut a = Poly::default();
+		let mut b = Poly::default();
+		// (-Q) * i32::MIN = 2^31 * Q exactly: the excluded endpoint.
+		a.coeffs[0] = -params::Q;
+		b.coeffs[0] = i32::MIN;
+		let mut c = Poly::default();
+		pointwise_montgomery(&mut c, &a, &b);
+	}
+
 	/// `montgomery_reduce` only guarantees a result in `(-Q, Q)` for inputs
-	/// in `[-2^31*Q, 2^31*Q]`; two arbitrary `i32` coefficients can produce
+	/// in `[-2^31*Q, 2^31*Q)`; two arbitrary `i32` coefficients can produce
 	/// a product far outside that domain, yielding a silently wrong residue
 	/// (no overflow, no panic — just corrupt output). The contract must fail
 	/// fast in debug builds like the module's other bounded helpers
