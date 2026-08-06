@@ -485,7 +485,10 @@ pub struct Dkg<S: TranscriptSigner> {
 	state: DkgState<S>,
 	/// Session identifier binding all messages to this specific DKG session.
 	ssid: [u8; DKG_SSID_SIZE],
-	/// Master seed for deriving all randomness (32 bytes, cryptographically random).
+	/// Master seed for deriving all randomness (32 bytes, cryptographically
+	/// random). Consumed once by Round 1 derivation and wiped in place at
+	/// that point (`start_round1`); only zeros remain here afterwards (the
+	/// drop/abort wipes are then no-ops for this field).
 	seed: [u8; 32],
 	/// Round 1 private messages awaiting delivery, held as zeroizing
 	/// [`Round1Private`] structs (not pre-serialized byte buffers) so the queued
@@ -1053,6 +1056,13 @@ impl<S: TranscriptSigner> Dkg<S> {
 		let leader_subsets = config.my_leader_subsets();
 		let (my_randomness, my_shared_secrets) =
 			derive_round1_randomness(&self.seed, &self.ssid, config.my_party_id(), &leader_subsets);
+
+		// The derivation above is the seed's only consumer; wipe it now
+		// (security review) rather than waiting for drop/abort, so a live
+		// session — parked in Rounds 2–4 or retained after completion — no
+		// longer holds root entropy that re-derives the Round 1 randomness
+		// and every subset shared secret.
+		self.seed.zeroize();
 
 		let my_commitment = h_commit(&self.ssid, config.my_party_id(), &my_randomness);
 
@@ -2611,6 +2621,93 @@ mod tests {
 			assert!(
 				leaked.is_empty(),
 				"poke left K_S from the queued Round 1 private in dead stack memory: {leaked:?}"
+			);
+		}
+	}
+
+	/// Security review: the master seed's only consumer is Round 1 derivation
+	/// (`start_round1`). It must be wiped as soon as that derivation has run —
+	/// not just on drop or fatal abort — so a live session (parked in Rounds
+	/// 2–4 waiting for peers, or retained by the caller after completion)
+	/// no longer holds root entropy that re-derives the Round 1 randomness
+	/// and every subset shared secret.
+	#[test]
+	fn master_seed_is_wiped_after_round1_derivation_and_completion() {
+		let seed = [0x5Au8; 32];
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = (0..3).collect();
+		let pk_map: BTreeMap<ParticipantId, u32> = participants.iter().map(|&p| (p, p)).collect();
+		let mut dkgs: Vec<Dkg<TestSigner>> = (0..3u32)
+			.map(|id| {
+				let config = DkgConfig::new(
+					threshold_config,
+					id,
+					participants.clone(),
+					TestSigner { id },
+					pk_map.clone(),
+				)
+				.unwrap();
+				Dkg::new(config, seed, &TEST_SESSION_NONCE)
+			})
+			.collect();
+
+		// Before the first poke the seed is still needed for Round 1.
+		assert_eq!(dkgs[0].seed, seed);
+
+		// The first poke enters Round 1 and derives all randomness from the
+		// seed; the seed is dead from that point on and must be wiped even
+		// though the session object stays alive for the remaining rounds.
+		let mut queues: Vec<Vec<(u32, Vec<u8>)>> = vec![Vec::new(); 3];
+		for (i, dkg) in dkgs.iter_mut().enumerate() {
+			match dkg.poke().unwrap() {
+				DkgAction::SendMany(data) =>
+					for (j, queue) in queues.iter_mut().enumerate() {
+						if j != i {
+							queue.push((i as u32, data.clone()));
+						}
+					},
+				other => panic!("expected the Round 1 broadcast, got {other:?}"),
+			}
+			assert_eq!(
+				dkg.seed, [0u8; 32],
+				"party {i} derived its Round 1 randomness but still holds the master seed"
+			);
+		}
+
+		// Drive the session to completion and re-check on the live objects:
+		// the wipe must not migrate somewhere a later phase misses.
+		let mut done = [false; 3];
+		for _ in 0..100 {
+			if done.iter().all(|&d| d) {
+				break;
+			}
+			for i in 0..3 {
+				if done[i] {
+					continue;
+				}
+				for (from, data) in mem::take(&mut queues[i]) {
+					dkgs[i].message(from, data).unwrap();
+				}
+				match dkgs[i].poke().unwrap() {
+					DkgAction::Wait => {},
+					DkgAction::SendMany(data) =>
+						for (j, queue) in queues.iter_mut().enumerate() {
+							if j != i {
+								queue.push((i as u32, data.clone()));
+							}
+						},
+					DkgAction::SendPrivate(to, data) =>
+						queues[to as usize].push((i as u32, data.to_vec())),
+					DkgAction::Return(_) => done[i] = true,
+				}
+			}
+		}
+		assert!(done.iter().all(|&d| d), "DKG must complete");
+		for (i, dkg) in dkgs.iter().enumerate() {
+			assert!(dkg.is_complete(), "party {i} must be complete");
+			assert_eq!(
+				dkg.seed, [0u8; 32],
+				"party {i} completed but the live session still holds the master seed"
 			);
 		}
 	}
