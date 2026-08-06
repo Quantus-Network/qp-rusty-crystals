@@ -1148,11 +1148,23 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	}
 
 	/// Generate this party's entropy contribution from the constructor seed.
+	///
+	/// The SSID — which binds the session nonce, epoch, both committees, and
+	/// the public key — is mixed in (security review) so that a constructor
+	/// seed reused across sessions (e.g. a retry after a failed attempt)
+	/// still yields a fresh, unpredictable contribution. Without it, an
+	/// adversary who saw a party's Round 2 reveal in one session knows that
+	/// party's contribution in any later session with the same seed *before
+	/// committing its own*, and can grind its entropy to bias the session
+	/// seed. The session seed's own SSID mixing does not defend against
+	/// this. Same fix as the DKG's `derive_round1_randomness`; the domain
+	/// tag is bumped to v2 because the derivation formula changed.
 	fn generate_entropy(&self) -> [u8; ENTROPY_SIZE] {
 		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, b"resharing-entropy-derive-v1");
+		fips202::shake256_absorb(&mut state, b"resharing-entropy-derive-v2");
 		fips202::shake256_absorb(&mut state, &self.seed);
 		fips202::shake256_absorb(&mut state, &self.config.my_party_id().to_le_bytes());
+		fips202::shake256_absorb(&mut state, &self.ssid);
 		fips202::shake256_finalize(&mut state);
 		let mut entropy = [0u8; ENTROPY_SIZE];
 		fips202::shake256_squeeze(&mut entropy, &mut state);
@@ -3587,6 +3599,62 @@ mod tests {
 			Action::Return(val) => assert_eq!(val, 123),
 			_ => panic!("Expected Return"),
 		}
+	}
+
+	/// Security review: a party's Round 1 entropy contribution must be
+	/// session-bound. `generate_entropy` previously derived from the raw
+	/// constructor seed and party ID only, so reusing a seed across sessions
+	/// (e.g. a retry after a failed attempt) reproduced the identical
+	/// entropy and Round 1 commitment: an adversary who saw the earlier
+	/// reveal knows the honest contribution *before committing its own* and
+	/// can grind its entropy to bias the session seed — the same attack
+	/// closed for DKG Round 1 randomness by SSID binding
+	/// (`derive_round1_randomness`). The session seed's own SSID mixing does
+	/// not defend against this: the bias enters through the adversary's
+	/// chosen contribution, not by replaying the honest one downstream.
+	#[test]
+	fn entropy_contribution_is_session_bound() {
+		let build = |session_nonce: &[u8; 32], epoch: u64| -> ResharingProtocol<TestSigner> {
+			let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+			let (public_key, shares) =
+				crate::keygen::generate_with_dealer(&[8u8; 32], config).expect("keygen");
+			let resharing_config = ResharingConfig::new(
+				Some(shares[1].clone()),
+				2,
+				vec![0, 1, 2],
+				2,
+				vec![0, 1, 2],
+				1,
+				public_key,
+			)
+			.expect("valid resharing config");
+			// Same constructor seed for every session.
+			ResharingProtocol::new(
+				resharing_config,
+				test_signer_config(1, &[0, 1, 2]),
+				[1u8; 32],
+				session_nonce,
+				epoch,
+			)
+		};
+
+		let base = build(&[0xA1u8; 32], 0);
+		let other_nonce = build(&[0xB2u8; 32], 0);
+		let next_epoch = build(&[0xA1u8; 32], 1);
+		let same_session = build(&[0xA1u8; 32], 0);
+
+		assert_ne!(
+			base.generate_entropy(),
+			other_nonce.generate_entropy(),
+			"a reused seed must yield a different entropy contribution per session nonce"
+		);
+		assert_ne!(
+			base.generate_entropy(),
+			next_epoch.generate_entropy(),
+			"a reused seed must yield a different entropy contribution per epoch"
+		);
+		// Same nonce and epoch → reproducible (deterministic within a session).
+		assert_eq!(base.generate_entropy(), same_session.generate_entropy());
 	}
 
 	/// Build a 2-of-3 old-committee protocol for party 1, returning the

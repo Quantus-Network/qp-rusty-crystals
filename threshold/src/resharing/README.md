@@ -117,7 +117,11 @@ Round 2 entropy reveals are part of the public transcript. After Round 2, the `s
 
 ### How It Works
 
-1. **Entropy Generation**: Each old committee member generates fresh random entropy from their provided seed.
+1. **Entropy Generation**: Each old committee member derives its entropy contribution from their provided seed *and the SSID*:
+   ```
+   entropy = SHAKE256("resharing-entropy-derive-v2" || seed || party_id || ssid)
+   ```
+   The SSID binding (session nonce, epoch, committees, public key) means a seed accidentally reused across sessions still produces a fresh, unpredictable contribution — without it, an adversary who saw a party's Round 2 reveal once could predict that party's contribution in any later session with the same seed before committing its own, and grind its entropy to bias the session seed.
 
 2. **Commit-Reveal**: Round 1-2 use a commit-reveal scheme to make the session seed unpredictable before reveals and prevent parties from choosing entropy after seeing others' revealed values.
 
@@ -305,7 +309,7 @@ the sub-shares `r_{I→J}` and potentially reconstruct secret key material.
 | **Independent per party** | Each party must generate their own entropy; don't share seeds |
 | **Fresh per session** | Generate new entropy for each resharing; don't reuse across sessions |
 
-If all parties reuse the same seeds with the same inputs, the protocol can repeat the same deterministic split. If seeds are predictable, the session seed can be predicted before Round 2.
+If seeds are predictable, the session seed can be predicted before Round 2. Seed reuse across sessions is additionally mitigated in-protocol: the entropy derivation binds the SSID, so a reused seed still yields a session-unique contribution (defense in depth — fresh seeds remain the requirement, since a predictable seed lets an attacker recompute the derivation regardless).
 
 ## Roles
 
