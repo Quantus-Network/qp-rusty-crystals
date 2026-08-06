@@ -28,7 +28,7 @@
 //! Poseidon hashing, which is particularly well-suited for zero-knowledge proof systems.
 
 use qp_poseidon_core::{
-	hash_bytes, hash_to_bytes, hash_twice,
+	hash_bytes, hash_to_bytes, rehash_to_bytes,
 	serialization::{bytes_to_digest_lossy, string_to_felts},
 	Goldilocks,
 };
@@ -74,27 +74,32 @@ fn zeroize_felts(felts: &mut [Goldilocks]) {
 pub struct WormholePair {
 	/// Deterministic Poseidon-derived address.
 	address: [u8; 32],
-	/// First hash of secret
-	first_hash: [u8; 32],
+	/// The single hash of the salted preimage — a reveal value used when
+	/// proving, not public data (the address is the *double* hash), so it
+	/// gets the same move-only, zeroize-on-drop wrapper as `secret`
+	/// (security review): a bare `[u8; 32]` would survive the pair's drop
+	/// in the released stack frame or heap allocation.
+	first_hash: SensitiveBytes32,
 	/// The hashed secret used to generate this address. Move-only and zeroized
 	/// on drop; read the raw bytes via `secret().as_bytes()`.
 	secret: SensitiveBytes32,
 }
 
-// `secret` is a `SensitiveBytes32` (which is not `PartialEq`), so equality is
-// implemented by hand. Every field is compared in constant time and the
-// results are combined with non-short-circuiting `&` (security review): `==`
-// on the raw bytes may bail out at the first differing byte, and short-
-// circuiting between fields skips later comparisons entirely, so comparison
-// time would depend on the length of the matching prefix — a timing oracle
-// against the secret. `first_hash` gets the same treatment as `secret`: the
-// address is the double hash of the same preimage, so the single hash is a
-// reveal value, not public data. `SensitiveBytes32` already zeroizes itself
-// on drop, so no `ZeroizeOnDrop` derive is needed on `WormholePair`.
+// `secret` and `first_hash` are `SensitiveBytes32` (which is not
+// `PartialEq`), so equality is implemented by hand. Every field is compared
+// in constant time and the results are combined with non-short-circuiting
+// `&` (security review): `==` on the raw bytes may bail out at the first
+// differing byte, and short-circuiting between fields skips later
+// comparisons entirely, so comparison time would depend on the length of the
+// matching prefix — a timing oracle against the secret. `first_hash` gets
+// the same treatment as `secret`: the address is the double hash of the same
+// preimage, so the single hash is a reveal value, not public data. Both
+// sensitive fields zeroize themselves on drop (and `address` is public), so
+// no `ZeroizeOnDrop` derive is needed on `WormholePair` itself.
 impl PartialEq for WormholePair {
 	fn eq(&self, other: &Self) -> bool {
 		let address_eq = ct_eq_32(&self.address, &other.address);
-		let first_hash_eq = ct_eq_32(&self.first_hash, &other.first_hash);
+		let first_hash_eq = self.first_hash.ct_eq(&other.first_hash);
 		let secret_eq = self.secret.ct_eq(&other.secret);
 		address_eq & first_hash_eq & secret_eq
 	}
@@ -131,9 +136,9 @@ impl WormholePair {
 
 	/// The single hash of the salted preimage. This is a reveal value used
 	/// when proving, not public data — borrowed so a copy is an explicit
-	/// `*` at the call site.
+	/// `*` at the call site. The pair keeps ownership and wipes it on drop.
 	pub fn first_hash(&self) -> &[u8; 32] {
-		&self.first_hash
+		self.first_hash.as_bytes()
 	}
 
 	/// Borrow the secret; the pair keeps ownership (and wipes it on drop).
@@ -175,8 +180,19 @@ impl WormholePair {
 		let mut preimage_felts = Vec::with_capacity(salt_felt.len() + secret_felt.len());
 		preimage_felts.extend_from_slice(&salt_felt);
 		preimage_felts.extend_from_slice(&secret_felt);
-		let inner_hash = hash_to_bytes(&preimage_felts);
-		let second_hash = hash_twice(&preimage_felts);
+		// The first hash is a reveal value (security review), so it is
+		// computed exactly once, straight into an already-placed
+		// `SensitiveBytes32` (the `*place = f()` shape lets the return slot
+		// be the wrapper's interior — no named bare-array local to wipe).
+		// The address is then derived by re-hashing that digest with
+		// `rehash_to_bytes`, which is byte-identical to the previous
+		// `hash_twice(&preimage_felts)` (digest encodings are canonical and
+		// round-trip) but never materializes a second, unwipeable copy of
+		// the inner digest in a foreign stack frame.
+		let mut first_hash = SensitiveBytes32::zeroed();
+		*first_hash.as_mut_bytes() = hash_to_bytes(&preimage_felts);
+		let second_hash = rehash_to_bytes(first_hash.as_bytes())
+			.expect("digests produced by hash_to_bytes are always canonical");
 
 		// Wipe the felt-encoded copies of the secret before their backing
 		// memory is released: `clear()`/drop alone would hand the allocator a
@@ -184,13 +200,13 @@ impl WormholePair {
 		zeroize_felts(&mut secret_felt);
 		zeroize_felts(&mut preimage_felts);
 
-		// Tail construction, with the secret swapped straight from the
-		// caller's wrapper into the pair: no named local holds the pair (a
-		// later return would leave a moved-from copy), and the caller's
-		// wrapper is left zeroed rather than dead-with-plaintext.
+		// Tail construction, with both sensitive values swapped straight
+		// from their wrappers into the pair: no named local holds the pair
+		// (a later return would leave a moved-from copy), and the source
+		// wrappers are left zeroed rather than dead-with-plaintext.
 		WormholePair {
 			address: second_hash,
-			first_hash: inner_hash,
+			first_hash: core::mem::replace(&mut first_hash, SensitiveBytes32::zeroed()),
 			secret: core::mem::replace(secret, SensitiveBytes32::zeroed()),
 		}
 	}
@@ -200,7 +216,14 @@ impl WormholePair {
 mod tests {
 	use super::*;
 	use hex_literal::hex;
-	use qp_poseidon_core::serialization::{bytes_to_digest_lossy, bytes_to_felts};
+	// `hash_twice` is deliberately still used by these tests even though the
+	// implementation switched to `rehash_to_bytes` (security review): deriving
+	// the expected address through the independent double-hash entry point
+	// cross-checks that the two shapes stay byte-identical.
+	use qp_poseidon_core::{
+		hash_twice,
+		serialization::{bytes_to_digest_lossy, bytes_to_felts},
+	};
 
 	#[test]
 	fn test_generate_pair_from_secret() {
@@ -216,7 +239,7 @@ mod tests {
 
 		// We can't easily predict the exact hash output without mocking Poseidon2Core,
 		// but we can verify that it's not zero and that it's deterministic
-		assert_ne!(pair.first_hash, [0u8; 32]);
+		assert_ne!(pair.first_hash.as_bytes(), &[0u8; 32]);
 		assert_ne!(pair.address, [0u8; 32]);
 
 		// Verify determinism
@@ -281,6 +304,13 @@ mod tests {
 		combined_felts.extend_from_slice(&secret_felts);
 		let first_hash = hash_to_bytes(&combined_felts);
 		assert_ne!(pair.address, first_hash);
+
+		// 6. Pin the derivation shape (security review): the implementation
+		// computes the first hash once and re-hashes it with
+		// `rehash_to_bytes`; both stored values must be byte-identical to
+		// the independent single/double hashes of the salted preimage.
+		assert_eq!(pair.first_hash(), &first_hash);
+		assert_eq!(pair.address, hash_twice(&combined_felts));
 	}
 
 	#[test]
@@ -323,8 +353,13 @@ mod tests {
 	#[test]
 	fn test_pair_equality_covers_every_field() {
 		let make_pair = |address: [u8; 32], first_hash: [u8; 32], secret: [u8; 32]| {
+			let mut first_hash = first_hash;
 			let mut secret = secret;
-			WormholePair { address, first_hash, secret: SensitiveBytes32::new(&mut secret) }
+			WormholePair {
+				address,
+				first_hash: SensitiveBytes32::new(&mut first_hash),
+				secret: SensitiveBytes32::new(&mut secret),
+			}
 		};
 
 		// `WormholePair` has no `Debug` (it would print the secret), so plain

@@ -26,7 +26,7 @@
 #![cfg(all(not(debug_assertions), feature = "ml-dsa-87"))]
 
 use qp_rusty_crystals_hdwallet::{SensitiveBytes32, WormholePair};
-use qp_rusty_crystals_test_utils::probe_stack_for;
+use qp_rusty_crystals_test_utils::{probe_stack_for, probe_stack_for_named};
 
 // The wormhole path only computes Poseidon hashes; 1 MiB is ample.
 const STACK_BYTES: usize = 1024 * 1024;
@@ -40,18 +40,25 @@ fn seed_holder() -> SensitiveBytes32 {
 	seed
 }
 
-/// The wormhole secret for SEED, computed outside any probed region.
-/// Derivation is deterministic, so a second run inside the probe produces
-/// the same secret bytes.
-fn reference_secret() -> [u8; 32] {
+/// The wormhole secret and first hash for SEED, computed outside any probed
+/// region. Derivation is deterministic, so a second run inside the probe
+/// produces the same bytes.
+fn reference_pair_bytes() -> ([u8; 32], [u8; 32]) {
 	let mut seed = seed_holder();
 	let pair = WormholePair::generate_new(&mut seed);
-	*pair.secret().as_bytes()
+	(*pair.secret().as_bytes(), *pair.first_hash())
 }
 
+/// Security review: both the wormhole secret and the `first_hash` reveal
+/// value must be gone from dead stack memory after the owning pair drops.
+/// `first_hash` is the single hash of the salted preimage — a proving
+/// reveal, not public data (the address is the *double* hash) — but it was
+/// held as a bare `[u8; 32]`, so the pair's drop wiped only the secret and
+/// left the reveal readable in the released frame.
 #[test]
-fn wormhole_secret_never_survives_pair_drop() {
-	let secret = reference_secret();
+fn wormhole_secrets_never_survive_pair_drop() {
+	let (secret, first_hash) = reference_pair_bytes();
+	let patterns = [("secret", &secret[..]), ("first_hash", &first_hash[..])];
 
 	// Sanity: the technique detects an unwiped copy.
 	assert!(
@@ -63,16 +70,16 @@ fn wormhole_secret_never_survives_pair_drop() {
 	);
 
 	// Generate a pair and drop it inside the probed region. The pair's own
-	// wrapper zeroizes the live secret on drop; nothing else may retain it.
-	let leaked = probe_stack_for(STACK_BYTES, &secret, || {
+	// wrappers zeroize the live values on drop; nothing else may retain them.
+	let leaked = probe_stack_for_named(STACK_BYTES, &patterns, || {
 		let mut seed = SensitiveBytes32::zeroed();
 		seed.as_mut_bytes().copy_from_slice(&SEED);
 		let pair = WormholePair::generate_new(&mut seed);
 		core::hint::black_box(&pair);
 	});
 	assert!(
-		!leaked,
-		"the wormhole secret survived in dead stack memory after the pair was \
-		 dropped; it alone derives (and verifies against) the wormhole address"
+		leaked.is_empty(),
+		"wormhole material survived in dead stack memory after the pair was dropped: {leaked:?} \
+		 (the secret alone derives the address; first_hash is the proving reveal)"
 	);
 }
