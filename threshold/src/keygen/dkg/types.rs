@@ -687,6 +687,29 @@ pub enum DkgMessage {
 	Round4Broadcast(Round4Broadcast),
 }
 
+/// Borsh variant index of [`DkgMessage::Round1Private`] (borsh encodes an
+/// enum as a `u8` variant index in declaration order, followed by the
+/// payload). Pinned against drift by `round1_private_frame_matches_enum`.
+const ROUND1_PRIVATE_VARIANT_IDX: u8 = 1;
+
+/// Borrowing serializer producing exactly the wire bytes of
+/// [`DkgMessage::Round1Private`].
+///
+/// Serializing the owned enum requires moving the secret-bearing
+/// [`Round1Private`] into it, and every by-value move can leave a bitwise
+/// temporary of K_S in a dead stack frame (pinned by the painted-stack
+/// probe `queued_round1_private_never_survives_poke`). This mirror writes
+/// the same framing while borrowing the private from its stable, wiped-on-
+/// drop heap slot.
+pub(crate) struct Round1PrivateFrame<'a>(pub(crate) &'a Round1Private);
+
+impl BorshSerialize for Round1PrivateFrame<'_> {
+	fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+		ROUND1_PRIVATE_VARIANT_IDX.serialize(writer)?;
+		self.0.serialize(writer)
+	}
+}
+
 impl DkgMessage {
 	/// Get the SSID from any message type.
 	pub fn ssid(&self) -> &[u8; DKG_SSID_SIZE] {
@@ -967,6 +990,24 @@ mod tests {
 
 	/// Test SSID for DKG type tests.
 	const TEST_SSID: [u8; DKG_SSID_SIZE] = [0xDD; DKG_SSID_SIZE];
+
+	/// `Round1PrivateFrame` must produce byte-identical output to the owned
+	/// `DkgMessage::Round1Private` encoding: it hardcodes the borsh variant
+	/// index, so any reordering of `DkgMessage` variants (or a change to
+	/// borsh's enum framing) must fail here rather than corrupt the wire
+	/// format.
+	#[test]
+	fn round1_private_frame_matches_enum() {
+		let private = Round1Private {
+			ssid: TEST_SSID,
+			from_party_id: 7,
+			subset_mask: 0b011,
+			shared_secret: core::array::from_fn(|i| i as u8),
+		};
+		let by_ref = borsh::to_vec(&Round1PrivateFrame(&private)).unwrap();
+		let owned = borsh::to_vec(&DkgMessage::Round1Private(private)).unwrap();
+		assert_eq!(by_ref, owned, "borrowing frame diverged from DkgMessage encoding");
+	}
 
 	#[derive(Clone, Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 	struct TestSigner {

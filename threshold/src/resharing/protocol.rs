@@ -494,7 +494,20 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// the caller's persistent store; see the module docs on working copy vs
 	/// durable share. In-memory-only callers use
 	/// [`Self::abort_and_take_existing_share`] before drop on abort paths.
+	///
+	/// Failure transitions instead go through [`Self::fail`], which erases
+	/// the same material *except* the old working share: on failure the old
+	/// share is still the party's live key material and must stay
+	/// recoverable for a retry.
 	fn zeroize_session_secrets(&mut self) {
+		self.zeroize_session_ephemerals();
+		self.config.zeroize_existing_share();
+	}
+
+	/// Erase the session's ephemeral secrets, leaving the old-committee
+	/// working share in place. See [`Self::zeroize_session_secrets`] for the
+	/// split rationale.
+	fn zeroize_session_ephemerals(&mut self) {
 		self.seed.zeroize();
 		if let Some(ref mut entropy) = self.my_entropy {
 			entropy.zeroize();
@@ -509,15 +522,27 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		self.new_shares.clear();
 		self.pending_round4.clear();
 		self.round4_messages.clear();
-		self.config.zeroize_existing_share();
 		// Explicitly zeroize the transcript signer (this party's long-term
 		// authentication key). `ZeroizeOnDrop` is only a marker trait, so
 		// relying on the signer's own Drop would leave erasure to downstream
 		// implementer discipline; calling `zeroize()` makes it an invariant.
 		// Safe here: the signer is only used for the Round 6 acceptance
-		// signature, which has already been produced by the time this runs
-		// (successful completion or drop).
+		// signature, which by the time this runs has either been produced
+		// (successful completion, drop) or never will be (terminal failure).
 		self.signer_config.my_signer.zeroize();
+	}
+
+	/// Terminal failure transition (security review): every path that ends
+	/// the session in `Failed` must erase the session ephemerals *at the
+	/// transition*, not later at drop — a failed protocol object retained
+	/// for diagnostics or retry coordination would otherwise keep session
+	/// seeds, sub-share and new-share state, and the transcript signer
+	/// readable in process memory for that whole interval. The old working
+	/// share is deliberately kept: it is still the party's key material and
+	/// must stay recoverable via [`Self::abort_and_take_existing_share`].
+	fn fail(&mut self, reason: String) {
+		self.zeroize_session_ephemerals();
+		self.state = ResharingState::Failed(reason);
 	}
 
 	/// Whether the old committee share has been erased from the config.
@@ -652,15 +677,17 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	///
 	/// Recovering the share renders the session unable to continue, so an
 	/// in-flight session is marked failed — the name carries the side
-	/// effect: this is an abort-recovery operation, not an accessor.
+	/// effect: this is an abort-recovery operation, not an accessor. The
+	/// failure transition also erases the remaining session ephemerals
+	/// (security review): once the caller has extracted the old share, the
+	/// dead session has no reason to keep seeds, sub-shares, or the
+	/// transcript signer readable in memory until drop.
 	pub fn abort_and_take_existing_share(&mut self) -> Option<PrivateKeyShare> {
 		let share = self.config.take_existing_share();
 		if share.is_some() &&
 			!matches!(self.state, ResharingState::Done | ResharingState::Failed(_))
 		{
-			self.state = ResharingState::Failed(
-				"old share recovered by caller before completion".to_string(),
-			);
+			self.fail("old share recovered by caller before completion".to_string());
 		}
 		share
 	}
@@ -853,7 +880,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		let required = self.config.old_threshold() as usize;
 		if act.len() < required {
 			let err = ResharingProtocolError::InsufficientParties { required, received: act.len() };
-			self.state = ResharingState::Failed(err.to_string());
+			self.fail(err.to_string());
 			return Err(err);
 		}
 
@@ -887,7 +914,32 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	}
 
 	/// Advance the protocol state machine.
+	///
+	/// # Errors
+	///
+	/// Every error is **terminal** (security review): round inputs are
+	/// frozen first-write-wins, so failed generation or verification work
+	/// can only fail identically on retry. The session therefore
+	/// transitions to `Failed` before the error is returned — later pokes
+	/// report `InvalidState` instead of repeating the failing work, and an
+	/// old-committee member can still recover its share for a fresh
+	/// attempt via [`Self::abort_and_take_existing_share`].
 	pub fn poke(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
+		let result = self.poke_inner();
+		if let Err(err) = &result {
+			// Record terminal failure unless the session already is
+			// terminal: Done's and Failed's own InvalidState reports must
+			// not re-label the session. (Several failure paths set Failed
+			// with a tailored reason themselves; this catches the rest,
+			// e.g. the entropy commit-reveal check.)
+			if !matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
+				self.fail(err.to_string());
+			}
+		}
+		result
+	}
+
+	fn poke_inner(&mut self) -> Result<Action<ResharingOutput>, ResharingProtocolError> {
 		match &self.state {
 			ResharingState::Round1Generate => self.handle_round1_generate(),
 			ResharingState::Round1Waiting => self.handle_round1_waiting(),
@@ -1025,12 +1077,13 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		let all_old = act.iter().all(|p| self.config.old_participants().contains(*p));
 		let enough = act.len() >= self.config.old_threshold() as usize;
 		if act.is_empty() || !sorted_unique || !all_old || !enough {
-			self.state = ResharingState::Failed(format!(
+			let reason = format!(
 				"invalid Act proposal from leader {}: {:?} (t_old = {})",
 				from,
 				act,
 				self.config.old_threshold()
-			));
+			);
+			self.fail(reason);
 			return;
 		}
 
@@ -1039,10 +1092,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			Some(existing) if *existing == msg.active_set => {}, // duplicate, ignore
 			Some(_) => {
 				// Two different proposals from the leader: equivocation.
-				self.state = ResharingState::Failed(format!(
-					"leader {} equivocated on the Act proposal",
-					from
-				));
+				self.fail(format!("leader {} equivocated on the Act proposal", from));
 			},
 		}
 	}
@@ -1148,11 +1198,23 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	}
 
 	/// Generate this party's entropy contribution from the constructor seed.
+	///
+	/// The SSID — which binds the session nonce, epoch, both committees, and
+	/// the public key — is mixed in (security review) so that a constructor
+	/// seed reused across sessions (e.g. a retry after a failed attempt)
+	/// still yields a fresh, unpredictable contribution. Without it, an
+	/// adversary who saw a party's Round 2 reveal in one session knows that
+	/// party's contribution in any later session with the same seed *before
+	/// committing its own*, and can grind its entropy to bias the session
+	/// seed. The session seed's own SSID mixing does not defend against
+	/// this. Same fix as the DKG's `derive_round1_randomness`; the domain
+	/// tag is bumped to v2 because the derivation formula changed.
 	fn generate_entropy(&self) -> [u8; ENTROPY_SIZE] {
 		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, b"resharing-entropy-derive-v1");
+		fips202::shake256_absorb(&mut state, b"resharing-entropy-derive-v2");
 		fips202::shake256_absorb(&mut state, &self.seed);
 		fips202::shake256_absorb(&mut state, &self.config.my_party_id().to_le_bytes());
+		fips202::shake256_absorb(&mut state, &self.ssid);
 		fips202::shake256_finalize(&mut state);
 		let mut entropy = [0u8; ENTROPY_SIZE];
 		fips202::shake256_squeeze(&mut entropy, &mut state);
@@ -1345,7 +1407,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			// `run_protocol`, while waiting nodes hit the 120s
 			// `perform_leader_centric_computation` timeout.)
 			if let Err(e) = self.verify_peer_dealer_commitments() {
-				self.state = ResharingState::Failed(e.to_string());
+				self.fail(e.to_string());
 				return Err(e);
 			}
 			self.state = ResharingState::Round4Generate;
@@ -1779,7 +1841,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		if !failed_parties.is_empty() {
 			let reason =
 				format!("Protocol aborted: {} parties reported failure", failed_parties.len());
-			self.state = ResharingState::Failed(reason.clone());
+			self.fail(reason.clone());
 			return Err(ResharingProtocolError::ProtocolAborted(reason));
 		}
 
@@ -1961,7 +2023,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 					 or forged signature",
 					p
 				);
-				self.state = ResharingState::Failed(reason.clone());
+				self.fail(reason.clone());
 				return Err(ResharingProtocolError::ShareVerificationFailed(reason));
 			}
 		}
@@ -2625,16 +2687,16 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	fn build_private_key_share(&self) -> Result<PrivateKeyShare, ResharingProtocolError> {
 		let mut shares_data: BTreeMap<u16, SecretShareData> = BTreeMap::new();
 		for (j_mask, share) in &self.new_shares {
-			// Convert from Vec to fixed-size arrays
-			let mut s1_arr = [[0i32; N as usize]; L];
-			for (i, poly) in share.s1.iter().enumerate().take(L) {
-				s1_arr[i] = *poly;
-			}
-			let mut s2_arr = [[0i32; N as usize]; K];
-			for (i, poly) in share.s2.iter().enumerate().take(K) {
-				s2_arr[i] = *poly;
-			}
-			shares_data.insert(*j_mask, SecretShareData { s1: s1_arr, s2: s2_arr });
+			// Copy the coefficients heap-to-heap: preallocate a zeroed map
+			// entry and assign the arrays directly into it, so no stack
+			// intermediary (the former s1_arr/s2_arr locals, or a by-value
+			// SecretShareData argument to insert) is left holding the new
+			// share's raw coefficients in memory no drop reaches. Pinned by
+			// the painted-stack probe
+			// `new_share_coefficients_never_survive_final_share_assembly`.
+			let entry = shares_data.entry(*j_mask).or_insert_with(SecretShareData::zeroed);
+			entry.s1 = share.s1;
+			entry.s2 = share.s2;
 		}
 
 		let rho = self.derive_rho();
@@ -2678,7 +2740,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			fips202::shake256_squeeze(&mut party_key, &mut h);
 		}
 
-		Ok(PrivateKeyShare::new(
+		let share = PrivateKeyShare::new(
 			self.config.my_party_id(),
 			self.config.new_participants().len() as u32,
 			self.config.new_threshold(),
@@ -2687,7 +2749,12 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			tr,
 			shares_data,
 			self.config.new_participants().clone(),
-		))
+		);
+		// `party_key` was copied (not moved) into the share above; the share
+		// zeroizes on drop, but this stack copy would otherwise linger, so
+		// wipe it (mirrors the DKG path's `build_private_share`).
+		party_key.zeroize();
+		Ok(share)
 	}
 }
 
@@ -3589,6 +3656,102 @@ mod tests {
 		}
 	}
 
+	/// Security review: a party's Round 1 entropy contribution must be
+	/// session-bound. `generate_entropy` previously derived from the raw
+	/// constructor seed and party ID only, so reusing a seed across sessions
+	/// (e.g. a retry after a failed attempt) reproduced the identical
+	/// entropy and Round 1 commitment: an adversary who saw the earlier
+	/// reveal knows the honest contribution *before committing its own* and
+	/// can grind its entropy to bias the session seed — the same attack
+	/// closed for DKG Round 1 randomness by SSID binding
+	/// (`derive_round1_randomness`). The session seed's own SSID mixing does
+	/// not defend against this: the bias enters through the adversary's
+	/// chosen contribution, not by replaying the honest one downstream.
+	#[test]
+	fn entropy_contribution_is_session_bound() {
+		let build = |session_nonce: &[u8; 32], epoch: u64| -> ResharingProtocol<TestSigner> {
+			let config = crate::ThresholdConfig::new(2, 3).expect("valid config");
+			let (public_key, shares) =
+				crate::keygen::generate_with_dealer(&[8u8; 32], config).expect("keygen");
+			let resharing_config = ResharingConfig::new(
+				Some(shares[1].clone()),
+				2,
+				vec![0, 1, 2],
+				2,
+				vec![0, 1, 2],
+				1,
+				public_key,
+			)
+			.expect("valid resharing config");
+			// Same constructor seed for every session.
+			ResharingProtocol::new(
+				resharing_config,
+				test_signer_config(1, &[0, 1, 2]),
+				[1u8; 32],
+				session_nonce,
+				epoch,
+			)
+		};
+
+		let base = build(&[0xA1u8; 32], 0);
+		let other_nonce = build(&[0xB2u8; 32], 0);
+		let next_epoch = build(&[0xA1u8; 32], 1);
+		let same_session = build(&[0xA1u8; 32], 0);
+
+		assert_ne!(
+			base.generate_entropy(),
+			other_nonce.generate_entropy(),
+			"a reused seed must yield a different entropy contribution per session nonce"
+		);
+		assert_ne!(
+			base.generate_entropy(),
+			next_epoch.generate_entropy(),
+			"a reused seed must yield a different entropy contribution per epoch"
+		);
+		// Same nonce and epoch → reproducible (deterministic within a session).
+		assert_eq!(base.generate_entropy(), same_session.generate_entropy());
+	}
+
+	/// Security review: an error escaping `poke` must leave the reactor in
+	/// the terminal `Failed` state. A failed entropy-commitment check used
+	/// to propagate out of `handle_round2_waiting` while the state stayed
+	/// `Round2Waiting`, so a supervisor polling the instance would re-run
+	/// the same failing verification forever (the commit/reveal maps are
+	/// first-write-wins, so the outcome cannot change) and state-based
+	/// recovery could not tell the dead instance from one awaiting input.
+	#[test]
+	fn entropy_commitment_mismatch_is_terminal() {
+		let (mut protocol, _original) = share_recovery_fixture();
+
+		// Simulate an agreed active set {0, 1} where party 0's reveal does
+		// not match its Round 1 commitment.
+		let honest = [0x11u8; ENTROPY_SIZE];
+		protocol.state = ResharingState::Round2Waiting;
+		protocol.active_set = Some(vec![0, 1]);
+		protocol.round1_entropy_commits.insert(0, commit_entropy(&honest));
+		protocol.round1_entropy_commits.insert(1, commit_entropy(&honest));
+		protocol.round2_entropy_reveals.insert(0, [0x22u8; ENTROPY_SIZE]); // mismatch
+		protocol.round2_entropy_reveals.insert(1, honest);
+
+		let err = protocol.poke().expect_err("a mismatched entropy reveal must fail the session");
+		assert!(
+			matches!(err, ResharingProtocolError::CommitmentMismatch(0)),
+			"unexpected error: {err}"
+		);
+		assert!(
+			matches!(protocol.state, ResharingState::Failed(_)),
+			"verification failure must be terminal, state is {:?}",
+			protocol.state
+		);
+
+		// A later poke reports the terminal failure instead of re-running
+		// the failed verification...
+		assert!(matches!(protocol.poke(), Err(ResharingProtocolError::InvalidState(_))));
+		// ...and the old share stays recoverable for a retry, like any
+		// other failed session.
+		assert!(protocol.abort_and_take_existing_share().is_some());
+	}
+
 	/// Build a 2-of-3 old-committee protocol for party 1, returning the
 	/// protocol and a copy of party 1's original share.
 	fn share_recovery_fixture() -> (ResharingProtocol<TestSigner>, PrivateKeyShare) {
@@ -3614,6 +3777,100 @@ mod tests {
 			0,
 		);
 		(protocol, original)
+	}
+
+	/// Fill every session-ephemeral slot with recognizable non-zero material,
+	/// as if the protocol were mid-session.
+	fn plant_session_ephemerals(protocol: &mut ResharingProtocol<TestSigner>) {
+		protocol.my_entropy = Some([0x5Au8; ENTROPY_SIZE]);
+		protocol.session_seed = Some([0x66u8; 32]);
+		protocol.my_subshares.insert((1, 2), Box::new(NewShareData::new()));
+		protocol.new_shares.insert(3, Box::new(NewShareData::new()));
+	}
+
+	/// Assert that every session-ephemeral slot has been erased. The old
+	/// working share is deliberately *not* covered: on failure it is still
+	/// the party's live key material and must stay recoverable via
+	/// [`ResharingProtocol::abort_and_take_existing_share`].
+	fn assert_session_ephemerals_wiped(protocol: &ResharingProtocol<TestSigner>) {
+		assert_eq!(protocol.seed, [0u8; 32], "constructor seed must be wiped");
+		assert!(protocol.my_entropy.is_none(), "entropy contribution must be wiped");
+		assert!(protocol.session_seed.is_none(), "session seed must be wiped");
+		assert!(protocol.my_subshares.is_empty(), "generated sub-shares must be dropped");
+		assert!(protocol.new_shares.is_empty(), "aggregated share state must be dropped");
+		assert!(protocol.pending_round4.is_empty(), "buffered Round 4 payloads must be dropped");
+		assert!(protocol.round4_messages.is_empty(), "received Round 4 payloads must be dropped");
+		assert_eq!(protocol.signer_config.my_signer.id, 0, "transcript signer must be wiped");
+	}
+
+	/// Security review: a failure escaping `poke` must erase the session
+	/// ephemerals at the terminal transition, not later at drop. A failed
+	/// protocol object retained for diagnostics or retry coordination used
+	/// to keep the constructor seed, entropy, session seed, sub-share and
+	/// new-share state, and the transcript signer readable in memory until
+	/// the object was destroyed.
+	#[test]
+	fn poke_failure_wipes_session_ephemerals_but_keeps_old_share() {
+		let (mut protocol, original) = share_recovery_fixture();
+		plant_session_ephemerals(&mut protocol);
+
+		// Same trigger as `entropy_commitment_mismatch_is_terminal`: party
+		// 0's reveal does not match its Round 1 commitment.
+		let honest = [0x11u8; ENTROPY_SIZE];
+		protocol.state = ResharingState::Round2Waiting;
+		protocol.active_set = Some(vec![0, 1]);
+		protocol.round1_entropy_commits.insert(0, commit_entropy(&honest));
+		protocol.round1_entropy_commits.insert(1, commit_entropy(&honest));
+		protocol.round2_entropy_reveals.insert(0, [0x22u8; ENTROPY_SIZE]); // mismatch
+		protocol.round2_entropy_reveals.insert(1, honest);
+
+		protocol.poke().expect_err("a mismatched entropy reveal must fail the session");
+		assert!(protocol.is_failed());
+		assert_session_ephemerals_wiped(&protocol);
+
+		// The old share is *not* an ephemeral: it is still the party's key
+		// material and must survive the failure for a retry.
+		let recovered = protocol
+			.abort_and_take_existing_share()
+			.expect("failed session must preserve the old share");
+		assert_eq!(recovered, original);
+	}
+
+	/// Security review: failures raised inside `message` handlers (which
+	/// return no error for the poke wrapper to catch) must also erase the
+	/// session ephemerals at the terminal transition.
+	#[test]
+	fn message_failure_wipes_session_ephemerals() {
+		let (mut protocol, _original) = share_recovery_fixture();
+		plant_session_ephemerals(&mut protocol);
+		protocol.state = ResharingState::Round1Waiting;
+
+		// An invalid Act proposal from the genuine leader (party 0): not
+		// enough members for t_old = 2. Unrecoverable, so the handler
+		// transitions straight to Failed.
+		protocol.handle_act_proposal(
+			0,
+			ResharingActProposal { party_id: 0, ssid: TEST_SSID, active_set: vec![0] },
+		);
+
+		assert!(protocol.is_failed(), "invalid Act proposal from the leader must be terminal");
+		assert_session_ephemerals_wiped(&protocol);
+	}
+
+	/// Security review: recovering the old share from an in-flight session
+	/// hands the caller the share and marks the session failed — the
+	/// remaining ephemerals must be erased at that same transition.
+	#[test]
+	fn share_recovery_wipes_remaining_session_ephemerals() {
+		let (mut protocol, original) = share_recovery_fixture();
+		plant_session_ephemerals(&mut protocol);
+
+		let recovered = protocol
+			.abort_and_take_existing_share()
+			.expect("stalled session must yield the share");
+		assert_eq!(recovered, original);
+		assert!(protocol.is_failed());
+		assert_session_ephemerals_wiped(&protocol);
 	}
 
 	/// A session that fails before Round 6 certification has produced no
@@ -4506,6 +4763,95 @@ mod tests {
 				"Subshare {} has unexpectedly large max coeff {}",
 				i,
 				max_coeff
+			);
+		}
+	}
+
+	/// Painted-stack probes: only meaningful in optimized builds, where the
+	/// compiler-generated move temporaries for large by-value structs (which
+	/// no source-level fix can wipe) are elided.
+	#[cfg(not(debug_assertions))]
+	mod stack_probes {
+		use super::*;
+		use qp_rusty_crystals_test_utils::probe_stack_for_named;
+
+		// 8 MiB: covers the final-share assembly frame (per-subset
+		// coefficient conversion plus the party-key SHAKE derivation).
+		const STACK_BYTES: usize = 8 * 1024 * 1024;
+
+		/// Security review: `build_private_key_share` converted each new
+		/// subset share's polynomials through `s1_arr`/`s2_arr` stack locals
+		/// before moving them into the `SecretShareData` map entry. The
+		/// arrays are `Copy`, so the "move" left the new share's raw
+		/// coefficients — a party's replacement long-term secret — in the
+		/// abandoned stack frame, recoverable after the protocol returns and
+		/// before the caller has stored the share securely. The DKG twin
+		/// (`build_private_share`) already wipes its locals; this pins the
+		/// resharing path.
+		#[test]
+		fn new_share_coefficients_never_survive_final_share_assembly() {
+			// Party 1 in both committees of a 2-of-3 -> 2-of-3 reshare.
+			let (mut protocol, _original) = share_recovery_fixture();
+
+			// Plant distinctive high-entropy coefficients (within (-Q, Q),
+			// as honest aggregation guarantees) as the round-5 output for
+			// the two new subsets party 1 belongs to.
+			let mut lcg = 0x1234_5678u32;
+			let mut coeff = move || {
+				lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+				(lcg % (2 * (Q as u32) - 1)) as i32 - (Q - 1)
+			};
+			for mask in [0b011u16, 0b110u16] {
+				let mut share = NewShareData::new();
+				share.s1.iter_mut().chain(share.s2.iter_mut()).for_each(|poly| {
+					poly.iter_mut().for_each(|c| *c = coeff());
+				});
+				protocol.new_shares.insert(mask, Box::new(share));
+			}
+
+			// Scan for the first 64 coefficients of each subset's s1[0] as
+			// they are laid out in memory (little-endian i32s). Both subsets
+			// are scanned: iterations of the conversion loop reuse the same
+			// stack slots, so only the last-processed subset's residue is
+			// guaranteed to survive to the scan. The planted shares live
+			// behind Box (heap), so a match in the painted region can only
+			// be a stack copy the assembly failed to wipe.
+			let pattern_for = |mask: u16| -> [u8; 256] {
+				let mut pattern = [0u8; 256];
+				for (chunk, c) in pattern.chunks_exact_mut(4).zip(protocol.new_shares[&mask].s1[0])
+				{
+					chunk.copy_from_slice(&c.to_le_bytes());
+				}
+				pattern
+			};
+			let first = pattern_for(0b011);
+			let last = pattern_for(0b110);
+			let patterns = [
+				("subset 0b011 coefficients", &first[..]),
+				("subset 0b110 coefficients", &last[..]),
+			];
+
+			// Sanity: the technique detects a deliberately leaked copy.
+			assert!(
+				!probe_stack_for_named(STACK_BYTES, &patterns, || {
+					let leaked: [u8; 256] = first;
+					core::hint::black_box(&leaked);
+				})
+				.is_empty(),
+				"probe self-check: a deliberately leaked stack copy was not detected"
+			);
+
+			// Real scenario: assemble the final share. The returned value
+			// holds the only legitimate copies; wipe it in place through a
+			// reference so the probe itself never moves the secrets.
+			let leaked = probe_stack_for_named(STACK_BYTES, &patterns, || {
+				let mut share =
+					protocol.build_private_key_share().expect("share assembly succeeds");
+				share.zeroize();
+			});
+			assert!(
+				leaked.is_empty(),
+				"build_private_key_share left new-share coefficients in dead stack memory"
 			);
 		}
 	}

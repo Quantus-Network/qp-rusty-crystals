@@ -78,6 +78,22 @@
 //!    session, or a replayed `Round4Retry` could force followers to reset and exhaust the retry
 //!    budget.
 //!
+//! # Timeouts (Caller Responsibility)
+//!
+//! The reactor has no clock (the crate is `no_std`-compatible and sans-io),
+//! so the waiting states — `Round1Waiting`, `Round2Waiting`, `Round3Waiting`,
+//! and the follower's `WaitingForLeaderDecision` — return [`Action::Wait`]
+//! for as long as the required traffic is absent. A crashed, isolated, or
+//! deliberately silent participant would otherwise leave the session pending
+//! indefinitely. The caller MUST therefore run a deadline per signing
+//! attempt (NEAR MPC's `run_protocol` already enforces a per-computation
+//! transport timeout) and, when it expires, call
+//! [`DilithiumSignProtocol::abort_stalled`]: it transitions the session to
+//! the terminal `Failed` state and returns a
+//! [`SignProtocolError::TimedOut`] naming the missing participants (also
+//! queryable while waiting via [`DilithiumSignProtocol::waiting_for`]), so
+//! the retry can select a signing set that routes around them.
+//!
 //! # Participant Set Requirement
 //!
 //! **IMPORTANT**: The threshold signing scheme requires **exactly T (threshold) active
@@ -262,6 +278,17 @@ pub enum SignProtocolError {
 	},
 	/// Invalid configuration provided to protocol constructor.
 	InvalidConfig(String),
+	/// The caller-enforced deadline expired while required peers were
+	/// silent; the session was terminated via
+	/// [`DilithiumSignProtocol::abort_stalled`].
+	TimedOut {
+		/// The protocol phase the session stalled in.
+		phase: String,
+		/// Participants whose messages were still missing at the deadline.
+		/// Empty if the session was not in a waiting phase (e.g. the caller
+		/// stopped poking a ready-to-generate state).
+		missing: Vec<ParticipantId>,
+	},
 }
 
 impl fmt::Display for SignProtocolError {
@@ -277,6 +304,9 @@ impl fmt::Display for SignProtocolError {
 				write!(f, "Malformed message from party {}: {}", from, reason)
 			},
 			SignProtocolError::InvalidConfig(s) => write!(f, "Invalid configuration: {}", s),
+			SignProtocolError::TimedOut { phase, missing } => {
+				write!(f, "Timed out in {} waiting for participants {:?}", phase, missing)
+			},
 		}
 	}
 }
@@ -603,8 +633,9 @@ pub struct DilithiumSignProtocol {
 
 impl Drop for DilithiumSignProtocol {
 	fn drop(&mut self) {
-		// Zeroize the round1_seed which is the key-leaking secret if exposed
-		self.round1_seed.zeroize();
+		// Terminal transitions already ran this; covers non-terminal drops.
+		// (The signer's own fields also wipe themselves on drop.)
+		self.zeroize_session_secrets();
 	}
 }
 
@@ -824,7 +855,9 @@ impl DilithiumSignProtocol {
 	/// Get the list of parties we are currently waiting for.
 	///
 	/// Returns the party IDs that have not yet sent their message for the
-	/// current round. Applications can use this for monitoring/debugging.
+	/// current round. Applications can use this for monitoring/debugging,
+	/// and it is the set reported by [`Self::abort_stalled`] when a caller
+	/// deadline expires while waiting on these parties.
 	///
 	/// # Note on Participant Set
 	///
@@ -863,6 +896,70 @@ impl DilithiumSignProtocol {
 			},
 			_ => vec![], // Not in a waiting state
 		}
+	}
+
+	/// Declare the session stalled and terminate it (security review).
+	///
+	/// This protocol is a sans-io reactor with no clock: while required
+	/// round traffic is absent, `poke` returns [`Action::Wait`] and cannot
+	/// itself distinguish ordinary waiting from a peer that has crashed, is
+	/// network-isolated, or is deliberately withholding its message —
+	/// without this hook, such a peer leaves the session pending forever
+	/// with no in-protocol failure to drive a retry. Deadlines are the
+	/// caller's responsibility (near-mpc's `run_protocol` enforces a
+	/// per-computation transport timeout); when one expires, call this to
+	/// transition the session to the terminal `Failed` state and obtain an
+	/// actionable [`SignProtocolError::TimedOut`] naming the participants
+	/// whose messages were missing (per [`Self::waiting_for`]).
+	///
+	/// Afterwards the instance behaves like any other failed session:
+	/// `poke` reports `ProtocolFailed` and late messages are ignored, so a
+	/// stale frame cannot resurrect the attempt. Retry by constructing a
+	/// fresh instance with a fresh seed and channel — and consider a
+	/// different signing set, which routes around the silent party (and
+	/// changes the leader if the silent party was leading).
+	///
+	/// Calling this on a session that already reached a terminal state
+	/// changes nothing and returns the existing terminal condition:
+	/// [`SignProtocolError::AlreadyComplete`] for a completed session, or
+	/// the original `ProtocolFailed` for a failed one.
+	pub fn abort_stalled(&mut self) -> SignProtocolError {
+		match &self.state {
+			SignProtocolState::Done => SignProtocolError::AlreadyComplete,
+			SignProtocolState::Failed(reason) => SignProtocolError::ProtocolFailed(reason.clone()),
+			state => {
+				let phase = format!("{:?}", state);
+				let missing = self.waiting_for();
+				self.fail(format!("Timed out in {} waiting for participants {:?}", phase, missing));
+				SignProtocolError::TimedOut { phase, missing }
+			},
+		}
+	}
+
+	/// Erase the session's secret material: the Round 1 seed (the
+	/// key-leaking secret if exposed) and the signer's share and nonce
+	/// state. Run at every terminal transition (security review) — a
+	/// Done/Failed instance retained for diagnostics or retry coordination
+	/// must not keep key or nonce material readable until drop — and again
+	/// on `Drop` for instances discarded mid-session. The broadcast maps
+	/// are wire-public and the signature (if any) lives outside the signer,
+	/// so both survive; `poke` on a completed session still returns it.
+	fn zeroize_session_secrets(&mut self) {
+		self.round1_seed.zeroize();
+		self.signer.zeroize_secrets();
+	}
+
+	/// Terminal failure transition: wipe session secrets, then record the
+	/// reason.
+	fn fail(&mut self, reason: String) {
+		self.zeroize_session_secrets();
+		self.state = SignProtocolState::Failed(reason);
+	}
+
+	/// Terminal success transition: wipe session secrets, then mark `Done`.
+	fn complete(&mut self) {
+		self.zeroize_session_secrets();
+		self.state = SignProtocolState::Done;
 	}
 
 	/// Serialize a message for network transmission.
@@ -928,8 +1025,31 @@ impl DilithiumSignProtocol {
 	///
 	/// # Errors
 	///
-	/// Returns an error if the protocol fails or encounters an invalid state.
+	/// Returns an error if the protocol fails or encounters an invalid
+	/// state. Every error is **terminal** (security review): round inputs
+	/// are frozen first-write-wins, so failed generation or verification
+	/// work can only fail identically on retry. The session therefore
+	/// transitions to `Failed` before the error is returned, and later
+	/// pokes report `ProtocolFailed` instead of repeating the failing work
+	/// — recover by constructing a fresh instance, exactly as for a
+	/// combination failure.
 	pub fn poke(&mut self) -> Result<Action<Signature>, SignProtocolError> {
+		let result = self.poke_inner();
+		if let Err(err) = &result {
+			// Record terminal failure unless the session already is
+			// terminal: Done's AlreadyComplete probe must not re-label a
+			// completed session, and a Failed session keeps its original
+			// reason. (Most failure arms below set Failed with a tailored
+			// reason themselves; this catches the rest, e.g. generation
+			// and serialization errors.)
+			if !matches!(self.state, SignProtocolState::Done | SignProtocolState::Failed(_)) {
+				self.fail(err.to_string());
+			}
+		}
+		result
+	}
+
+	fn poke_inner(&mut self) -> Result<Action<Signature>, SignProtocolError> {
 		match &self.state {
 			SignProtocolState::Round1Generate => {
 				// Generate Round 1 commitment using the round1 seed for this instance.
@@ -1078,7 +1198,7 @@ impl DilithiumSignProtocol {
 						let r4 = Round4Broadcast { ssid: self.ssid, signature: signature.clone() };
 						let msg = SigningMessage::Round4Complete(r4);
 						let data = self.serialize_message(&msg)?;
-						self.state = SignProtocolState::Done;
+						self.complete();
 						// Store signature for return after sending
 						self.received_signature = Some(signature);
 						Ok(Action::SendMany(data))
@@ -1092,7 +1212,7 @@ impl DilithiumSignProtocol {
 						// on this variant, and every subsequent poke of this dead
 						// instance reports ProtocolFailed already.
 						let msg = format!("Signature combination failed: {}", e);
-						self.state = SignProtocolState::Failed(msg.clone());
+						self.fail(msg.clone());
 						Err(SignProtocolError::ProtocolFailed(msg))
 					},
 				}
@@ -1105,12 +1225,11 @@ impl DilithiumSignProtocol {
 					let public_key = self.signer.public_key();
 					if crate::verify_signature(public_key, &self.message, &self.context, &signature)
 					{
-						self.state = SignProtocolState::Done;
+						self.complete();
 						return Ok(Action::Return(signature));
 					} else {
 						// Leader sent an invalid signature - this is a protocol failure
-						self.state =
-							SignProtocolState::Failed("Leader sent invalid signature".to_string());
+						self.fail("Leader sent invalid signature".to_string());
 						return Err(SignProtocolError::ProtocolFailed(
 							"Leader sent invalid signature".to_string(),
 						));
@@ -2316,6 +2435,388 @@ mod tests {
 		assert!(protocol0.message_buffer.round2.is_empty());
 		// And the Round 2 message from party 1 should now be in r2_broadcasts
 		assert!(protocol0.r2_broadcasts.contains_key(&1));
+	}
+
+	/// Boundary pin for the errors-are-terminal contract: terminality
+	/// applies to `poke` (local work on frozen inputs, deterministic on
+	/// retry) and must NOT extend to `message` — peer-supplied data is the
+	/// attacker-facing channel, so a compromised party feeding garbage
+	/// gets its frame rejected (surfaced as `MalformedMessage` for
+	/// logging/attribution) while the session stays live and completes
+	/// when the honest traffic arrives. If message errors ever became
+	/// terminal, one junk frame would be a one-packet denial-of-signature
+	/// primitive against every receiver.
+	#[test]
+	fn malformed_frame_does_not_terminate_the_session() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+		let signer0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer0,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xCC; 32],
+		)
+		.unwrap();
+		assert!(matches!(protocol.poke().unwrap(), Action::SendMany(_)));
+
+		// A compromised party 1 sends a frame with a valid header (right
+		// tag, right SSID — so it reaches the deserializer) but a garbage
+		// body.
+		let mut junk = Vec::new();
+		junk.push(0u8); // SigningMessage::Round1 tag
+		junk.extend_from_slice(protocol.ssid());
+		junk.extend_from_slice(&[0xFFu8; 7]); // truncated garbage body
+		let err = protocol.message(1, junk).expect_err("garbage body must be reported");
+		assert!(matches!(err, SignProtocolError::MalformedMessage { from: 1, .. }));
+
+		// The session is still live and waiting — not Failed.
+		assert!(matches!(protocol.poke().unwrap(), Action::Wait));
+		assert_eq!(protocol.state, SignProtocolState::Round1Waiting);
+
+		// The honest frame still completes the round.
+		let signer1 = ThresholdSigner::new(shares[1].clone(), pk, config).unwrap();
+		let mut peer = DilithiumSignProtocol::new(
+			signer1,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1],
+			0,
+			[0xBB; 32],
+			[0xCC; 32],
+		)
+		.unwrap();
+		let honest_r1 = match peer.poke().unwrap() {
+			Action::SendMany(d) => d,
+			other => panic!("expected SendMany, got {other:?}"),
+		};
+		protocol.message(1, honest_r1).unwrap();
+		assert!(
+			matches!(protocol.poke().unwrap(), Action::SendMany(_)),
+			"session must advance to Round 2 after the honest frame arrives"
+		);
+	}
+
+	/// Security review: an error escaping `poke` must leave the reactor in
+	/// the terminal `Failed` state. Generation inputs are frozen
+	/// first-write-wins, so a failed generation can only fail identically
+	/// on retry — yet `Round2Generate`/`Round3Generate` errors used to
+	/// leave the state unchanged, so a supervisor polling the instance
+	/// would re-execute the failing work forever and `is_failed()`-style
+	/// state checks could not tell an unrecoverable instance from one
+	/// awaiting input.
+	#[test]
+	fn generation_failure_is_terminal_not_silently_retried() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+		let signer = ThresholdSigner::new(shares[0].clone(), pk, config).unwrap();
+		let mut protocol = DilithiumSignProtocol::new(
+			signer,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xCC; 32],
+		)
+		.unwrap();
+		assert!(matches!(protocol.poke().unwrap(), Action::SendMany(_)));
+
+		// Force Round 2 generation without the peer's Round 1 broadcast:
+		// the signer rejects the wrong party count — a local error whose
+		// inputs cannot change, so it is unrecoverable for this instance.
+		protocol.state = SignProtocolState::Round2Generate;
+		let err = protocol.poke().expect_err("round 2 generation must fail");
+		assert!(matches!(err, SignProtocolError::SigningError(_)), "unexpected error: {err}");
+		assert!(
+			matches!(protocol.state, SignProtocolState::Failed(_)),
+			"generation failure must be terminal, state is {:?}",
+			protocol.state
+		);
+
+		// A later poke reports the terminal failure instead of re-running
+		// the failed generation (which would surface as SigningError again).
+		match protocol.poke() {
+			Err(SignProtocolError::ProtocolFailed(_)) => {},
+			other => panic!("expected ProtocolFailed from a dead instance, got {other:?}"),
+		}
+	}
+
+	/// Security review: a silent peer must not leave a signing session
+	/// pending forever. The reactor is sans-io and clockless, so `poke`
+	/// alone returns `Wait` indefinitely in the collection phases; the
+	/// caller's deadline drives `abort_stalled`, which must terminate the
+	/// session with an actionable error naming the missing parties — and
+	/// the dead instance must stay dead even if the withheld message
+	/// arrives later.
+	#[test]
+	fn abort_stalled_terminates_a_stalled_waiting_phase() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+		let signer0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+		let mut protocol0 = DilithiumSignProtocol::new(
+			signer0,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xCC; 32],
+		)
+		.unwrap();
+		// A second instance only to produce party 1's (withheld) frame.
+		let signer1 = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
+		let mut protocol1 = DilithiumSignProtocol::new(
+			signer1,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1],
+			0,
+			[0xBB; 32],
+			[0xCC; 32],
+		)
+		.unwrap();
+
+		// Party 0 broadcasts its Round 1 commitment; party 1 stays silent.
+		assert!(matches!(protocol0.poke().unwrap(), Action::SendMany(_)));
+		assert!(matches!(protocol0.poke().unwrap(), Action::Wait));
+		assert_eq!(protocol0.waiting_for(), vec![1]);
+
+		// The caller's deadline expires.
+		let err = protocol0.abort_stalled();
+		match &err {
+			SignProtocolError::TimedOut { phase, missing } => {
+				assert_eq!(missing, &vec![1], "the silent party must be named");
+				assert!(phase.contains("Round1Waiting"), "unexpected phase: {phase}");
+			},
+			other => panic!("expected TimedOut, got {other}"),
+		}
+
+		// Terminal: poke reports the failure with the timeout context...
+		match protocol0.poke() {
+			Err(SignProtocolError::ProtocolFailed(reason)) => {
+				assert!(reason.contains("Timed out"), "unexpected reason: {reason}");
+			},
+			other => panic!("expected ProtocolFailed, got {other:?}"),
+		}
+		// ...and party 1's frame arriving late is ignored, not resurrected.
+		let r1_data1 = match protocol1.poke().unwrap() {
+			Action::SendMany(d) => d,
+			_ => panic!("Expected SendMany"),
+		};
+		protocol0.message(1, r1_data1).unwrap();
+		assert!(protocol0.poke().is_err(), "late traffic must not revive a timed-out session");
+		assert!(protocol0.r1_broadcasts.len() == 1, "late frame must not be recorded");
+	}
+
+	/// Security review: the follower path in `WaitingForLeaderDecision`
+	/// waits on a single party (the leader); a leader that withholds its
+	/// Round 4 decision must be abortable the same way. Terminal sessions
+	/// must be unaffected: a completed session reports `AlreadyComplete`
+	/// and a timed-out one keeps its original failure reason.
+	#[test]
+	fn abort_stalled_covers_leader_decision_wait_and_terminal_states() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		// Run rounds 1-3 between fresh leader/follower instances, retrying
+		// with new seeds on ML-DSA rejection-sampling failure (the same
+		// idiom as `test_local_signing_2_of_3`). Returns with the leader
+		// having combined successfully (Round4Complete withheld from the
+		// follower) and the follower in WaitingForLeaderDecision.
+		let run_attempt = |attempt: u8| -> Option<(DilithiumSignProtocol, DilithiumSignProtocol)> {
+			let signer0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+			let mut leader = DilithiumSignProtocol::new(
+				signer0,
+				b"test message".to_vec(),
+				b"context".to_vec(),
+				vec![0, 1],
+				0,
+				[attempt; 32],
+				[0xCC; 32],
+			)
+			.unwrap();
+			let signer1 = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
+			let mut follower = DilithiumSignProtocol::new(
+				signer1,
+				b"test message".to_vec(),
+				b"context".to_vec(),
+				vec![0, 1],
+				0,
+				[attempt.wrapping_add(0x80); 32],
+				[0xCC; 32],
+			)
+			.unwrap();
+
+			// Exchange rounds 1-3 both ways.
+			for _ in 0..3 {
+				let leader_frame = match leader.poke().unwrap() {
+					Action::SendMany(d) => d,
+					other => panic!("leader: expected SendMany, got {other:?}"),
+				};
+				let follower_frame = match follower.poke().unwrap() {
+					Action::SendMany(d) => d,
+					other => panic!("follower: expected SendMany, got {other:?}"),
+				};
+				follower.message(0, leader_frame).unwrap();
+				leader.message(1, follower_frame).unwrap();
+			}
+
+			// The leader combines and would broadcast Round4Complete —
+			// withhold it from the follower.
+			match leader.poke() {
+				Ok(Action::SendMany(_withheld_round4)) => Some((leader, follower)),
+				Ok(other) => panic!("leader: expected Round4Complete broadcast, got {other:?}"),
+				Err(_) => None, // rejection sampling failed; retry
+			}
+		};
+		let (mut leader, mut follower) = (0..100)
+			.find_map(run_attempt)
+			.expect("signature combination should succeed within 100 attempts");
+
+		// The follower is now waiting on the leader alone.
+		assert!(matches!(follower.poke().unwrap(), Action::Wait));
+		assert_eq!(follower.state, SignProtocolState::WaitingForLeaderDecision);
+		assert_eq!(follower.waiting_for(), vec![0]);
+
+		let err = follower.abort_stalled();
+		match &err {
+			SignProtocolError::TimedOut { phase, missing } => {
+				assert_eq!(missing, &vec![0], "the silent leader must be named");
+				assert!(phase.contains("WaitingForLeaderDecision"), "unexpected phase: {phase}");
+			},
+			other => panic!("expected TimedOut, got {other}"),
+		}
+
+		// Aborting an already-failed session preserves the original reason.
+		match follower.abort_stalled() {
+			SignProtocolError::ProtocolFailed(reason) => {
+				assert!(reason.contains("Timed out"), "unexpected reason: {reason}");
+			},
+			other => panic!("expected ProtocolFailed, got {other}"),
+		}
+
+		// Aborting a completed session is a no-op reporting completion.
+		let signature = match leader.poke().unwrap() {
+			Action::Return(sig) => sig,
+			other => panic!("leader: expected Return, got {other:?}"),
+		};
+		assert!(verify_signature(&pk, b"test message", b"context", &signature));
+		assert!(matches!(leader.abort_stalled(), SignProtocolError::AlreadyComplete));
+		assert_eq!(leader.state, SignProtocolState::Done);
+	}
+
+	/// Security review: terminal transitions (`Done` and `Failed`) must
+	/// erase the session secrets at the transition, not later at drop — a
+	/// terminal protocol object retained for diagnostics or retry
+	/// coordination otherwise keeps the Round 1 seed (the key-leaking
+	/// secret), the signer's hyperball nonces (which, combined with the
+	/// broadcast responses, reveal the share), and the private key share
+	/// readable in process memory. The signature itself must survive the
+	/// wipe: it is stored outside the signer and stays retrievable.
+	#[test]
+	fn terminal_transitions_wipe_session_secrets() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		// --- Failure path: a stalled session aborted by the caller. ---
+		let signer0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+		let mut stalled = DilithiumSignProtocol::new(
+			signer0,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xCC; 32],
+		)
+		.unwrap();
+		// Round 1 ran: the signer now holds live nonce material.
+		assert!(matches!(stalled.poke().unwrap(), Action::SendMany(_)));
+		assert!(!stalled.signer.secrets_are_wiped(), "sanity: secrets are live mid-session");
+		assert_ne!(stalled.round1_seed, [0u8; 32], "sanity: seed is live mid-session");
+
+		stalled.abort_stalled();
+		assert_eq!(stalled.round1_seed, [0u8; 32], "round1 seed must be wiped at failure");
+		assert!(stalled.signer.secrets_are_wiped(), "signer secrets must be wiped at failure");
+
+		// --- Success path: drive a 2-party session to completion. ---
+		// Retry with fresh seeds on ML-DSA rejection-sampling failure (the
+		// same idiom as `test_local_signing_2_of_3`).
+		let run_attempt = |attempt: u8| -> Option<(DilithiumSignProtocol, DilithiumSignProtocol)> {
+			let signer0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+			let mut leader = DilithiumSignProtocol::new(
+				signer0,
+				b"test message".to_vec(),
+				b"context".to_vec(),
+				vec![0, 1],
+				0,
+				[attempt; 32],
+				[0xCC; 32],
+			)
+			.unwrap();
+			let signer1 = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
+			let mut follower = DilithiumSignProtocol::new(
+				signer1,
+				b"test message".to_vec(),
+				b"context".to_vec(),
+				vec![0, 1],
+				0,
+				[attempt.wrapping_add(0x80); 32],
+				[0xCC; 32],
+			)
+			.unwrap();
+
+			for _ in 0..3 {
+				let leader_frame = match leader.poke().unwrap() {
+					Action::SendMany(d) => d,
+					other => panic!("leader: expected SendMany, got {other:?}"),
+				};
+				let follower_frame = match follower.poke().unwrap() {
+					Action::SendMany(d) => d,
+					other => panic!("follower: expected SendMany, got {other:?}"),
+				};
+				follower.message(0, leader_frame).unwrap();
+				leader.message(1, follower_frame).unwrap();
+			}
+
+			match leader.poke() {
+				Ok(Action::SendMany(round4)) => {
+					follower.message(0, round4).unwrap();
+					Some((leader, follower))
+				},
+				Ok(other) => panic!("leader: expected Round4Complete broadcast, got {other:?}"),
+				Err(_) => None, // rejection sampling failed; retry
+			}
+		};
+		let (mut leader, mut follower) = (0..100)
+			.find_map(run_attempt)
+			.expect("signature combination should succeed within 100 attempts");
+
+		// The leader reached Done when it combined; its secrets must be gone
+		// while the signature is still retrievable.
+		assert_eq!(leader.state, SignProtocolState::Done);
+		assert_eq!(leader.round1_seed, [0u8; 32], "round1 seed must be wiped at completion");
+		assert!(leader.signer.secrets_are_wiped(), "signer secrets must be wiped at completion");
+		let signature = match leader.poke().unwrap() {
+			Action::Return(sig) => sig,
+			other => panic!("leader: expected Return, got {other:?}"),
+		};
+		assert!(verify_signature(&pk, b"test message", b"context", &signature));
+
+		// The follower completes on the leader's decision and is wiped too.
+		match follower.poke().unwrap() {
+			Action::Return(sig) => {
+				assert!(verify_signature(&pk, b"test message", b"context", &sig))
+			},
+			other => panic!("follower: expected Return, got {other:?}"),
+		}
+		assert_eq!(follower.state, SignProtocolState::Done);
+		assert_eq!(follower.round1_seed, [0u8; 32]);
+		assert!(follower.signer.secrets_are_wiped());
 	}
 
 	#[test]

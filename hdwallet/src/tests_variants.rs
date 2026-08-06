@@ -32,7 +32,7 @@ macro_rules! variant_tests {
 				assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
 				assert_eq!(key1.public().bytes, key2.public().bytes);
 
-				let key3 = crate::$mod_name::derive_key_from_seed(test_seed(), PATH).unwrap();
+				let key3 = crate::$mod_name::derive_key_from_seed(&test_seed(), PATH).unwrap();
 				assert_eq!(key1.secret().to_bytes(), key3.secret().to_bytes());
 			}
 
@@ -99,10 +99,10 @@ fn top_level_api_is_ml_dsa_87() {
 #[test]
 fn variant_independent_surface_available() {
 	let pair =
-		crate::generate_wormhole_from_seed(test_seed(), "m/44'/189189189'/0'/0'/0'").unwrap();
+		crate::generate_wormhole_from_seed(&test_seed(), "m/44'/189189189'/0'/0'/0'").unwrap();
 	// Determinism of the variant-independent path.
 	let pair2 =
-		crate::generate_wormhole_from_seed(test_seed(), "m/44'/189189189'/0'/0'/0'").unwrap();
+		crate::generate_wormhole_from_seed(&test_seed(), "m/44'/189189189'/0'/0'/0'").unwrap();
 	assert_eq!(pair.address(), pair2.address());
 }
 

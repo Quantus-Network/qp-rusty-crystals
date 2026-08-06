@@ -117,7 +117,11 @@ Round 2 entropy reveals are part of the public transcript. After Round 2, the `s
 
 ### How It Works
 
-1. **Entropy Generation**: Each old committee member generates fresh random entropy from their provided seed.
+1. **Entropy Generation**: Each old committee member derives its entropy contribution from their provided seed *and the SSID*:
+   ```
+   entropy = SHAKE256("resharing-entropy-derive-v2" || seed || party_id || ssid)
+   ```
+   The SSID binding (session nonce, epoch, committees, public key) means a seed accidentally reused across sessions still produces a fresh, unpredictable contribution — without it, an adversary who saw a party's Round 2 reveal once could predict that party's contribution in any later session with the same seed before committing its own, and grind its entropy to bias the session seed.
 
 2. **Commit-Reveal**: Round 1-2 use a commit-reveal scheme to make the session seed unpredictable before reveals and prevent parties from choosing entropy after seeing others' revealed values.
 
@@ -141,6 +145,8 @@ Before Round 2 reveals are known, an attacker cannot predict the session seed un
 Because sub-share derivation is deterministic from the (public, post-Round-2) session seed and the old subset shares, erasure of pre-handoff state is the compensating control for forward secrecy: an attacker must compromise a machine **while it still holds old material** to recompute the handoff.
 
 On successful completion (`Action::Return`), the protocol zeroizes, in place: the caller-provided seed, this party's entropy, the session seed, all derived sub-shares `r_{I→J}`, all received Round 4 messages, the aggregated new-share working set, and — for old committee members — **the old-share working copy held in the config**. `old_share_erased()` reports whether the config's share is gone. The same erasure runs again on `Drop` (covering abort paths).
+
+Every terminal **failure** transition (validation or verification failures, leader equivocation, `abort_and_take_existing_share`) runs the same erasure at the transition itself, with one exception: the old-share working copy is kept, because on failure it is still the party's live key material and must stay recoverable for a retry. A failed protocol object retained for diagnostics or retry coordination therefore holds no session secrets — only the recoverable old share, until the caller extracts it or the object drops.
 
 **Working copy vs durable share**: `ResharingConfig` owns an in-memory working copy for one attempt. Production deployments persist the durable old share outside the protocol (keystore / permanent keyshare store) and load a clone per attempt. Dropping a failed session therefore wipes only the working copy; the persisted share remains, and a retry reloads it. Callers must still erase the durable copy themselves after a certified handoff (and any other clones they made before `ResharingConfig::new`).
 
@@ -305,7 +311,7 @@ the sub-shares `r_{I→J}` and potentially reconstruct secret key material.
 | **Independent per party** | Each party must generate their own entropy; don't share seeds |
 | **Fresh per session** | Generate new entropy for each resharing; don't reuse across sessions |
 
-If all parties reuse the same seeds with the same inputs, the protocol can repeat the same deterministic split. If seeds are predictable, the session seed can be predicted before Round 2.
+If seeds are predictable, the session seed can be predicted before Round 2. Seed reuse across sessions is additionally mitigated in-protocol: the entropy derivation binds the SSID, so a reused seed still yields a session-unique contribution (defense in depth — fresh seeds remain the requirement, since a predictable seed lets an attacker recompute the derivation regardless).
 
 ## Roles
 

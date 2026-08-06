@@ -63,7 +63,7 @@ fn derived_entropy_never_survives_key_generation() {
 	// remain anywhere on the stack.
 	let holder = seed_holder();
 	let leaked = probe_stack_for(STACK_BYTES, &entropy, move || {
-		let keypair = derive_key_from_seed(holder, PATH).unwrap();
+		let keypair = derive_key_from_seed(&holder, PATH).unwrap();
 		core::hint::black_box(&keypair);
 	});
 	assert!(
@@ -84,7 +84,7 @@ fn derived_entropy_never_survives_wormhole_generation() {
 
 	let holder = seed_holder();
 	let leaked = probe_stack_for(STACK_BYTES, &entropy, move || {
-		let pair = generate_wormhole_from_seed(holder, WORMHOLE_PATH).unwrap();
+		let pair = generate_wormhole_from_seed(&holder, WORMHOLE_PATH).unwrap();
 		core::hint::black_box(&pair);
 	});
 	assert!(

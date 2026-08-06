@@ -114,18 +114,26 @@ jobs:
           for probe in import_stack_zeroization sign_stack_zeroization sensitive_bytes_stack_zeroization; do
             run_probe -p qp-rusty-crystals-dilithium --all-features --test "$probe"
           done
-          for probe in dkg_stack_zeroization signing_stack_zeroization dealer_stack_zeroization; do
+          for probe in dkg_stack_zeroization signing_stack_zeroization dealer_stack_zeroization \
+              share_import_stack_zeroization; do
             run_probe -p qp-rusty-crystals-threshold --test "$probe"
           done
           # Release-gated unit test inside the threshold lib (painted-stack
           # probe over the derivation digest).
           run_probe -p qp-rusty-crystals-threshold --lib shares_digest_never_survives_derivation
+          # Release-gated `stack_probes` unit modules inside the threshold lib
+          # (DKG subset seeds / queued Round 1 privates, resharing final-share
+          # assembly): unit-level probes that scan the stack immediately after
+          # the function under test, where an end-to-end run would overwrite
+          # the residue before a probe could see it.
+          run_probe -p qp-rusty-crystals-threshold --lib stack_probes
           # The two mnemonic heap probes also run in the debug job, but the
           # word-pointer scrub in generate_mnemonic is plain (safe) stores
           # ahead of a free — exactly what dead-store elimination targets —
           # so they must additionally pass under optimized codegen.
           for probe in bip39_stack_zeroization entropy_stack_zeroization \
               hderive_stack_zeroization wormhole_stack_zeroization \
+              seed_stack_zeroization \
               mnemonic_heap_zeroization mnemonic_word_pointer_zeroization; do
             run_probe -p qp-rusty-crystals-hdwallet --test "$probe"
           done

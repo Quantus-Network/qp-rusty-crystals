@@ -28,8 +28,8 @@ use super::{
 		compute_dkg_ssid, compute_partial_output_hash, compute_signing_message,
 		compute_transcript_hash, derive_subset_contribution, h_commit, h_commit_pk, h_keygen,
 		h_seed, DkgConfig, DkgMessage, PartialPublicKey, Round1Broadcast, Round1Private,
-		Round2Broadcast, Round3Broadcast, Round4Broadcast, SubsetContribution, SubsetMask,
-		TranscriptSigner, DKG_SSID_SIZE, RANDOMNESS_SIZE, SHARED_SECRET_SIZE,
+		Round1PrivateFrame, Round2Broadcast, Round3Broadcast, Round4Broadcast, SubsetContribution,
+		SubsetMask, TranscriptSigner, DKG_SSID_SIZE, RANDOMNESS_SIZE, SHARED_SECRET_SIZE,
 	},
 };
 
@@ -69,8 +69,12 @@ fn deserialize_message(data: &[u8]) -> Result<DkgMessage, String> {
 
 /// Serialize a queued Round 1 private message into a self-wiping transport buffer.
 ///
-/// The frame carries the secret K_S, so two properties matter beyond plain
+/// The frame carries the secret K_S, so three properties matter beyond plain
 /// `borsh::to_vec`:
+/// - the private is serialized *by reference* via [`Round1PrivateFrame`] — building the owned
+///   `DkgMessage::Round1Private` would move K_S by value, and each move can leave a bitwise
+///   temporary in a dead stack frame (pinned by the painted-stack probe
+///   `queued_round1_private_never_survives_poke`);
 /// - the buffer is allocated at its exact final size before serialization — letting borsh grow a
 ///   `Vec` incrementally frees intermediate blocks that already contain a prefix of the secret
 ///   payload;
@@ -78,12 +82,12 @@ fn deserialize_message(data: &[u8]) -> Result<DkgMessage, String> {
 ///   to the transport.
 fn serialize_round1_private(
 	to: ParticipantId,
-	private: Round1Private,
+	private: &Round1Private,
 ) -> Result<DkgAction, DkgError> {
-	let msg = DkgMessage::Round1Private(private);
-	let len = borsh::object_length(&msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
+	let frame = Round1PrivateFrame(private);
+	let len = borsh::object_length(&frame).map_err(|e| DkgError::InternalError(e.to_string()))?;
 	let mut data = Zeroizing::new(Vec::with_capacity(len));
-	borsh::to_writer(&mut *data, &msg).map_err(|e| DkgError::InternalError(e.to_string()))?;
+	borsh::to_writer(&mut *data, &frame).map_err(|e| DkgError::InternalError(e.to_string()))?;
 	Ok(DkgAction::SendPrivate(to, data))
 }
 
@@ -481,7 +485,10 @@ pub struct Dkg<S: TranscriptSigner> {
 	state: DkgState<S>,
 	/// Session identifier binding all messages to this specific DKG session.
 	ssid: [u8; DKG_SSID_SIZE],
-	/// Master seed for deriving all randomness (32 bytes, cryptographically random).
+	/// Master seed for deriving all randomness (32 bytes, cryptographically
+	/// random). Consumed once by Round 1 derivation and wiped in place at
+	/// that point (`start_round1`); only zeros remain here afterwards (the
+	/// drop/abort wipes are then no-ops for this field).
 	seed: [u8; 32],
 	/// Round 1 private messages awaiting delivery, held as zeroizing
 	/// [`Round1Private`] structs (not pre-serialized byte buffers) so the queued
@@ -579,27 +586,14 @@ impl<S: TranscriptSigner> Dkg<S> {
 	///
 	/// The queue elements are boxed, so `Vec::pop` moves only the pointer;
 	/// the stale slot beyond the shrunken length holds no secret bytes. The
-	/// private is *cloned* out of the box rather than moved (`*boxed` would
-	/// relocate the value and free the box's allocation unwiped); dropping
-	/// the box then wipes the heap copy in place (`ZeroizeOnDrop`) before
-	/// the allocation is released.
-	///
-	/// Known residual (heap is covered, stack is not): the clone returned
-	/// here moves by value through `poke` into `serialize_round1_private`,
-	/// and each move can leave a bitwise temporary of K_S in a dead stack
-	/// frame. The final binding is wiped (`Round1Private: ZeroizeOnDrop`),
-	/// but intermediate move temporaries are compiler-managed — the same
-	/// class of leak addressed for key import/serialize in the dilithium
-	/// crate, where it is pinned by a painted-stack probe. Closing it here
-	/// would need a by-reference serialization path plus an equivalent
-	/// probe; tracked as follow-up, not covered by the heap-zeroization
-	/// tests.
-	fn pop_pending_private(&mut self) -> Option<(ParticipantId, Round1Private)> {
-		let (to, boxed) = self.pending_privates.pop()?;
-		let private = (*boxed).clone();
-		// `boxed` drops here: ZeroizeOnDrop wipes the boxed copy in place
-		// before its allocation is freed.
-		Some((to, private))
+	/// private stays in its box: K_S never leaves the stable heap slot, which
+	/// `ZeroizeOnDrop` wipes in place when the caller drops the box after
+	/// serializing from it by reference (`serialize_round1_private`). Popping
+	/// or cloning the value out instead would move K_S by value, and each
+	/// move can leave a bitwise temporary in a dead stack frame — pinned by
+	/// the painted-stack probe `queued_round1_private_never_survives_poke`.
+	fn pop_pending_private(&mut self) -> Option<(ParticipantId, Box<Round1Private>)> {
+		self.pending_privates.pop()
 	}
 
 	/// Advance the protocol state machine.
@@ -613,7 +607,9 @@ impl<S: TranscriptSigner> Dkg<S> {
 	/// * `Err(DkgError)` - If the protocol encounters an error
 	pub fn poke(&mut self) -> Result<DkgAction, DkgError> {
 		let result = if let Some((to, private)) = self.pop_pending_private() {
-			serialize_round1_private(to, private)
+			// `private` is dropped (and its heap slot wiped, ZeroizeOnDrop)
+			// as soon as the frame is serialized from it by reference.
+			serialize_round1_private(to, &private)
 		} else {
 			match self.state.phase {
 				DkgPhase::Initialized => self.start_round1(),
@@ -1061,6 +1057,13 @@ impl<S: TranscriptSigner> Dkg<S> {
 		let (my_randomness, my_shared_secrets) =
 			derive_round1_randomness(&self.seed, &self.ssid, config.my_party_id(), &leader_subsets);
 
+		// The derivation above is the seed's only consumer; wipe it now
+		// (security review) rather than waiting for drop/abort, so a live
+		// session — parked in Rounds 2–4 or retained after completion — no
+		// longer holds root entropy that re-derives the Round 1 randomness
+		// and every subset shared secret.
+		self.seed.zeroize();
+
 		let my_commitment = h_commit(&self.ssid, config.my_party_id(), &my_randomness);
 
 		// Transition to Round1 by setting fields directly
@@ -1201,7 +1204,7 @@ impl<S: TranscriptSigner> Dkg<S> {
 			self.state.privates_sent = true;
 
 			if let Some((to, private)) = self.pop_pending_private() {
-				return serialize_round1_private(to, private);
+				return serialize_round1_private(to, &private);
 			}
 		}
 
@@ -1798,11 +1801,16 @@ fn compute_my_contributions<S: TranscriptSigner>(
 	let mut my_partial_pks = BTreeMap::new();
 	let mut my_pk_commitments = BTreeMap::new();
 
-	// Compute contributions for leader subsets (includes partial PKs)
+	// Compute contributions for leader subsets (includes partial PKs).
+	// K_S is borrowed from the map (copying it out would park it in a stack
+	// local no drop reaches) and the derived subset seed is wiped as soon as
+	// the contribution is expanded from it — both seeds and K_S are pinned
+	// by the painted-stack probes in this module's tests.
 	for &subset in &config.my_leader_subsets() {
-		if let Some(&shared_secret) = shared_secrets.get(&subset) {
-			let seed = h_keygen(subset, &shared_secret, global_randomness);
+		if let Some(shared_secret) = shared_secrets.get(&subset) {
+			let mut seed = h_keygen(subset, shared_secret, global_randomness);
 			let contribution = derive_subset_contribution(&seed);
+			seed.zeroize();
 			let t = compute_partial_pk_t(rho, &contribution.s1, &contribution.s2);
 			let partial_pk = PartialPublicKey { subset_mask: subset, t };
 			let pk_commitment = h_commit_pk(ssid, config.my_party_id(), subset, &partial_pk);
@@ -1816,9 +1824,10 @@ fn compute_my_contributions<S: TranscriptSigner>(
 	// Compute contributions for non-leader subsets (no partial PKs needed)
 	for &subset in &config.my_subsets() {
 		if let alloc::collections::btree_map::Entry::Vacant(e) = my_contributions.entry(subset) {
-			if let Some(&shared_secret) = shared_secrets.get(&subset) {
-				let seed = h_keygen(subset, &shared_secret, global_randomness);
+			if let Some(shared_secret) = shared_secrets.get(&subset) {
+				let mut seed = h_keygen(subset, shared_secret, global_randomness);
 				let contribution = derive_subset_contribution(&seed);
+				seed.zeroize();
 				e.insert(contribution);
 			}
 		}
@@ -2017,10 +2026,14 @@ fn verify_partial_pk_commitment(
 		return Err(DkgError::PkCommitmentMismatch { party_id, subset });
 	}
 
-	// If we have the shared secret, verify the PK is correct
-	if let Some(&shared_secret) = shared_secrets.get(&subset) {
-		let seed = h_keygen(subset, &shared_secret, global_randomness);
+	// If we have the shared secret, verify the PK is correct. K_S is
+	// borrowed from the map (not copied to the stack) and the derived seed
+	// is wiped before the early-return path — pinned by the painted-stack
+	// probe `subset_seed_never_survives_pk_commitment_verification`.
+	if let Some(shared_secret) = shared_secrets.get(&subset) {
+		let mut seed = h_keygen(subset, shared_secret, global_randomness);
 		let expected_contribution = derive_subset_contribution(&seed);
+		seed.zeroize();
 		let expected_t =
 			compute_partial_pk_t(rho, &expected_contribution.s1, &expected_contribution.s2);
 		if pk.t != expected_t {
@@ -2411,6 +2424,291 @@ mod tests {
 
 		fn public_key(&self) -> Self::PublicKey {
 			self.id
+		}
+	}
+
+	/// Painted-stack regression probes (security review): the subset seed
+	/// `h_keygen` derives from K_S — and the queued `Round1Private` carrying
+	/// K_S itself — must not survive in dead stack memory once the deriving
+	/// function returns. The full-DKG integration probe
+	/// (`tests/dkg_stack_zeroization.rs`) cannot pin these leaks because
+	/// later protocol rounds overwrite the dead frames before its scan;
+	/// these probes call the exact functions and scan immediately.
+	///
+	/// Release-only (like the `derivation.rs` probe): the assertion is about
+	/// codegen, and unoptimized builds materialize move temporaries no
+	/// source-level fix can wipe.
+	#[cfg(not(debug_assertions))]
+	mod stack_probes {
+		use super::*;
+		use crate::keygen::dkg::SUBSET_SEED_SIZE;
+		use qp_rusty_crystals_test_utils::probe_stack_for_named;
+
+		// 8 MiB: covers matrix expansion (K x L NTT chains) in
+		// `compute_partial_pk_t` plus SHAKE contribution derivation.
+		const STACK_BYTES: usize = 8 * 1024 * 1024;
+
+		/// Deterministic fixture for the seed probes: party 0 of a 2-of-3
+		/// DKG, with a distinctive K_S for every subset party 0 belongs to.
+		#[allow(clippy::type_complexity)]
+		fn seed_probe_fixture() -> (
+			DkgConfig<TestSigner>,
+			BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]>,
+			Vec<u8>,
+			[u8; 32],
+			[u8; DKG_SSID_SIZE],
+		) {
+			let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+			let participants: Vec<ParticipantId> = vec![0, 1, 2];
+			let pk_map: BTreeMap<ParticipantId, u32> =
+				participants.iter().map(|&p| (p, p)).collect();
+			let config =
+				DkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
+					.unwrap();
+
+			let mut shared_secrets = BTreeMap::new();
+			for (i, &subset) in config.my_subsets().iter().enumerate() {
+				let ks: [u8; SHARED_SECRET_SIZE] = core::array::from_fn(|j| {
+					(j as u8)
+						.wrapping_mul(23)
+						.wrapping_add((i as u8).wrapping_mul(89))
+						.wrapping_add(5)
+				});
+				shared_secrets.insert(subset, ks);
+			}
+			let global_randomness: Vec<u8> = (0..3 * RANDOMNESS_SIZE)
+				.map(|i| (i as u8).wrapping_mul(41).wrapping_add(7))
+				.collect();
+			let rho = [0x42u8; 32];
+			let ssid = [0x77u8; DKG_SSID_SIZE];
+			(config, shared_secrets, global_randomness, rho, ssid)
+		}
+
+		/// Assert the probe technique itself detects a deliberately leaked
+		/// copy of `planted`, then return; guards against a silently
+		/// ineffective probe.
+		fn assert_probe_detects(planted: &[u8]) {
+			let named = [("planted", planted)];
+			assert!(
+				!probe_stack_for_named(STACK_BYTES, &named, || {
+					let mut leaked = [0u8; SUBSET_SEED_SIZE];
+					leaked[..planted.len()].copy_from_slice(planted);
+					core::hint::black_box(&leaked);
+				})
+				.is_empty(),
+				"probe self-check: a deliberately leaked stack copy was not detected"
+			);
+		}
+
+		/// `compute_my_contributions` binds the seed `h_keygen` derives from
+		/// K_S to a bare local for every subset; none of those locals may
+		/// survive the call.
+		#[test]
+		fn subset_seed_never_survives_contribution_derivation() {
+			let (config, shared_secrets, global_randomness, rho, ssid) = seed_probe_fixture();
+			// Reference seeds, computed outside the probed region.
+			let seeds: Vec<[u8; SUBSET_SEED_SIZE]> = shared_secrets
+				.iter()
+				.map(|(&subset, ks)| h_keygen(subset, ks, &global_randomness))
+				.collect();
+			assert!(!seeds.is_empty(), "fixture must cover at least one subset");
+			let names: Vec<String> =
+				(0..seeds.len()).map(|i| format!("subset seed #{i}")).collect();
+			let named: Vec<(&str, &[u8])> = names
+				.iter()
+				.zip(&seeds)
+				.map(|(name, seed)| (name.as_str(), seed.as_slice()))
+				.collect();
+
+			assert_probe_detects(&seeds[0]);
+
+			let leaked = probe_stack_for_named(STACK_BYTES, &named, || {
+				let out = compute_my_contributions(
+					&ssid,
+					&config,
+					&shared_secrets,
+					&global_randomness,
+					&rho,
+				);
+				core::hint::black_box(&out);
+			});
+			assert!(
+				leaked.is_empty(),
+				"compute_my_contributions left subset seeds in dead stack memory: {leaked:?}"
+			);
+		}
+
+		/// `verify_partial_pk_commitment` re-derives the subset seed to check
+		/// a peer's partial PK; the seed local may not survive the call.
+		#[test]
+		fn subset_seed_never_survives_pk_commitment_verification() {
+			let (_config, shared_secrets, global_randomness, rho, ssid) = seed_probe_fixture();
+			let (&subset, ks) = shared_secrets.iter().next().unwrap();
+
+			// Build a correct partial PK and matching Round 3 commitment from
+			// party 1, so verification runs the full seed-derivation path.
+			let seed = h_keygen(subset, ks, &global_randomness);
+			let contribution = derive_subset_contribution(&seed);
+			let t = compute_partial_pk_t(&rho, &contribution.s1, &contribution.s2);
+			let pk = PartialPublicKey { subset_mask: subset, t };
+			let commitment = h_commit_pk(&ssid, 1, subset, &pk);
+			let round3 = Round3Broadcast {
+				ssid,
+				party_id: 1,
+				partial_pk_commitments: [(subset, commitment)].into_iter().collect(),
+			};
+
+			assert_probe_detects(&seed);
+
+			let named = [("subset seed", seed.as_slice())];
+			let leaked = probe_stack_for_named(STACK_BYTES, &named, || {
+				let result = verify_partial_pk_commitment(
+					&ssid,
+					&shared_secrets,
+					&global_randomness,
+					&rho,
+					1,
+					subset,
+					&pk,
+					&round3,
+				);
+				assert!(result.is_ok(), "fixture PK must verify: {result:?}");
+			});
+			assert!(
+				leaked.is_empty(),
+				"verify_partial_pk_commitment left the subset seed in dead stack memory: {leaked:?}"
+			);
+		}
+
+		/// Serializing a queued Round 1 private through `poke` must not leave
+		/// bitwise temporaries of K_S in dead stack frames (the residual the
+		/// `pop_pending_private` clone/move path previously documented as
+		/// unresolved).
+		#[test]
+		fn queued_round1_private_never_survives_poke() {
+			let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+			let participants: Vec<ParticipantId> = vec![0, 1, 2];
+			let pk_map: BTreeMap<ParticipantId, u32> =
+				participants.iter().map(|&p| (p, p)).collect();
+			let config =
+				DkgConfig::new(threshold_config, 0, participants, TestSigner { id: 0 }, pk_map)
+					.unwrap();
+			let mut dkg = Dkg::new(config, [0x21u8; 32], &TEST_SESSION_NONCE);
+
+			let ks: [u8; SHARED_SECRET_SIZE] =
+				core::array::from_fn(|j| (j as u8).wrapping_mul(29).wrapping_add(3));
+			let private = Round1Private {
+				ssid: *dkg.ssid(),
+				from_party_id: 0,
+				subset_mask: 0b011,
+				shared_secret: ks,
+			};
+			dkg.pending_privates.push((1, Box::new(private)));
+
+			assert_probe_detects(&ks);
+
+			let named = [("shared secret K_S", ks.as_slice())];
+			let leaked = probe_stack_for_named(STACK_BYTES, &named, || {
+				// `poke` pops the queued private and serializes it; the
+				// returned Zeroizing payload is dropped (wiped) in here.
+				let action = dkg.poke().expect("poke serializes the queued private");
+				assert!(
+					matches!(action, DkgAction::SendPrivate(1, _)),
+					"queued private must be sent to party 1"
+				);
+				core::hint::black_box(&action);
+			});
+			assert!(
+				leaked.is_empty(),
+				"poke left K_S from the queued Round 1 private in dead stack memory: {leaked:?}"
+			);
+		}
+	}
+
+	/// Security review: the master seed's only consumer is Round 1 derivation
+	/// (`start_round1`). It must be wiped as soon as that derivation has run —
+	/// not just on drop or fatal abort — so a live session (parked in Rounds
+	/// 2–4 waiting for peers, or retained by the caller after completion)
+	/// no longer holds root entropy that re-derives the Round 1 randomness
+	/// and every subset shared secret.
+	#[test]
+	fn master_seed_is_wiped_after_round1_derivation_and_completion() {
+		let seed = [0x5Au8; 32];
+		let threshold_config = ThresholdConfig::new(2, 3).unwrap();
+		let participants: Vec<ParticipantId> = (0..3).collect();
+		let pk_map: BTreeMap<ParticipantId, u32> = participants.iter().map(|&p| (p, p)).collect();
+		let mut dkgs: Vec<Dkg<TestSigner>> = (0..3u32)
+			.map(|id| {
+				let config = DkgConfig::new(
+					threshold_config,
+					id,
+					participants.clone(),
+					TestSigner { id },
+					pk_map.clone(),
+				)
+				.unwrap();
+				Dkg::new(config, seed, &TEST_SESSION_NONCE)
+			})
+			.collect();
+
+		// Before the first poke the seed is still needed for Round 1.
+		assert_eq!(dkgs[0].seed, seed);
+
+		// The first poke enters Round 1 and derives all randomness from the
+		// seed; the seed is dead from that point on and must be wiped even
+		// though the session object stays alive for the remaining rounds.
+		let mut queues: Vec<Vec<(u32, Vec<u8>)>> = vec![Vec::new(); 3];
+		for (i, dkg) in dkgs.iter_mut().enumerate() {
+			match dkg.poke().unwrap() {
+				DkgAction::SendMany(data) =>
+					for (j, queue) in queues.iter_mut().enumerate() {
+						if j != i {
+							queue.push((i as u32, data.clone()));
+						}
+					},
+				other => panic!("expected the Round 1 broadcast, got {other:?}"),
+			}
+			assert_eq!(
+				dkg.seed, [0u8; 32],
+				"party {i} derived its Round 1 randomness but still holds the master seed"
+			);
+		}
+
+		// Drive the session to completion and re-check on the live objects:
+		// the wipe must not migrate somewhere a later phase misses.
+		let mut done = [false; 3];
+		for _ in 0..100 {
+			if done.iter().all(|&d| d) {
+				break;
+			}
+			for i in 0..3 {
+				if done[i] {
+					continue;
+				}
+				for (from, data) in mem::take(&mut queues[i]) {
+					dkgs[i].message(from, data).unwrap();
+				}
+				match dkgs[i].poke().unwrap() {
+					DkgAction::Wait => {},
+					DkgAction::SendMany(data) =>
+						for (j, queue) in queues.iter_mut().enumerate() {
+							if j != i {
+								queue.push((i as u32, data.clone()));
+							}
+						},
+					DkgAction::SendPrivate(to, data) =>
+						queues[to as usize].push((i as u32, data.to_vec())),
+					DkgAction::Return(_) => done[i] = true,
+				}
+			}
+		}
+		assert!(done.iter().all(|&d| d), "DKG must complete");
+		for (i, dkg) in dkgs.iter().enumerate() {
+			assert!(dkg.is_complete(), "party {i} must be complete");
+			assert_eq!(
+				dkg.seed, [0u8; 32],
+				"party {i} completed but the live session still holds the master seed"
+			);
 		}
 	}
 
