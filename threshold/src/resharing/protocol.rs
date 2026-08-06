@@ -494,7 +494,20 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	/// the caller's persistent store; see the module docs on working copy vs
 	/// durable share. In-memory-only callers use
 	/// [`Self::abort_and_take_existing_share`] before drop on abort paths.
+	///
+	/// Failure transitions instead go through [`Self::fail`], which erases
+	/// the same material *except* the old working share: on failure the old
+	/// share is still the party's live key material and must stay
+	/// recoverable for a retry.
 	fn zeroize_session_secrets(&mut self) {
+		self.zeroize_session_ephemerals();
+		self.config.zeroize_existing_share();
+	}
+
+	/// Erase the session's ephemeral secrets, leaving the old-committee
+	/// working share in place. See [`Self::zeroize_session_secrets`] for the
+	/// split rationale.
+	fn zeroize_session_ephemerals(&mut self) {
 		self.seed.zeroize();
 		if let Some(ref mut entropy) = self.my_entropy {
 			entropy.zeroize();
@@ -509,15 +522,27 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		self.new_shares.clear();
 		self.pending_round4.clear();
 		self.round4_messages.clear();
-		self.config.zeroize_existing_share();
 		// Explicitly zeroize the transcript signer (this party's long-term
 		// authentication key). `ZeroizeOnDrop` is only a marker trait, so
 		// relying on the signer's own Drop would leave erasure to downstream
 		// implementer discipline; calling `zeroize()` makes it an invariant.
 		// Safe here: the signer is only used for the Round 6 acceptance
-		// signature, which has already been produced by the time this runs
-		// (successful completion or drop).
+		// signature, which by the time this runs has either been produced
+		// (successful completion, drop) or never will be (terminal failure).
 		self.signer_config.my_signer.zeroize();
+	}
+
+	/// Terminal failure transition (security review): every path that ends
+	/// the session in `Failed` must erase the session ephemerals *at the
+	/// transition*, not later at drop — a failed protocol object retained
+	/// for diagnostics or retry coordination would otherwise keep session
+	/// seeds, sub-share and new-share state, and the transcript signer
+	/// readable in process memory for that whole interval. The old working
+	/// share is deliberately kept: it is still the party's key material and
+	/// must stay recoverable via [`Self::abort_and_take_existing_share`].
+	fn fail(&mut self, reason: String) {
+		self.zeroize_session_ephemerals();
+		self.state = ResharingState::Failed(reason);
 	}
 
 	/// Whether the old committee share has been erased from the config.
@@ -652,15 +677,17 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	///
 	/// Recovering the share renders the session unable to continue, so an
 	/// in-flight session is marked failed — the name carries the side
-	/// effect: this is an abort-recovery operation, not an accessor.
+	/// effect: this is an abort-recovery operation, not an accessor. The
+	/// failure transition also erases the remaining session ephemerals
+	/// (security review): once the caller has extracted the old share, the
+	/// dead session has no reason to keep seeds, sub-shares, or the
+	/// transcript signer readable in memory until drop.
 	pub fn abort_and_take_existing_share(&mut self) -> Option<PrivateKeyShare> {
 		let share = self.config.take_existing_share();
 		if share.is_some() &&
 			!matches!(self.state, ResharingState::Done | ResharingState::Failed(_))
 		{
-			self.state = ResharingState::Failed(
-				"old share recovered by caller before completion".to_string(),
-			);
+			self.fail("old share recovered by caller before completion".to_string());
 		}
 		share
 	}
@@ -853,7 +880,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		let required = self.config.old_threshold() as usize;
 		if act.len() < required {
 			let err = ResharingProtocolError::InsufficientParties { required, received: act.len() };
-			self.state = ResharingState::Failed(err.to_string());
+			self.fail(err.to_string());
 			return Err(err);
 		}
 
@@ -906,7 +933,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			// with a tailored reason themselves; this catches the rest,
 			// e.g. the entropy commit-reveal check.)
 			if !matches!(self.state, ResharingState::Done | ResharingState::Failed(_)) {
-				self.state = ResharingState::Failed(err.to_string());
+				self.fail(err.to_string());
 			}
 		}
 		result
@@ -1050,12 +1077,13 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		let all_old = act.iter().all(|p| self.config.old_participants().contains(*p));
 		let enough = act.len() >= self.config.old_threshold() as usize;
 		if act.is_empty() || !sorted_unique || !all_old || !enough {
-			self.state = ResharingState::Failed(format!(
+			let reason = format!(
 				"invalid Act proposal from leader {}: {:?} (t_old = {})",
 				from,
 				act,
 				self.config.old_threshold()
-			));
+			);
+			self.fail(reason);
 			return;
 		}
 
@@ -1064,10 +1092,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			Some(existing) if *existing == msg.active_set => {}, // duplicate, ignore
 			Some(_) => {
 				// Two different proposals from the leader: equivocation.
-				self.state = ResharingState::Failed(format!(
-					"leader {} equivocated on the Act proposal",
-					from
-				));
+				self.fail(format!("leader {} equivocated on the Act proposal", from));
 			},
 		}
 	}
@@ -1382,7 +1407,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			// `run_protocol`, while waiting nodes hit the 120s
 			// `perform_leader_centric_computation` timeout.)
 			if let Err(e) = self.verify_peer_dealer_commitments() {
-				self.state = ResharingState::Failed(e.to_string());
+				self.fail(e.to_string());
 				return Err(e);
 			}
 			self.state = ResharingState::Round4Generate;
@@ -1816,7 +1841,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		if !failed_parties.is_empty() {
 			let reason =
 				format!("Protocol aborted: {} parties reported failure", failed_parties.len());
-			self.state = ResharingState::Failed(reason.clone());
+			self.fail(reason.clone());
 			return Err(ResharingProtocolError::ProtocolAborted(reason));
 		}
 
@@ -1998,7 +2023,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 					 or forged signature",
 					p
 				);
-				self.state = ResharingState::Failed(reason.clone());
+				self.fail(reason.clone());
 				return Err(ResharingProtocolError::ShareVerificationFailed(reason));
 			}
 		}
@@ -3752,6 +3777,100 @@ mod tests {
 			0,
 		);
 		(protocol, original)
+	}
+
+	/// Fill every session-ephemeral slot with recognizable non-zero material,
+	/// as if the protocol were mid-session.
+	fn plant_session_ephemerals(protocol: &mut ResharingProtocol<TestSigner>) {
+		protocol.my_entropy = Some([0x5Au8; ENTROPY_SIZE]);
+		protocol.session_seed = Some([0x66u8; 32]);
+		protocol.my_subshares.insert((1, 2), Box::new(NewShareData::new()));
+		protocol.new_shares.insert(3, Box::new(NewShareData::new()));
+	}
+
+	/// Assert that every session-ephemeral slot has been erased. The old
+	/// working share is deliberately *not* covered: on failure it is still
+	/// the party's live key material and must stay recoverable via
+	/// [`ResharingProtocol::abort_and_take_existing_share`].
+	fn assert_session_ephemerals_wiped(protocol: &ResharingProtocol<TestSigner>) {
+		assert_eq!(protocol.seed, [0u8; 32], "constructor seed must be wiped");
+		assert!(protocol.my_entropy.is_none(), "entropy contribution must be wiped");
+		assert!(protocol.session_seed.is_none(), "session seed must be wiped");
+		assert!(protocol.my_subshares.is_empty(), "generated sub-shares must be dropped");
+		assert!(protocol.new_shares.is_empty(), "aggregated share state must be dropped");
+		assert!(protocol.pending_round4.is_empty(), "buffered Round 4 payloads must be dropped");
+		assert!(protocol.round4_messages.is_empty(), "received Round 4 payloads must be dropped");
+		assert_eq!(protocol.signer_config.my_signer.id, 0, "transcript signer must be wiped");
+	}
+
+	/// Security review: a failure escaping `poke` must erase the session
+	/// ephemerals at the terminal transition, not later at drop. A failed
+	/// protocol object retained for diagnostics or retry coordination used
+	/// to keep the constructor seed, entropy, session seed, sub-share and
+	/// new-share state, and the transcript signer readable in memory until
+	/// the object was destroyed.
+	#[test]
+	fn poke_failure_wipes_session_ephemerals_but_keeps_old_share() {
+		let (mut protocol, original) = share_recovery_fixture();
+		plant_session_ephemerals(&mut protocol);
+
+		// Same trigger as `entropy_commitment_mismatch_is_terminal`: party
+		// 0's reveal does not match its Round 1 commitment.
+		let honest = [0x11u8; ENTROPY_SIZE];
+		protocol.state = ResharingState::Round2Waiting;
+		protocol.active_set = Some(vec![0, 1]);
+		protocol.round1_entropy_commits.insert(0, commit_entropy(&honest));
+		protocol.round1_entropy_commits.insert(1, commit_entropy(&honest));
+		protocol.round2_entropy_reveals.insert(0, [0x22u8; ENTROPY_SIZE]); // mismatch
+		protocol.round2_entropy_reveals.insert(1, honest);
+
+		protocol.poke().expect_err("a mismatched entropy reveal must fail the session");
+		assert!(protocol.is_failed());
+		assert_session_ephemerals_wiped(&protocol);
+
+		// The old share is *not* an ephemeral: it is still the party's key
+		// material and must survive the failure for a retry.
+		let recovered = protocol
+			.abort_and_take_existing_share()
+			.expect("failed session must preserve the old share");
+		assert_eq!(recovered, original);
+	}
+
+	/// Security review: failures raised inside `message` handlers (which
+	/// return no error for the poke wrapper to catch) must also erase the
+	/// session ephemerals at the terminal transition.
+	#[test]
+	fn message_failure_wipes_session_ephemerals() {
+		let (mut protocol, _original) = share_recovery_fixture();
+		plant_session_ephemerals(&mut protocol);
+		protocol.state = ResharingState::Round1Waiting;
+
+		// An invalid Act proposal from the genuine leader (party 0): not
+		// enough members for t_old = 2. Unrecoverable, so the handler
+		// transitions straight to Failed.
+		protocol.handle_act_proposal(
+			0,
+			ResharingActProposal { party_id: 0, ssid: TEST_SSID, active_set: vec![0] },
+		);
+
+		assert!(protocol.is_failed(), "invalid Act proposal from the leader must be terminal");
+		assert_session_ephemerals_wiped(&protocol);
+	}
+
+	/// Security review: recovering the old share from an in-flight session
+	/// hands the caller the share and marks the session failed — the
+	/// remaining ephemerals must be erased at that same transition.
+	#[test]
+	fn share_recovery_wipes_remaining_session_ephemerals() {
+		let (mut protocol, original) = share_recovery_fixture();
+		plant_session_ephemerals(&mut protocol);
+
+		let recovered = protocol
+			.abort_and_take_existing_share()
+			.expect("stalled session must yield the share");
+		assert_eq!(recovered, original);
+		assert!(protocol.is_failed());
+		assert_session_ephemerals_wiped(&protocol);
 	}
 
 	/// A session that fails before Round 6 certification has produced no
