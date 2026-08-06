@@ -2637,16 +2637,16 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 	fn build_private_key_share(&self) -> Result<PrivateKeyShare, ResharingProtocolError> {
 		let mut shares_data: BTreeMap<u16, SecretShareData> = BTreeMap::new();
 		for (j_mask, share) in &self.new_shares {
-			// Convert from Vec to fixed-size arrays
-			let mut s1_arr = [[0i32; N as usize]; L];
-			for (i, poly) in share.s1.iter().enumerate().take(L) {
-				s1_arr[i] = *poly;
-			}
-			let mut s2_arr = [[0i32; N as usize]; K];
-			for (i, poly) in share.s2.iter().enumerate().take(K) {
-				s2_arr[i] = *poly;
-			}
-			shares_data.insert(*j_mask, SecretShareData { s1: s1_arr, s2: s2_arr });
+			// Copy the coefficients heap-to-heap: preallocate a zeroed map
+			// entry and assign the arrays directly into it, so no stack
+			// intermediary (the former s1_arr/s2_arr locals, or a by-value
+			// SecretShareData argument to insert) is left holding the new
+			// share's raw coefficients in memory no drop reaches. Pinned by
+			// the painted-stack probe
+			// `new_share_coefficients_never_survive_final_share_assembly`.
+			let entry = shares_data.entry(*j_mask).or_insert_with(SecretShareData::zeroed);
+			entry.s1 = share.s1;
+			entry.s2 = share.s2;
 		}
 
 		let rho = self.derive_rho();
@@ -2690,7 +2690,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			fips202::shake256_squeeze(&mut party_key, &mut h);
 		}
 
-		Ok(PrivateKeyShare::new(
+		let share = PrivateKeyShare::new(
 			self.config.my_party_id(),
 			self.config.new_participants().len() as u32,
 			self.config.new_threshold(),
@@ -2699,7 +2699,12 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			tr,
 			shares_data,
 			self.config.new_participants().clone(),
-		))
+		);
+		// `party_key` was copied (not moved) into the share above; the share
+		// zeroizes on drop, but this stack copy would otherwise linger, so
+		// wipe it (mirrors the DKG path's `build_private_share`).
+		party_key.zeroize();
+		Ok(share)
 	}
 }
 
@@ -4574,6 +4579,95 @@ mod tests {
 				"Subshare {} has unexpectedly large max coeff {}",
 				i,
 				max_coeff
+			);
+		}
+	}
+
+	/// Painted-stack probes: only meaningful in optimized builds, where the
+	/// compiler-generated move temporaries for large by-value structs (which
+	/// no source-level fix can wipe) are elided.
+	#[cfg(not(debug_assertions))]
+	mod stack_probes {
+		use super::*;
+		use qp_rusty_crystals_test_utils::probe_stack_for_named;
+
+		// 8 MiB: covers the final-share assembly frame (per-subset
+		// coefficient conversion plus the party-key SHAKE derivation).
+		const STACK_BYTES: usize = 8 * 1024 * 1024;
+
+		/// Security review: `build_private_key_share` converted each new
+		/// subset share's polynomials through `s1_arr`/`s2_arr` stack locals
+		/// before moving them into the `SecretShareData` map entry. The
+		/// arrays are `Copy`, so the "move" left the new share's raw
+		/// coefficients — a party's replacement long-term secret — in the
+		/// abandoned stack frame, recoverable after the protocol returns and
+		/// before the caller has stored the share securely. The DKG twin
+		/// (`build_private_share`) already wipes its locals; this pins the
+		/// resharing path.
+		#[test]
+		fn new_share_coefficients_never_survive_final_share_assembly() {
+			// Party 1 in both committees of a 2-of-3 -> 2-of-3 reshare.
+			let (mut protocol, _original) = share_recovery_fixture();
+
+			// Plant distinctive high-entropy coefficients (within (-Q, Q),
+			// as honest aggregation guarantees) as the round-5 output for
+			// the two new subsets party 1 belongs to.
+			let mut lcg = 0x1234_5678u32;
+			let mut coeff = move || {
+				lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+				(lcg % (2 * (Q as u32) - 1)) as i32 - (Q - 1)
+			};
+			for mask in [0b011u16, 0b110u16] {
+				let mut share = NewShareData::new();
+				share.s1.iter_mut().chain(share.s2.iter_mut()).for_each(|poly| {
+					poly.iter_mut().for_each(|c| *c = coeff());
+				});
+				protocol.new_shares.insert(mask, Box::new(share));
+			}
+
+			// Scan for the first 64 coefficients of each subset's s1[0] as
+			// they are laid out in memory (little-endian i32s). Both subsets
+			// are scanned: iterations of the conversion loop reuse the same
+			// stack slots, so only the last-processed subset's residue is
+			// guaranteed to survive to the scan. The planted shares live
+			// behind Box (heap), so a match in the painted region can only
+			// be a stack copy the assembly failed to wipe.
+			let pattern_for = |mask: u16| -> [u8; 256] {
+				let mut pattern = [0u8; 256];
+				for (chunk, c) in pattern.chunks_exact_mut(4).zip(protocol.new_shares[&mask].s1[0])
+				{
+					chunk.copy_from_slice(&c.to_le_bytes());
+				}
+				pattern
+			};
+			let first = pattern_for(0b011);
+			let last = pattern_for(0b110);
+			let patterns = [
+				("subset 0b011 coefficients", &first[..]),
+				("subset 0b110 coefficients", &last[..]),
+			];
+
+			// Sanity: the technique detects a deliberately leaked copy.
+			assert!(
+				!probe_stack_for_named(STACK_BYTES, &patterns, || {
+					let leaked: [u8; 256] = first;
+					core::hint::black_box(&leaked);
+				})
+				.is_empty(),
+				"probe self-check: a deliberately leaked stack copy was not detected"
+			);
+
+			// Real scenario: assemble the final share. The returned value
+			// holds the only legitimate copies; wipe it in place through a
+			// reference so the probe itself never moves the secrets.
+			let leaked = probe_stack_for_named(STACK_BYTES, &patterns, || {
+				let mut share =
+					protocol.build_private_key_share().expect("share assembly succeeds");
+				share.zeroize();
+			});
+			assert!(
+				leaked.is_empty(),
+				"build_private_key_share left new-share coefficients in dead stack memory"
 			);
 		}
 	}
