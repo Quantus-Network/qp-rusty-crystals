@@ -633,8 +633,9 @@ pub struct DilithiumSignProtocol {
 
 impl Drop for DilithiumSignProtocol {
 	fn drop(&mut self) {
-		// Zeroize the round1_seed which is the key-leaking secret if exposed
-		self.round1_seed.zeroize();
+		// Terminal transitions already ran this; covers non-terminal drops.
+		// (The signer's own fields also wipe themselves on drop.)
+		self.zeroize_session_secrets();
 	}
 }
 
@@ -929,13 +930,36 @@ impl DilithiumSignProtocol {
 			state => {
 				let phase = format!("{:?}", state);
 				let missing = self.waiting_for();
-				self.state = SignProtocolState::Failed(format!(
-					"Timed out in {} waiting for participants {:?}",
-					phase, missing
-				));
+				self.fail(format!("Timed out in {} waiting for participants {:?}", phase, missing));
 				SignProtocolError::TimedOut { phase, missing }
 			},
 		}
+	}
+
+	/// Erase the session's secret material: the Round 1 seed (the
+	/// key-leaking secret if exposed) and the signer's share and nonce
+	/// state. Run at every terminal transition (security review) — a
+	/// Done/Failed instance retained for diagnostics or retry coordination
+	/// must not keep key or nonce material readable until drop — and again
+	/// on `Drop` for instances discarded mid-session. The broadcast maps
+	/// are wire-public and the signature (if any) lives outside the signer,
+	/// so both survive; `poke` on a completed session still returns it.
+	fn zeroize_session_secrets(&mut self) {
+		self.round1_seed.zeroize();
+		self.signer.zeroize_secrets();
+	}
+
+	/// Terminal failure transition: wipe session secrets, then record the
+	/// reason.
+	fn fail(&mut self, reason: String) {
+		self.zeroize_session_secrets();
+		self.state = SignProtocolState::Failed(reason);
+	}
+
+	/// Terminal success transition: wipe session secrets, then mark `Done`.
+	fn complete(&mut self) {
+		self.zeroize_session_secrets();
+		self.state = SignProtocolState::Done;
 	}
 
 	/// Serialize a message for network transmission.
@@ -1019,7 +1043,7 @@ impl DilithiumSignProtocol {
 			// reason themselves; this catches the rest, e.g. generation
 			// and serialization errors.)
 			if !matches!(self.state, SignProtocolState::Done | SignProtocolState::Failed(_)) {
-				self.state = SignProtocolState::Failed(err.to_string());
+				self.fail(err.to_string());
 			}
 		}
 		result
@@ -1174,7 +1198,7 @@ impl DilithiumSignProtocol {
 						let r4 = Round4Broadcast { ssid: self.ssid, signature: signature.clone() };
 						let msg = SigningMessage::Round4Complete(r4);
 						let data = self.serialize_message(&msg)?;
-						self.state = SignProtocolState::Done;
+						self.complete();
 						// Store signature for return after sending
 						self.received_signature = Some(signature);
 						Ok(Action::SendMany(data))
@@ -1188,7 +1212,7 @@ impl DilithiumSignProtocol {
 						// on this variant, and every subsequent poke of this dead
 						// instance reports ProtocolFailed already.
 						let msg = format!("Signature combination failed: {}", e);
-						self.state = SignProtocolState::Failed(msg.clone());
+						self.fail(msg.clone());
 						Err(SignProtocolError::ProtocolFailed(msg))
 					},
 				}
@@ -1201,12 +1225,11 @@ impl DilithiumSignProtocol {
 					let public_key = self.signer.public_key();
 					if crate::verify_signature(public_key, &self.message, &self.context, &signature)
 					{
-						self.state = SignProtocolState::Done;
+						self.complete();
 						return Ok(Action::Return(signature));
 					} else {
 						// Leader sent an invalid signature - this is a protocol failure
-						self.state =
-							SignProtocolState::Failed("Leader sent invalid signature".to_string());
+						self.fail("Leader sent invalid signature".to_string());
 						return Err(SignProtocolError::ProtocolFailed(
 							"Leader sent invalid signature".to_string(),
 						));
@@ -2684,6 +2707,116 @@ mod tests {
 		assert!(verify_signature(&pk, b"test message", b"context", &signature));
 		assert!(matches!(leader.abort_stalled(), SignProtocolError::AlreadyComplete));
 		assert_eq!(leader.state, SignProtocolState::Done);
+	}
+
+	/// Security review: terminal transitions (`Done` and `Failed`) must
+	/// erase the session secrets at the transition, not later at drop — a
+	/// terminal protocol object retained for diagnostics or retry
+	/// coordination otherwise keeps the Round 1 seed (the key-leaking
+	/// secret), the signer's hyperball nonces (which, combined with the
+	/// broadcast responses, reveal the share), and the private key share
+	/// readable in process memory. The signature itself must survive the
+	/// wipe: it is stored outside the signer and stays retrievable.
+	#[test]
+	fn terminal_transitions_wipe_session_secrets() {
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[42u8; 32], config).unwrap();
+
+		// --- Failure path: a stalled session aborted by the caller. ---
+		let signer0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+		let mut stalled = DilithiumSignProtocol::new(
+			signer0,
+			b"test message".to_vec(),
+			b"context".to_vec(),
+			vec![0, 1],
+			0,
+			[0xAA; 32],
+			[0xCC; 32],
+		)
+		.unwrap();
+		// Round 1 ran: the signer now holds live nonce material.
+		assert!(matches!(stalled.poke().unwrap(), Action::SendMany(_)));
+		assert!(!stalled.signer.secrets_are_wiped(), "sanity: secrets are live mid-session");
+		assert_ne!(stalled.round1_seed, [0u8; 32], "sanity: seed is live mid-session");
+
+		stalled.abort_stalled();
+		assert_eq!(stalled.round1_seed, [0u8; 32], "round1 seed must be wiped at failure");
+		assert!(stalled.signer.secrets_are_wiped(), "signer secrets must be wiped at failure");
+
+		// --- Success path: drive a 2-party session to completion. ---
+		// Retry with fresh seeds on ML-DSA rejection-sampling failure (the
+		// same idiom as `test_local_signing_2_of_3`).
+		let run_attempt = |attempt: u8| -> Option<(DilithiumSignProtocol, DilithiumSignProtocol)> {
+			let signer0 = ThresholdSigner::new(shares[0].clone(), pk.clone(), config).unwrap();
+			let mut leader = DilithiumSignProtocol::new(
+				signer0,
+				b"test message".to_vec(),
+				b"context".to_vec(),
+				vec![0, 1],
+				0,
+				[attempt; 32],
+				[0xCC; 32],
+			)
+			.unwrap();
+			let signer1 = ThresholdSigner::new(shares[1].clone(), pk.clone(), config).unwrap();
+			let mut follower = DilithiumSignProtocol::new(
+				signer1,
+				b"test message".to_vec(),
+				b"context".to_vec(),
+				vec![0, 1],
+				0,
+				[attempt.wrapping_add(0x80); 32],
+				[0xCC; 32],
+			)
+			.unwrap();
+
+			for _ in 0..3 {
+				let leader_frame = match leader.poke().unwrap() {
+					Action::SendMany(d) => d,
+					other => panic!("leader: expected SendMany, got {other:?}"),
+				};
+				let follower_frame = match follower.poke().unwrap() {
+					Action::SendMany(d) => d,
+					other => panic!("follower: expected SendMany, got {other:?}"),
+				};
+				follower.message(0, leader_frame).unwrap();
+				leader.message(1, follower_frame).unwrap();
+			}
+
+			match leader.poke() {
+				Ok(Action::SendMany(round4)) => {
+					follower.message(0, round4).unwrap();
+					Some((leader, follower))
+				},
+				Ok(other) => panic!("leader: expected Round4Complete broadcast, got {other:?}"),
+				Err(_) => None, // rejection sampling failed; retry
+			}
+		};
+		let (mut leader, mut follower) = (0..100)
+			.find_map(run_attempt)
+			.expect("signature combination should succeed within 100 attempts");
+
+		// The leader reached Done when it combined; its secrets must be gone
+		// while the signature is still retrievable.
+		assert_eq!(leader.state, SignProtocolState::Done);
+		assert_eq!(leader.round1_seed, [0u8; 32], "round1 seed must be wiped at completion");
+		assert!(leader.signer.secrets_are_wiped(), "signer secrets must be wiped at completion");
+		let signature = match leader.poke().unwrap() {
+			Action::Return(sig) => sig,
+			other => panic!("leader: expected Return, got {other:?}"),
+		};
+		assert!(verify_signature(&pk, b"test message", b"context", &signature));
+
+		// The follower completes on the leader's decision and is wiped too.
+		match follower.poke().unwrap() {
+			Action::Return(sig) => {
+				assert!(verify_signature(&pk, b"test message", b"context", &sig))
+			},
+			other => panic!("follower: expected Return, got {other:?}"),
+		}
+		assert_eq!(follower.state, SignProtocolState::Done);
+		assert_eq!(follower.round1_seed, [0u8; 32]);
+		assert!(follower.signer.secrets_are_wiped());
 	}
 
 	#[test]

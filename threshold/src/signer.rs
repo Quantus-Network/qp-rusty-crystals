@@ -334,6 +334,29 @@ impl ThresholdSigner {
 		self.private_key.dkg_participants()
 	}
 
+	/// Erase the signer's secret material in place (security review): the
+	/// private key share and the per-session signing state (Round 1
+	/// hyperball nonces, pending responses). Called by the signing protocol
+	/// at terminal transitions so a Done/Failed instance retained for
+	/// diagnostics or retry coordination holds no key or nonce material
+	/// until it is dropped. The signer cannot be used for further rounds
+	/// afterwards; terminal sessions never do.
+	pub(crate) fn zeroize_secrets(&mut self) {
+		self.private_key.zeroize();
+		self.state.zeroize();
+	}
+
+	/// Crate-only test hook: whether [`Self::zeroize_secrets`] has erased
+	/// the share and the session nonces.
+	#[cfg(test)]
+	pub(crate) fn secrets_are_wiped(&self) -> bool {
+		// `PrivateKeyShare::zeroize` clears the subset-share map, and
+		// `SignerState::zeroize` drops the round data and responses.
+		self.private_key.shares().is_empty() &&
+			self.state.round1_data.is_none() &&
+			self.state.my_responses.is_none()
+	}
+
 	/// Round 1: Generate our commitment from a provided seed.
 	///
 	/// This is a no_std compatible version that takes a pre-generated random seed
