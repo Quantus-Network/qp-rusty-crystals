@@ -9,7 +9,7 @@ use alloc::{
 	format,
 };
 use core::fmt;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
@@ -198,6 +198,19 @@ impl BorshDeserialize for PrivateKeyShare {
 	/// panic. Every producer (dealer, DKG, resharing) satisfies these
 	/// invariants by construction, so rejecting violations here only rejects
 	/// malformed or tampered blobs.
+	///
+	/// # Zeroization on rejection
+	///
+	/// Secret fields are read before the validation checks, so every error
+	/// return below happens with secret material already in memory. A
+	/// malformed (possibly attacker-controlled) blob must not leave that
+	/// material behind: `key`/`rho`/`tr` are therefore held in `Zeroizing`
+	/// buffers filled in place via `read_exact` (never in plain locals,
+	/// whose default `Drop` does not wipe, nor via by-value reads whose
+	/// dead `Result` temporaries no drop reaches), and share data is read
+	/// directly into map entries whose `SecretShareData` values zeroize on
+	/// drop. Any exit — success or error — wipes everything except the
+	/// returned value. Pinned by `share_import_stack_zeroization.rs`.
 	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
 		let invalid = |msg: &str| borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, msg);
 
@@ -205,9 +218,12 @@ impl BorshDeserialize for PrivateKeyShare {
 		let total_parties = u32::deserialize_reader(reader)?;
 		let threshold = u32::deserialize_reader(reader)?;
 		let dkg_participants = ParticipantList::deserialize_reader(reader)?;
-		let key = <[u8; 32]>::deserialize_reader(reader)?;
-		let rho = <[u8; 32]>::deserialize_reader(reader)?;
-		let tr = <[u8; TR_SIZE]>::deserialize_reader(reader)?;
+		let mut key = Zeroizing::new([0u8; 32]);
+		reader.read_exact(&mut *key)?;
+		let mut rho = Zeroizing::new([0u8; 32]);
+		reader.read_exact(&mut *rho)?;
+		let mut tr = Zeroizing::new([0u8; TR_SIZE]);
+		reader.read_exact(&mut *tr)?;
 
 		// (threshold, total_parties) must be a combination the scheme
 		// actually supports; this also bounds total_parties by MAX_PARTIES,
@@ -241,8 +257,15 @@ impl BorshDeserialize for PrivateKeyShare {
 					"PrivateKeyShare share subset mask outside participant index domain",
 				));
 			}
-			let value = SecretShareData::deserialize_reader(reader)?;
-			shares.insert(key, value);
+			// Read directly into the map entry (heap storage wiped by
+			// SecretShareData's zeroize-on-drop when the map is dropped on
+			// any later error) instead of through a by-value local, which
+			// would leave an unwiped ~15 KiB coefficient copy in the dead
+			// stack frame after the move into the map.
+			shares
+				.entry(key)
+				.or_insert_with(SecretShareData::zeroed)
+				.read_in_place(reader)?;
 		}
 
 		// The share map keys must be exactly the holder-specific canonical
@@ -267,7 +290,16 @@ impl BorshDeserialize for PrivateKeyShare {
 			));
 		}
 
-		Ok(Self { party_id, total_parties, threshold, dkg_participants, key, rho, tr, shares })
+		Ok(Self {
+			party_id,
+			total_parties,
+			threshold,
+			dkg_participants,
+			key: *key,
+			rho: *rho,
+			tr: *tr,
+			shares,
+		})
 	}
 }
 
@@ -284,7 +316,26 @@ pub(crate) struct SecretShareData {
 }
 
 impl BorshDeserialize for SecretShareData {
-	/// Deserialize with coefficient-range validation.
+	/// Deserialize with coefficient-range validation (see [`Self::read_in_place`]).
+	///
+	/// Prefer `read_in_place` on preallocated storage where possible:
+	/// returning `Self` by value moves the ~15 KiB coefficient arrays
+	/// through a stack temporary that no drop wipes.
+	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+		let mut value = Self::zeroed();
+		value.read_in_place(reader)?;
+		Ok(value)
+	}
+}
+
+impl SecretShareData {
+	/// An all-zero value, used as preallocated storage for `read_in_place`.
+	pub(crate) fn zeroed() -> Self {
+		Self { s1: [[0i32; 256]; L], s2: [[0i32; 256]; K] }
+	}
+
+	/// Read share data from `reader` directly into `self`'s storage,
+	/// validating coefficient ranges.
 	///
 	/// Every producer of share data emits coefficients in (-Q, Q): the
 	/// dealer's shares are η-bounded, and DKG/resharing shares are reduced
@@ -293,18 +344,26 @@ impl BorshDeserialize for SecretShareData {
 	/// caller-enforced contract — so a malformed blob with out-of-range
 	/// coefficients must be rejected at import, not discovered as a panic
 	/// (overflow checks on) or silent wraparound (release) mid-signing.
-	fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-		let s1 = <[[i32; 256]; L]>::deserialize_reader(reader)?;
-		let s2 = <[[i32; 256]; K]>::deserialize_reader(reader)?;
-		let in_range =
-			|polys: &[[i32; 256]]| polys.iter().all(|poly| poly.iter().all(|&c| c > -Q && c < Q));
-		if !in_range(&s1) || !in_range(&s2) {
-			return Err(borsh::io::Error::new(
-				borsh::io::ErrorKind::InvalidData,
-				"SecretShareData coefficient outside (-Q, Q)",
-			));
+	///
+	/// Coefficients are read one at a time into the caller's storage rather
+	/// than through by-value array reads, so a rejected blob never strands
+	/// secret material in dead stack temporaries: on any error, everything
+	/// read so far sits in `self`, which is `ZeroizeOnDrop` and wiped by
+	/// the caller's drop. Pinned by `share_import_stack_zeroization.rs`.
+	fn read_in_place<R: borsh::io::Read>(&mut self, reader: &mut R) -> borsh::io::Result<()> {
+		for poly in self.s1.iter_mut().chain(self.s2.iter_mut()) {
+			for coeff in poly.iter_mut() {
+				let value = i32::deserialize_reader(reader)?;
+				if value <= -Q || value >= Q {
+					return Err(borsh::io::Error::new(
+						borsh::io::ErrorKind::InvalidData,
+						"SecretShareData coefficient outside (-Q, Q)",
+					));
+				}
+				*coeff = value;
+			}
 		}
-		Ok(Self { s1, s2 })
+		Ok(())
 	}
 }
 
