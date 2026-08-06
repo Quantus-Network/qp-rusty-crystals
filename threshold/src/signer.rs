@@ -242,6 +242,20 @@ impl ThresholdSigner {
 			));
 		}
 
+		// Validate the matrix seed rho the same way (security review):
+		// response generation expands matrix A from private_key.rho(), while
+		// combine_signature reconstructs A from the first 32 bytes of the
+		// public key encoding. The tr check alone does not cover this — a
+		// share whose rho was tampered with (its original tr retained) would
+		// pass construction and run signing rounds over a matrix inconsistent
+		// with combination, consuming local and peer computation before
+		// failing.
+		if &public_key.as_bytes()[..32] != private_key.rho() {
+			return Err(ThresholdError::InvalidConfiguration(
+				"Public key matrix seed (rho) does not match private key rho - possible key mismatch or corrupted share".to_string()
+			));
+		}
+
 		// Validate that the config is compatible with the private key for subset signing.
 		//
 		// For subset signing (t-of-n threshold), we allow:
@@ -1025,6 +1039,49 @@ mod tests {
 			Err(e) => panic!("Expected InvalidConfiguration error, got: {:?}", e),
 			Ok(_) => panic!("Should reject public key with TR not matching private key TR"),
 		}
+	}
+
+	/// Security review: response generation expands matrix A from
+	/// `private_key.rho()`, while `combine_signature` reconstructs A from
+	/// the first 32 bytes of `public_key.as_bytes()`. A share with a
+	/// tampered rho (its original tr retained) used to pass construction —
+	/// the boundary only compared tr — and the two protocol stages then
+	/// operated over inconsistent matrices, consuming local and peer
+	/// computation before combination failed.
+	#[test]
+	fn test_signer_rejects_share_with_mismatched_rho() {
+		use crate::{generate_with_dealer, keys::PrivateKeyShare};
+
+		let config = ThresholdConfig::new(2, 3).unwrap();
+		let (pk, shares) = generate_with_dealer(&[11u8; 32], config).unwrap();
+		let good = &shares[0];
+
+		// Tamper only rho; keep the genuine tr so the existing tr check
+		// passes.
+		let mut bad_rho = *good.rho();
+		bad_rho[0] ^= 1;
+		assert_eq!(&pk.as_bytes()[..32], good.rho(), "sanity: genuine share matches pk rho");
+		let tampered = PrivateKeyShare::new(
+			good.party_id(),
+			good.total_parties(),
+			good.threshold(),
+			[0u8; 32],
+			bad_rho,
+			*good.tr(),
+			good.shares().clone(),
+			good.dkg_participants().clone(),
+		);
+
+		match ThresholdSigner::new(tampered, pk.clone(), config) {
+			Err(ThresholdError::InvalidConfiguration(msg)) => {
+				assert!(msg.contains("rho"), "error should mention the rho mismatch: {msg}");
+			},
+			Err(e) => panic!("expected InvalidConfiguration, got: {e:?}"),
+			Ok(_) => panic!("signer must reject a share whose rho does not match the public key"),
+		}
+
+		// The untampered share still constructs.
+		assert!(ThresholdSigner::new(good.clone(), pk, config).is_ok());
 	}
 
 	/// Security review: `ThresholdSigner::new` is the construction boundary
