@@ -181,6 +181,7 @@ pub(crate) fn public_key_from_secret_var<
 	const K: usize,
 	const L: usize,
 	const ETA: usize,
+	const GAMMA2: usize,
 	const PK: usize,
 	const SK: usize,
 >(
@@ -224,7 +225,10 @@ pub(crate) fn public_key_from_secret_var<
 
 	let (t1, mut t0_derived) = derive_public_components(&rho, &s1, &s2);
 
-	let t1_nonzero = !t1.vec.iter().all(|p| p.coeffs().iter().all(|&c| c == 0));
+	// Reject a secret key whose derived t1 is degenerate (same predicate the verifier and
+	// PublicKey::from_bytes apply): such a public key would admit a keyless forgery. An honest
+	// secret key always derives a non-degenerate t1, so this never rejects a legitimate import.
+	let t1_binding = !polyvec::t1_is_degenerate::<K, GAMMA2>(&t1);
 
 	let mut pk = [0u8; PK];
 	packing::pack_pk(&mut pk, &rho, &t1);
@@ -246,7 +250,7 @@ pub(crate) fn public_key_from_secret_var<
 	t0_derived.zeroize();
 
 	// `s_in_range` was already enforced above (we returned early otherwise).
-	if t0_consistent && tr_consistent && t1_nonzero {
+	if t0_consistent && tr_consistent && t1_binding {
 		Some(pk)
 	} else {
 		None
@@ -704,12 +708,14 @@ pub(crate) fn verify_var<
 
 	packing::unpack_pk(&mut rho, &mut t1, pk);
 
-	// Reject the degenerate all-zero t1 public key. With t1 = 0 the term c*2^d*t1 in the
-	// verification relation vanishes for every challenge c, so w1 = UseHint(h, Az) no longer
-	// binds the challenge to the key. An attacker can then forge a signature (z = 0, empty
-	// hint, c = H(mu || w1Encode(0))) with no secret key. Honest key generation never yields
-	// t1 = 0, so rejecting it costs nothing and closes the malicious-key forgery.
-	if t1.vec.iter().all(|p| p.coeffs.iter().all(|&c| c == 0)) {
+	// Reject degenerate t1 public keys. The term c*2^d*t1 in the verification relation only
+	// binds the challenge to the key when HighBits(c*2^d*t1) is non-trivial; it vanishes for
+	// every c whenever the centered representatives of 2^d*t1 stay inside the low-bits window
+	// (|r_j| <= GAMMA2), which includes but is far larger than t1 = 0. Any such key admits a
+	// keyless forgery (z = 0, empty hint, c = H(mu || w1Encode(0))). Honest keygen never
+	// produces a degenerate t1, so rejecting the whole family closes the malicious-key forgery
+	// at no cost to legitimate keys. See polyvec::t1_is_degenerate for the exact predicate.
+	if polyvec::t1_is_degenerate::<K, GAMMA2>(&t1) {
 		return false;
 	}
 
@@ -1219,6 +1225,180 @@ mod tests {
 			"signature forged under an all-zero-t1 public key must be rejected"
 		);
 	}
+
+	// Malicious-key forgery, non-zero t1 variant (incomplete-guard regression). The all-zero
+	// t1 guard is not enough: the c*2^d*t1 term also vanishes whenever the centered
+	// representative r_j = (2^d * t1_j) mod± q stays within GAMMA2, HighBits is then 0 and the
+	// challenge drops out. For a single non-zero coefficient v this is |2^d * v mod± q| <=
+	// GAMMA2, which holds for small v (2^d*v <= GAMMA2) and, via 2^d*1023 ≡ -1, for v near
+	// 1023. Each such key admits the same keyless forgery (z = 0, empty hint,
+	// c = H(mu || w1Encode(0))) and must be rejected even though t1 != 0.
+	//
+	// This randomizes over the whole forgeable family: the degenerate value v is drawn from
+	// the exact low-bits window, and coefficients are scattered across random rows and random
+	// positions. At most one non-zero coefficient is placed per row so every generated key is
+	// a genuine forgery (each row's c*2^d*t1 output is a lone ±2^d*v term inside the window, so
+	// w1' = 0 holds for any challenge and the forged c is self-consistent).
+	//
+	// Written as a variant-agnostic core so each parameter set is exercised against its own
+	// low-bits window (which differs between ML-DSA-44 and ML-DSA-65/87).
+	#[allow(clippy::too_many_arguments)]
+	fn assert_degenerate_t1_forgeries_rejected<
+		const KV: usize,
+		const LV: usize,
+		const ETA: usize,
+		const TAU: usize,
+		const GAMMA1: usize,
+		const GAMMA2: usize,
+		const OMEGA: usize,
+		const CD: usize,
+		const PZ: usize,
+		const W1: usize,
+		const KW1: usize,
+		const PK: usize,
+		const SK: usize,
+		const SIG: usize,
+	>() {
+		use rand::{Rng, RngExt};
+
+		// The exact set of non-zero t1 values whose scaled centered representative lands inside
+		// the low-bits window (|2^d * v mod± q| <= GAMMA2), derived from the parameters so each
+		// variant is tested against its own window rather than a hard-coded list.
+		let mut forgeable: vec::Vec<i32> = vec::Vec::new();
+		for v in 1i32..1024 {
+			let scaled = (v as i64) << params::D;
+			let centered =
+				if scaled > params::Q as i64 / 2 { scaled - params::Q as i64 } else { scaled };
+			if centered.unsigned_abs() <= GAMMA2 as u64 {
+				forgeable.push(v);
+			}
+		}
+		assert!(!forgeable.is_empty(), "expected a non-empty forgeable window for these params");
+
+		let mut rng = rand::rng();
+		let m = b"forge me without a secret key";
+
+		for _ in 0..64 {
+			// Scatter degenerate coefficients across random rows (at least one), one per row so
+			// the single-term-per-output property that makes w1' = 0 is preserved.
+			let mut t1 = Polyvec::<KV>::default();
+			let mut placed = 0usize;
+			for row in 0..KV {
+				if rng.next_u32() & 1 == 0 {
+					let pos = (rng.next_u32() as usize) % (params::N as usize);
+					let v = forgeable[(rng.next_u32() as usize) % forgeable.len()];
+					t1.vec[row].coeffs[pos] = v;
+					placed += 1;
+				}
+			}
+			if placed == 0 {
+				let pos = (rng.next_u32() as usize) % (params::N as usize);
+				let v = forgeable[(rng.next_u32() as usize) % forgeable.len()];
+				t1.vec[(rng.next_u32() as usize) % KV].coeffs[pos] = v;
+			}
+
+			let mut pk = [0u8; PK];
+			let mut rho = [0u8; params::SEEDBYTES];
+			rng.fill(&mut rho);
+			packing::pack_pk::<KV, PK>(&mut pk, &rho, &t1);
+
+			// Recompute mu exactly as verify_var does: mu = CRH(H(pk) || m) (empty domain prefix).
+			let mut mu = [0u8; params::CRHBYTES];
+			fips202::shake256(&mut mu, &pk);
+			let mut state = fips202::KeccakState::default();
+			fips202::shake256_absorb(&mut state, &mu);
+			fips202::shake256_absorb(&mut state, m);
+			fips202::shake256_finalize(&mut state);
+			fips202::shake256_squeeze(&mut mu, &mut state);
+
+			// With z = 0, h = 0 and a degenerate t1 the verifier reconstructs w1 = 0.
+			let w1 = Polyvec::<KV>::default();
+			let mut buf = [0u8; KW1];
+			polyvec::pack_w1::<KV, GAMMA2, KW1>(&mut buf, &w1);
+
+			// Pick c = H(mu || w1Encode(0)) so the verifier's recomputation matches.
+			let mut c = [0u8; CD];
+			let mut cstate = fips202::KeccakState::default();
+			fips202::shake256_absorb(&mut cstate, &mu);
+			fips202::shake256_absorb(&mut cstate, &buf);
+			fips202::shake256_finalize(&mut cstate);
+			fips202::shake256_squeeze(&mut c, &mut cstate);
+
+			let z = Polyvec::<LV>::default();
+			let h = Polyvec::<KV>::default();
+			let mut sig = [0u8; SIG];
+			packing::pack_sig::<KV, LV, GAMMA1, OMEGA, CD, PZ, SIG>(&mut sig, Some(&c), &z, &h);
+
+			let verified = super::verify_var::<
+				KV,
+				LV,
+				ETA,
+				TAU,
+				GAMMA1,
+				GAMMA2,
+				OMEGA,
+				CD,
+				PZ,
+				W1,
+				KW1,
+				PK,
+				SK,
+				SIG,
+			>(&sig, &[], m, &pk);
+
+			assert!(
+				!verified,
+				"keyless forgery under degenerate non-zero t1 must be rejected (t1 = {:?})",
+				t1.vec
+					.iter()
+					.enumerate()
+					.flat_map(|(r, p)| p
+						.coeffs
+						.iter()
+						.enumerate()
+						.filter(|(_, &v)| v != 0)
+						.map(move |(i, &v)| (r, i, v)))
+					.collect::<vec::Vec<_>>()
+			);
+		}
+	}
+
+	macro_rules! degenerate_t1_forgery_test {
+		($name:ident, $variant:ident) => {
+			#[test]
+			fn $name() {
+				assert_degenerate_t1_forgeries_rejected::<
+					{ params::$variant::K },
+					{ params::$variant::L },
+					{ params::$variant::ETA },
+					{ params::$variant::TAU },
+					{ params::$variant::GAMMA1 },
+					{ params::$variant::GAMMA2 },
+					{ params::$variant::OMEGA },
+					{ params::$variant::C_DASH_BYTES },
+					{ params::$variant::POLYZ_PACKEDBYTES },
+					{ params::$variant::POLYW1_PACKEDBYTES },
+					{ params::$variant::K * params::$variant::POLYW1_PACKEDBYTES },
+					{ params::$variant::PUBLICKEYBYTES },
+					{ params::$variant::SECRETKEYBYTES },
+					{ params::$variant::SIGNBYTES },
+				>();
+			}
+		};
+	}
+
+	degenerate_t1_forgery_test!(
+		test_forged_signature_with_nonzero_degenerate_t1_is_rejected_ml_dsa_44,
+		ml_dsa_44
+	);
+	degenerate_t1_forgery_test!(
+		test_forged_signature_with_nonzero_degenerate_t1_is_rejected_ml_dsa_65,
+		ml_dsa_65
+	);
+	degenerate_t1_forgery_test!(
+		test_forged_signature_with_nonzero_degenerate_t1_is_rejected_ml_dsa_87,
+		ml_dsa_87
+	);
 
 	// Bug Class 2 (K zeroing/omission): K seeds the mask ρ', so mutating one byte of the
 	// stored K must change the produced signature while still yielding a valid signature.

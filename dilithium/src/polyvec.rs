@@ -246,6 +246,42 @@ pub fn is_norm_within_bound<const N: usize>(v: &Polyvec<N>, bound: i32) -> bool 
 	result
 }
 
+/// Reject public keys whose `t1` fails to bind the verification challenge.
+///
+/// The verification relation contains the term `c * 2^D * t1`. Its contribution
+/// is `HighBits(c * 2^D * t1)`, and `HighBits(x) = 0` for every coefficient whose
+/// centered representative `r_j = (2^D * t1_j) mod± q` satisfies `|r_j| <= GAMMA2`.
+/// If (nearly) every coefficient stays inside that window the challenge drops out
+/// of the relation and a signature can be forged with no secret key (`z = 0`,
+/// empty hint, `c = H(mu || w1Encode(0))`) — see the `verify_var` guard and the
+/// `test_forged_signature_with_nonzero_degenerate_t1_is_rejected` regression. The
+/// all-zero check that previously guarded this is a strict subset of this family
+/// (`2^D * v <= GAMMA2` for small `v`, plus the wrap-around near `v = 1023` where
+/// `2^D * 1023 ≡ -1`), so it let non-zero degenerate keys through.
+///
+/// Honest key generation draws `t1` uniformly on `[0, 1024)^{K*N}`, so each
+/// coefficient has `|r_j| > GAMMA2` with probability `15/16` (ML-DSA-87/65) or
+/// `~0.977` (ML-DSA-44). Requiring at least `K * N / 4` coefficients above the
+/// window rejects the whole degenerate family while its false-positive rate on
+/// honest keys is `2^{-Ω(K*N)}` (mean count of large coefficients is `>= 1000`
+/// for every parameter set, versus a threshold of `K * N / 4`).
+pub fn t1_is_degenerate<const K: usize, const GAMMA2: usize>(t1: &Polyvec<K>) -> bool {
+	const HALF_Q: i64 = (params::Q as i64) / 2;
+	let mut large = 0usize;
+	for p in t1.vec.iter() {
+		for &coeff in p.coeffs.iter() {
+			// `t1` coefficients are 10-bit unsigned ([0, 1024)); scaling by `2^D`
+			// stays below `q`, so the only reduction needed is centering.
+			let scaled = (coeff as i64) << (params::D as u32);
+			let centered = if scaled > HALF_Q { scaled - params::Q as i64 } else { scaled };
+			if centered.unsigned_abs() > GAMMA2 as u64 {
+				large += 1;
+			}
+		}
+	}
+	large < (K * params::N as usize) / 4
+}
+
 /// For all coefficients a of polynomials in vector of length N, compute a0, a1 such that a mod Q =
 /// a1*2^D + a0 with -2^{D-1} < a0 <= 2^{D-1}. Assumes coefficients to be standard representatives.
 pub fn power2round<const N: usize>(v1: &mut Polyvec<N>, v0: &mut Polyvec<N>) {
