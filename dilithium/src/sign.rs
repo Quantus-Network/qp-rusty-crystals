@@ -1330,7 +1330,20 @@ mod tests {
 			packing::pack_sig::<KV, LV, GAMMA1, OMEGA, CD, PZ, SIG>(&mut sig, Some(&c), &z, &h);
 
 			let verified = super::verify_var::<
-				KV, LV, ETA, TAU, GAMMA1, GAMMA2, OMEGA, CD, PZ, W1, KW1, PK, SK, SIG,
+				KV,
+				LV,
+				ETA,
+				TAU,
+				GAMMA1,
+				GAMMA2,
+				OMEGA,
+				CD,
+				PZ,
+				W1,
+				KW1,
+				PK,
+				SK,
+				SIG,
 			>(&sig, &[], m, &pk);
 
 			assert!(
@@ -1339,9 +1352,12 @@ mod tests {
 				t1.vec
 					.iter()
 					.enumerate()
-					.flat_map(|(r, p)| p.coeffs.iter().enumerate().filter(|(_, &v)| v != 0).map(
-						move |(i, &v)| (r, i, v)
-					))
+					.flat_map(|(r, p)| p
+						.coeffs
+						.iter()
+						.enumerate()
+						.filter(|(_, &v)| v != 0)
+						.map(move |(i, &v)| (r, i, v)))
 					.collect::<vec::Vec<_>>()
 			);
 		}
