@@ -42,7 +42,7 @@ macro_rules! define_ml_dsa {
 		use $crate::{
 			errors::{KeyParsingError, KeyParsingError::BadSecretKey, SignatureError},
 			params::SEEDBYTES,
-			polyvec::Polyvec,
+			polyvec::{t1_is_degenerate, Polyvec},
 			SensitiveBytes32,
 		};
 
@@ -167,6 +167,7 @@ macro_rules! define_ml_dsa {
 					K,
 					L,
 					ETA,
+					GAMMA2,
 					PUBLICKEYBYTES,
 					SECRETKEYBYTES,
 				>(secret_bytes)
@@ -361,6 +362,7 @@ macro_rules! define_ml_dsa {
 					K,
 					L,
 					ETA,
+					GAMMA2,
 					PUBLICKEYBYTES,
 					SECRETKEYBYTES,
 				>(&sk);
@@ -422,11 +424,13 @@ macro_rules! define_ml_dsa {
 				let bytes: [u8; PUBLICKEYBYTES] =
 					bytes.try_into().map_err(|_| KeyParsingError::BadPublicKey)?;
 
-				// Reject the degenerate all-zero t1 public key.
+				// Reject degenerate t1 public keys (see polyvec::t1_is_degenerate): the
+				// all-zero key is only one member of a larger family whose c*2^d*t1 term
+				// vanishes, all of which admit a keyless forgery.
 				let mut rho = [0u8; SEEDBYTES];
 				let mut t1 = Polyvec::<K>::default();
 				$crate::packing::unpack_pk(&mut rho, &mut t1, &bytes);
-				if t1.vec.iter().all(|p| p.coeffs.iter().all(|&c| c == 0)) {
+				if t1_is_degenerate::<K, GAMMA2>(&t1) {
 					return Err(KeyParsingError::BadPublicKey);
 				}
 
