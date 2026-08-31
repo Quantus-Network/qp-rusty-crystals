@@ -1124,7 +1124,8 @@ fn test_resharing_round1_message_from_non_member_ignored() {
 	// Try to deliver a truly malformed message from a valid participant
 	// (single byte can't be valid borsh for our types)
 	// This should return an error since it can't be deserialized
-	let malformed_message = vec![0xFF]; // Single byte - definitely can't deserialize to ResharingMessage
+	// Single byte - definitely can't deserialize to ResharingMessage
+	let malformed_message = vec![0xFF];
 	let result = protocol.message(1, malformed_message); // From party 1 (valid participant)
 
 	// Should return MalformedMessage error
