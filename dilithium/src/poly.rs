@@ -1618,6 +1618,7 @@ mod tests {
 		let mut output = [0i32; 10];
 		// Create buffer with many valid nibbles
 		let buffer = [0x01u8, 0x23u8, 0x45u8]; // nibbles: 1,0,3,2,5,4
+
 		// Only space for 3 coefficients
 		let result = rej_eta::<{ params::ETA }>(&mut output[..3], &buffer);
 

@@ -1,0 +1,26 @@
+name: Format checks
+description: taplo and rustfmt checks. rustfmt runs on a pinned nightly so formatting rules only change when the pin is bumped.
+inputs:
+  rustfmt-toolchain:
+    description: Nightly toolchain used for rustfmt
+    default: nightly-2026-08-31
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchains (rust-toolchain file + pinned nightly rustfmt)
+      shell: bash
+      env:
+        RUSTFMT_TOOLCHAIN: ${{ inputs.rustfmt-toolchain }}
+      run: |
+        rustup toolchain install
+        rustup toolchain install "$RUSTFMT_TOOLCHAIN" --profile minimal --component rustfmt
+    - name: Install taplo
+      shell: bash
+      run: cargo install taplo-cli --locked
+    - name: Run format checks
+      shell: bash
+      env:
+        RUSTFMT_TOOLCHAIN: ${{ inputs.rustfmt-toolchain }}
+      run: |
+        taplo format --check --config taplo.toml
+        cargo "+$RUSTFMT_TOOLCHAIN" fmt --all -- --check

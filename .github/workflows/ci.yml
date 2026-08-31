@@ -34,16 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Install Rust toolchain (from rust-toolchain file)
-        run: |
-          rustup toolchain install
-          rustup component add rustfmt --toolchain nightly
-      - name: Install taplo
-        run: cargo install taplo-cli --locked
-      - name: Run format checks
-        run: |
-          taplo format --check --config taplo.toml
-          cargo +nightly fmt --all -- --check
+      - uses: ./.github/actions/format-check
 
   test-workspace:
     name: 🧪 Test Workspace
