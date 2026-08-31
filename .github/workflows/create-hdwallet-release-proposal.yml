@@ -36,7 +36,7 @@ on:
         default: false
 
 # Default to read-only; the version-bump job overrides with `contents: write`
-# (it pushes a release branch and uses ADMIN_PAT for `gh pr create`).
+# (it pushes a release branch and needs `pull-requests: write` for `gh pr create`).
 permissions:
   contents: read
 
@@ -143,6 +143,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -153,7 +154,7 @@ jobs:
         env:
           NEW_VERSION: ${{ needs.calculate-next-version.outputs.new_version }}
           LATEST_DILITHIUM_VERSION: ${{ needs.calculate-next-version.outputs.latest_dilithium_version }}
-          GITHUB_TOKEN: ${{ secrets.ADMIN_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
           SOURCE_BRANCH: ${{ needs.calculate-next-version.outputs.source_branch }}
           TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
           UPDATE_DILITHIUM: ${{ github.event.inputs.update_dilithium_dependency }}

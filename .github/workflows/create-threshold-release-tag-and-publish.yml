@@ -177,7 +177,7 @@ jobs:
 
       - name: Create GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.ADMIN_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
           NEW_VERSION: ${{ needs.create-tag.outputs.version }}
         run: |
           release_notes="Automated threshold release for version $NEW_VERSION."
