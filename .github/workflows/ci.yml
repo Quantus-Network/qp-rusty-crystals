@@ -219,6 +219,57 @@ jobs:
       - name: Check per-function stack frames against budget
         run: ./stack-check.sh 128
 
+  formal-spec:
+    name: 📐 Formal Spec (Lean)
+    needs: fast-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      # Builds the Lean 4 formal spec under `dilithium/formal/`: machine-checked
+      # proofs that the hand-transcribed models of `reduce.rs` / `rounding.rs` /
+      # `ntt.rs` refine FIPS 204 Algs 35–42. The package is mathlib-free.
+      # elan/lake are installed from `dilithium/formal/lean-toolchain` (Lean v4.30).
+      - name: Build formal spec (lake build)
+        # Pinned to a full commit SHA (supply-chain hardening). 38fbc41 == v1.5.0.
+        uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9 # v1.5.0
+        with:
+          lake-package-directory: "dilithium/formal"
+          use-mathlib-cache: "false"
+          leanchecker: "true"
+      - name: Assert the spec contains no sorry/admit
+        run: |
+          if grep -rEn '\b(sorry|admit|sorryAx)\b' --include='*.lean' dilithium/formal --exclude-dir=.lake; then
+            echo "::error::formal spec contains a sorry/admit placeholder"
+            exit 1
+          fi
+      - name: Assert capstone axiom footprints
+        run: |
+          set -euo pipefail
+          cd dilithium/formal
+          output=$(lake env lean ci/AxiomsCheck.lean 2>&1)
+          printf '%s\n' "$output"
+          expected=$(printf '%s\n' \
+            'propext' \
+            'Classical.choice' \
+            'Quot.sound' | sort)
+          for thm in mldsa_arith_tier1 mldsa_arith_tier1_safety; do
+            line=$(grep "'MlDsaArith.${thm}' depends on axioms" <<< "$output" || true)
+            if [ -z "$line" ]; then
+              echo "::error::could not read #print axioms for MlDsaArith.${thm}"
+              exit 1
+            fi
+            axioms=$(sed 's/.*\[\(.*\)\].*/\1/' <<< "$line" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | sort)
+            if [ "$axioms" != "$expected" ]; then
+              echo "::error::${thm} axiom footprint mismatch"
+              echo "expected exactly:"
+              printf '  %s\n' "$expected"
+              echo "got:"
+              printf '  %s\n' "$axioms"
+              exit 1
+            fi
+          done
+
   security-audit:
     name: 🔒 Security Audit
     needs: fast-checks

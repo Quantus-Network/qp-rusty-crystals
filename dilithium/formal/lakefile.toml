@@ -1,0 +1,10 @@
+# Lean 4 formal-spec package for qp-rusty-crystals-dilithium field
+# arithmetic (`src/reduce.rs`, `src/rounding.rs`, `src/ntt.rs`).
+#
+# Deliberately dependency-free (core Lean + `omega`/`decide` only), mirroring
+# qp-poseidon/formal: it stays hermetic — no mathlib cache to fetch in CI.
+defaultTargets = ["MlDsaArith"]
+name = "mldsaArith"
+
+[[lean_lib]]
+name = "MlDsaArith"
