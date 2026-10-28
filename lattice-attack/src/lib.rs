@@ -7,8 +7,14 @@
 //! - [`basis`] is the plain integer representation exchanged between the harness, reducers and the
 //!   verifier.
 
+//! - [`gso`] computes Gram–Schmidt profiles, both a fast `f64` version for progress traces and a
+//!   double-double version the verifier trusts.
+
 pub mod basis;
+pub mod dd;
+pub mod gso;
 pub mod instance;
 
 pub use basis::Basis;
+pub use gso::Profile;
 pub use instance::{Instance, InstanceError, Variant, Q};
