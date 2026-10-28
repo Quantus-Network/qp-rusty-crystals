@@ -118,9 +118,11 @@ Why this metric:
   `(d − i)` make that movement visible. The first vector contributes a weight
   of `d` out of a total of roughly `d²/2`, so one lucky short vector cannot
   dominate. A single-vector metric such as the Hermite factor would.
-- **It is monotone under reduction.** Every elementary reduction step strictly
-  decreases it. That is the classical argument that LLL terminates, and it
-  means more reduction never scores worse.
+- **It tracks reduction.** Every LLL swap strictly decreases it (that is the
+  classical argument that LLL terminates). A BKZ block insertion lowers the
+  front of its block but only leaves the rest of the block LLL-reduced, so a
+  single tour can give back a few bits; over a run the score climbs steadily,
+  which the tests check.
 - **It is model-free.** It is defined for any basis, including the very uneven
   starting one, without assuming the basis profile has a particular shape.
 - **It is computed by the verifier**, from the submitted basis, never
@@ -128,10 +130,11 @@ Why this metric:
 
 Orthogonality is not scored directly: the parts of a basis vector that point
 along earlier vectors ("size reduction") can be removed cheaply by anyone
-after the fact and do not change the Gram–Schmidt lengths. The verifier
-performs that pass itself before reporting secondary, human-facing metrics
-(length of the shortest vector relative to the Gaussian heuristic, slope of
-the log-profile).
+after the fact and do not change the Gram–Schmidt lengths. The secondary,
+human-facing metrics in the report (length of the first vector relative to
+the Gaussian heuristic, shortest row, slope of the log-profile) are therefore
+chosen so that they do not depend on it either, or are labelled as taken
+from the basis as submitted.
 
 ## Verification criteria
 
@@ -168,9 +171,9 @@ The harness owns the clock. A submission implements:
 
 ```rust
 pub trait Reducer: Send {
-	fn name(&self) -> &str;
+	fn name(&self) -> String;
 	/// Perform one unit of work on `basis`, in place. Should return promptly
-	/// once `ctx.deadline` has passed.
+	/// once `ctx.should_stop()` is true.
 	fn step(&mut self, basis: &mut Basis, ctx: &StepContext) -> Step; // Continue | Done
 }
 ```
@@ -180,7 +183,10 @@ and the harness:
 1. Builds the starting basis and records `P(B₀)`.
 2. Calls `step` repeatedly. After each call that returns **before the
    deadline**, it snapshots the basis. A call that returns after the deadline
-   does not count; the previous snapshot is used.
+   does not count; the previous snapshot is used. `ctx.should_stop()` turns
+   true a small margin before the deadline (`Budget::soft_margin`, default
+   50 ms plus 0.5 % of the budget) so that a reducer which stops when asked
+   returns inside the window.
 3. If a call has not returned by `deadline + grace`, a watchdog ends the run
    on the previous snapshot.
 4. A reducer may return `Done` to end the run early (e.g. it has converged).
@@ -188,9 +194,10 @@ and the harness:
    run by hand.
 5. The final snapshot goes through the verifier. The report records the
    instance id, the reducer name, the budget, a per-step trace of elapsed time
-   and (optionally) fast approximate score, how the run terminated, the
-   verified score, and the final basis so that anyone can re-run the verifier
-   on it offline.
+   and (optionally) fast approximate score, how the run terminated
+   (`Deadline`, `Overrun`, `Watchdog`, `Done`, `Cancelled`, `MaxSteps`,
+   `ReducerPanicked`), the verified score or the rejection reason, and the
+   final basis so that anyone can re-run the verifier on it offline.
 
 Contestants therefore cannot gain by ignoring the deadline, and the host does
 not need to inspect their code to measure time. Multithreading inside a step
@@ -199,11 +206,55 @@ is allowed; the budget is wall-clock.
 ## Reference reducer
 
 `ProgressiveBkz` is included as a worked example of the trait: LLL to start,
-then BKZ tours with Schnorr–Euchner enumeration as the SVP oracle, increasing
-the block size each time a tour stops making progress. It checks the deadline
-inside enumeration so it stops within milliseconds of the budget. It is a
-baseline, not a target: a serious entry would use sieving, pruned enumeration,
-or something new.
+then BKZ tours with Schnorr–Euchner enumeration as the SVP oracle, inserting
+the vector found by LLL-reducing the block with it as an extra row, and
+increasing the block size every couple of tours or as soon as a tour stalls.
+One step is one tour.
+It checks the deadline between blocks and every 2¹⁶ enumeration nodes, so it
+stops within milliseconds of the budget. It is a baseline, not a target: a
+serious entry would use sieving, pruned enumeration, or something new. `Lll`
+on its own is also provided as the simplest possible `Reducer`.
+
+## Usage
+
+```rust
+use std::time::Duration;
+use qp_rusty_crystals_lattice_attack::{
+	harness::{run, Budget, StderrObserver},
+	reducers::ProgressiveBkz,
+	verify::verify,
+	Instance, Variant,
+};
+
+let instance = Instance::generate(Variant::MlDsa44, [7u8; 32], 60, 60)?;
+let report = run(
+	&instance,
+	ProgressiveBkz::new(10, 60),
+	&Budget::new(Duration::from_secs(30)),
+	&mut StderrObserver,
+);
+println!("{:?}", report.score_bits());
+
+// Anyone holding the instance parameters and the basis can re-check it:
+let again = verify(&instance, report.basis.as_ref().unwrap())?;
+assert_eq!(again.score_bits, report.score_bits().unwrap());
+```
+
+The same flow from the command line, including offline re-verification of a
+saved report:
+
+```sh
+cargo run --release -p qp-rusty-crystals-lattice-attack --example bkz_demo -- \
+    --variant 44 --seed 07 --n 60 --m 60 --secs 30 --report report.json --events events.jsonl
+cargo run --release -p qp-rusty-crystals-lattice-attack --example bkz_demo -- --verify report.json
+```
+
+Costs to plan around: verification is `O(d³)` in double-double arithmetic,
+which is instant below `d ≈ 300` and tens of seconds at the full ML-DSA-44
+dimension (`d = 2049`); the per-step `f64` trace is also `O(d³)` and should
+be disabled (`Budget::trace = false`) for large instances. The reference
+reducers recompute Gram–Schmidt rows on change and are not tuned; they are
+fine up to a few hundred dimensions.
 
 ## What this crate does not do
 
@@ -225,9 +276,11 @@ or something new.
 | `gso`             | Gram–Schmidt: fast `f64` (for reducers and traces) and double-double from the exact Gram matrix (for the verifier) |
 | `verify`          | membership, volume, score, secondary metrics                  |
 | `harness`         | `Reducer`, `StepContext`, `Budget`, `Observer`, `Report`, `run` |
-| `reducers::lll`   | floating-point LLL                                            |
-| `reducers::bkz`   | enumeration and `ProgressiveBkz`                              |
-| `examples/bkz_demo` | runs the reference reducer on a seeded instance and writes a report |
+| `reducers::workspace` | integer rows plus incrementally maintained `f64` Gram–Schmidt data |
+| `reducers::lll`   | floating-point LLL and the `Lll` reducer                      |
+| `reducers::bkz`   | enumeration, unimodular insertion, tours, `ProgressiveBkz`    |
+| `examples/bkz_demo` | runs the reference reducer on a seeded instance, writes a report, re-verifies one |
+| `tests/full_size` | opt-in (`--ignored`) checks at the full ML-DSA-44 dimension   |
 
 ## Tests as proof of the criteria
 
@@ -245,5 +298,8 @@ or something new.
   larger budget never scores lower.
 - A reducer that overruns the deadline is scored on its last in-time
   snapshot; a reducer that never returns is terminated by the watchdog; a
-  reducer returning `Done` ends the run early.
-- An ignored (opt-in) test exercises the full ML-DSA-44 dimension end to end.
+  reducer returning `Done` ends the run early; a reducer that panics or
+  returns a non-lattice basis forfeits (scored on the last good snapshot, or
+  rejected).
+- An ignored (opt-in) test exercises the full ML-DSA-44 dimension end to end:
+  `cargo test --release -p qp-rusty-crystals-lattice-attack --test full_size -- --ignored`.
