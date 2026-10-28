@@ -855,6 +855,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "qp-rusty-crystals-lattice-attack"
+version = "0.1.0"
+dependencies = [
+ "qp-rusty-crystals-dilithium",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "qp-rusty-crystals-test-utils"
 version = "0.1.0"
 dependencies = [
