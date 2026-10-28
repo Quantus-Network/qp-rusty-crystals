@@ -124,6 +124,34 @@ impl Workspace {
 		self.invalidate_from(to);
 	}
 
+	/// Insert an extra row at position `k`. The rows then form a generating
+	/// set rather than a basis until one row is removed again.
+	pub fn insert_row(&mut self, k: usize, row: Vec<i64>) {
+		let width = row.len();
+		self.rows.insert(k, row);
+		let d = self.rows.len();
+		self.mu.push(vec![0.0; d]);
+		for m in &mut self.mu {
+			m.push(0.0);
+		}
+		self.r.push(0.0);
+		self.bstar.push(vec![0.0; width]);
+		self.invalidate_from(k);
+	}
+
+	/// Remove row `k`. Invalidates from `k`.
+	pub fn remove_row(&mut self, k: usize) {
+		self.rows.remove(k);
+		self.mu.pop();
+		self.r.pop();
+		self.bstar.pop();
+		self.invalidate_from(k);
+	}
+
+	pub fn row_is_zero(&self, k: usize) -> bool {
+		self.rows[k].iter().all(|&x| x == 0)
+	}
+
 	/// Recompute everything from scratch and check the LLL conditions with
 	/// parameters `(delta, eta)`, allowing a small floating-point slack.
 	pub fn is_lll_reduced(&mut self, delta: f64, eta: f64) -> bool {

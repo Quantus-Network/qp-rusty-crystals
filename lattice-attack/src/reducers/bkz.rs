@@ -90,10 +90,73 @@ pub fn enumerate(
 	}
 }
 
+/// Insert `v = Σ x_i b_{k+i}` at position `k` and LLL-reduce the now
+/// dependent block `k..k + n + 1` until one row becomes zero and is dropped.
+/// This disturbs the rest of the block far less than [`insert_euclid`], so
+/// later tours have less to redo. Returns `false` (with the rows restored to
+/// their state on entry) if no zero row appeared within an iteration cap,
+/// which floating-point Gram–Schmidt data can occasionally cause.
+pub fn insert_lll(
+	ws: &mut Workspace,
+	k: usize,
+	x: &[i64],
+	delta: f64,
+	eta: f64,
+	stop: &mut dyn FnMut() -> bool,
+) -> bool {
+	let n = x.len();
+	// Swaps may reach below `k`, so everything up to the block end is backed up.
+	let backup: Vec<Vec<i64>> = ws.rows[..k + n].to_vec();
+	let width = ws.rows[0].len();
+	let mut v = vec![0i64; width];
+	for (c, row) in x.iter().zip(&ws.rows[k..k + n]) {
+		for (vi, &ri) in v.iter_mut().zip(row) {
+			*vi = vi.checked_add(c.checked_mul(ri).expect("overflow")).expect("overflow");
+		}
+	}
+	ws.insert_row(k, v);
+
+	let end = k + n + 1;
+	let cap = 64 * (n + 1) * (n + 1);
+	let mut kk = k.max(1);
+	ws.ensure(kk);
+	let mut iters = 0usize;
+	let mut removed = false;
+	while kk < end {
+		iters += 1;
+		if iters > cap || (iters.is_multiple_of(64) && stop()) {
+			break;
+		}
+		ws.size_reduce_row(kk, eta);
+		if ws.row_is_zero(kk) {
+			ws.remove_row(kk);
+			removed = true;
+			break;
+		}
+		let m = ws.mu[kk][kk - 1];
+		if ws.r[kk] < (delta - m * m) * ws.r[kk - 1] {
+			ws.swap(kk);
+			kk = (kk - 1).max(1);
+		} else {
+			kk += 1;
+		}
+	}
+	if !removed {
+		ws.remove_row(k);
+		for (i, row) in backup.into_iter().enumerate() {
+			ws.rows[i] = row;
+		}
+		ws.invalidate_from(0);
+		return false;
+	}
+	true
+}
+
 /// Replace the block rows `k..k + x.len()` by a basis of the same block
 /// lattice whose first row is `Σ x_i b_{k+i}` (up to sign), using only
 /// elementary unimodular row operations (Euclid on the coefficients).
-pub fn insert(ws: &mut Workspace, k: usize, x: &[i64]) {
+/// Always succeeds; used as the fallback for [`insert_lll`].
+pub fn insert_euclid(ws: &mut Workspace, k: usize, x: &[i64]) {
 	let n = x.len();
 	let mut coef = x.to_vec();
 	loop {
@@ -150,7 +213,9 @@ pub fn bkz_tour(
 		}
 		let radius = block_radius_sq(ws, k, n, gh_factor);
 		if let Some((x, _)) = enumerate(ws, k, n, radius, stop) {
-			insert(ws, k, &x);
+			if !insert_lll(ws, k, &x, delta, eta, stop) {
+				insert_euclid(ws, k, &x);
+			}
 			insertions += 1;
 			if !lll(ws, k, k + n, delta, eta, stop) {
 				return None;
@@ -160,18 +225,41 @@ pub fn bkz_tour(
 	Some(insertions)
 }
 
-/// LLL first, then BKZ tours whose block size grows by `beta_step` each
-/// time a tour makes no insertion, up to `beta_max`. One step is one tour.
+/// Log-potential of the workspace rows in bits, from its `f64` data.
+fn potential_bits(ws: &mut Workspace) -> f64 {
+	let d = ws.dim();
+	ws.ensure(d);
+	ws.r.iter()
+		.enumerate()
+		.map(|(i, r)| (d - 1 - i) as f64 * 0.5 * r.ln())
+		.sum::<f64>() /
+		core::f64::consts::LN_2
+}
+
+/// LLL first, then BKZ tours with a growing block size. One step is one
+/// tour. The block size advances by `beta_step` after `tours_per_beta` tours,
+/// or earlier if a tour stalls (no insertion, or a potential gain below
+/// `stall_bits_per_dim · d` bits). At `beta_max`, tours continue until one
+/// stalls, then the reducer reports `Done`.
 #[derive(Clone, Debug)]
 pub struct ProgressiveBkz {
 	pub beta_start: usize,
 	pub beta_max: usize,
 	pub beta_step: usize,
+	/// Tours to run at each block size below `beta_max` before advancing.
+	/// Small block sizes stay productive for many tours, but under a time
+	/// budget it pays to move on quickly.
+	pub tours_per_beta: usize,
 	pub delta: f64,
 	pub eta: f64,
 	pub gh_factor: f64,
+	/// A tour that improves the potential by less than this many bits per
+	/// dimension counts as stalled. Without it, floating-point noise can
+	/// keep producing one or two insertions per tour indefinitely.
+	pub stall_bits_per_dim: f64,
 	lll_done: bool,
 	beta: Option<usize>,
+	tours_at_beta: usize,
 }
 
 impl ProgressiveBkz {
@@ -180,11 +268,14 @@ impl ProgressiveBkz {
 			beta_start: beta_start.max(2),
 			beta_max: beta_max.max(beta_start),
 			beta_step: 2,
+			tours_per_beta: 2,
 			delta: DEFAULT_DELTA,
 			eta: DEFAULT_ETA,
 			gh_factor: DEFAULT_GH_FACTOR,
+			stall_bits_per_dim: 0.05,
 			lll_done: false,
 			beta: None,
+			tours_at_beta: 0,
 		}
 	}
 
@@ -203,8 +294,13 @@ impl Default for ProgressiveBkz {
 impl Reducer for ProgressiveBkz {
 	fn name(&self) -> String {
 		format!(
-			"progressive-bkz(beta={}..{} step {}, delta={}, gh={})",
-			self.beta_start, self.beta_max, self.beta_step, self.delta, self.gh_factor
+			"progressive-bkz(beta={}..{} step {} x{} tours, delta={}, gh={})",
+			self.beta_start,
+			self.beta_max,
+			self.beta_step,
+			self.tours_per_beta,
+			self.delta,
+			self.gh_factor
 		)
 	}
 
@@ -219,13 +315,24 @@ impl Reducer for ProgressiveBkz {
 			let beta_cap = min(self.beta_max, d);
 			let beta = min(self.current_beta(), beta_cap);
 			self.beta = Some(beta);
+			let before = potential_bits(&mut ws);
 			match bkz_tour(&mut ws, beta, self.delta, self.eta, self.gh_factor, &mut stop) {
-				Some(0) if beta >= beta_cap => Step::Done,
-				Some(0) => {
-					self.beta = Some(min(beta + self.beta_step, beta_cap));
-					Step::Continue
+				Some(insertions) => {
+					self.tours_at_beta += 1;
+					let gained = before - potential_bits(&mut ws);
+					let stalled = insertions == 0 || gained < self.stall_bits_per_dim * d as f64;
+					if stalled && beta >= beta_cap {
+						Step::Done
+					} else {
+						if beta < beta_cap && (stalled || self.tours_at_beta >= self.tours_per_beta)
+						{
+							self.beta = Some(min(beta + self.beta_step, beta_cap));
+							self.tours_at_beta = 0;
+						}
+						Step::Continue
+					}
 				},
-				_ => Step::Continue,
+				None => Step::Continue,
 			}
 		};
 		basis.rows = ws.into_rows();
@@ -362,11 +469,34 @@ mod tests {
 				*vi += c * ri;
 			}
 		}
-		insert(&mut ws, k, &x);
+		insert_euclid(&mut ws, k, &x);
 		let neg: Vec<i64> = v.iter().map(|a| -a).collect();
 		assert!(ws.rows[k] == v || ws.rows[k] == neg);
 		basis.rows = ws.into_rows();
 		assert!(verify(&inst, &basis).is_ok());
+	}
+
+	#[test]
+	fn insert_lll_keeps_the_lattice_and_shortens_the_block_front() {
+		let inst = Instance::generate(Variant::MlDsa44, [12u8; 32], 16, 16).unwrap();
+		let d = inst.dim();
+		let mut ws = Workspace::new(inst.start_basis().rows);
+		assert!(lll(&mut ws, 0, d, DEFAULT_DELTA, DEFAULT_ETA, &mut || false));
+		let (k, n) = (3, 12);
+		let before = potential_bits(&mut ws);
+		let old_rk = ws.r[k];
+		let (x, norm_sq) =
+			enumerate(&ws, k, n, ws.r[k] * (1.0 - 1e-6), &mut || false).expect("improvement");
+		assert!(norm_sq < old_rk);
+		assert!(insert_lll(&mut ws, k, &x, DEFAULT_DELTA, DEFAULT_ETA, &mut || false));
+		assert_eq!(ws.dim(), d);
+		ws.invalidate_from(0);
+		// The inserted vector may travel below `k` if it is shorter there too;
+		// either way the block front is no longer than before and the
+		// potential dropped.
+		assert!(ws.r[k] <= old_rk * (1.0 + 1e-9), "{} vs {}", ws.r[k], old_rk);
+		assert!(potential_bits(&mut ws) < before);
+		assert!(verify(&inst, &Basis::new(ws.into_rows())).is_ok());
 	}
 
 	#[test]
@@ -429,7 +559,8 @@ mod tests {
 		let mut budget = Budget::new(Duration::from_millis(300));
 		budget.trace = false;
 		let report = run(&inst, ProgressiveBkz::new(10, 60), &budget, &mut NullObserver);
-		assert!(matches!(report.termination, Termination::Deadline | Termination::Overrun));
+		// Cooperative stopping lands inside the window, so no step is discarded.
+		assert_eq!(report.termination, Termination::Deadline, "{:?}", report.steps);
 		assert!(report.result.is_ok(), "{:?}", report.result);
 		assert!(report.elapsed_secs < 2.0);
 	}

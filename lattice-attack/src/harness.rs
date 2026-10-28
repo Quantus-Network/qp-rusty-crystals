@@ -38,13 +38,18 @@ pub enum Step {
 #[derive(Clone, Debug)]
 pub struct StepContext {
 	pub started: Instant,
+	/// Steps that return after this instant are discarded.
 	pub deadline: Instant,
+	/// [`Self::should_stop`] turns true this long before `deadline`, so a
+	/// reducer that stops when asked still returns inside the window.
+	pub soft_margin: Duration,
 	/// Zero-based index of this step.
 	pub step: u64,
 	cancel: Arc<AtomicBool>,
 }
 
 impl StepContext {
+	/// Time until the hard deadline.
 	pub fn remaining(&self) -> Duration {
 		self.deadline.saturating_duration_since(Instant::now())
 	}
@@ -53,10 +58,11 @@ impl StepContext {
 		self.started.elapsed()
 	}
 
-	/// True once the deadline has passed or the run was cancelled. Reducers
-	/// doing long inner loops should poll this and return promptly.
+	/// True once the run was cancelled or the soft deadline
+	/// (`deadline − soft_margin`) has passed. Reducers doing long inner loops
+	/// should poll this and return promptly.
 	pub fn should_stop(&self) -> bool {
-		self.cancelled() || Instant::now() >= self.deadline
+		self.cancelled() || Instant::now() + self.soft_margin >= self.deadline
 	}
 
 	pub fn cancelled(&self) -> bool {
@@ -85,6 +91,9 @@ pub struct Budget {
 	/// How long past the deadline to wait for an in-flight step before the
 	/// watchdog gives up on it.
 	pub grace: Duration,
+	/// How long before the deadline [`StepContext::should_stop`] starts
+	/// returning true. Defaults to 50 ms plus 0.5% of `wall`.
+	pub soft_margin: Duration,
 	pub max_steps: Option<u64>,
 	/// Compute an approximate `f64` score after each counted step (costs
 	/// `O(d³)` per step; fine for small instances, disable for large ones).
@@ -102,6 +111,7 @@ impl Budget {
 		Budget {
 			wall,
 			grace: Duration::from_secs(5),
+			soft_margin: Duration::from_millis(50) + wall / 200,
 			max_steps: None,
 			trace: true,
 			trace_min_interval: Duration::ZERO,
@@ -295,6 +305,7 @@ pub fn run<R: Reducer + 'static>(
 	let started = Instant::now();
 	let deadline = started + budget.wall;
 	let max_steps = budget.max_steps;
+	let soft_margin = budget.soft_margin;
 
 	let (tx, rx) = mpsc::channel::<Msg>();
 	let worker_cancel = cancel.clone();
@@ -302,7 +313,8 @@ pub fn run<R: Reducer + 'static>(
 		let mut basis = start_basis;
 		let mut step = 0u64;
 		loop {
-			let ctx = StepContext { started, deadline, step, cancel: worker_cancel.clone() };
+			let ctx =
+				StepContext { started, deadline, soft_margin, step, cancel: worker_cancel.clone() };
 			if ctx.should_stop() || max_steps.is_some_and(|m| step >= m) {
 				let _ = tx.send(Msg::Idle);
 				return;
@@ -407,6 +419,7 @@ mod tests {
 	fn budget(ms: u64) -> Budget {
 		let mut b = Budget::new(Duration::from_millis(ms));
 		b.grace = Duration::from_millis(200);
+		b.soft_margin = Duration::from_millis(15);
 		b
 	}
 
@@ -420,7 +433,7 @@ mod tests {
 		}
 		fn step(&mut self, basis: &mut Basis, ctx: &StepContext) -> Step {
 			basis.rows.swap(0, 1);
-			if ctx.remaining() > Duration::from_millis(20) {
+			if !ctx.should_stop() {
 				thread::sleep(Duration::from_millis(5));
 			}
 			Step::Continue
