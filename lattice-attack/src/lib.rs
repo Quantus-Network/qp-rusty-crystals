@@ -10,14 +10,18 @@
 //!   double-double version the verifier trusts.
 //! - [`verify`] decides whether a submitted basis generates the instance's lattice and scores it by
 //!   log-potential improvement.
+//! - [`harness`] defines the [`Reducer`] trait contestants implement, runs one under a wall-clock
+//!   budget, and produces a [`Report`].
 
 pub mod basis;
 pub mod dd;
 pub mod gso;
+pub mod harness;
 pub mod instance;
 pub mod verify;
 
 pub use basis::Basis;
 pub use gso::Profile;
+pub use harness::{run, Budget, Observer, Reducer, Report, Step, StepContext, Termination};
 pub use instance::{Instance, InstanceError, Variant, Q};
 pub use verify::{Rejection, Score};
