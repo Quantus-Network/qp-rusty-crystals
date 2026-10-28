@@ -12,12 +12,14 @@
 //!   log-potential improvement.
 //! - [`harness`] defines the [`Reducer`] trait contestants implement, runs one under a wall-clock
 //!   budget, and produces a [`Report`].
+//! - [`reducers`] holds the reference implementations (LLL, progressive BKZ).
 
 pub mod basis;
 pub mod dd;
 pub mod gso;
 pub mod harness;
 pub mod instance;
+pub mod reducers;
 pub mod verify;
 
 pub use basis::Basis;
