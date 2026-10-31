@@ -1,15 +1,33 @@
-//! Opt-in end-to-end checks at the full ML-DSA-44 dimension (d = 2049).
-//! Verification alone takes tens of seconds in release; run with
+//! Opt-in end-to-end checks at larger dimensions, up to the full ML-DSA-44
+//! lattice (d = 2049). They take a few minutes in release; run with
 //! `cargo test --release -p qp-rusty-crystals-lattice-attack --test full_size -- --ignored`.
 
 use std::time::Duration;
 
 use qp_rusty_crystals_lattice_attack::{
-	harness::{run, Budget, NullObserver},
-	reducers::ProgressiveBkz,
+	harness::{run, Budget, NullObserver, Termination},
+	reducers::{Lll, ProgressiveBkz},
 	verify::verify,
 	Instance, Variant,
 };
+
+/// LLL at d = 401 needs size-reduction coefficients far beyond `i64`; this
+/// checks the `BigInt` fallback end to end and that LLL terminates.
+#[test]
+#[ignore]
+fn lll_completes_and_verifies_at_d_401() {
+	let inst = Instance::generate(Variant::MlDsa44, [0x2Au8; 32], 200, 200).unwrap();
+	let mut budget = Budget::new(Duration::from_secs(900));
+	budget.trace = false;
+	let report = run(&inst, Lll::default(), &budget, &mut NullObserver);
+	assert_eq!(report.termination, Termination::Done, "{:?}", report.termination);
+	let score = report.result.unwrap();
+	eprintln!("d=401 LLL: {:.1} bits in {:.1}s", score.score_bits, report.elapsed_secs);
+	assert!(score.score_bits > 50_000.0, "{}", score.score_bits);
+	// LLL cannot beat the q-vectors at this dimension, so the first row stays
+	// at length q; that is expected, not a failure.
+	assert!(score.first_norm <= 8_380_417.0, "{}", score.first_norm);
+}
 
 #[test]
 #[ignore]

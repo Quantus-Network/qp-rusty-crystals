@@ -5,7 +5,7 @@
 //!
 //! 1. a square `d × d` matrix with entries below `2^MAX_ENTRY_BITS`;
 //! 2. every row satisfies the lattice congruence (exact integer check);
-//! 3. the double-double Gram–Schmidt factorisation succeeds;
+//! 3. the exact-Gram Gram–Schmidt factorisation succeeds;
 //! 4. the log-volume equals `m · ln q` within [`VOLUME_TOLERANCE`]. A proper sublattice has index
 //!    at least 2, i.e. log-volume off by at least `ln 2`, so together with (2) this proves the rows
 //!    generate the whole lattice.
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
 	basis::Basis,
-	gso::{profile_dd, profile_f64, Profile},
+	gso::{profile_exact, profile_f64, Profile},
 	instance::Instance,
 };
 
@@ -136,7 +136,7 @@ pub fn verify(instance: &Instance, basis: &Basis) -> Result<Score, Rejection> {
 		}
 	}
 	let profile =
-		profile_dd(basis).map_err(|e| Rejection::Unverifiable { reason: e.to_string() })?;
+		profile_exact(basis).map_err(|e| Rejection::Unverifiable { reason: e.to_string() })?;
 	let log_volume = profile.log_volume();
 	let expected = instance.log_volume();
 	if (log_volume - expected).abs() > VOLUME_TOLERANCE {
@@ -145,10 +145,20 @@ pub fn verify(instance: &Instance, basis: &Basis) -> Result<Score, Rejection> {
 	Ok(Score::from_profile(instance, basis, profile))
 }
 
+/// How far the `f64` profile's log-volume may stray from the instance's
+/// before the profile is deemed unreliable (at d = 2049 an unreliable one is
+/// off by thousands of nats).
+const FAST_VOLUME_TOLERANCE: f64 = 1.0;
+
 /// Approximate score in bits from the `f64` profile, without any lattice
-/// checks. For progress traces only.
+/// checks. For progress traces only. Returns `None` when `f64` could not
+/// resolve the profile, detected by its log-volume disagreeing with the
+/// instance's.
 pub fn score_fast(instance: &Instance, basis: &Basis) -> Option<f64> {
 	let p = profile_f64(basis)?;
+	if (p.log_volume() - instance.log_volume()).abs() > FAST_VOLUME_TOLERANCE {
+		return None;
+	}
 	Some((instance.start_potential() - p.potential()) / core::f64::consts::LN_2)
 }
 

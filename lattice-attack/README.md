@@ -157,11 +157,19 @@ verifier accepts iff all of the following hold:
    within `0.25` of `m · ln q`. Combined with (2), this proves `B` generates
    exactly the original lattice.
 4. **Numerically trustworthy.** The Gram–Schmidt lengths behind (3) and the
-   score are computed from the exact integer Gram matrix in double-double
-   arithmetic (about 32 significant digits). If a pivot comes out
-   non-positive or tiny relative to its row, the basis is rejected as
-   "unverifiable" rather than scored. Any honest reduced basis passes; this
-   only triggers on inputs engineered to defeat floating point.
+   score are computed from the exact integer Gram matrix in fixed-point
+   big-integer arithmetic. The Gram matrix of a reduced basis is extremely
+   ill-conditioned even when every Gram–Schmidt length is around 1 (the
+   coordinates of a row with respect to the rows before it grow
+   exponentially with the dimension), so ordinary floating point, and even
+   double-double, loses the small pivots once `d` passes a few hundred. The
+   verifier therefore uses `128 + d/4` fractional bits (640 at `d = 2049`,
+   several times what measured error growth requires), doubles that if a
+   pivot still comes out non-positive, and rejects the basis as
+   "unverifiable" rather than scoring it if that fails too. The volume check
+   in (3) doubles as a backstop: insufficient precision shows up there as a
+   volume mismatch of whole nats long before it could shift the score by a
+   bit.
 
 If accepted, the verifier returns the score plus the secondary metrics.
 
@@ -249,12 +257,33 @@ cargo run --release -p qp-rusty-crystals-lattice-attack --example bkz_demo -- \
 cargo run --release -p qp-rusty-crystals-lattice-attack --example bkz_demo -- --verify report.json
 ```
 
-Costs to plan around: verification is `O(d³)` in double-double arithmetic,
-which is instant below `d ≈ 300` and tens of seconds at the full ML-DSA-44
-dimension (`d = 2049`); the per-step `f64` trace is also `O(d³)` and should
-be disabled (`Budget::trace = false`) for large instances. The reference
-reducers recompute Gram–Schmidt rows on change and are not tuned; they are
-fine up to a few hundred dimensions.
+Costs to plan around: verification is `O(d³)` big-integer work, instant
+below `d ≈ 300`, about 5 s at `d = 801` and about a minute at the full
+ML-DSA-44 dimension (`d = 2049`). The per-step `f64` trace is `O(d³)` in
+plain floating point; it stops producing an approximate score (the field is
+`null`) once `f64` can no longer resolve the profile, detected by the `f64`
+log-volume disagreeing with the instance's, and can be disabled with
+`Budget::trace = false`.
+
+The reference reducers are a baseline, not a tuned implementation. Two
+numerical facts about ML-DSA bases shape them and matter for anyone writing
+a better one:
+
+- Rows are around `2^27` long while their Gram–Schmidt lengths are around 1.
+  Modified Gram–Schmidt in `f64` cannot resolve that (its error grows with
+  the condition number of the basis), so the workspace uses Householder QR,
+  whose error only grows with the row length.
+- Size-reducing a fresh row against a reduced prefix needs coefficients that
+  grow exponentially with the prefix length: hundreds of bits by `d ≈ 800`.
+  Rows at rest fit in `i64`, but the workspace moves a row to big integers
+  for the duration of its size reduction when an `i64` operation would
+  overflow. This is the same reason fplll keeps rows in GMP integers.
+
+With those, LLL completes at `d = 401` in about 90 s and at `d = 801` in a
+few minutes; at `d = 2049` LLL alone would take hours, so a timed run returns
+a partially reduced basis (a 25-minute run scores about 78 000 bits), and
+the `f64` Gram–Schmidt data loses accuracy in the tail of the basis, so
+reduction there is less efficient (the basis stays valid and verifiable).
 
 ## What this crate does not do
 
@@ -272,15 +301,14 @@ fine up to a few hundred dimensions.
 |-------------------|---------------------------------------------------------------|
 | `instance`        | `Variant`, `Instance`, Fiat–Shamir generation, real-key import, starting basis |
 | `basis`           | `Basis` (rows of `i64`) and serialization                     |
-| `dd`              | double-double arithmetic for the verifier                     |
-| `gso`             | Gram–Schmidt: fast `f64` (for reducers and traces) and double-double from the exact Gram matrix (for the verifier) |
+| `gso`             | Gram–Schmidt profiles: fast `f64` Householder (for traces) and fixed-point big-integer Cholesky of the exact Gram matrix (for the verifier) |
 | `verify`          | membership, volume, score, secondary metrics                  |
 | `harness`         | `Reducer`, `StepContext`, `Budget`, `Observer`, `Report`, `run` |
-| `reducers::workspace` | integer rows plus incrementally maintained `f64` Gram–Schmidt data |
+| `reducers::workspace` | integer rows plus incrementally maintained `f64` Householder Gram–Schmidt data, with big-integer size reduction |
 | `reducers::lll`   | floating-point LLL and the `Lll` reducer                      |
 | `reducers::bkz`   | enumeration, unimodular insertion, tours, `ProgressiveBkz`    |
 | `examples/bkz_demo` | runs the reference reducer on a seeded instance, writes a report, re-verifies one |
-| `tests/full_size` | opt-in (`--ignored`) checks at the full ML-DSA-44 dimension   |
+| `tests/full_size` | opt-in (`--ignored`) checks at `d = 401` and the full ML-DSA-44 dimension |
 
 ## Tests as proof of the criteria
 

@@ -7,7 +7,7 @@
 //! - [`basis`] is the plain integer representation exchanged between the harness, reducers and the
 //!   verifier.
 //! - [`gso`] computes Gram–Schmidt profiles, both a fast `f64` version for progress traces and a
-//!   double-double version the verifier trusts.
+//!   fixed-point `BigInt` version from the exact Gram matrix that the verifier trusts.
 //! - [`verify`] decides whether a submitted basis generates the instance's lattice and scores it by
 //!   log-potential improvement.
 //! - [`harness`] defines the [`Reducer`] trait contestants implement, runs one under a wall-clock
@@ -15,7 +15,6 @@
 //! - [`reducers`] holds the reference implementations (LLL, progressive BKZ).
 
 pub mod basis;
-pub mod dd;
 pub mod gso;
 pub mod harness;
 pub mod instance;
