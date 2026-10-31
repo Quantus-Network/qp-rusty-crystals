@@ -1,5 +1,12 @@
 [workspace]
-members = ["dilithium", "hdwallet", "lattice-attack", "test-utils", "tests", "threshold"]
+members = [
+	"dilithium",
+	"hdwallet",
+	"lattice-attack",
+	"test-utils",
+	"tests",
+	"threshold",
+]
 resolver = "2"
 
 [workspace.dependencies]
