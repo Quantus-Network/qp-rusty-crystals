@@ -22,8 +22,9 @@ The crate ships three things:
 
 ML-DSA is the NIST post-quantum signature standard. A public key is a matrix
 `A` and a vector `t` with `t = A·s1 + s2 (mod q)`, where `s1, s2` are the
-secret and have very small entries (between −2 and 2 for the parameter sets we
-use). The prime modulus is `q = 8 380 417`. Recovering `(s1, s2)` from
+secret and have very small entries (magnitude at most `η`, which is 2 for
+ML-DSA-44 and ML-DSA-87 and 4 for ML-DSA-65). The prime modulus is
+`q = 8 380 417`. Recovering `(s1, s2)` from
 `(A, t)` is the Module-LWE problem, and the best known attacks on it are
 lattice reduction algorithms.
 
@@ -63,7 +64,7 @@ An instance is identified by:
 | field     | meaning                                                                 |
 |-----------|-------------------------------------------------------------------------|
 | `variant` | `ML-DSA-44`, `ML-DSA-65`, or `ML-DSA-87`. Fixes `q`, the ring dimension (256) and the matrix shape `k × l`. |
-| `seed`    | 32 bytes, public. The host chooses it (e.g. a hash of the previous leaderboard entry). |
+| `seed`    | 32 bytes, public, chosen by the host (see below).                       |
 | `n`       | number of secret coordinates used (columns of `A`), `1 ≤ n ≤ 256·l`.    |
 | `m`       | number of equations used (rows of `A`), `1 ≤ m ≤ 256·k`.                |
 
@@ -72,6 +73,19 @@ the instance is exactly the full key-recovery lattice of that parameter set
 (`d = 2049` for ML-DSA-44). Smaller `n, m` give a ladder of easier instances
 with identical structure, which is what a leaderboard will mostly live on. The
 instance id is a hash of all four fields.
+
+### Choosing the seed
+
+The seed must be unpredictable to the contestant until their submission is
+frozen. If the instance is known in advance, a submission can carry a basis
+reduced offline for as long as it likes, recognise the starting basis in its
+first step, write the stored basis out and return `Done`; the verifier sees
+a legitimate basis and the clock sees a sub-millisecond run. Nothing in this
+crate can detect that, so the protocol has to prevent it: the host takes a
+commitment to the submission (e.g. the hash of its code or binary), and only
+then fixes the seed from a source neither party controls, such as a public
+randomness beacon or the hash of a block mined after the commitment. A seed
+derived from existing leaderboard state is not sufficient.
 
 ### Starting basis
 
@@ -149,29 +163,38 @@ verifier accepts iff all of the following hold:
    congruence `y ≡ x·Aᵀ + w·b (mod q)`, checked exactly with integers. No
    matrix inversion is needed because the lattice is defined by that
    congruence.
-3. **Same volume.** Rows in the lattice can still span a *sub*lattice (for
-   example if a row is doubled, or a row is replaced by a combination of the
-   others). A sublattice has volume `k · qᵐ` for an integer `k ≥ 2`, i.e. its
-   log-volume differs from the expected `m · ln q` by at least `ln 2`. The
-   verifier computes the log-volume as `Σ ln ‖b*_i‖` and requires it to be
-   within `0.25` of `m · ln q`. Combined with (2), this proves `B` generates
-   exactly the original lattice.
-4. **Numerically trustworthy.** The Gram–Schmidt lengths behind (3) and the
-   score are computed from the exact integer Gram matrix in fixed-point
-   big-integer arithmetic. The Gram matrix of a reduced basis is extremely
-   ill-conditioned even when every Gram–Schmidt length is around 1 (the
-   coordinates of a row with respect to the rows before it grow
-   exponentially with the dimension), so ordinary floating point, and even
-   double-double, loses the small pivots once `d` passes a few hundred. The
-   verifier therefore uses `128 + d/4` fractional bits (640 at `d = 2049`,
-   several times what measured error growth requires), doubles that if a
-   pivot still comes out non-positive, and rejects the basis as
-   "unverifiable" rather than scoring it if that fails too. The volume check
-   in (3) doubles as a backstop: insufficient precision shows up there as a
-   volume mismatch of whole nats long before it could shift the score by a
-   bit.
+3. **Generates the whole lattice.** Rows in the lattice can still span a
+   *sub*lattice (for example if a row is doubled, or a row is replaced by a
+   combination of the others). `B` generates the lattice iff
+   `det B = ±qᵐ`, and the verifier decides that exactly: it computes
+   `det B mod p` for three 62-bit primes derived by hashing the instance id
+   and the submitted rows, and requires each residue to equal `±qᵐ mod p`
+   with a consistent sign. A sublattice has `det B = k · qᵐ` with `k ≥ 2`,
+   so passing all three is impossible unless `k ≡ ±1` modulo every prime,
+   which a contestant cannot arrange because the primes depend on the rows.
+   This replaces an earlier floating-point volume comparison with a
+   tolerance, which was exploitable.
+4. **Certified score.** The Gram–Schmidt lengths behind the score are
+   computed from the exact integer Gram matrix by a fixed-point big-integer
+   Cholesky factorisation, with an a-posteriori error bound: from the
+   factor's diagonal, the size of its off-diagonal entries and the
+   truncation error per entry, the verifier bounds the error of the
+   log-potential and accepts only if that bound is below `10⁻⁶` nats. The
+   precision needed grows with how far from size-reduced the submission is,
+   so before factoring, the verifier size-reduces the rows itself with exact
+   integer row operations (which leave every Gram–Schmidt length unchanged).
+   For a size-reduced basis the bound needs about `1.2·d` fractional bits
+   (≈ 2 500 at `d = 2049`); if the bound does not hold at the precision used,
+   the precision is raised and the factorisation repeated. Any basis for
+   which this cannot be made to work is rejected as "unverifiable" rather
+   than scored. The log-volume from the certified profile must also agree
+   with `m · ln q` to within the certified error, as a consistency check on
+   the arithmetic.
 
-If accepted, the verifier returns the score plus the secondary metrics.
+The score therefore depends only on the lattice and the order of the rows,
+not on how the rows are written: adding multiples of earlier rows to later
+ones cannot change it, and cannot make a basis fail verification. If accepted,
+the verifier returns the score plus the secondary metrics.
 
 ## Time rules
 
@@ -189,14 +212,20 @@ pub trait Reducer: Send {
 and the harness:
 
 1. Builds the starting basis and records `P(B₀)`.
-2. Calls `step` repeatedly. After each call that returns **before the
-   deadline**, it snapshots the basis. A call that returns after the deadline
-   does not count; the previous snapshot is used. `ctx.should_stop()` turns
-   true a small margin before the deadline (`Budget::soft_margin`, default
-   50 ms plus 0.5 % of the budget) so that a reducer which stops when asked
-   returns inside the window.
+2. Calls `step` repeatedly on a worker thread. After each call that returns
+   **before the deadline**, measured by the time the call returned, the
+   worker stores a snapshot of the basis; the newest such snapshot is what
+   gets scored. A call that returns after the deadline does not count.
+   Whether a step counts never depends on how busy the harness thread is
+   (observers, tracing), so slow logging cannot cost a run any work.
+   `ctx.should_stop()` turns true a small margin before the deadline
+   (`Budget::soft_margin`, default 50 ms plus 0.5 % of the budget, at most a
+   quarter of it) so that a reducer which stops when asked returns inside
+   the window.
 3. If a call has not returned by `deadline + grace`, a watchdog ends the run
-   on the previous snapshot.
+   on the latest snapshot. The abandoned step sees `ctx.cancelled()` turn
+   true; the operator's cancel flag is never touched by the harness, so a
+   hung run cannot affect other runs sharing a `Budget`.
 4. A reducer may return `Done` to end the run early (e.g. it has converged).
    An external cancel flag is also honoured, for operators who want to stop a
    run by hand.
@@ -205,7 +234,10 @@ and the harness:
    and (optionally) fast approximate score, how the run terminated
    (`Deadline`, `Overrun`, `Watchdog`, `Done`, `Cancelled`, `MaxSteps`,
    `ReducerPanicked`), the verified score or the rejection reason, and the
-   final basis so that anyone can re-run the verifier on it offline.
+   final basis so that anyone can re-run the verifier on it offline. The
+   approximate score in the trace is best-effort: it is computed from the
+   newest snapshot only, so when steps are faster than the trace, some
+   steps are logged without one.
 
 Contestants therefore cannot gain by ignoring the deadline, and the host does
 not need to inspect their code to measure time. Multithreading inside a step
@@ -218,8 +250,13 @@ then BKZ tours with Schnorr–Euchner enumeration as the SVP oracle, inserting
 the vector found by LLL-reducing the block with it as an extra row, and
 increasing the block size every couple of tours or as soon as a tour stalls.
 One step is one tour.
-It checks the deadline between blocks and every 2¹⁶ enumeration nodes, so it
-stops within milliseconds of the budget. It is a baseline, not a target: a
+It checks the deadline between blocks and every 2¹⁶ enumeration nodes, and
+keeps its Gram–Schmidt data between steps, so at `d ≤ 400` it stops within
+milliseconds of the soft deadline. At full size a stop request still has to
+wait for the current row's size reduction and the Gram–Schmidt recomputation
+after a swap, which can take longer than the default soft margin; a step that
+starts shortly before the soft deadline may then be discarded, costing one
+tour. It is a baseline, not a target: a
 serious entry would use sieving, pruned enumeration, or something new. `Lll`
 on its own is also provided as the simplest possible `Reducer`.
 
@@ -234,7 +271,9 @@ use qp_rusty_crystals_lattice_attack::{
 	Instance, Variant,
 };
 
-let instance = Instance::generate(Variant::MlDsa44, [7u8; 32], 60, 60)?;
+let mut seed = [0u8; 32];
+seed[0] = 7;
+let instance = Instance::generate(Variant::MlDsa44, seed, 60, 60)?;
 let report = run(
 	&instance,
 	ProgressiveBkz::new(10, 60),
@@ -248,8 +287,9 @@ let again = verify(&instance, report.basis.as_ref().unwrap())?;
 assert_eq!(again.score_bits, report.score_bits().unwrap());
 ```
 
-The same flow from the command line, including offline re-verification of a
-saved report:
+The same flow from the command line (`--seed` takes up to 32 bytes of hex,
+zero-padded at the end, so `--seed 07` is the seed above), including offline
+re-verification of a saved report:
 
 ```sh
 cargo run --release -p qp-rusty-crystals-lattice-attack --example bkz_demo -- \
@@ -257,9 +297,13 @@ cargo run --release -p qp-rusty-crystals-lattice-attack --example bkz_demo -- \
 cargo run --release -p qp-rusty-crystals-lattice-attack --example bkz_demo -- --verify report.json
 ```
 
-Costs to plan around: verification is `O(d³)` big-integer work, instant
-below `d ≈ 300`, about 5 s at `d = 801` and about a minute at the full
-ML-DSA-44 dimension (`d = 2049`). The per-step `f64` trace is `O(d³)` in
+Costs to plan around: verification is `O(d³)` big-integer work at a
+precision proportional to `d`, parallelised across cores. On a 10-core
+laptop it takes about 1.5 s at `d = 401`, 5 s at `d = 801` and about a
+minute at the full ML-DSA-44 dimension (`d = 2049`), and holds the `d × d`
+big-integer factor in memory (a few hundred MB at full size). A submission
+that is far from size-reduced costs a few extra factorisations while the
+verifier reduces it. The per-step `f64` trace is `O(d³)` in
 plain floating point; it stops producing an approximate score (the field is
 `null`) once `f64` can no longer resolve the profile, detected by the `f64`
 log-volume disagreeing with the instance's, and can be disabled with
@@ -301,8 +345,9 @@ reduction there is less efficient (the basis stays valid and verifiable).
 |-------------------|---------------------------------------------------------------|
 | `instance`        | `Variant`, `Instance`, Fiat–Shamir generation, real-key import, starting basis |
 | `basis`           | `Basis` (rows of `i64`) and serialization                     |
-| `gso`             | Gram–Schmidt profiles: fast `f64` Householder (for traces) and fixed-point big-integer Cholesky of the exact Gram matrix (for the verifier) |
-| `verify`          | membership, volume, score, secondary metrics                  |
+| `gso`             | Gram–Schmidt profiles: fast `f64` Householder (for traces) and the certified fixed-point big-integer Cholesky of the exact Gram matrix with verifier-side size reduction |
+| `modp`            | Montgomery arithmetic and determinants modulo 62-bit primes, for the exact lattice-index check |
+| `verify`          | membership, exact index check, certified score, secondary metrics |
 | `harness`         | `Reducer`, `StepContext`, `Budget`, `Observer`, `Report`, `run` |
 | `reducers::workspace` | integer rows plus incrementally maintained `f64` Householder Gram–Schmidt data, with big-integer size reduction |
 | `reducers::lll`   | floating-point LLL and the `Lll` reducer                      |
@@ -317,17 +362,20 @@ reduction there is less efficient (the basis stays valid and verifiable).
   secret vector `(s1, t0 − s2, −1)`, confirming the embedding matches the
   real scheme (including the NTT-domain convention of `ExpandA`).
 - The verifier accepts the starting basis with score 0, accepts row
-  permutations and any LLL/BKZ output, and rejects: a scaled row, a row
-  replaced by a combination of others, a basis for a different seed, wrong
-  dimensions, and oversized entries.
+  permutations and any LLL/BKZ output, gives the same score for a reduced
+  basis and for the same basis rewritten with large multiples of earlier
+  rows added to later ones, and rejects: a scaled row, a row replaced by a
+  combination of others, an index-2 sublattice disguised by such rewrites,
+  a basis for a different seed, wrong dimensions, and oversized entries.
 - Enumeration matches brute force on small lattices; LLL output satisfies the
   LLL conditions.
 - On a fixed small instance the score is non-decreasing across BKZ steps and a
   larger budget never scores lower.
 - A reducer that overruns the deadline is scored on its last in-time
-  snapshot; a reducer that never returns is terminated by the watchdog; a
-  reducer returning `Done` ends the run early; a reducer that panics or
-  returns a non-lattice basis forfeits (scored on the last good snapshot, or
-  rejected).
+  snapshot; a reducer that never returns is terminated by the watchdog
+  without affecting other runs sharing its budget; a slow observer does not
+  cost the run any in-time steps; a reducer returning `Done` ends the run
+  early; a reducer that panics or returns a non-lattice basis forfeits
+  (scored on the last good snapshot, or rejected).
 - An ignored (opt-in) test exercises the full ML-DSA-44 dimension end to end:
   `cargo test --release -p qp-rusty-crystals-lattice-attack --test full_size -- --ignored`.
