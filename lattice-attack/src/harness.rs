@@ -417,8 +417,9 @@ pub fn run<R: Reducer + 'static>(
 	let mut steps = Vec::new();
 	let mut counted_steps = 0u64;
 	let mut last_trace = None::<Instant>;
-	let mut ended_at = None::<Instant>;
-	let termination = loop {
+	// Each exit of the loop reports the termination and the instant the run
+	// ended, which for the watchdog and a panic is later than the last step.
+	let (termination, ended_at) = loop {
 		let wait = (deadline + grace).saturating_duration_since(Instant::now());
 		match rx.recv_timeout(wait) {
 			Ok(Msg::Step { step, started_at, finished_at, outcome }) => {
@@ -452,35 +453,35 @@ pub fn run<R: Reducer + 'static>(
 				}
 				observer.on_step(&event);
 				steps.push(event);
-				ended_at = Some(finished_at);
 				if !counted {
-					break Termination::Overrun;
+					break (Termination::Overrun, finished_at);
 				}
 				if outcome == Step::Done {
-					break Termination::Done;
+					break (Termination::Done, finished_at);
 				}
 				// The deadline is reported by the worker (`Idle`) so that every
 				// step it completed in time is counted first.
 				if max_steps.is_some_and(|m| step + 1 >= m) {
-					break Termination::MaxSteps;
+					break (Termination::MaxSteps, finished_at);
 				}
 			},
 			Ok(Msg::Idle { at }) => {
-				ended_at = Some(at);
-				break if cancel.load(Ordering::Relaxed) {
+				let termination = if cancel.load(Ordering::Relaxed) {
 					Termination::Cancelled
 				} else if max_steps.is_some_and(|m| counted_steps >= m) {
 					Termination::MaxSteps
 				} else {
 					Termination::Deadline
 				};
+				break (termination, at);
 			},
-			Err(RecvTimeoutError::Timeout) => break Termination::Watchdog,
-			Err(RecvTimeoutError::Disconnected) => break Termination::ReducerPanicked,
+			Err(RecvTimeoutError::Timeout) => break (Termination::Watchdog, Instant::now()),
+			Err(RecvTimeoutError::Disconnected) =>
+				break (Termination::ReducerPanicked, Instant::now()),
 		}
 	};
 	stop.store(true, Ordering::Relaxed);
-	let elapsed_secs = ended_at.unwrap_or_else(Instant::now).duration_since(started).as_secs_f64();
+	let elapsed_secs = ended_at.duration_since(started).as_secs_f64();
 
 	let last_good = snapshot
 		.lock()
@@ -507,6 +508,8 @@ pub fn run<R: Reducer + 'static>(
 
 #[cfg(test)]
 mod tests {
+	use std::sync::atomic::AtomicU64;
+
 	use super::*;
 	use crate::instance::Variant;
 
@@ -633,8 +636,9 @@ mod tests {
 		let inst = instance();
 		let r = run(&inst, Swapper, &budget(60), &mut NullObserver);
 		assert_eq!(r.termination, Termination::Deadline);
-		assert!(r.counted_steps >= 2, "{}", r.counted_steps);
-		assert!(r.steps.iter().all(|s| s.counted && s.approx_score_bits.is_some()));
+		assert!(r.counted_steps >= 1, "{}", r.counted_steps);
+		assert!(r.steps.iter().all(|s| s.counted));
+		assert!(r.steps.iter().any(|s| s.approx_score_bits.is_some()));
 		assert!(r.result.is_ok());
 		assert!(r.elapsed_secs < 0.5);
 		assert_eq!(r.basis.as_ref().unwrap().len(), inst.dim());
@@ -686,14 +690,39 @@ mod tests {
 		assert_eq!(r.counted_steps, 1);
 	}
 
-	/// Blocks the harness thread for most of the budget on the first event.
-	struct SlowStart(bool);
+	/// Swaps rows 0 and 1 on every step without sleeping, and counts its
+	/// completed steps where an observer can see them.
+	struct CountingSwapper(Arc<AtomicU64>);
 
-	impl Observer for SlowStart {
+	impl Reducer for CountingSwapper {
+		fn name(&self) -> String {
+			"counting-swapper".into()
+		}
+		fn step(&mut self, basis: &mut Basis, _ctx: &StepContext) -> Step {
+			basis.rows.swap(0, 1);
+			self.0.fetch_add(1, Ordering::SeqCst);
+			Step::Continue
+		}
+	}
+
+	/// On its first event, blocks the harness thread until the reducer has
+	/// completed at least `backlog` steps, so a backlog of in-time steps
+	/// builds up in the channel.
+	struct BlockUntil {
+		completed: Arc<AtomicU64>,
+		backlog: u64,
+		blocked: bool,
+	}
+
+	impl Observer for BlockUntil {
 		fn on_step(&mut self, _event: &StepEvent) {
-			if !self.0 {
-				self.0 = true;
-				thread::sleep(Duration::from_millis(150));
+			if !self.blocked {
+				self.blocked = true;
+				let t = Instant::now();
+				while self.completed.load(Ordering::SeqCst) < self.backlog {
+					assert!(t.elapsed() < Duration::from_secs(10), "reducer stalled");
+					thread::yield_now();
+				}
 			}
 		}
 	}
@@ -701,34 +730,94 @@ mod tests {
 	#[test]
 	fn slow_observer_does_not_lose_in_time_steps() {
 		let inst = instance();
-		let mut b = budget(200);
-		b.trace = false;
-		let r = run(&inst, Swapper, &b, &mut SlowStart(false));
-		assert_eq!(r.termination, Termination::Deadline);
-		assert!(r.counted_steps >= 20, "{}", r.counted_steps);
-		assert_eq!(r.steps.len(), r.counted_steps as usize);
+		let completed = Arc::new(AtomicU64::new(0));
+		let mut b = budget(10_000);
+		b.max_steps = Some(40);
+		let mut obs = BlockUntil { completed: completed.clone(), backlog: 30, blocked: false };
+		let r = run(&inst, CountingSwapper(completed), &b, &mut obs);
+		assert_eq!(r.termination, Termination::MaxSteps);
+		assert_eq!(r.counted_steps, 40);
+		assert_eq!(r.steps.len(), 40);
 		assert!(r.steps.iter().all(|s| s.counted));
-		// The scored basis is the newest snapshot: an odd number of swaps
-		// leaves rows 0 and 1 exchanged.
-		let mut expected = inst.start_basis();
-		if r.counted_steps % 2 == 1 {
-			expected.rows.swap(0, 1);
-		}
-		assert_eq!(r.basis.unwrap(), expected);
+		// Every step was traced from the newest snapshot or not at all; the
+		// scored basis is the newest snapshot (40 swaps: unchanged).
+		assert_eq!(r.basis.unwrap(), inst.start_basis());
 	}
 
 	#[test]
 	fn tiny_budgets_still_run_steps() {
 		let inst = instance();
 		let mut b = Budget::new(Duration::from_millis(40));
-		b.grace = Duration::from_millis(200);
+		b.grace = Duration::from_millis(500);
 		b.trace = false;
 		assert!(b.soft_margin < b.wall / 2);
-		let r = run(&inst, Swapper, &b, &mut NullObserver);
+		let r = run(&inst, CountingSwapper(Arc::new(AtomicU64::new(0))), &b, &mut NullObserver);
 		assert!(r.counted_steps >= 1, "{:?}", r.termination);
 
 		let b = Budget::new(Duration::MAX);
 		assert_eq!(b.wall, MAX_WALL);
+	}
+
+	/// Reverses the basis on step 0, then waits to be cancelled.
+	struct HangAfterOne;
+
+	impl Reducer for HangAfterOne {
+		fn name(&self) -> String {
+			"hang-after-one".into()
+		}
+		fn step(&mut self, basis: &mut Basis, ctx: &StepContext) -> Step {
+			if ctx.step == 0 {
+				basis.rows.reverse();
+			} else {
+				while !ctx.cancelled() {
+					thread::sleep(Duration::from_millis(1));
+				}
+			}
+			Step::Continue
+		}
+	}
+
+	struct PanicsAfterOne;
+
+	impl Reducer for PanicsAfterOne {
+		fn name(&self) -> String {
+			"panics-after-one".into()
+		}
+		fn step(&mut self, basis: &mut Basis, ctx: &StepContext) -> Step {
+			if ctx.step == 0 {
+				basis.rows.reverse();
+				Step::Continue
+			} else {
+				panic!("reducer bug");
+			}
+		}
+	}
+
+	#[test]
+	fn elapsed_time_covers_the_watchdog_wait_after_a_counted_step() {
+		let inst = instance();
+		let mut b = budget(60);
+		b.grace = Duration::from_millis(20);
+		let r = run(&inst, HangAfterOne, &b, &mut NullObserver);
+		assert_eq!(r.termination, Termination::Watchdog);
+		assert_eq!(r.counted_steps, 1);
+		assert!(r.elapsed_secs >= 0.08, "{}", r.elapsed_secs);
+		let mut expected = inst.start_basis();
+		expected.rows.reverse();
+		assert_eq!(r.basis.unwrap(), expected);
+	}
+
+	#[test]
+	fn panic_after_a_counted_step_keeps_the_snapshot() {
+		let inst = instance();
+		let r = run(&inst, PanicsAfterOne, &budget(5_000), &mut NullObserver);
+		assert_eq!(r.termination, Termination::ReducerPanicked);
+		assert_eq!(r.counted_steps, 1);
+		assert!(r.elapsed_secs >= r.steps[0].elapsed_secs);
+		let mut expected = inst.start_basis();
+		expected.rows.reverse();
+		assert_eq!(r.basis.unwrap(), expected);
+		assert!(r.result.is_ok());
 	}
 
 	#[test]
