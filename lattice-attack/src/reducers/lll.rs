@@ -10,11 +10,21 @@ use crate::{
 pub const DEFAULT_DELTA: f64 = 0.99;
 pub const DEFAULT_ETA: f64 = 0.51;
 
+/// Bring user-supplied LLL parameters into the range where LLL terminates:
+/// `delta` in `[1/4, 1 − 1e-6]` and `eta ≥ 1/2`; non-finite values become
+/// the defaults.
+pub fn clamp_parameters(delta: f64, eta: f64) -> (f64, f64) {
+	let delta = if delta.is_finite() { delta.clamp(0.25, 1.0 - 1e-6) } else { DEFAULT_DELTA };
+	let eta = if eta.is_finite() { eta.max(0.5) } else { DEFAULT_ETA };
+	(delta, eta)
+}
+
 /// LLL-reduce rows `start..end`, assuming rows `0..start` are already valid in
 /// the workspace (they may still be swapped into if the Lovász condition at
 /// the boundary fails). `stop` is polled periodically; returns `false` if it
 /// fired before the reduction finished. The rows are a valid basis of the
-/// same lattice at every return.
+/// same lattice at every return. Parameters go through
+/// [`clamp_parameters`].
 pub fn lll(
 	ws: &mut Workspace,
 	start: usize,
@@ -23,6 +33,7 @@ pub fn lll(
 	eta: f64,
 	stop: &mut dyn FnMut() -> bool,
 ) -> bool {
+	let (delta, eta) = clamp_parameters(delta, eta);
 	let mut k = start.max(1);
 	ws.ensure(k);
 	let mut iter = 0u64;
@@ -119,6 +130,21 @@ mod tests {
 		assert_eq!(report.termination, Termination::Done);
 		assert_eq!(report.counted_steps, 1);
 		assert!(report.score_bits().unwrap() > 0.0);
+	}
+
+	#[test]
+	fn out_of_range_parameters_still_terminate() {
+		let inst = Instance::generate(Variant::MlDsa44, [5u8; 32], 6, 6).unwrap();
+		for (delta, eta) in [(0.99, 0.3), (1.5, 0.51), (f64::NAN, f64::INFINITY), (-1.0, 0.0)] {
+			let report = run(
+				&inst,
+				Lll { delta, eta },
+				&Budget::new(Duration::from_secs(30)),
+				&mut NullObserver,
+			);
+			assert_eq!(report.termination, Termination::Done, "{delta} {eta}");
+			assert!(report.result.is_ok());
+		}
 	}
 
 	#[test]
