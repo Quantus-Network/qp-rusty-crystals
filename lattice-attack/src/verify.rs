@@ -372,6 +372,24 @@ mod tests {
 	}
 
 	#[test]
+	fn rewrites_involving_the_first_row_are_accepted() {
+		let inst = Instance::generate(Variant::MlDsa44, [42u8; 32], 300, 300).unwrap();
+		let d = inst.dim();
+		let start = inst.start_basis();
+		let mut b = start.clone();
+		for j in 0..d {
+			b.rows[0][j] += start.rows[1][j];
+		}
+		let first = verify(&inst, &b).unwrap();
+		let row0 = b.rows[0].clone();
+		for (x, y) in b.rows[1].iter_mut().zip(&row0) {
+			*x += 65536 * y;
+		}
+		let second = verify(&inst, &b).unwrap();
+		assert!((first.score_bits - second.score_bits).abs() < 1e-6);
+	}
+
+	#[test]
 	fn rejects_foreign_lattice() {
 		let inst = instance();
 		let other = Instance::generate(Variant::MlDsa44, [43u8; 32], 14, 10).unwrap();

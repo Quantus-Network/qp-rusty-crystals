@@ -416,7 +416,7 @@ fn size_reduce(rows: &mut [Vec<i64>], fac: &mut Factor) -> bool {
 	let d = rows.len();
 	let gs_norm_sq: Vec<f64> =
 		(0..d).map(|i| (2.0 * ln_scaled(&fac.r[i][i], fac.bits)).exp()).collect();
-	let mut earlier_sum = 0.0;
+	let mut earlier_sum = gs_norm_sq[0];
 	let mut changed = false;
 	for k in 1..d {
 		let bound = (gs_norm_sq[k] + ACCEPT_MU * ACCEPT_MU * earlier_sum) * (1.0 + 1e-9);
@@ -632,6 +632,23 @@ mod tests {
 				assert!((x - y).abs() < 1e-9, "{x} vs {y}");
 			}
 			assert!((p.potential() - reference.potential()).abs() < 1e-6);
+		}
+	}
+
+	/// Row 1 reduced against row 0 keeps a residual projection onto it, so
+	/// the acceptance bound at `k = 1` must include `‖b*_0‖²`.
+	#[test]
+	fn residual_projection_onto_the_first_row_is_accepted() {
+		let inst = Instance::generate(Variant::MlDsa44, [42u8; 32], 600, 1).unwrap();
+		let start = inst.start_basis();
+		let reference = profile_exact(&start).unwrap();
+		let mut b = start.clone();
+		for j in 0..inst.dim() {
+			b.rows[1][j] += 65536 * start.rows[0][j];
+		}
+		let p = profile_exact(&b).unwrap();
+		for (x, y) in p.log_norms.iter().zip(&reference.log_norms) {
+			assert!((x - y).abs() < 1e-9, "{x} vs {y}");
 		}
 	}
 
