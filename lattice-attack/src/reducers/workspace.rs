@@ -20,10 +20,17 @@
 use std::cmp::min;
 
 use num_bigint::BigInt;
-use num_traits::{FromPrimitive, ToPrimitive};
+use num_traits::ToPrimitive;
 
-use crate::gso::F64_DEPENDENCE_RATIO;
+use crate::basis::{sub_multiple_big, sub_multiple_i64, MAX_COEFFICIENT};
 
+/// A Gram–Schmidt length below this fraction of the row's length is treated
+/// as zero: `f64` Householder QR leaves noise of about `2^-47` times the row
+/// length in the tail of a dependent row, while a genuine Gram–Schmidt length
+/// of a size-reduced ML-DSA row is at least about `2^-32` of its length.
+pub const F64_DEPENDENCE_RATIO: f64 = 1e-12;
+
+#[derive(Clone, Debug)]
 pub struct Workspace {
 	pub rows: Vec<Vec<i64>>,
 	/// `mu[i][j]` for `j < i`; entries `j >= i` are unused.
@@ -121,8 +128,8 @@ impl Workspace {
 	}
 
 	/// Size-reduce row `k` against rows `0..k` (`|mu[k][j]| <= eta`
-	/// afterwards, up to floating-point error). Returns whether the row
-	/// changed. Leaves rows `0..=k` valid.
+	/// afterwards, up to floating-point error; `eta` below `0.5` acts as
+	/// `0.5`). Returns whether the row changed. Leaves rows `0..=k` valid.
 	///
 	/// Each pass subtracts the rounded coefficients computed from the current
 	/// floating-point data and then recomputes row `k` exactly, so inaccurate
@@ -147,6 +154,9 @@ impl Workspace {
 				let m = self.mu[k][j];
 				if m.abs() > eta {
 					let c = m.round().clamp(-MAX_COEFFICIENT, MAX_COEFFICIENT);
+					if c == 0.0 {
+						continue;
+					}
 					match &mut big {
 						Some(b) => sub_multiple_big(b, &self.rows[j], c, 0),
 						None => {
@@ -228,6 +238,9 @@ impl Workspace {
 	pub fn remove_row(&mut self, k: usize) {
 		self.rows.remove(k);
 		self.mu.pop();
+		for m in &mut self.mu {
+			m.pop();
+		}
 		self.r.pop();
 		self.refl.pop();
 		self.tau.pop();
@@ -256,39 +269,6 @@ impl Workspace {
 			}
 		}
 		true
-	}
-}
-
-/// Largest size-reduction coefficient applied in one pass. Keeps `c * x`
-/// finite in `f64` for the Gram–Schmidt updates and leaves room for the
-/// exponent range when a row has grown large.
-const MAX_COEFFICIENT: f64 = 1e300;
-
-/// `row_k -= c * row_j` in `i64`, stopping at the first entry whose result
-/// does not fit. Entries before it are updated; returns their count as the
-/// error so the caller can finish in wider arithmetic.
-fn sub_multiple_i64(row_k: &mut [i64], row_j: &[i64], c: f64) -> Result<(), usize> {
-	if c.abs() >= 9.2e18 {
-		return Err(0);
-	}
-	let ci = c as i64;
-	for (i, (xk, xj)) in row_k.iter_mut().zip(row_j).enumerate() {
-		match ci.checked_mul(*xj).and_then(|p| xk.checked_sub(p)) {
-			Some(v) => *xk = v,
-			None => return Err(i),
-		}
-	}
-	Ok(())
-}
-
-/// `row_k[from..] -= c * row_j[from..]` exactly, `c` being an integer-valued
-/// `f64`.
-fn sub_multiple_big(row_k: &mut [BigInt], row_j: &[i64], c: f64, from: usize) {
-	let c = BigInt::from_f64(c).expect("finite integer coefficient");
-	for (xk, &xj) in row_k[from..].iter_mut().zip(&row_j[from..]) {
-		if xj != 0 {
-			*xk -= &c * xj;
-		}
 	}
 }
 
@@ -328,6 +308,15 @@ mod tests {
 	fn size_reduction_of_a_reduced_row_is_a_no_op() {
 		let mut ws = Workspace::new(vec![vec![5, 0], vec![2, 7]]);
 		assert!(!ws.size_reduce_row(1, DEFAULT_ETA));
+		assert_eq!(ws.rows[1], vec![2, 7]);
+	}
+
+	#[test]
+	fn eta_below_one_half_terminates() {
+		// mu = 0.4 lies between eta and 0.5, so the rounded coefficient is
+		// zero and nothing can change.
+		let mut ws = Workspace::new(vec![vec![5, 0], vec![2, 7]]);
+		assert!(!ws.size_reduce_row(1, 0.3));
 		assert_eq!(ws.rows[1], vec![2, 7]);
 	}
 

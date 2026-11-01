@@ -5,19 +5,23 @@
 //!
 //! 1. a square `d × d` matrix with entries below `2^MAX_ENTRY_BITS`;
 //! 2. every row satisfies the lattice congruence (exact integer check);
-//! 3. the exact-Gram Gram–Schmidt factorisation succeeds;
-//! 4. the log-volume equals `m · ln q` within [`VOLUME_TOLERANCE`]. A proper sublattice has index
-//!    at least 2, i.e. log-volume off by at least `ln 2`, so together with (2) this proves the rows
-//!    generate the whole lattice.
+//! 3. the rows generate the whole lattice, not a sublattice: `det B ≡ ±qᵐ` modulo [`INDEX_PRIMES`]
+//!    62-bit primes derived by hashing the instance and the basis (see [`crate::modp`]);
+//! 4. the certified Gram–Schmidt profile ([`profile_exact`]) can be computed; its log-volume is
+//!    then checked against `m · ln q` as a consistency check on the arithmetic.
 
 use core::fmt;
 
+use qp_rusty_crystals_dilithium::fips202::{
+	shake256_absorb, shake256_finalize, shake256_squeeze, Shake256State,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
 	basis::Basis,
-	gso::{profile_exact, profile_f64, Profile},
-	instance::Instance,
+	gso::{profile_exact, profile_f64, Profile, CERTIFIED_TOLERANCE},
+	instance::{Instance, Q},
+	modp::{determinant, next_prime, Mont},
 };
 
 /// Entries of magnitude `2^40` or more are rejected. The starting basis has
@@ -25,9 +29,15 @@ use crate::{
 /// arithmetic exact.
 pub const MAX_ENTRY_BITS: u32 = 40;
 
-/// Allowed deviation of the log-volume from `m · ln q`, in nats. A sublattice
-/// deviates by at least `ln 2 ≈ 0.69`.
-pub const VOLUME_TOLERANCE: f64 = 0.25;
+/// Number of hash-derived primes the determinant is checked against.
+pub const INDEX_PRIMES: usize = 3;
+
+const PRIME_DOMAIN: &[u8] = b"qp-lattice-attack/index-primes/v1";
+
+/// Allowed deviation of the certified log-volume from `m · ln q`, in nats.
+/// The certificate bounds the error by far less; a larger deviation would
+/// mean a bug, not a sublattice (those are caught exactly before).
+const VOLUME_CONSISTENCY: f64 = 1e-6 + CERTIFIED_TOLERANCE;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Rejection {
@@ -43,14 +53,12 @@ pub enum Rejection {
 	NotInLattice {
 		row: usize,
 	},
-	/// The Gram–Schmidt factorisation could not vouch for the basis.
+	/// Rows lie in the lattice but generate a proper sublattice (or are
+	/// linearly dependent).
+	Sublattice,
+	/// The certified Gram–Schmidt profile could not be computed.
 	Unverifiable {
 		reason: String,
-	},
-	/// Rows lie in the lattice but generate a proper sublattice.
-	WrongVolume {
-		log_volume: f64,
-		expected: f64,
 	},
 }
 
@@ -62,11 +70,9 @@ impl fmt::Display for Rejection {
 			Rejection::EntryTooLarge { row, col, value } =>
 				write!(f, "entry ({row}, {col}) = {value} exceeds 2^{MAX_ENTRY_BITS}"),
 			Rejection::NotInLattice { row } => write!(f, "row {row} is not a lattice vector"),
+			Rejection::Sublattice =>
+				write!(f, "rows lie in the lattice but do not generate it (determinant ≠ ±q^m)"),
 			Rejection::Unverifiable { reason } => write!(f, "unverifiable: {reason}"),
-			Rejection::WrongVolume { log_volume, expected } => write!(
-				f,
-				"rows generate a sublattice (log-volume {log_volume:.4}, expected {expected:.4})"
-			),
 		}
 	}
 }
@@ -135,14 +141,74 @@ pub fn verify(instance: &Instance, basis: &Basis) -> Result<Score, Rejection> {
 			return Err(Rejection::NotInLattice { row: i });
 		}
 	}
+	if !generates_lattice(instance, basis) {
+		return Err(Rejection::Sublattice);
+	}
 	let profile =
 		profile_exact(basis).map_err(|e| Rejection::Unverifiable { reason: e.to_string() })?;
 	let log_volume = profile.log_volume();
 	let expected = instance.log_volume();
-	if (log_volume - expected).abs() > VOLUME_TOLERANCE {
-		return Err(Rejection::WrongVolume { log_volume, expected });
+	if (log_volume - expected).abs() > VOLUME_CONSISTENCY {
+		return Err(Rejection::Unverifiable {
+			reason: format!("certified log-volume {log_volume} disagrees with {expected}"),
+		});
 	}
 	Ok(Score::from_profile(instance, basis, profile))
+}
+
+/// Whether rows already known to lie in the lattice generate all of it:
+/// `det B ≡ ±qᵐ` modulo each of [`INDEX_PRIMES`] primes derived from the
+/// instance and the basis, with the same sign for every prime.
+pub fn generates_lattice(instance: &Instance, basis: &Basis) -> bool {
+	let mut sign = None;
+	for p in index_primes(instance, basis) {
+		let mont = Mont::new(p);
+		let det = determinant(&basis.rows, &mont);
+		let qm = mont.pow(mont.from_i64(Q), instance.m() as u64);
+		let s = if det == qm {
+			true
+		} else if det == mont.neg(qm) {
+			false
+		} else {
+			return false;
+		};
+		if sign.is_some_and(|prev| prev != s) {
+			return false;
+		}
+		sign = Some(s);
+	}
+	true
+}
+
+/// Distinct primes in `[2^62, 2^63)`, other than `q`, from a SHAKE256 stream
+/// over the instance id and every basis entry.
+fn index_primes(instance: &Instance, basis: &Basis) -> [u64; INDEX_PRIMES] {
+	let mut state = Shake256State::default();
+	shake256_absorb(&mut state, PRIME_DOMAIN);
+	shake256_absorb(&mut state, instance.id());
+	shake256_absorb(&mut state, &(basis.len() as u64).to_le_bytes());
+	let mut buf = Vec::with_capacity(8 * basis.len());
+	for row in &basis.rows {
+		buf.clear();
+		buf.extend(row.iter().flat_map(|x| x.to_le_bytes()));
+		shake256_absorb(&mut state, &buf);
+	}
+	shake256_finalize(&mut state);
+
+	let mut primes = [0u64; INDEX_PRIMES];
+	let mut word = [0u8; 8];
+	for i in 0..INDEX_PRIMES {
+		loop {
+			shake256_squeeze(&mut word, &mut state);
+			let candidate = (u64::from_le_bytes(word) >> 1) | (1 << 62) | 1;
+			let p = next_prime(candidate);
+			if p < (1 << 63) && p != Q as u64 && !primes[..i].contains(&p) {
+				primes[i] = p;
+				break;
+			}
+		}
+	}
+	primes
 }
 
 /// How far the `f64` profile's log-volume may stray from the instance's
@@ -165,7 +231,13 @@ pub fn score_fast(instance: &Instance, basis: &Basis) -> Option<f64> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::instance::{Variant, Q};
+	use crate::{
+		instance::Variant,
+		reducers::{
+			lll::{lll, DEFAULT_DELTA, DEFAULT_ETA},
+			workspace::Workspace,
+		},
+	};
 
 	fn instance() -> Instance {
 		Instance::generate(Variant::MlDsa44, [42u8; 32], 14, 10).unwrap()
@@ -220,15 +292,16 @@ mod tests {
 	#[test]
 	fn rejects_scaled_row_as_sublattice() {
 		let inst = instance();
-		let mut b = inst.start_basis();
-		for x in b.rows[0].iter_mut() {
-			*x *= 2;
-		}
-		match verify(&inst, &b) {
-			Err(Rejection::WrongVolume { log_volume, expected }) => {
-				assert!((log_volume - expected - core::f64::consts::LN_2).abs() < 1e-9);
-			},
-			other => panic!("expected WrongVolume, got {other:?}"),
+		for row in [0, inst.dim() - 1] {
+			let mut b = inst.start_basis();
+			for x in b.rows[row].iter_mut() {
+				*x *= 2;
+			}
+			assert_eq!(verify(&inst, &b), Err(Rejection::Sublattice));
+			for x in b.rows[row].iter_mut() {
+				*x = -*x;
+			}
+			assert_eq!(verify(&inst, &b), Err(Rejection::Sublattice));
 		}
 	}
 
@@ -238,7 +311,64 @@ mod tests {
 		let mut b = inst.start_basis();
 		let combo: Vec<i64> = (0..b.len()).map(|k| b.rows[1][k] + b.rows[2][k]).collect();
 		b.rows[5] = combo;
-		assert!(matches!(verify(&inst, &b), Err(Rejection::Unverifiable { .. })));
+		assert_eq!(verify(&inst, &b), Err(Rejection::Sublattice));
+	}
+
+	fn lll_reduced(inst: &Instance) -> Basis {
+		let d = inst.dim();
+		let mut ws = Workspace::new(inst.start_basis().rows);
+		assert!(lll(&mut ws, 0, d, DEFAULT_DELTA, DEFAULT_ETA, &mut || false));
+		Basis::new(ws.into_rows())
+	}
+
+	/// An index-2 sublattice disguised by row additions that make the Gram
+	/// matrix badly conditioned: the volume check of an uncertified
+	/// floating-point profile accepted this, the determinant check must not.
+	#[test]
+	fn rejects_disguised_index_two_sublattice() {
+		let inst = Instance::generate(Variant::MlDsa44, [42u8; 32], 20, 20).unwrap();
+		let d = inst.dim();
+		let mut b = lll_reduced(&inst);
+		for x in &mut b.rows[d - 1] {
+			*x *= 2;
+		}
+		let orig = b.clone();
+		let coefficients = [
+			17i64, 3, 17, 18, 4, 13, 1, 10, 1, 9, 10, 14, 11, 2, 5, 16, 12, 10, 8, 11, 12, 11, 17,
+			4, 3, 2,
+		];
+		for (i, c) in (15..d).zip(coefficients) {
+			for j in 0..d {
+				b.rows[i][j] += c * orig.rows[i - 1][j];
+			}
+		}
+		assert!(b.rows.iter().all(|r| inst.contains(r)));
+		assert_eq!(verify(&inst, &b), Err(Rejection::Sublattice));
+	}
+
+	/// Row additions that keep the lattice must not move the score: the
+	/// certified profile is representation-independent.
+	#[test]
+	fn score_is_invariant_under_lower_triangular_rewrites() {
+		let inst = Instance::generate(Variant::MlDsa44, [42u8; 32], 20, 20).unwrap();
+		let d = inst.dim();
+		let reduced = lll_reduced(&inst);
+		let reference = verify(&inst, &reduced).unwrap();
+		let mut b = reduced.clone();
+		for i in 1..d {
+			for j in 0..d {
+				b.rows[i][j] +=
+					(4096 - 7 * i as i64) * reduced.rows[i - 1][j] - 3 * reduced.rows[i / 2][j];
+			}
+		}
+		let s = verify(&inst, &b).unwrap();
+		assert!(
+			(s.score_bits - reference.score_bits).abs() < 1e-6,
+			"{} vs {}",
+			s.score_bits,
+			reference.score_bits
+		);
+		assert_eq!(s.first_norm, reference.first_norm);
 	}
 
 	#[test]

@@ -313,7 +313,7 @@ impl Instance {
 	}
 
 	pub fn id_hex(&self) -> String {
-		hex(&self.id)
+		hex::encode(self.id)
 	}
 
 	/// Row `j` of `A` (`n` entries in `[0, q)`).
@@ -330,7 +330,7 @@ impl Instance {
 		InstanceDescriptor {
 			id: self.id_hex(),
 			variant: self.variant,
-			seed: self.seed.as_ref().map(|s| hex(s)),
+			seed: self.seed.map(hex::encode),
 			n: self.n,
 			m: self.m,
 			dim: self.dim(),
@@ -479,10 +479,6 @@ fn expand_submatrix(rho: &[u8; params::SEEDBYTES], n: usize, m: usize) -> Vec<Ve
 		}
 	}
 	a
-}
-
-pub(crate) fn hex(bytes: &[u8]) -> String {
-	bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
