@@ -7,10 +7,16 @@
 //! cargo run --release -p qp-rusty-crystals-lattice-attack --example bkz_demo -- --verify report.json
 //! ```
 
-use std::{fs::File, io::BufWriter, process::ExitCode, time::Duration};
+use std::{
+	fs::File,
+	io::{BufWriter, Write},
+	process::ExitCode,
+	time::Duration,
+};
 
 use qp_rusty_crystals_lattice_attack::{
-	harness::{run, Budget, JsonlObserver, Observer, Report, StderrObserver},
+	harness::{run, Budget, JsonlObserver, Observer, Report, StderrObserver, StepEvent},
+	instance::InstanceDescriptor,
 	reducers::ProgressiveBkz,
 	verify::verify,
 	Instance, Variant,
@@ -21,7 +27,7 @@ struct Args {
 	seed: [u8; 32],
 	n: usize,
 	m: usize,
-	secs: f64,
+	wall: Duration,
 	beta_start: usize,
 	beta_max: usize,
 	report: Option<String>,
@@ -31,17 +37,21 @@ struct Args {
 	verify: Option<String>,
 }
 
+/// Up to 32 bytes of hex; shorter input is padded with zero bytes at the
+/// end, so `07` is `[7, 0, 0, …]`.
 fn parse_seed(s: &str) -> Result<[u8; 32], String> {
-	let s = s.trim_start_matches("0x");
-	if s.len() > 64 || !s.len().is_multiple_of(2) {
+	let bytes = hex::decode(s.trim_start_matches("0x")).map_err(|e| format!("seed: {e}"))?;
+	if bytes.len() > 32 {
 		return Err("seed must be at most 32 bytes of hex".into());
 	}
 	let mut out = [0u8; 32];
-	for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
-		let hex = std::str::from_utf8(chunk).map_err(|e| e.to_string())?;
-		out[i] = u8::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
-	}
+	out[..bytes.len()].copy_from_slice(&bytes);
 	Ok(out)
+}
+
+fn parse_secs(s: &str) -> Result<Duration, String> {
+	let secs: f64 = s.parse().map_err(|e| format!("--secs: {e}"))?;
+	Duration::try_from_secs_f64(secs).map_err(|e| format!("--secs: {e}"))
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -50,7 +60,7 @@ fn parse_args() -> Result<Args, String> {
 		seed: [0u8; 32],
 		n: 60,
 		m: 60,
-		secs: 30.0,
+		wall: Duration::from_secs(30),
 		beta_start: 10,
 		beta_max: 60,
 		report: None,
@@ -67,7 +77,7 @@ fn parse_args() -> Result<Args, String> {
 			"--seed" => a.seed = parse_seed(&value()?)?,
 			"--n" => a.n = value()?.parse().map_err(|e| format!("--n: {e}"))?,
 			"--m" => a.m = value()?.parse().map_err(|e| format!("--m: {e}"))?,
-			"--secs" => a.secs = value()?.parse().map_err(|e| format!("--secs: {e}"))?,
+			"--secs" => a.wall = parse_secs(&value()?)?,
 			"--beta" => {
 				let v = value()?;
 				let (lo, hi) = v.split_once("..").ok_or("--beta expects START..MAX")?;
@@ -109,42 +119,52 @@ fn main() -> ExitCode {
 			return ExitCode::from(2);
 		},
 	};
-	let mut budget = Budget::new(Duration::from_secs_f64(args.secs));
+	let mut budget = Budget::new(args.wall);
 	budget.include_basis = args.include_basis;
 	budget.trace = args.trace;
 	let reducer = ProgressiveBkz::new(args.beta_start, args.beta_max);
 
-	let mut observers: Vec<Box<dyn Observer>> = vec![Box::new(StderrObserver)];
-	if let Some(path) = &args.events {
-		match File::create(path) {
-			Ok(f) => observers.push(Box::new(JsonlObserver::new(BufWriter::new(f)))),
+	let mut events = match &args.events {
+		Some(path) => match File::create(path) {
+			Ok(f) => Some(JsonlObserver::new(BufWriter::new(f))),
 			Err(e) => {
 				eprintln!("cannot create {path}: {e}");
 				return ExitCode::from(2);
 			},
-		}
+		},
+		None => None,
+	};
+	let mut stderr = StderrObserver;
+	let mut observers: Vec<&mut dyn Observer> = vec![&mut stderr];
+	if let Some(ev) = &mut events {
+		observers.push(ev);
 	}
-	let mut fanout = Fanout(observers);
-	let report = run(&instance, reducer, &budget, &mut fanout);
+	let report = run(&instance, reducer, &budget, &mut Fanout(observers));
 
-	if let Some(path) = &args.report {
-		match File::create(path).map(BufWriter::new) {
-			Ok(w) =>
-				if let Err(e) = serde_json::to_writer(w, &report) {
-					eprintln!("cannot write {path}: {e}");
-					return ExitCode::from(1);
-				},
-			Err(e) => {
-				eprintln!("cannot create {path}: {e}");
-				return ExitCode::from(1);
-			},
+	let mut failed = false;
+	if let Some(ev) = events {
+		if let Err(e) = ev.finish() {
+			eprintln!("cannot write {}: {e}", args.events.as_deref().unwrap_or_default());
+			failed = true;
 		}
 	}
-	if report.result.is_ok() {
+	if let Some(path) = &args.report {
+		if let Err(e) = write_report(path, &report) {
+			eprintln!("cannot write {path}: {e}");
+			failed = true;
+		}
+	}
+	if report.result.is_ok() && !failed {
 		ExitCode::SUCCESS
 	} else {
 		ExitCode::from(1)
 	}
+}
+
+fn write_report(path: &str, report: &Report) -> std::io::Result<()> {
+	let mut w = BufWriter::new(File::create(path)?);
+	serde_json::to_writer(&mut w, report)?;
+	w.flush()
 }
 
 /// Re-run the verifier on the basis stored in a report, regenerating the
@@ -208,21 +228,16 @@ fn reverify(path: &str) -> ExitCode {
 	}
 }
 
-struct Fanout(Vec<Box<dyn Observer>>);
+struct Fanout<'a>(Vec<&'a mut dyn Observer>);
 
-impl Observer for Fanout {
-	fn on_start(
-		&mut self,
-		instance: &qp_rusty_crystals_lattice_attack::instance::InstanceDescriptor,
-		reducer: &str,
-		budget: &Budget,
-	) {
+impl Observer for Fanout<'_> {
+	fn on_start(&mut self, instance: &InstanceDescriptor, reducer: &str, budget: &Budget) {
 		for o in &mut self.0 {
 			o.on_start(instance, reducer, budget);
 		}
 	}
 
-	fn on_step(&mut self, event: &qp_rusty_crystals_lattice_attack::harness::StepEvent) {
+	fn on_step(&mut self, event: &StepEvent) {
 		for o in &mut self.0 {
 			o.on_step(event);
 		}

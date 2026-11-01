@@ -1,5 +1,6 @@
 //! Opt-in end-to-end checks at larger dimensions, up to the full ML-DSA-44
-//! lattice (d = 2049). They take a few minutes in release; run with
+//! lattice (d = 2049). They take minutes in release (certified verification
+//! alone is a few minutes at d = 2049 on a multi-core machine); run with
 //! `cargo test --release -p qp-rusty-crystals-lattice-attack --test full_size -- --ignored`.
 
 use std::time::Duration;
@@ -43,10 +44,11 @@ fn full_ml_dsa_44_start_basis_verifies_with_score_zero() {
 #[ignore]
 fn full_ml_dsa_44_timed_run_produces_a_verified_report() {
 	let inst = Instance::full(Variant::MlDsa44, [0x5Au8; 32]);
-	let mut budget = Budget::new(Duration::from_secs(20));
+	let mut budget = Budget::new(Duration::from_secs(60));
 	budget.trace = false;
 	budget.include_basis = false;
 	let report = run(&inst, ProgressiveBkz::new(10, 40), &budget, &mut NullObserver);
+	assert!(report.counted_steps >= 1, "{:?}", report.termination);
 	assert!(report.result.is_ok(), "{:?}", report.result);
-	assert!(report.score_bits().unwrap() >= 0.0);
+	assert!(report.score_bits().unwrap() > 0.0);
 }
