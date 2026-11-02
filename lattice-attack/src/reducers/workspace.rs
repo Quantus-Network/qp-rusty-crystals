@@ -22,7 +22,10 @@ use std::cmp::min;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 
-use crate::basis::{sub_multiple_big, sub_multiple_i64, MAX_COEFFICIENT};
+use crate::{
+	basis::{sub_multiple_big, sub_multiple_i64, MAX_COEFFICIENT},
+	reducers::lll::clamp_eta,
+};
 
 /// A Gram–Schmidt length below this fraction of the row's length is treated
 /// as zero: `f64` Householder QR leaves noise of about `2^-47` times the row
@@ -128,14 +131,16 @@ impl Workspace {
 	}
 
 	/// Size-reduce row `k` against rows `0..k` (`|mu[k][j]| <= eta`
-	/// afterwards, up to floating-point error; `eta` below `0.5` acts as
-	/// `0.5`). Returns whether the row changed. Leaves rows `0..=k` valid.
+	/// afterwards, up to floating-point error; `eta` goes through
+	/// [`clamp_eta`]). Returns whether the row changed. Leaves rows `0..=k`
+	/// valid.
 	///
 	/// Each pass subtracts the rounded coefficients computed from the current
 	/// floating-point data and then recomputes row `k` exactly, so inaccurate
 	/// coefficients only cost extra passes. Coefficients beyond the range of
 	/// `f64` are clamped; the next pass picks up the remainder.
 	pub fn size_reduce_row(&mut self, k: usize, eta: f64) -> bool {
+		let eta = clamp_eta(eta);
 		self.ensure(k);
 		let mut changed = false;
 		let mut big: Option<Vec<BigInt>> = None;
@@ -318,6 +323,47 @@ mod tests {
 		let mut ws = Workspace::new(vec![vec![5, 0], vec![2, 7]]);
 		assert!(!ws.size_reduce_row(1, 0.3));
 		assert_eq!(ws.rows[1], vec![2, 7]);
+	}
+
+	#[test]
+	fn half_integer_coefficient_terminates_for_any_eta() {
+		// mu = ±0.5 exactly: without the eta floor the coefficient rounds to
+		// ±1 on every pass and the row alternates between [1, 1] and [-1, 1].
+		for (row, eta) in [
+			(vec![1, 1], 0.3),
+			(vec![-1, 1], 0.3),
+			(vec![1, 1], 0.49),
+			(vec![-1, 1], 0.0),
+			(vec![1, 1], f64::NEG_INFINITY),
+			(vec![-1, 1], f64::NAN),
+		] {
+			let mut ws = Workspace::new(vec![vec![2, 0], row.clone()]);
+			assert!(!ws.size_reduce_row(1, eta), "{row:?} {eta}");
+			assert_eq!(ws.rows[1], row);
+			assert!(ws.mu[1][0].abs() <= 0.5);
+		}
+	}
+
+	#[test]
+	fn half_integer_coefficient_on_an_instance_terminates() {
+		use crate::{
+			instance::{Instance, Variant},
+			verify::verify,
+		};
+		let inst = Instance::generate(Variant::MlDsa44, [42u8; 32], 2, 2).unwrap();
+		let mut basis = inst.start_basis();
+		let (r0, r1) = basis.rows.split_at_mut(1);
+		for (x, y) in r0[0].iter_mut().zip(&r1[0]) {
+			*x += y;
+		}
+		assert!(verify(&inst, &basis).is_ok());
+		let mut ws = Workspace::new(basis.rows.clone());
+		ws.ensure(2);
+		assert_eq!(ws.mu[1][0].abs(), 0.5);
+		ws.size_reduce_row(1, 0.3);
+		assert!(ws.mu[1][0].abs() <= 0.5);
+		basis.rows = ws.into_rows();
+		assert!(verify(&inst, &basis).is_ok());
 	}
 
 	const DEFAULT_ETA: f64 = crate::reducers::lll::DEFAULT_ETA;

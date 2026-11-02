@@ -15,8 +15,18 @@ pub const DEFAULT_ETA: f64 = 0.51;
 /// the defaults.
 pub fn clamp_parameters(delta: f64, eta: f64) -> (f64, f64) {
 	let delta = if delta.is_finite() { delta.clamp(0.25, 1.0 - 1e-6) } else { DEFAULT_DELTA };
-	let eta = if eta.is_finite() { eta.max(0.5) } else { DEFAULT_ETA };
-	(delta, eta)
+	(delta, clamp_eta(eta))
+}
+
+/// `eta ≥ 1/2` (below that, a coefficient of exactly `±1/2` would round to
+/// `±1` on every pass and size reduction would never terminate); non-finite
+/// values become the default.
+pub fn clamp_eta(eta: f64) -> f64 {
+	if eta.is_finite() {
+		eta.max(0.5)
+	} else {
+		DEFAULT_ETA
+	}
 }
 
 /// LLL-reduce rows `start..end`, assuming rows `0..start` are already valid in
