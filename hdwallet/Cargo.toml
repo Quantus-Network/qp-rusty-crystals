@@ -20,7 +20,6 @@ categories = ["cryptography"]
 # Parameter sets are selected through this crate's own ml-dsa-* features
 # (workspace pins dilithium with default-features = false).
 qp-rusty-crystals-dilithium = { workspace = true }
-bip39.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
 qp-poseidon-core.workspace = true
@@ -40,9 +39,8 @@ sha2 = { version = "0.10", default-features = false }
 getrandom = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
-# Same bip39 instance as the library: the word-pointer heap-zeroization test
-# reconstructs the fat-pointer sequence into bip39's static word list to scan
-# freed blocks for it.
+# Reference BIP-0039 implementation the in-crate `mnemonic` module is tested
+# against.
 bip39.workspace = true
 hex-literal.workspace = true
 rand.workspace = true
