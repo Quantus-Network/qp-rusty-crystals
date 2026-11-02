@@ -1,13 +1,15 @@
-//! Regression tests (security review): dropped `bip39::Mnemonic` values must
-//! not leave the mnemonic's word indices in dead stack memory.
+//! Regression tests (security review): `mnemonic_to_seed` and
+//! `generate_mnemonic` must not leave the mnemonic's word indices in dead
+//! stack memory.
 //!
-//! `Mnemonic` stores the secret phrase as `words: [u16; 24]` (indices into the
-//! public BIP39 word list, so the phrase is trivially reconstructible from
-//! them) and only implements `Zeroize`/`ZeroizeOnDrop` when the bip39 crate's
-//! `zeroize` feature is enabled. The workspace previously declared bip39 with
-//! `default-features = false` and no `zeroize` feature, so the `Mnemonic`
-//! locals dropped inside `mnemonic_to_seed` (seed stretching) and
-//! `generate_mnemonic` left the full word-index buffer in dead stack frames.
+//! The indices (`[u16; 24]` into the public BIP39 word list, so the phrase is
+//! trivially reconstructible from them) used to be held in `bip39::Mnemonic`
+//! values, which at first were not zeroized at all and later were returned by
+//! value, leaving unwiped copies in moved-from stack slots. The crate now
+//! encodes and validates phrases itself, keeping the indices in a wiping
+//! buffer that is never moved; these probes pin that property. The
+//! self-check still uses a `bip39::Mnemonic` as a known way to leave the
+//! pattern on the stack.
 //!
 //! Detection uses the same painted-stack technique as the other
 //! `*_stack_zeroization` tests: run the operation on a sentinel-painted buffer
