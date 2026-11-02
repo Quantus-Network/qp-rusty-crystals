@@ -634,7 +634,13 @@ mod tests {
 	#[test]
 	fn deadline_is_honoured_and_steps_counted() {
 		let inst = instance();
-		let r = run(&inst, Swapper, &budget(60), &mut NullObserver);
+		// Swapper stops sleeping once `remaining <= soft_margin`, so a step
+		// can only overrun if its 5 ms sleep is delayed by more than the
+		// margin. Keep the margin far above scheduler jitter on busy CI
+		// runners.
+		let mut b = budget(200);
+		b.soft_margin = Duration::from_millis(100);
+		let r = run(&inst, Swapper, &b, &mut NullObserver);
 		assert_eq!(r.termination, Termination::Deadline);
 		assert!(r.counted_steps >= 1, "{}", r.counted_steps);
 		assert!(r.steps.iter().all(|s| s.counted));
