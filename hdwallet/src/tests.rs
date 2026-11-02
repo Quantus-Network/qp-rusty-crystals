@@ -212,6 +212,22 @@ mod hdwallet_tests {
 	}
 
 	#[test]
+	fn generate_mnemonic_matches_bip39_reference_encoding() {
+		let mut rng = StdRng::from_seed([7u8; 32]);
+		for entropy in [[0u8; 32], [0xFFu8; 32], *b"mnemonic-word-ptr-zeroize-32-pat"]
+			.into_iter()
+			.chain((0..16).map(|_| {
+				let mut e = [0u8; 32];
+				rng.fill_bytes(&mut e);
+				e
+			})) {
+			let expected = bip39::Mnemonic::from_entropy(&entropy).unwrap().to_string();
+			let phrase = generate_mnemonic((&mut { entropy }).into()).unwrap();
+			assert_eq!(*phrase, expected);
+		}
+	}
+
+	#[test]
 	fn test_generate_mnemonic_valid_length() {
 		// Use a deterministic seed for testing
 		let mut seed = [42u8; 32];

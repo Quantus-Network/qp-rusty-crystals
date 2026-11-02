@@ -32,6 +32,7 @@ use bip39::{Language, Mnemonic};
 use core::str::FromStr;
 #[cfg(feature = "ml-dsa-87")]
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
+use sha2::{Digest, Sha256};
 use unicode_normalization::{is_nfkd_quick, IsNormalized, UnicodeNormalization};
 
 use zeroize::Zeroizing;
@@ -455,18 +456,37 @@ fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 /// Always use cryptographically secure random entropy (e.g., from `getrandom::getrandom()`).
 /// Never use predictable strings, timestamps, or user input as entropy sources.
 pub fn generate_mnemonic(entropy: SensitiveBytes32) -> Result<Zeroizing<String>, HDLatticeError> {
-	// Create mnemonic from entropy
-	let mnemonic = Mnemonic::from_entropy(entropy.as_bytes())
-		.map_err(|e| HDLatticeError::MnemonicDerivationFailed(e.to_string()))?;
+	// BIP39 encoding done here rather than through `bip39::Mnemonic`: that
+	// type is returned by value from `from_entropy`, and a by-value return of
+	// a struct holding the secret word indices is moved (copied) through the
+	// callee's return slot and the `Result` payload. Those moved-from stack
+	// slots are dead but never dropped, so `ZeroizeOnDrop` cannot wipe them,
+	// and whether the compiler elides the copies depends on codegen details
+	// (the bip39 stack probe caught an unwiped copy on one platform). Writing
+	// the indices into a wiping buffer that never moves removes the issue.
+	//
+	// 256 bits of entropy followed by the first 8 bits of SHA-256(entropy),
+	// read as 24 big-endian 11-bit word indices.
+	let checksum = Sha256::digest(entropy.as_bytes())[0];
+	let mut indices = Zeroizing::new([0u16; 24]);
+	for (i, index) in indices.iter_mut().enumerate() {
+		let mut v = 0u16;
+		for bit in i * 11..(i + 1) * 11 {
+			let byte = if bit < 256 { entropy.as_bytes()[bit / 8] } else { checksum };
+			v = (v << 1) | u16::from((byte >> (7 - bit % 8)) & 1);
+		}
+		*index = v;
+	}
+	let list = Language::English.word_list();
 
 	// Collect the word pointers in one tight pass, then `join` — do NOT
-	// stream `words()` straight into a growing String: keeping that
-	// iterator (which borrows the mnemonic's secret word-index buffer)
-	// alive across String appends made release codegen spill an unwiped
-	// copy of the index array into a dead stack slot (caught by the bip39
-	// stack probe). `join` allocates the phrase exactly once and moving it
-	// into `Zeroizing::new` transfers the same allocation.
-	let mut words: Vec<&str> = mnemonic.words().collect();
+	// stream straight into a growing String: an iterator borrowing the
+	// secret index buffer kept alive across String appends made release
+	// codegen spill an unwiped copy of the index array into a dead stack
+	// slot (caught by the bip39 stack probe). `join` allocates the phrase
+	// exactly once and moving it into `Zeroizing::new` transfers the same
+	// allocation.
+	let mut words: Vec<&str> = indices.iter().map(|&i| list[usize::from(i)]).collect();
 	let result = Zeroizing::new(words.join(" "));
 
 	// The Vec buffer now holds 24 fat pointers into bip39's *static* word
