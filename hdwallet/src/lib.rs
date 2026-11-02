@@ -28,7 +28,6 @@ use alloc::{
 	string::{String, ToString},
 	vec::Vec,
 };
-use bip39::{Language, Mnemonic};
 use core::str::FromStr;
 #[cfg(feature = "ml-dsa-87")]
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
@@ -49,6 +48,7 @@ mod tests;
 mod tests_variants;
 
 pub mod hderive;
+pub mod mnemonic;
 pub mod wormhole;
 
 pub use wormhole::WormholePair;
@@ -166,10 +166,9 @@ fn nfkd_owned(s: &str) -> Option<Zeroizing<String>> {
 /// the redundant heap copy a `to_string()` would create).
 ///
 /// BIP39 requires NFKD Unicode normalization of both the mnemonic and the passphrase
-/// before PBKDF2. The bip39 crate's `parse_in_normalized`/`to_seed_normalized` APIs
-/// assume the *caller* already normalized their inputs, so we normalize here. Without
-/// this, canonically equivalent inputs (e.g. a composed "é" vs a decomposed "e"+combining
-/// accent in a passphrase) would silently derive different seeds and thus different keys.
+/// before PBKDF2. Without this, canonically equivalent inputs (e.g. a composed "é" vs a
+/// decomposed "e"+combining accent in a passphrase) would silently derive different seeds
+/// and thus different keys.
 ///
 /// Both inputs are size-capped ([`MAX_MNEMONIC_BYTES`], [`MAX_PASSPHRASE_BYTES`])
 /// *before* normalization, so attacker-controlled text cannot drive unbounded
@@ -201,23 +200,12 @@ fn parse_mnemonic_to_seed_into(
 	let normalized_passphrase = nfkd_owned(passphrase);
 	let passphrase = normalized_passphrase.as_ref().map_or(passphrase, |p| p.as_str());
 
-	let parsed_mnemonic = Mnemonic::parse_in_normalized(Language::English, mnemonic)
-		.map_err(|e| HDLatticeError::Bip39Error(e.to_string()))?;
+	mnemonic::validate(mnemonic).map_err(|e| HDLatticeError::Bip39Error(e.to_string()))?;
 
-	// Seed stretching is done in-crate rather than via
-	// `Mnemonic::to_seed_normalized`, which returns the seed as a plain
-	// `[u8; 64]` from a non-inlinable external function and leaves an
-	// unwiped copy of it in a dead stack frame (security review). The PBKDF2
-	// password is the canonical phrase — the validated words joined by
-	// single spaces — matching `to_seed_normalized` byte for byte (pinned by
-	// the golden-vector tests and a direct cross-check against bip39).
-	let mut password = Zeroizing::new(String::with_capacity(mnemonic.len()));
-	for (i, word) in parsed_mnemonic.words().enumerate() {
-		if i > 0 {
-			password.push(' ');
-		}
-		password.push_str(word);
-	}
+	// The PBKDF2 password is the canonical phrase: the validated words joined
+	// by single spaces. Seed stretching is done in-crate so that the seed is
+	// only ever written into the caller's wiping buffer.
+	let password = mnemonic::canonical_phrase(mnemonic);
 
 	hderive::pbkdf2_hmac_sha512(
 		password.as_bytes(),
@@ -455,22 +443,24 @@ fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 /// Always use cryptographically secure random entropy (e.g., from `getrandom::getrandom()`).
 /// Never use predictable strings, timestamps, or user input as entropy sources.
 pub fn generate_mnemonic(entropy: SensitiveBytes32) -> Result<Zeroizing<String>, HDLatticeError> {
-	// Create mnemonic from entropy
-	let mnemonic = Mnemonic::from_entropy(entropy.as_bytes())
-		.map_err(|e| HDLatticeError::MnemonicDerivationFailed(e.to_string()))?;
+	// The secret word indices live only in this wiping buffer, which is
+	// filled in place and never moved (see the `mnemonic` module).
+	let mut indices = Zeroizing::new([0u16; mnemonic::MAX_WORDS]);
+	mnemonic::encode_256(entropy.as_bytes(), &mut indices);
 
 	// Collect the word pointers in one tight pass, then `join` — do NOT
-	// stream `words()` straight into a growing String: keeping that
-	// iterator (which borrows the mnemonic's secret word-index buffer)
-	// alive across String appends made release codegen spill an unwiped
-	// copy of the index array into a dead stack slot (caught by the bip39
-	// stack probe). `join` allocates the phrase exactly once and moving it
-	// into `Zeroizing::new` transfers the same allocation.
-	let mut words: Vec<&str> = mnemonic.words().collect();
+	// stream straight into a growing String: an iterator borrowing the
+	// secret index buffer kept alive across String appends made release
+	// codegen spill an unwiped copy of the index array into a dead stack
+	// slot (caught by the bip39 stack probe). `join` allocates the phrase
+	// exactly once and moving it into `Zeroizing::new` transfers the same
+	// allocation.
+	let mut words: Vec<&str> =
+		indices.iter().map(|&i| mnemonic::WORD_LIST[usize::from(i)]).collect();
 	let result = Zeroizing::new(words.join(" "));
 
-	// The Vec buffer now holds 24 fat pointers into bip39's *static* word
-	// list. The addresses are fixed per process image, so the freed pointer
+	// The Vec buffer now holds 24 fat pointers into the *static* word list.
+	// The addresses are fixed per process image, so the freed pointer
 	// sequence decodes right back to the phrase — an alternate
 	// representation the byte-level phrase probe cannot see (the
 	// word-pointer heap-zeroization test pins it). Scrub the buffer in
