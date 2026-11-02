@@ -9,21 +9,25 @@ use crate::{
 
 pub const DEFAULT_DELTA: f64 = 0.99;
 pub const DEFAULT_ETA: f64 = 0.51;
+/// Smallest size-reduction threshold. Floating-point LLL needs `eta`
+/// strictly above `1/2` by more than the Gram–Schmidt rounding error:
+/// a coefficient that is exactly `±1/2` is computed as `±(1/2 + ε)`, and
+/// with a threshold of `1/2` it would round to `±1` on every pass, flipping
+/// the row back and forth forever.
+pub const MIN_ETA: f64 = 0.51;
 
 /// Bring user-supplied LLL parameters into the range where LLL terminates:
-/// `delta` in `[1/4, 1 − 1e-6]` and `eta ≥ 1/2`; non-finite values become
+/// `delta` in `[1/4, 1 − 1e-6]` and `eta ≥ MIN_ETA`; non-finite values become
 /// the defaults.
 pub fn clamp_parameters(delta: f64, eta: f64) -> (f64, f64) {
 	let delta = if delta.is_finite() { delta.clamp(0.25, 1.0 - 1e-6) } else { DEFAULT_DELTA };
 	(delta, clamp_eta(eta))
 }
 
-/// `eta ≥ 1/2` (below that, a coefficient of exactly `±1/2` would round to
-/// `±1` on every pass and size reduction would never terminate); non-finite
-/// values become the default.
+/// `eta` floored at [`MIN_ETA`]; non-finite values become the default.
 pub fn clamp_eta(eta: f64) -> f64 {
 	if eta.is_finite() {
-		eta.max(0.5)
+		eta.max(MIN_ETA)
 	} else {
 		DEFAULT_ETA
 	}

@@ -329,6 +329,9 @@ mod tests {
 	fn half_integer_coefficient_terminates_for_any_eta() {
 		// mu = ±0.5 exactly: without the eta floor the coefficient rounds to
 		// ±1 on every pass and the row alternates between [1, 1] and [-1, 1].
+		// Here mu is exactly representable, so this only checks the floor
+		// is applied; `rounded_half_integer_coefficient_terminates` checks
+		// its margin.
 		for (row, eta) in [
 			(vec![1, 1], 0.3),
 			(vec![-1, 1], 0.3),
@@ -341,6 +344,20 @@ mod tests {
 			assert!(!ws.size_reduce_row(1, eta), "{row:?} {eta}");
 			assert_eq!(ws.rows[1], row);
 			assert!(ws.mu[1][0].abs() <= 0.5);
+		}
+	}
+
+	#[test]
+	fn rounded_half_integer_coefficient_terminates() {
+		// The exact coefficient is ±34/68 = ±0.5, but Householder rounding
+		// computes ±(0.5 + 1e-16). With a threshold of exactly 0.5 the row
+		// would alternate between [-27, 11] and [-29, 3] forever.
+		for row in [vec![-27, 11], vec![-29, 3]] {
+			for eta in [0.3, 0.49, 0.5] {
+				let mut ws = Workspace::new(vec![vec![2, 8], row.clone()]);
+				assert!(!ws.size_reduce_row(1, eta), "{row:?} {eta}");
+				assert_eq!(ws.rows[1], row);
+			}
 		}
 	}
 
