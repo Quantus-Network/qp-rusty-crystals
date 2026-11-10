@@ -476,19 +476,6 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
-version = "0.2.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
-dependencies = [
- "cfg-if",
- "js-sys",
- "libc",
- "wasi",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "getrandom"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
@@ -855,8 +842,6 @@ name = "qp-rusty-crystals-hdwallet"
 version = "4.1.1"
 dependencies = [
  "bip39",
- "getrandom 0.2.17",
- "hex",
  "hex-literal",
  "hmac",
  "psm",
@@ -864,9 +849,6 @@ dependencies = [
  "qp-rusty-crystals-dilithium",
  "qp-rusty-crystals-test-utils",
  "rand",
- "rand_core",
- "serde",
- "serde_json",
  "sha2",
  "thiserror",
  "unicode-normalization",
@@ -932,7 +914,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
 dependencies = [
  "chacha20",
- "getrandom 0.4.2",
+ "getrandom",
  "rand_core",
 ]
 
@@ -1013,7 +995,6 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "cipher",
- "getrandom 0.2.17",
  "qp-rusty-crystals-dilithium",
  "qp-rusty-crystals-hdwallet",
  "rand",
@@ -1261,12 +1242,6 @@ dependencies = [
  "same-file",
  "winapi-util",
 ]
-
-[[package]]
-name = "wasi"
-version = "0.11.1+wasi-snapshot-preview1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "wasip2"
