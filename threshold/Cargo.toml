@@ -37,7 +37,7 @@ hex-literal = { workspace = true }
 rand = { workspace = true }
 # Painted-stack probe for stack-zeroization regression tests (also used
 # directly by the unit-test probe in `derivation.rs`).
-psm = "=0.1.31"
+psm = { workspace = true }
 qp-rusty-crystals-test-utils = { workspace = true }
 # Self-referential dev-dependency: enables the internal-test-helpers feature
 # for this crate's own test builds only, so the adversary-simulation
