@@ -2,7 +2,7 @@
 //! Implements the exact same AES256_CTR_DRBG as the C reference code
 
 use aes::{
-	cipher::{BlockEncrypt, KeyInit},
+	cipher::{BlockCipherEncrypt, KeyInit},
 	Aes256, Block,
 };
 use core::{fmt, fmt::Display};
@@ -113,7 +113,7 @@ impl Drbg {
 
 	fn aes256_ecb(&mut self, output: &mut [u8; 16]) {
 		let cipher = Aes256::new_from_slice(&self.key).unwrap();
-		let mut block = *Block::from_slice(&self.v);
+		let mut block = Block::from(self.v);
 		cipher.encrypt_block(&mut block);
 		output.copy_from_slice(block.as_slice());
 	}

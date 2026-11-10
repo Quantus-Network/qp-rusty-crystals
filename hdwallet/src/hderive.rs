@@ -1,9 +1,6 @@
 use alloc::vec::Vec;
 use core::{ops::Deref, str::FromStr};
-use sha2::{
-	digest::{generic_array::GenericArray, Digest},
-	Sha512,
-};
+use sha2::{Digest, Sha512};
 use zeroize::Zeroizing;
 
 use crate::{SensitiveBytes32, MAX_DERIVATION_DEPTH, MAX_DERIVATION_PATH_BYTES};
@@ -29,7 +26,7 @@ const HMAC_OUTPUT_BYTES: usize = 64;
 ///
 /// This is the only function in the crate containing `unsafe`; every other
 /// primitive that hashes secret material is built on it. It exists because
-/// `sha2` 0.10 has no zeroizing drop semantics: a plainly dropped `Sha512`
+/// `sha2` has no zeroizing drop semantics: a plainly dropped `Sha512`
 /// leaves its block buffer — still holding input bytes verbatim — in a dead
 /// stack frame (security review). The hasher here is only driven through
 /// `&mut` methods (never moved), so wiping it in place erases every copy.
@@ -39,7 +36,7 @@ fn sha512_wiped(first: &[u8], rest: &[&[u8]], out: &mut [u8; HMAC_OUTPUT_BYTES])
 	for part in rest {
 		hasher.update(part);
 	}
-	hasher.finalize_into_reset(GenericArray::from_mut_slice(&mut out[..]));
+	hasher.finalize_into_reset(out.into());
 
 	// SAFETY: `Sha512` is a flat struct (word state, length counter, block
 	// buffer, position), containing no pointers or Drop glue, so writing
@@ -414,7 +411,7 @@ mod tests {
 	// (32-byte key, three parts) and everything in between.
 	#[test]
 	fn hmac_sha512_matches_reference_implementation() {
-		use hmac::{Hmac, Mac};
+		use hmac::{Hmac, KeyInit, Mac};
 
 		let msg: Vec<u8> = (0..200u32).map(|i| (i.wrapping_mul(31) ^ 0x5f) as u8).collect();
 		for key_len in [0usize, 1, 14, 32, 63, 64, 65, 127, 128] {

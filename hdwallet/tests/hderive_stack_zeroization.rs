@@ -26,7 +26,7 @@
 //! source-level fix can wipe.
 #![cfg(not(debug_assertions))]
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use qp_rusty_crystals_hdwallet::hderive::{ChildNumber, ExtendedPrivKey};
 use qp_rusty_crystals_test_utils::probe_stack_for_named;
 use sha2::Sha512;

@@ -13,7 +13,7 @@ qp-rusty-crystals-dilithium = { workspace = true, features = [
 	"ml-dsa-87",
 ] }
 hex = { workspace = true }
-num-bigint = { version = "=0.4.6", default-features = false, features = ["std"] }
+num-bigint = { version = "=0.5.1", default-features = false, features = ["std"] }
 num-traits = { version = "=0.2.19", default-features = false, features = ["std"] }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["float_roundtrip", "std"] }
