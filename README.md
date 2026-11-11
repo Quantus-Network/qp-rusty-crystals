@@ -147,16 +147,10 @@ This repository has 100% code coverage for all critical logic and functionality.
 
 ## License
 
-| Crate | License |
-|-------|---------|
-| `qp-rusty-crystals-dilithium` | [GPL-3.0-only](dilithium/LICENSE) |
-| `qp-rusty-crystals-hdwallet` | [Apache-2.0](LICENSE) |
-| `qp-rusty-crystals-threshold` | [Apache-2.0](LICENSE) |
-| `qp-rusty-crystals-lattice-attack` | [Apache-2.0](LICENSE) |
+[Apache-2.0](LICENSE) for every crate in this workspace.
 
-The dilithium crate is GPL-3.0-only because it is derived from Quantum Blockchains' GPL-3.0 Rust port (see Acknowledgements). The other crates depend on it, so any build that includes them must also comply with GPL-3.0 for the dilithium code.
+Versions of `qp-rusty-crystals-dilithium` up to and including 4.1.1 are GPL-3.0-only: they contained code from Quantum Blockchains' GPL-3.0 Rust port of pq-crystals. That code has since been replaced by a re-implementation from the pq-crystals reference.
 
 ## Acknowledgements
 
-The ml-dsa code was lifted with minimal changes from [Quantum Blockchain's port](https://github.com/Quantum-Blockchains/dilithium)
-of [pq-crystals](https://github.com/pq-crystals/dilithium) to Rust.
+The ML-DSA arithmetic, packing and Keccak code is a Rust port of the [pq-crystals](https://github.com/pq-crystals/dilithium) reference implementation, which its authors release as public domain (CC0) or under Apache-2.0.

@@ -2,7 +2,7 @@
 name = "qp-rusty-crystals-dilithium"
 version = "4.1.1"
 edition = "2021"
-license = "GPL-3.0-only"
+license = "Apache-2.0"
 description = "Pure Quantus RUST implementation of CRYSTALS-Dilithium digital signature scheme"
 readme = "README.md"
 homepage = "https://www.quantus.com"
