@@ -80,8 +80,7 @@ pub(crate) fn keypair_var<
 		assert!(PK == params::publickeybytes(K));
 		assert!(SK == params::secretkeybytes(K, L, ETA));
 	}
-	const SEEDBUF_LEN: usize = 2 * params::SEEDBYTES + params::CRHBYTES;
-	let mut seedbuf = [0u8; SEEDBUF_LEN];
+	let mut seedbuf = [0u8; 2 * params::SEEDBYTES + params::CRHBYTES];
 	// Build preimage = seed || K || L in a fixed stack buffer. A growable
 	// Vec would reallocate while holding the seed (Vec::new +
 	// extend_from_slice sizes capacity exactly, so the pushes force a
@@ -94,13 +93,13 @@ pub(crate) fn keypair_var<
 	fips202::shake256(&mut seedbuf, &preimage);
 
 	let mut rho = [0u8; params::SEEDBYTES];
-	rho.copy_from_slice(&seedbuf[..params::SEEDBYTES]);
-
 	let mut rhoprime = [0u8; params::CRHBYTES];
-	rhoprime.copy_from_slice(&seedbuf[params::SEEDBYTES..params::SEEDBYTES + params::CRHBYTES]);
-
 	let mut key = [0u8; params::SEEDBYTES];
-	key.copy_from_slice(&seedbuf[params::SEEDBYTES + params::CRHBYTES..]);
+	let (rho_bytes, rest) = seedbuf.split_at(params::SEEDBYTES);
+	let (rhoprime_bytes, key_bytes) = rest.split_at(params::CRHBYTES);
+	rho.copy_from_slice(rho_bytes);
+	rhoprime.copy_from_slice(rhoprime_bytes);
+	key.copy_from_slice(key_bytes);
 
 	let mut s1 = Polyvec::<L>::default();
 	polyvec::uniform_eta::<L, ETA>(&mut s1, &rhoprime, 0);
@@ -668,7 +667,7 @@ pub(crate) fn signature_var<
 	}
 }
 
-/// Verify a signature for a given message with a public key (parameterized).
+/// Verifies `sig` on `domain_prefix || m` under `pk` for an arbitrary ML-DSA parameter set.
 pub(crate) fn verify_var<
 	const K: usize,
 	const L: usize,
@@ -742,8 +741,11 @@ pub(crate) fn verify_var<
 	poly::ntt(&mut cp);
 	polyvec::shiftl(&mut t1);
 	polyvec::ntt(&mut t1);
-	let t1_2 = t1.clone();
-	polyvec::pointwise_poly_montgomery(&mut t1, &cp, &t1_2);
+	let mut t1_hat = Poly::default();
+	for t1_i in t1.vec.iter_mut() {
+		t1_hat.coeffs = t1_i.coeffs;
+		poly::pointwise_montgomery(t1_i, &cp, &t1_hat);
+	}
 
 	polyvec::sub(&mut w1, &t1);
 	polyvec::reduce(&mut w1);

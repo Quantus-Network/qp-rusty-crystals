@@ -15,12 +15,7 @@ const fn assert_supported_gamma2(gamma2: usize) {
 	assert!(gamma2 == GAMMA2_32 || gamma2 == GAMMA2_88, "unsupported GAMMA2 parameter");
 }
 
-/// For finite field element a, compute high and low bits a0, a1 such that a mod^+ Q = a1*2^D + a0
-/// with -2^{D-1} < a0 <= 2^{D-1}.
-///
-/// # Arguments
-///
-/// * 'a' - input element
+/// Returns `(a0, a1)` (low, high) with `a = a1*2^D + a0 (mod Q)` and `-2^(D-1) < a0 <= 2^(D-1)`.
 ///
 /// # Preconditions
 ///
@@ -33,22 +28,17 @@ const fn assert_supported_gamma2(gamma2: usize) {
 /// overflow the `i32` arithmetic below: a panic in overflow-checked builds,
 /// silent wraparound (and a corrupt decomposition) otherwise. Checked with
 /// `debug_assert!`.
-///
-/// Returns a touple (a0, a1).
 pub fn power2round(a: i32) -> (i32, i32) {
 	use crate::params::D;
 	debug_assert!(-Q < a && a < Q, "power2round input outside (-Q, Q)");
 	// Canonicalize to the standard representative in [0, Q); branchless, so
 	// constant-time, and identity for inputs already in [0, Q).
 	let a = crate::reduce::caddq(a);
-	let a1: i32 = (a + (1 << (D - 1)) - 1) >> D;
-	let a0: i32 = a - (a1 << D);
-	(a0, a1)
+	let a1 = (a + (1 << (D - 1)) - 1) >> D;
+	(a - (a1 << D), a1)
 }
 
-/// For finite field element a, compute high and low bits a0, a1 such that a mod^+ Q = a1*ALPHA + a0
-/// with -ALPHA/2 < a0 <= ALPHA/2 except if a1 = (Q-1)/ALPHA where we set a1 = 0 and -ALPHA/2 <= a0
-/// = a mod^+ Q - Q < 0.
+/// Returns `(a0, a1)` (low, high) with `a = a1*2*GAMMA2 + a0 (mod Q)` and `|a0| <= GAMMA2`.
 ///
 /// The high-bits extraction divides by `ALPHA = 2*GAMMA2` with a fixed-point
 /// reciprocal that is exact over the whole input domain `[0, Q)`:
@@ -57,10 +47,6 @@ pub fn power2round(a: i32) -> (i32, i32) {
 /// does not divide a power of two, so the wrap to 0 is a branchless
 /// conditional instead of a mask). Both arms are verified exhaustively over
 /// `[0, Q)` against the FIPS 204 definition in this module's tests.
-///
-/// # Arguments
-///
-/// * 'a' - input element
 ///
 /// # Preconditions
 ///
@@ -72,8 +58,6 @@ pub fn power2round(a: i32) -> (i32, i32) {
 /// in `[0, Q)`. Inputs outside `(-Q, Q)` violate the contract and can
 /// overflow the `i32` arithmetic below (panic in overflow-checked builds,
 /// silent wraparound otherwise). Checked with `debug_assert!`.
-///
-/// Returns a touple (a0, a1).
 pub fn decompose<const GAMMA2: usize>(a: i32) -> (i32, i32) {
 	const {
 		assert_supported_gamma2(GAMMA2);
@@ -82,8 +66,7 @@ pub fn decompose<const GAMMA2: usize>(a: i32) -> (i32, i32) {
 	// Canonicalize to the standard representative in [0, Q); branchless, so
 	// constant-time, and identity for inputs already in [0, Q).
 	let a = crate::reduce::caddq(a);
-	let gamma2 = GAMMA2 as i32;
-	let mut a1: i32 = (a + 127) >> 7;
+	let mut a1 = (a + 127) >> 7;
 	if GAMMA2 == GAMMA2_32 {
 		a1 = (a1 * 1025 + (1 << 21)) >> 22;
 		a1 &= 15;
@@ -94,13 +77,12 @@ pub fn decompose<const GAMMA2: usize>(a: i32) -> (i32, i32) {
 		// mask is all-ones exactly then, and 44 ^ 44 == 0.
 		a1 ^= ((43 - a1) >> 31) & a1;
 	}
-	let mut a0: i32 = a - a1 * 2 * gamma2;
+	let mut a0 = a - a1 * 2 * GAMMA2 as i32;
 	a0 -= (((Q - 1) / 2 - a0) >> 31) & Q;
 	(a0, a1)
 }
 
-/// Compute hint bit indicating whether the low bits of the input element overflow into the high
-/// bits.
+/// MakeHint: returns 1 if the low part `a0` spills over into the high part `a1`, otherwise 0.
 ///
 /// Branchless via sign-bit arithmetic: the inputs are derived from secret data
 /// (w0 - c*s2 + c*t0) and this runs on rejected signing attempts whose hints are never
@@ -136,15 +118,13 @@ pub fn make_hint<const GAMMA2: usize>(a0: i32, a1: i32) -> i32 {
 	(gt | lt | (eq & a1_nonzero)) & 1
 }
 
-/// Correct high bits according to hint.
+/// UseHint: returns the high bits of `a`; for nonzero `hint`, +1 if the low part is > 0, else -1.
 ///
 /// The corrected value is `(a1 ± 1) mod m` where `m = (Q-1)/(2*GAMMA2)` is the
 /// number of distinct high-bits values: 16 for `GAMMA2 = (Q-1)/32` (a mask)
 /// and 44 for `GAMMA2 = (Q-1)/88` (explicit wrap-around, as 44 is not a power
 /// of two). Runs only on public data (signature verification), so the
 /// branches are not a timing concern.
-///
-/// Returns corrected high bits.
 pub fn use_hint<const GAMMA2: usize>(a: i32, hint: i32) -> i32 {
 	const {
 		assert_supported_gamma2(GAMMA2);

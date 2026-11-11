@@ -56,8 +56,7 @@ impl<const N: usize> Default for Polyvec<N> {
 	}
 }
 
-/// Implementation of ExpandA. Generates matrix A with uniformly random coefficients a_{i,j} by
-/// performing rejection sampling on the output stream of SHAKE128(rho|j|i).
+/// ExpandA: fills `mat` with the `K x L` matrix `A` in NTT domain, sampled from the seed `rho`.
 pub fn matrix_expand<const K: usize, const L: usize>(
 	mat: &mut [Polyvec<L>; K],
 	rho: &[u8; params::SEEDBYTES],
@@ -69,9 +68,7 @@ pub fn matrix_expand<const K: usize, const L: usize>(
 	}
 }
 
-/// Pointwise multiply vectors of polynomials of length N, multiply resulting vector by 2^{-32} and
-/// add (accumulate) polynomials in it. Input/output vectors are in NTT domain representation. Input
-/// coefficients are assumed to be less than 22*Q. Output coeffcient are less than 2*N*Q.
+/// Sets `w` to the NTT-domain inner product of `u` and `v`, times `2^-32`, summed unreduced.
 pub fn pointwise_acc_montgomery<const N: usize>(w: &mut Poly, u: &Polyvec<N>, v: &Polyvec<N>) {
 	poly::pointwise_montgomery(w, &u.vec[0], &v.vec[0]);
 	let mut t = Poly::default();
@@ -163,8 +160,7 @@ pub fn reduce<const N: usize>(v: &mut Polyvec<N>) {
 	}
 }
 
-/// For all coefficients of polynomials in vector of length N
-/// add Q if coefficient is negative.
+/// Adds `Q` to every negative coefficient of `v`, taking `(-Q, Q)` to the standard range `[0, Q)`.
 pub fn caddq<const N: usize>(v: &mut Polyvec<N>) {
 	for i in 0..N {
 		poly::caddq(&mut v.vec[i]);
@@ -172,7 +168,6 @@ pub fn caddq<const N: usize>(v: &mut Polyvec<N>) {
 }
 
 /// Add vectors of polynomials of length N.
-/// No modular reduction is performed.
 pub fn add<const N: usize>(w: &mut Polyvec<N>, v: &Polyvec<N>) {
 	for i in 0..N {
 		poly::add_ip(&mut w.vec[i], &v.vec[i]);
@@ -180,8 +175,6 @@ pub fn add<const N: usize>(w: &mut Polyvec<N>, v: &Polyvec<N>) {
 }
 
 /// Subtract vectors of polynomials of length N.
-/// Assumes coefficients of polynomials in second input vector
-/// to be less than 2*Q. No modular reduction is performed.
 pub fn sub<const N: usize>(w: &mut Polyvec<N>, v: &Polyvec<N>) {
 	for i in 0..N {
 		poly::sub_ip(&mut w.vec[i], &v.vec[i]);
@@ -199,16 +192,14 @@ pub(crate) fn shiftl<const N: usize>(v: &mut Polyvec<N>) {
 	}
 }
 
-/// Forward NTT of all polynomials in vector of length N. Output coefficients can be up to 16*Q
-/// larger than input coefficients.
+/// Forward NTT of each polynomial of `v` in place; magnitudes can grow by up to `8*Q`.
 pub fn ntt<const N: usize>(v: &mut Polyvec<N>) {
 	for i in 0..N {
 		poly::ntt(&mut v.vec[i]);
 	}
 }
 
-/// Inverse NTT and multiplication by 2^{32} of polynomials
-/// in vector of length N.
+/// Inverse NTT of each polynomial of `v` in place, times the Montgomery factor `2^32`.
 ///
 /// # Preconditions
 ///
@@ -282,8 +273,7 @@ pub fn t1_is_degenerate<const K: usize, const GAMMA2: usize>(t1: &Polyvec<K>) ->
 	large < (K * params::N as usize) / 4
 }
 
-/// For all coefficients a of polynomials in vector of length N, compute a0, a1 such that a mod Q =
-/// a1*2^D + a0 with -2^{D-1} < a0 <= 2^{D-1}. Assumes coefficients to be standard representatives.
+/// Power2Round on every polynomial: `v1` keeps the high bits in place, `v0` receives the low bits.
 pub fn power2round<const N: usize>(v1: &mut Polyvec<N>, v0: &mut Polyvec<N>) {
 	for i in 0..N {
 		poly::power2round(&mut v1.vec[i], &mut v0.vec[i]);
