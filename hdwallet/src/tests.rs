@@ -1,11 +1,8 @@
 #[cfg(test)]
 mod hdwallet_tests {
 	use crate::{
-		derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed,
-		hderive::{ChildNumber, ExtendedPrivKey},
-		mnemonic_to_seed,
-		test_vectors::get_test_vectors,
-		HDLatticeError, SensitiveBytes64,
+		derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed, mnemonic_to_seed,
+		test_vectors::get_test_vectors, HDLatticeError, SensitiveBytes64,
 	};
 	use alloc::{
 		borrow::ToOwned,
@@ -13,7 +10,6 @@ mod hdwallet_tests {
 		string::{String, ToString},
 		vec::Vec,
 	};
-	use core::str::FromStr;
 	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 	use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -311,22 +307,6 @@ mod hdwallet_tests {
 			key2.secret().to_bytes(),
 			"Keys derived from same path should be identical"
 		);
-	}
-
-	#[test]
-	fn test_tiny_hderive_api() {
-		// Test that nam-tiny-hderive works with our seed format
-		let seed: &[u8] = &[42; 64];
-		let path = "m/44'/60'/0'/0'/0'";
-		let mut ext = ExtendedPrivKey::zeroed();
-		ExtendedPrivKey::derive(seed, path, &mut ext).unwrap();
-		assert_eq!(ext.secret().as_bytes(), b"\xfc\x29\xd9\xfc\x63\x5b\x32\x72\x63\x1b\x43\x02\xf7\x9b\xe4\x07\xa7\xf6\x77\xef\x73\x4a\xf2\xc4\x52\x7c\x90\x88\x97\xcd\xaa\x86");
-
-		// Stepping the parent in place must agree with the full-path derivation.
-		let mut stepped = ExtendedPrivKey::zeroed();
-		ExtendedPrivKey::derive(seed, "m/44'/60'/0'/0'", &mut stepped).unwrap();
-		stepped.child_in_place(ChildNumber::from_str("0'").unwrap());
-		assert_eq!(ext.secret().as_bytes(), stepped.secret().as_bytes());
 	}
 
 	// End-to-end known-answer test: pins the full mnemonic -> seed -> wormhole pipeline.

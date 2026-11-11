@@ -47,9 +47,9 @@ fn word_index_pattern(phrase: &str) -> Vec<u8> {
 		.collect()
 }
 
-const PHRASE: &str = "panda eyebrow bullet gorilla call smoke muffin taste mesh \
-	discover soft ostrich alcohol speed nation flash devote level hobby quick \
-	inner drive ghost inside";
+const PHRASE: &str = "battle topple knee humor arrive matrix hub oval cushion \
+	wrestle affair relief disagree boy wild tilt fluid blanket snack wine \
+	genius proof marble flame";
 
 #[test]
 fn mnemonic_word_indices_never_survive_on_the_stack() {

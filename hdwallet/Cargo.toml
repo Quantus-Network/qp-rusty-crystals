@@ -25,7 +25,7 @@ unicode-normalization.workspace = true
 qp-poseidon-core.workspace = true
 zeroize = { workspace = true, features = ["alloc"] }
 
-# Dependency for hderive module (ported from nam-tiny-hderive). The HMAC
+# Dependency for the hderive module. The HMAC
 # construction is implemented in-crate with zeroizing buffers; the `hmac`
 # crate's non-zeroizing state objects leaked secrets into dead stack memory
 # (security review), so it is intentionally not used here.

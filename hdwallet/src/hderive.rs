@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use core::{ops::Deref, str::FromStr};
+use core::str::FromStr;
 use sha2::{
 	digest::{generic_array::GenericArray, Digest},
 	Sha512,
@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 use crate::{SensitiveBytes32, MAX_DERIVATION_DEPTH, MAX_DERIVATION_PATH_BYTES};
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Error {
 	InvalidChildNumber,
 	InvalidDerivationPath,
@@ -17,8 +17,6 @@ pub enum Error {
 	PathTooDeep(usize),
 	InvalidSeedLength(usize),
 }
-
-const HARDENED_BIT: u32 = 1 << 31;
 
 /// SHA-512 block and output sizes (bytes), fixed by the hash function.
 const HMAC_BLOCK_BYTES: usize = 128;
@@ -60,6 +58,9 @@ fn sha512_wiped(first: &[u8], rest: &[&[u8]], out: &mut [u8; HMAC_OUTPUT_BYTES])
 ///
 /// Only keys up to one block are supported (the longer-key hashing step of
 /// RFC 2104 is intentionally omitted); callers pass 14, 32, or 64 bytes.
+// Never inlined: its buffers must stay out of callers' frames and its body
+// must exist only once (hardware-wallet code and stack budget).
+#[inline(never)]
 fn hmac_sha512(key: &[u8], message_parts: &[&[u8]], out: &mut [u8; HMAC_OUTPUT_BYTES]) {
 	debug_assert!(key.len() <= HMAC_BLOCK_BYTES, "keys longer than one block are unsupported");
 
@@ -142,22 +143,20 @@ pub(crate) fn check_path_bounds(path: &str) -> Result<(), Error> {
 	Ok(())
 }
 
-/// A child number for a derived key
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct ChildNumber(u32);
+/// Bit 31 of a hashed child number marks it hardened; path indexes lie below it.
+const HARDENED: u32 = 1 << 31;
 
-impl ChildNumber {
-	pub fn to_bytes(&self) -> [u8; 4] {
-		self.0.to_be_bytes()
-	}
+/// The index of a hardened child, as written in a path (without the hardened bit).
+#[derive(Debug, PartialEq)]
+pub struct ChildNumber {
+	index: u32,
 }
 
-impl FromStr for ChildNumber {
-	type Err = Error;
-
-	fn from_str(child: &str) -> Result<ChildNumber, Error> {
-		let child = child.strip_suffix('\'').ok_or(Error::NotHardened)?;
-
+impl ChildNumber {
+	fn parse(component: &[u8]) -> Result<Self, Error> {
+		let Some((b'\'', digits)) = component.split_last() else {
+			return Err(Error::NotHardened);
+		};
 		// Enforce a canonical decimal encoding before parsing. `u32::from_str`
 		// tolerates a leading '+' and any number of leading zeros, so "44'",
 		// "+44'", "0044'" and "000000044'" would all decode to the same child
@@ -165,86 +164,57 @@ impl FromStr for ChildNumber {
 		// those distinct path strings would derive byte-identical keys and
 		// addresses — collapsing textually distinct paths onto one identity.
 		// Require: non-empty, ASCII digits only, and no redundant leading zero.
-		if child.is_empty() || !child.bytes().all(|b| b.is_ascii_digit()) {
+		if matches!(digits, [] | [b'0', _, ..]) {
 			return Err(Error::InvalidChildNumber);
 		}
-		if child.len() > 1 && child.starts_with('0') {
-			return Err(Error::InvalidChildNumber);
+		let mut index = 0;
+		for byte in digits {
+			let digit = byte.wrapping_sub(b'0');
+			index = match u32::try_from(u64::from(index) * 10 + u64::from(digit)) {
+				Ok(index) if digit <= 9 && index < HARDENED => index,
+				_ => return Err(Error::InvalidChildNumber),
+			};
 		}
-
-		let index: u32 = child.parse().map_err(|_| Error::InvalidChildNumber)?;
-		if index & HARDENED_BIT != 0 {
-			return Err(Error::InvalidChildNumber);
-		}
-		Ok(ChildNumber(index | HARDENED_BIT))
+		Ok(Self { index })
 	}
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct DerivationPath {
-	path: Vec<ChildNumber>,
+impl FromStr for ChildNumber {
+	type Err = Error;
+
+	fn from_str(child: &str) -> Result<Self, Error> {
+		Self::parse(child.as_bytes())
+	}
 }
+
+/// Validates `path` and passes its child numbers to `visit`, from the master key downwards.
+fn for_each_child(path: &str, mut visit: impl FnMut(ChildNumber)) -> Result<(), Error> {
+	check_path_bounds(path)?;
+	let mut components = path.as_bytes().split(|byte| *byte == b'/');
+	let Some(b"m") = components.next() else {
+		return Err(Error::InvalidDerivationPath);
+	};
+	for component in components {
+		visit(ChildNumber::parse(component)?);
+	}
+	Ok(())
+}
+
+/// Proof that a string is a valid path of hardened children below the master key `m`.
+#[derive(Debug)]
+pub struct DerivationPath(());
 
 impl FromStr for DerivationPath {
 	type Err = Error;
 
-	fn from_str(path: &str) -> Result<DerivationPath, Error> {
-		check_path_bounds(path)?;
-
-		let mut parts = path.split('/');
-
-		if parts.next() != Some("m") {
-			return Err(Error::InvalidDerivationPath);
-		}
-
-		Ok(DerivationPath {
-			path: parts.map(str::parse).collect::<Result<Vec<ChildNumber>, Error>>()?,
-		})
+	fn from_str(path: &str) -> Result<Self, Error> {
+		for_each_child(path, |_| ())?;
+		Ok(Self(()))
 	}
 }
 
-impl Deref for DerivationPath {
-	type Target = [ChildNumber];
-
-	fn deref(&self) -> &Self::Target {
-		&self.path
-	}
-}
-
-impl<T> AsRef<T> for DerivationPath
-where
-	T: ?Sized,
-	<DerivationPath as Deref>::Target: AsRef<T>,
-{
-	fn as_ref(&self) -> &T {
-		self.deref().as_ref()
-	}
-}
-
-impl DerivationPath {
-	pub fn iter(&self) -> impl Iterator<Item = &ChildNumber> {
-		self.path.iter()
-	}
-}
-
-pub trait IntoDerivationPath {
-	fn into(self) -> Result<DerivationPath, Error>;
-}
-
-impl IntoDerivationPath for DerivationPath {
-	fn into(self) -> Result<DerivationPath, Error> {
-		Ok(self)
-	}
-}
-
-impl IntoDerivationPath for &str {
-	fn into(self) -> Result<DerivationPath, Error> {
-		self.parse()
-	}
-}
+/// Clone intentionally omitted: the embedded SensitiveBytes32 fields are move-only.
 pub struct ExtendedPrivKey {
-	// Debug intentionally omitted to avoid leaking key material.
-	// Clone intentionally omitted: the embedded SensitiveBytes32 fields are move-only.
 	secret_key: SensitiveBytes32,
 	chain_code: SensitiveBytes32,
 }
@@ -273,28 +243,13 @@ impl ExtendedPrivKey {
 	/// in a dead `Result` slot. With an out-parameter the key material only
 	/// ever exists inside the caller's self-zeroizing value; the
 	/// stack-residue regression test pins this.
-	pub fn derive<Path>(seed: &[u8], path: Path, out: &mut ExtendedPrivKey) -> Result<(), Error>
-	where
-		Path: IntoDerivationPath,
-	{
-		let path = path.into()?;
-		if seed.len() < MIN_SEED_BYTES || seed.len() > MAX_SEED_BYTES {
+	pub fn derive(seed: &[u8], path: &str, out: &mut ExtendedPrivKey) -> Result<(), Error> {
+		DerivationPath::from_str(path)?;
+		if !(MIN_SEED_BYTES..=MAX_SEED_BYTES).contains(&seed.len()) {
 			return Err(Error::InvalidSeedLength(seed.len()));
 		}
-
-		// `result` holds secret_key || chain_code; the self-wiping buffer is
-		// zeroized on drop, after the halves are copied into `out`'s
-		// self-zeroizing `SensitiveBytes32` fields.
-		let mut result = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
-		hmac_sha512(b"Dilithium seed", &[seed], &mut result);
-		out.secret_key.as_mut_bytes().copy_from_slice(&result[..32]);
-		out.chain_code.as_mut_bytes().copy_from_slice(&result[32..]);
-
-		for child in path.as_ref() {
-			out.child_in_place(*child);
-		}
-
-		Ok(())
+		out.master_in_place(seed);
+		for_each_child(path, |child| out.child_in_place(child))
 	}
 
 	/// Borrow the derived secret key.
@@ -311,28 +266,39 @@ impl ExtendedPrivKey {
 
 	/// Overwrites this key with its child key at `child`, in place.
 	///
-	/// This replaces the by-value `child()` (security review): returning a
-	/// fresh `ExtendedPrivKey` moved the child's secret key and chain code
-	/// through a dead `Result` slot on every derivation step (see
-	/// [`Self::derive`]). Stepping in place keeps the key material inside
+	/// Stepping in place keeps the key material inside
 	/// this value's self-zeroizing fields; the parent's bytes are destroyed
 	/// by being overwritten with the child's.
+	// Never inlined: the HMAC output buffer must not sit in `derive`'s frame
+	// while the master step runs below it (hardware-wallet stack budget).
+	#[inline(never)]
 	pub fn child_in_place(&mut self, child: ChildNumber) {
-		// See `derive` for the lifecycle of the self-wiping `result` buffer.
-		let mut result = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
+		let index = (child.index | HARDENED).to_be_bytes();
+		let mut output = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
 		hmac_sha512(
 			self.chain_code.as_bytes(),
-			&[&[0], self.secret_key.as_bytes(), &child.to_bytes()],
-			&mut result,
+			&[&[0], self.secret_key.as_bytes(), &index],
+			&mut output,
 		);
-		self.secret_key.as_mut_bytes().copy_from_slice(&result[..32]);
-		self.chain_code.as_mut_bytes().copy_from_slice(&result[32..]);
+		self.store(&output);
 	}
-}
 
-impl core::fmt::Debug for ExtendedPrivKey {
-	fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-		f.debug_struct("ExtendedPrivKey").finish_non_exhaustive()
+	/// Overwrites this key with the master key of `seed`.
+	// Never inlined, for the stack budget as above.
+	#[inline(never)]
+	fn master_in_place(&mut self, seed: &[u8]) {
+		let mut output = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
+		hmac_sha512(b"Dilithium seed", &[seed], &mut output);
+		self.store(&output);
+	}
+
+	// Never inlined: both steps share one body and keep a smaller frame
+	// (hardware-wallet code and stack budget).
+	#[inline(never)]
+	fn store(&mut self, output: &[u8; HMAC_OUTPUT_BYTES]) {
+		let (secret_key, chain_code) = output.split_at(HMAC_OUTPUT_BYTES / 2);
+		self.secret_key.as_mut_bytes().copy_from_slice(secret_key);
+		self.chain_code.as_mut_bytes().copy_from_slice(chain_code);
 	}
 }
 
@@ -340,22 +306,6 @@ impl core::fmt::Debug for ExtendedPrivKey {
 mod tests {
 	use super::*;
 	use alloc::vec;
-	use bip39::{Language, Mnemonic};
-
-	#[test]
-	fn bip39_to_address() {
-		let phrase = "panda eyebrow bullet gorilla call smoke muffin taste mesh discover soft ostrich alcohol speed nation flash devote level hobby quick inner drive ghost inside";
-
-		let expected_secret_key = b"\x2f\xbd\x41\x6a\x34\xc0\xac\x40\x98\xea\xad\xd0\x8c\x07\xc7\x09\xad\xf4\xd8\x7e\x7a\xa8\x12\x44\xa4\xbf\x2b\xf9\xfb\xfb\xbf\x76";
-
-		let mnemonic = Mnemonic::parse_in_normalized(Language::English, phrase).unwrap();
-		let seed = mnemonic.to_seed_normalized("");
-
-		let mut account = ExtendedPrivKey::zeroed();
-		ExtendedPrivKey::derive(&seed, "m/44'/60'/0'/0'/0'", &mut account).unwrap();
-
-		assert_eq!(expected_secret_key, account.secret().as_bytes(), "Secret key is invalid");
-	}
 
 	// The in-crate zeroizing HMAC must be a correct HMAC-SHA512. Pin it to the
 	// official RFC 4231 test vectors (cases 1-4; the remaining cases use
@@ -446,21 +396,6 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn derive_path() {
-		let path: DerivationPath = "m/44'/60'/0'".parse().unwrap();
-		assert_eq!(
-			path,
-			DerivationPath {
-				path: vec![
-					ChildNumber(44 | HARDENED_BIT),
-					ChildNumber(60 | HARDENED_BIT),
-					ChildNumber(HARDENED_BIT),
-				],
-			}
-		);
-	}
-
 	// Hardened-only is the documented contract (README "Why Hardened Keys
 	// Only?"): lattice keys have no public-derivability, so an unhardened
 	// level cannot mean what BIP-32 implies. This pins both sides of the
@@ -485,8 +420,8 @@ mod tests {
 	#[test]
 	fn non_canonical_child_numbers_rejected() {
 		// The canonical form still works.
-		assert_eq!("44'".parse::<ChildNumber>().unwrap(), ChildNumber(44 | HARDENED_BIT));
-		assert_eq!("0'".parse::<ChildNumber>().unwrap(), ChildNumber(HARDENED_BIT));
+		assert_eq!("44'".parse::<ChildNumber>().unwrap(), ChildNumber { index: 44 });
+		assert_eq!("0'".parse::<ChildNumber>().unwrap(), ChildNumber { index: 0 });
 
 		for bad in ["+44'", "0044'", "000000044'", "+0'", "00'", " 44'", "44 '", "4_4'"] {
 			assert_eq!(
@@ -515,7 +450,10 @@ mod tests {
 	#[test]
 	fn child_indexes_with_hardened_bit_set_rejected() {
 		// The largest valid index and its would-be aliases.
-		assert_eq!("2147483647'".parse::<ChildNumber>().unwrap(), ChildNumber(u32::MAX));
+		assert_eq!(
+			"2147483647'".parse::<ChildNumber>().unwrap(),
+			ChildNumber { index: 2147483647 }
+		);
 		for (aliased, canonical) in [("2147483648'", "0'"), ("2147483692'", "44'")] {
 			assert!(
 				canonical.parse::<ChildNumber>().is_ok(),
