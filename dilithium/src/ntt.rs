@@ -43,43 +43,47 @@ const ZETAS: [i32; N] = [
 const F: i64 = 41978;
 
 /// Forward NTT in place; the output is in bit-reversed order and grows by up to Q per layer.
+#[inline(never)]
 pub fn ntt(a: &mut [i32; N]) {
 	let mut k = 0;
 	let mut len = N / 2;
 	while len > 0 {
-		for block in a.chunks_exact_mut(2 * len) {
+		let mut start = 0;
+		while start < N {
 			k += 1;
 			let zeta = ZETAS[k] as i64;
-			let (lo, hi) = block.split_at_mut(len);
-			for (x, y) in lo.iter_mut().zip(hi) {
-				let t = montgomery_reduce(zeta * *y as i64);
-				*y = *x - t;
-				*x += t;
+			for j in start..start + len {
+				let t = montgomery_reduce(zeta * a[j + len] as i64);
+				a[j + len] = a[j] - t;
+				a[j] += t;
 			}
+			start += 2 * len;
 		}
 		len >>= 1;
 	}
 }
 
 /// Inverse NTT in place, multiplied by the Montgomery factor `2^32`; needs `|a[i]| < Q`.
+#[inline(never)]
 pub fn invntt_tomont(a: &mut [i32; N]) {
 	let mut k = N;
 	let mut len = 1;
 	while len < N {
-		for block in a.chunks_exact_mut(2 * len) {
+		let mut start = 0;
+		while start < N {
 			k -= 1;
 			let zeta = -ZETAS[k] as i64;
-			let (lo, hi) = block.split_at_mut(len);
-			for (x, y) in lo.iter_mut().zip(hi) {
-				let t = *x;
-				*x = t + *y;
-				*y = montgomery_reduce(zeta * (t - *y) as i64);
+			for j in start..start + len {
+				let t = a[j];
+				a[j] = t + a[j + len];
+				a[j + len] = montgomery_reduce(zeta * (t - a[j + len]) as i64);
 			}
+			start += 2 * len;
 		}
 		len <<= 1;
 	}
-	for x in a.iter_mut() {
-		*x = montgomery_reduce(F * *x as i64);
+	for j in 0..N {
+		a[j] = montgomery_reduce(F * a[j] as i64);
 	}
 }
 

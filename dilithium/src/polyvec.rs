@@ -215,6 +215,7 @@ pub fn invntt_tomont<const N: usize>(v: &mut Polyvec<N>) {
 	}
 }
 
+#[inline(never)]
 pub fn pointwise_poly_montgomery<const N: usize>(r: &mut Polyvec<N>, a: &Poly, v: &Polyvec<N>) {
 	for i in 0..N {
 		poly::pointwise_montgomery(&mut r.vec[i], a, &v.vec[i]);

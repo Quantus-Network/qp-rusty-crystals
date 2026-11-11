@@ -6,6 +6,7 @@ const N: usize = params::N as usize;
 ///
 /// Generic over the variant's row count `K`; `PK` is the packed public key
 /// size, checked against `K` at compile time.
+#[inline(never)]
 pub fn pack_pk<const K: usize, const PK: usize>(
 	pk: &mut [u8; PK],
 	rho: &[u8; params::SEEDBYTES],
@@ -14,10 +15,10 @@ pub fn pack_pk<const K: usize, const PK: usize>(
 	const {
 		assert!(PK == params::publickeybytes(K));
 	}
-	let (rho_bytes, t1_bytes) = pk.split_at_mut(params::SEEDBYTES);
-	rho_bytes.copy_from_slice(rho);
-	for (chunk, t1_i) in t1_bytes.chunks_exact_mut(params::POLYT1_PACKEDBYTES).zip(t1.vec.iter()) {
-		poly::t1_pack(chunk, t1_i);
+	pk[..params::SEEDBYTES].copy_from_slice(rho);
+	for i in 0..K {
+		let at = params::SEEDBYTES + i * params::POLYT1_PACKEDBYTES;
+		poly::t1_pack(&mut pk[at..], &t1.vec[i]);
 	}
 }
 
@@ -30,10 +31,10 @@ pub fn unpack_pk<const K: usize, const PK: usize>(
 	const {
 		assert!(PK == params::publickeybytes(K));
 	}
-	let (rho_bytes, t1_bytes) = pk.split_at(params::SEEDBYTES);
-	rho.copy_from_slice(rho_bytes);
-	for (chunk, t1_i) in t1_bytes.chunks_exact(params::POLYT1_PACKEDBYTES).zip(t1.vec.iter_mut()) {
-		poly::t1_unpack(t1_i, chunk);
+	rho.copy_from_slice(&pk[..params::SEEDBYTES]);
+	for i in 0..K {
+		let at = params::SEEDBYTES + i * params::POLYT1_PACKEDBYTES;
+		poly::t1_unpack(&mut t1.vec[i], &pk[at..]);
 	}
 }
 
@@ -41,6 +42,7 @@ pub fn unpack_pk<const K: usize, const PK: usize>(
 ///
 /// Generic over the variant's `K`/`L`/`ETA`; `SK` is the packed secret key
 /// size, checked for consistency at compile time.
+#[inline(never)]
 pub fn pack_sk<const K: usize, const L: usize, const ETA: usize, const SK: usize>(
 	sk: &mut [u8; SK],
 	rho: &[u8; params::SEEDBYTES],
@@ -54,19 +56,22 @@ pub fn pack_sk<const K: usize, const L: usize, const ETA: usize, const SK: usize
 		assert!(SK == params::secretkeybytes(K, L, ETA));
 	}
 	let eta_bytes = params::polyeta_packedbytes(ETA);
-	let (rho_bytes, rest) = sk.split_at_mut(params::SEEDBYTES);
-	let (key_bytes, rest) = rest.split_at_mut(params::SEEDBYTES);
-	let (tr_bytes, rest) = rest.split_at_mut(params::TR_BYTES);
-	let (s_bytes, t0_bytes) = rest.split_at_mut((L + K) * eta_bytes);
-	rho_bytes.copy_from_slice(rho);
-	key_bytes.copy_from_slice(key);
-	tr_bytes.copy_from_slice(tr);
-	let s = s1.vec.iter().chain(s2.vec.iter());
-	for (chunk, s_i) in s_bytes.chunks_exact_mut(eta_bytes).zip(s) {
-		poly::eta_pack::<ETA>(chunk, s_i);
+	sk[..params::SEEDBYTES].copy_from_slice(rho);
+	let mut idx = params::SEEDBYTES;
+	sk[idx..idx + params::SEEDBYTES].copy_from_slice(key);
+	idx += params::SEEDBYTES;
+	sk[idx..idx + params::TR_BYTES].copy_from_slice(tr);
+	idx += params::TR_BYTES;
+	for i in 0..L {
+		poly::eta_pack::<ETA>(&mut sk[idx + i * eta_bytes..], &s1.vec[i]);
 	}
-	for (chunk, t0_i) in t0_bytes.chunks_exact_mut(params::POLYT0_PACKEDBYTES).zip(t0.vec.iter()) {
-		poly::t0_pack(chunk, t0_i);
+	idx += L * eta_bytes;
+	for i in 0..K {
+		poly::eta_pack::<ETA>(&mut sk[idx + i * eta_bytes..], &s2.vec[i]);
+	}
+	idx += K * eta_bytes;
+	for i in 0..K {
+		poly::t0_pack(&mut sk[idx + i * params::POLYT0_PACKEDBYTES..], &t0.vec[i]);
 	}
 }
 
@@ -92,23 +97,26 @@ pub fn unpack_sk<const K: usize, const L: usize, const ETA: usize, const SK: usi
 		assert!(SK == params::secretkeybytes(K, L, ETA));
 	}
 	let eta_bytes = params::polyeta_packedbytes(ETA);
-	let (rho_bytes, rest) = sk.split_at(params::SEEDBYTES);
-	let (key_bytes, rest) = rest.split_at(params::SEEDBYTES);
-	let (tr_bytes, rest) = rest.split_at(params::TR_BYTES);
-	let (s_bytes, t0_bytes) = rest.split_at((L + K) * eta_bytes);
-	rho.copy_from_slice(rho_bytes);
-	key.copy_from_slice(key_bytes);
-	tr.copy_from_slice(tr_bytes);
+	rho.copy_from_slice(&sk[..params::SEEDBYTES]);
+	let mut idx = params::SEEDBYTES;
+	key.copy_from_slice(&sk[idx..idx + params::SEEDBYTES]);
+	idx += params::SEEDBYTES;
+	tr.copy_from_slice(&sk[idx..idx + params::TR_BYTES]);
+	idx += params::TR_BYTES;
 	// Accumulate with `&` rather than short-circuiting so every polynomial is
 	// unpacked and checked regardless of earlier results (data-independent
 	// control flow; honest keys always pass anyway).
 	let mut canonical = true;
-	let s = s1.vec.iter_mut().chain(s2.vec.iter_mut());
-	for (chunk, s_i) in s_bytes.chunks_exact(eta_bytes).zip(s) {
-		canonical &= poly::eta_unpack::<ETA>(s_i, chunk);
+	for i in 0..L {
+		canonical &= poly::eta_unpack::<ETA>(&mut s1.vec[i], &sk[idx + i * eta_bytes..]);
 	}
-	for (chunk, t0_i) in t0_bytes.chunks_exact(params::POLYT0_PACKEDBYTES).zip(t0.vec.iter_mut()) {
-		poly::t0_unpack(t0_i, chunk);
+	idx += L * eta_bytes;
+	for i in 0..K {
+		canonical &= poly::eta_unpack::<ETA>(&mut s2.vec[i], &sk[idx + i * eta_bytes..]);
+	}
+	idx += K * eta_bytes;
+	for i in 0..K {
+		poly::t0_unpack(&mut t0.vec[i], &sk[idx + i * params::POLYT0_PACKEDBYTES..]);
 	}
 	canonical
 }

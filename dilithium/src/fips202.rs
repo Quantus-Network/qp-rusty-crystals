@@ -131,6 +131,85 @@ fn chi([a, e, i, o, u]: [u64; 5]) -> [u64; 5] {
 	[a ^ (!e & i), e ^ (!i & o), i ^ (!o & u), o ^ (!u & a), u ^ (!a & e)]
 }
 
+/// One round of Keccak-f[1600]: theta, rho, pi, chi and iota applied to the lanes `a`.
+#[inline(always)]
+fn keccakf1600_round(a: [u64; 25], round_constant: u64) -> [u64; 25] {
+	let bca = a[0] ^ a[5] ^ a[10] ^ a[15] ^ a[20];
+	let bce = a[1] ^ a[6] ^ a[11] ^ a[16] ^ a[21];
+	let bci = a[2] ^ a[7] ^ a[12] ^ a[17] ^ a[22];
+	let bco = a[3] ^ a[8] ^ a[13] ^ a[18] ^ a[23];
+	let bcu = a[4] ^ a[9] ^ a[14] ^ a[19] ^ a[24];
+
+	let da = bcu ^ rol(bce, 1);
+	let de = bca ^ rol(bci, 1);
+	let di = bce ^ rol(bco, 1);
+	let d_o = bci ^ rol(bcu, 1);
+	let du = bco ^ rol(bca, 1);
+
+	let [eba, ebe, ebi, ebo, ebu] = chi([
+		a[0] ^ da,
+		rol(a[6] ^ de, 44),
+		rol(a[12] ^ di, 43),
+		rol(a[18] ^ d_o, 21),
+		rol(a[24] ^ du, 14),
+	]);
+	let [ega, ege, egi, ego, egu] = chi([
+		rol(a[3] ^ d_o, 28),
+		rol(a[9] ^ du, 20),
+		rol(a[10] ^ da, 3),
+		rol(a[16] ^ de, 45),
+		rol(a[22] ^ di, 61),
+	]);
+	let [eka, eke, eki, eko, eku] = chi([
+		rol(a[1] ^ de, 1),
+		rol(a[7] ^ di, 6),
+		rol(a[13] ^ d_o, 25),
+		rol(a[19] ^ du, 8),
+		rol(a[20] ^ da, 18),
+	]);
+	let [ema, eme, emi, emo, emu] = chi([
+		rol(a[4] ^ du, 27),
+		rol(a[5] ^ da, 36),
+		rol(a[11] ^ de, 10),
+		rol(a[17] ^ di, 15),
+		rol(a[23] ^ d_o, 56),
+	]);
+	let [esa, ese, esi, eso, esu] = chi([
+		rol(a[2] ^ di, 62),
+		rol(a[8] ^ d_o, 55),
+		rol(a[14] ^ du, 39),
+		rol(a[15] ^ da, 41),
+		rol(a[21] ^ de, 2),
+	]);
+	[
+		eba ^ round_constant,
+		ebe,
+		ebi,
+		ebo,
+		ebu,
+		ega,
+		ege,
+		egi,
+		ego,
+		egu,
+		eka,
+		eke,
+		eki,
+		eko,
+		eku,
+		ema,
+		eme,
+		emi,
+		emo,
+		emu,
+		esa,
+		ese,
+		esi,
+		eso,
+		esu,
+	]
+}
+
 /// Secret-scrubbing boundary: this permutation unrolls the sponge into ~25 lane
 /// locals plus per-round temporaries. These are deliberately *not* individually
 /// zeroized. Doing so would be security theater with a real cost: `zeroize`'s
@@ -143,95 +222,26 @@ fn chi([a, e, i, o, u]: [u64; 5]) -> [u64; 5] {
 /// state is dropped; callers that squeeze secrets into their own buffers are
 /// responsible for wiping those (see `poly::uniform_eta` / `uniform_gamma1`).
 fn keccakf1600_statepermute(state: &mut [u64; 25]) {
-	let [mut aba, mut abe, mut abi, mut abo, mut abu, rest @ ..] = *state;
-	let [mut aga, mut age, mut agi, mut ago, mut agu, rest @ ..] = rest;
-	let [mut aka, mut ake, mut aki, mut ako, mut aku, rest @ ..] = rest;
-	let [mut ama, mut ame, mut ami, mut amo, mut amu, rest @ ..] = rest;
-	let [mut asa, mut ase, mut asi, mut aso, mut asu] = rest;
-
-	for round_constant in KECCAKF_ROUND_CONSTANTS {
-		let bca = aba ^ aga ^ aka ^ ama ^ asa;
-		let bce = abe ^ age ^ ake ^ ame ^ ase;
-		let bci = abi ^ agi ^ aki ^ ami ^ asi;
-		let bco = abo ^ ago ^ ako ^ amo ^ aso;
-		let bcu = abu ^ agu ^ aku ^ amu ^ asu;
-
-		let da = bcu ^ rol(bce, 1);
-		let de = bca ^ rol(bci, 1);
-		let di = bce ^ rol(bco, 1);
-		let d_o = bci ^ rol(bcu, 1);
-		let du = bco ^ rol(bca, 1);
-
-		let [eba, ebe, ebi, ebo, ebu] = chi([
-			aba ^ da,
-			rol(age ^ de, 44),
-			rol(aki ^ di, 43),
-			rol(amo ^ d_o, 21),
-			rol(asu ^ du, 14),
-		]);
-		let [ega, ege, egi, ego, egu] = chi([
-			rol(abo ^ d_o, 28),
-			rol(agu ^ du, 20),
-			rol(aka ^ da, 3),
-			rol(ame ^ de, 45),
-			rol(asi ^ di, 61),
-		]);
-		let [eka, eke, eki, eko, eku] = chi([
-			rol(abe ^ de, 1),
-			rol(agi ^ di, 6),
-			rol(ako ^ d_o, 25),
-			rol(amu ^ du, 8),
-			rol(asa ^ da, 18),
-		]);
-		let [ema, eme, emi, emo, emu] = chi([
-			rol(abu ^ du, 27),
-			rol(aga ^ da, 36),
-			rol(ake ^ de, 10),
-			rol(ami ^ di, 15),
-			rol(aso ^ d_o, 56),
-		]);
-		let [esa, ese, esi, eso, esu] = chi([
-			rol(abi ^ di, 62),
-			rol(ago ^ d_o, 55),
-			rol(aku ^ du, 39),
-			rol(ama ^ da, 41),
-			rol(ase ^ de, 2),
-		]);
-
-		[aba, abe, abi, abo, abu] = [eba ^ round_constant, ebe, ebi, ebo, ebu];
-		[aga, age, agi, ago, agu] = [ega, ege, egi, ego, egu];
-		[aka, ake, aki, ako, aku] = [eka, eke, eki, eko, eku];
-		[ama, ame, ami, amo, amu] = [ema, eme, emi, emo, emu];
-		[asa, ase, asi, aso, asu] = [esa, ese, esi, eso, esu];
+	let mut a = *state;
+	for pair in KECCAKF_ROUND_CONSTANTS.chunks_exact(2) {
+		a = keccakf1600_round(keccakf1600_round(a, pair[0]), pair[1]);
 	}
-
-	*state = [
-		aba, abe, abi, abo, abu, aga, age, agi, ago, agu, aka, ake, aki, ako, aku, ama, ame, ami,
-		amo, amu, asa, ase, asi, aso, asu,
-	];
-}
-
-/// XORs `bytes` into the state, starting at byte offset `pos` of the lane array.
-fn xor_bytes(s: &mut [u64; 25], pos: usize, bytes: &[u8]) {
-	for (i, &byte) in (pos..).zip(bytes) {
-		s[i / 8] ^= (byte as u64) << (8 * (i % 8));
-	}
+	*state = a;
 }
 
 /// Absorb step of Keccak; incremental. The rate comes from the state's type,
 /// so `pos` can never be interpreted against the wrong block size.
+#[inline(never)]
 fn keccak_absorb<const R: usize>(state: &mut KeccakState<R>, input: &[u8]) {
 	debug_assert!(!state.squeezing, "fips202: absorb called on a finalized (squeezing) state");
-	let mut input = input;
-	while state.pos + input.len() >= R {
-		let (block, rest) = input.split_at(R - state.pos);
-		xor_bytes(&mut state.s, state.pos, block);
-		keccakf1600_statepermute(&mut state.s);
-		state.pos = 0;
-		input = rest;
+	for &byte in input {
+		state.s[state.pos / 8] ^= (byte as u64) << (8 * (state.pos % 8));
+		state.pos += 1;
+		if state.pos >= R {
+			keccakf1600_statepermute(&mut state.s);
+			state.pos = 0;
+		}
 	}
-	xor_bytes(&mut state.s, state.pos, input);
-	state.pos += input.len();
 }
 
 /// Finalize absorb step: apply domain-separation/padding and transition the

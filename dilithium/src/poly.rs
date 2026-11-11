@@ -131,6 +131,7 @@ impl Poly {
 /// limit). Larger values overflow the underlying `reduce32` shift trick:
 /// panic in builds with overflow checks, silent wraparound in release builds.
 /// Checked with `debug_assert!`.
+#[inline(never)]
 pub fn reduce(a: &mut Poly) {
 	debug_assert!(
 		a.coeffs.iter().all(|&c| c <= i32::MAX - (1 << 22)),
@@ -142,6 +143,7 @@ pub fn reduce(a: &mut Poly) {
 }
 
 /// Adds Q to every negative coefficient.
+#[inline(never)]
 pub fn caddq(a: &mut Poly) {
 	for c in a.coeffs.iter_mut() {
 		*c = reduce::caddq(*c);
@@ -149,6 +151,7 @@ pub fn caddq(a: &mut Poly) {
 }
 
 /// Adds `b` to `a` coefficient-wise, without modular reduction.
+#[inline(never)]
 pub fn add_ip(a: &mut Poly, b: &Poly) {
 	for (x, y) in a.coeffs.iter_mut().zip(b.coeffs.iter()) {
 		*x += y;
@@ -156,6 +159,7 @@ pub fn add_ip(a: &mut Poly, b: &Poly) {
 }
 
 /// Subtracts `b` from `a` coefficient-wise, without modular reduction.
+#[inline(never)]
 pub fn sub_ip(a: &mut Poly, b: &Poly) {
 	for (x, y) in a.coeffs.iter_mut().zip(b.coeffs.iter()) {
 		*x -= y;
@@ -175,6 +179,7 @@ pub fn sub_ip(a: &mut Poly, b: &Poly) {
 /// The only caller is the signature verify path, which applies it to `t1`
 /// (the public high bits of the public key), whose coefficients are masked
 /// to 10 bits by [`t1_unpack`] — far below `2^{31-D}` — by construction.
+#[inline(never)]
 pub(crate) fn shiftl(a: &mut Poly) {
 	debug_assert!(
 		a.coeffs.iter().all(|&c| c.unsigned_abs() < 1 << (31 - params::D)),
@@ -232,6 +237,7 @@ pub fn invntt_tomont(a: &mut Poly) {
 /// this comfortably (forward-NTT output is below `8*Q`, and `(8*Q)^2 <
 /// 2^31 * Q`). Checked with `debug_assert!`, matching the module's other
 /// bounded helpers.
+#[inline(never)]
 pub fn pointwise_montgomery(c: &mut Poly, a: &Poly, b: &Poly) {
 	debug_assert!(
 		(0..N).all(|i| {
@@ -255,6 +261,7 @@ pub fn pointwise_montgomery(c: &mut Poly, a: &Poly, b: &Poly) {
 /// decompose identically. Reaching this with a coefficient outside `(-Q, Q)`
 /// (only possible via [`Poly::coeffs_mut`]) violates the rounding
 /// precondition — see [`rounding::power2round`].
+#[inline(never)]
 pub fn power2round(a1: &mut Poly, a0: &mut Poly) {
 	for i in 0..N {
 		(a0.coeffs[i], a1.coeffs[i]) = rounding::power2round(a1.coeffs[i]);
@@ -356,6 +363,7 @@ pub(crate) fn t1_unpack(r: &mut Poly, a: &[u8]) {
 }
 
 /// Packs t0 (coefficients in `(-2^(D-1), 2^(D-1)]`) as `2^(D-1) - coefficient` at 13 bits each.
+#[inline(never)]
 pub(crate) fn t0_pack(r: &mut [u8], a: &Poly) {
 	let mut t = [0i32; 8];
 	for i in 0..N / 8 {
@@ -382,20 +390,18 @@ pub(crate) fn t0_pack(r: &mut [u8], a: &Poly) {
 }
 
 /// Unpacks t0 from 13 bits per coefficient into `(-2^(D-1), 2^(D-1)]`.
+#[inline(never)]
 pub(crate) fn t0_unpack(r: &mut Poly, a: &[u8]) {
 	for i in 0..N / 8 {
 		let b = |k: usize| a[13 * i + k] as i32;
-		r.coeffs[8 * i + 0] = (b(0) | b(1) << 8) & 0x1FFF;
-		r.coeffs[8 * i + 1] = (b(1) >> 5 | b(2) << 3 | b(3) << 11) & 0x1FFF;
-		r.coeffs[8 * i + 2] = (b(3) >> 2 | b(4) << 6) & 0x1FFF;
-		r.coeffs[8 * i + 3] = (b(4) >> 7 | b(5) << 1 | b(6) << 9) & 0x1FFF;
-		r.coeffs[8 * i + 4] = (b(6) >> 4 | b(7) << 4 | b(8) << 12) & 0x1FFF;
-		r.coeffs[8 * i + 5] = (b(8) >> 1 | b(9) << 7) & 0x1FFF;
-		r.coeffs[8 * i + 6] = (b(9) >> 6 | b(10) << 2 | b(11) << 10) & 0x1FFF;
-		r.coeffs[8 * i + 7] = (b(11) >> 3 | b(12) << 5) & 0x1FFF;
-	}
-	for c in r.coeffs.iter_mut() {
-		*c = D_SHL - *c;
+		r.coeffs[8 * i + 0] = D_SHL - ((b(0) | b(1) << 8) & 0x1FFF);
+		r.coeffs[8 * i + 1] = D_SHL - ((b(1) >> 5 | b(2) << 3 | b(3) << 11) & 0x1FFF);
+		r.coeffs[8 * i + 2] = D_SHL - ((b(3) >> 2 | b(4) << 6) & 0x1FFF);
+		r.coeffs[8 * i + 3] = D_SHL - ((b(4) >> 7 | b(5) << 1 | b(6) << 9) & 0x1FFF);
+		r.coeffs[8 * i + 4] = D_SHL - ((b(6) >> 4 | b(7) << 4 | b(8) << 12) & 0x1FFF);
+		r.coeffs[8 * i + 5] = D_SHL - ((b(8) >> 1 | b(9) << 7) & 0x1FFF);
+		r.coeffs[8 * i + 6] = D_SHL - ((b(9) >> 6 | b(10) << 2 | b(11) << 10) & 0x1FFF);
+		r.coeffs[8 * i + 7] = D_SHL - ((b(11) >> 3 | b(12) << 5) & 0x1FFF);
 	}
 }
 
@@ -631,6 +637,7 @@ pub fn challenge<const TAU: usize, const CD: usize>(c: &mut Poly, seed: &[u8; CD
 /// The packed encoding stores `ETA - coefficient` per slot: 3 bits (8
 /// coefficients per 3 bytes) for `ETA = 2`, 4 bits (2 coefficients per byte)
 /// for `ETA = 4`.
+#[inline(never)]
 pub(crate) fn eta_pack<const ETA: usize>(r: &mut [u8], a: &Poly) {
 	const {
 		assert!(ETA == 2 || ETA == 4, "unsupported ETA parameter");
@@ -669,39 +676,31 @@ pub(crate) fn eta_pack<const ETA: usize>(r: &mut [u8], a: &Poly) {
 /// if any slot is non-canonical (the output polynomial is still fully
 /// written in that case; callers must treat it as invalid).
 #[must_use]
+#[inline(never)]
 pub(crate) fn eta_unpack<const ETA: usize>(r: &mut Poly, a: &[u8]) -> bool {
 	const {
 		assert!(ETA == 2 || ETA == 4, "unsupported ETA parameter");
 	}
-	if ETA == 2 {
-		for i in 0..N / 8 {
-			let b = |k: usize| a[3 * i + k] as i32;
-			r.coeffs[8 * i + 0] = b(0) & 7;
-			r.coeffs[8 * i + 1] = b(0) >> 3 & 7;
-			r.coeffs[8 * i + 2] = (b(0) >> 6 | b(1) << 2) & 7;
-			r.coeffs[8 * i + 3] = b(1) >> 1 & 7;
-			r.coeffs[8 * i + 4] = b(1) >> 4 & 7;
-			r.coeffs[8 * i + 5] = (b(1) >> 7 | b(2) << 1) & 7;
-			r.coeffs[8 * i + 6] = b(2) >> 2 & 7;
-			r.coeffs[8 * i + 7] = b(2) >> 5 & 7;
-		}
-	} else {
-		for i in 0..N / 2 {
-			r.coeffs[2 * i + 0] = (a[i] & 0x0F) as i32;
-			r.coeffs[2 * i + 1] = (a[i] >> 4) as i32;
-		}
-	}
 	let eta = ETA as i32;
-	// Canonicality sweep after the fact, accumulated with non-short-circuiting
-	// `&` (`Iterator::all` would exit at the first failure): the sweep always
+	let slot_bits = if ETA == 2 { 3 } else { 4 };
+	// Canonicality check on every coefficient, accumulated with non-short-circuiting
+	// `&` (`Iterator::all` would exit at the first failure): the loop always
 	// traverses the whole polynomial, so honest keys (which always pass) take
 	// a data-independent path through this function. The range check is
 	// ETA-agnostic: every non-canonical slot decodes to a coefficient below
 	// -ETA for both encodings, so it is caught here.
 	let mut canonical = true;
+	let (mut bits, mut len, mut next) = (0u32, 0, 0);
 	for c in r.coeffs.iter_mut() {
-		*c = eta - *c;
+		if len < slot_bits {
+			bits |= (a[next] as u32) << len;
+			next += 1;
+			len += 8;
+		}
+		*c = eta - (bits & ((1 << slot_bits) - 1)) as i32;
 		canonical &= (*c >= -eta) & (*c <= eta);
+		bits >>= slot_bits;
+		len -= slot_bits;
 	}
 	canonical
 }
@@ -749,27 +748,26 @@ pub fn z_pack<const GAMMA1: usize, const PZ: usize>(r: &mut [u8; PZ], a: &Poly) 
 ///
 /// The input is an exact-size array so a truncated slice is rejected at compile
 /// time rather than panicking on an out-of-bounds read.
+#[inline(never)]
 pub fn z_unpack<const GAMMA1: usize, const PZ: usize>(r: &mut Poly, a: &[u8; PZ]) {
 	const {
 		assert!(PZ == params::polyz_packedbytes(GAMMA1));
 	}
+	let gamma1 = GAMMA1 as i32;
 	if GAMMA1 == 1 << 17 {
 		for i in 0..N / 4 {
 			let b = |k: usize| a[9 * i + k] as i32;
-			r.coeffs[4 * i + 0] = (b(0) | b(1) << 8 | b(2) << 16) & 0x3FFFF;
-			r.coeffs[4 * i + 1] = (b(2) >> 2 | b(3) << 6 | b(4) << 14) & 0x3FFFF;
-			r.coeffs[4 * i + 2] = (b(4) >> 4 | b(5) << 4 | b(6) << 12) & 0x3FFFF;
-			r.coeffs[4 * i + 3] = (b(6) >> 6 | b(7) << 2 | b(8) << 10) & 0x3FFFF;
+			r.coeffs[4 * i + 0] = gamma1 - ((b(0) | b(1) << 8 | b(2) << 16) & 0x3FFFF);
+			r.coeffs[4 * i + 1] = gamma1 - ((b(2) >> 2 | b(3) << 6 | b(4) << 14) & 0x3FFFF);
+			r.coeffs[4 * i + 2] = gamma1 - ((b(4) >> 4 | b(5) << 4 | b(6) << 12) & 0x3FFFF);
+			r.coeffs[4 * i + 3] = gamma1 - ((b(6) >> 6 | b(7) << 2 | b(8) << 10) & 0x3FFFF);
 		}
 	} else {
 		for i in 0..N / 2 {
 			let b = |k: usize| a[5 * i + k] as i32;
-			r.coeffs[2 * i + 0] = (b(0) | b(1) << 8 | b(2) << 16) & 0xFFFFF;
-			r.coeffs[2 * i + 1] = b(2) >> 4 | b(3) << 4 | b(4) << 12;
+			r.coeffs[2 * i + 0] = gamma1 - ((b(0) | b(1) << 8 | b(2) << 16) & 0xFFFFF);
+			r.coeffs[2 * i + 1] = gamma1 - (b(2) >> 4 | b(3) << 4 | b(4) << 12);
 		}
-	}
-	for c in r.coeffs.iter_mut() {
-		*c = GAMMA1 as i32 - *c;
 	}
 }
 
