@@ -147,7 +147,14 @@ This repository has 100% code coverage for all critical logic and functionality.
 
 ## License
 
-[GPL-3.0](LICENSE) - See LICENSE file for details.
+| Crate | License |
+|-------|---------|
+| `qp-rusty-crystals-dilithium` | [GPL-3.0-only](dilithium/LICENSE) |
+| `qp-rusty-crystals-hdwallet` | [Apache-2.0](LICENSE) |
+| `qp-rusty-crystals-threshold` | [Apache-2.0](LICENSE) |
+| `qp-rusty-crystals-lattice-attack` | [Apache-2.0](LICENSE) |
+
+The dilithium crate is GPL-3.0-only because it is derived from Quantum Blockchains' GPL-3.0 Rust port (see Acknowledgements). The other crates depend on it, so any build that includes them must also comply with GPL-3.0 for the dilithium code.
 
 ## Acknowledgements
 

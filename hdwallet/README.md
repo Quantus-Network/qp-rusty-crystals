@@ -132,4 +132,4 @@ is enabled; the multi-variant suite runs for whichever features are active.
 
 ## License
 
-GPL-3.0 - See [LICENSE](../LICENSE) for details.
+Apache-2.0 - See [LICENSE](LICENSE) for details. Depends on `qp-rusty-crystals-dilithium`, which is GPL-3.0-only.

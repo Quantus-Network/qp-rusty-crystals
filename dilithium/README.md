@@ -173,4 +173,4 @@ cargo run --example stack_usage_demo -p qp-rusty-crystals-dilithium
 
 ## License
 
-GPL-3.0 - See [LICENSE](LICENSE) for details.
+GPL-3.0-only - See [LICENSE](LICENSE) for details. This crate is derived from [Quantum Blockchains' Rust port](https://github.com/Quantum-Blockchains/dilithium) of [pq-crystals](https://github.com/pq-crystals/dilithium), which is licensed under GPL-3.0.
