@@ -213,8 +213,9 @@ impl FromStr for DerivationPath {
 	}
 }
 
-/// Clone intentionally omitted: the embedded SensitiveBytes32 fields are move-only.
 pub struct ExtendedPrivKey {
+	// Debug intentionally omitted to avoid leaking key material.
+	// Clone intentionally omitted: the embedded SensitiveBytes32 fields are move-only.
 	secret_key: SensitiveBytes32,
 	chain_code: SensitiveBytes32,
 }
@@ -245,11 +246,24 @@ impl ExtendedPrivKey {
 	/// stack-residue regression test pins this.
 	pub fn derive(seed: &[u8], path: &str, out: &mut ExtendedPrivKey) -> Result<(), Error> {
 		DerivationPath::from_str(path)?;
-		if !(MIN_SEED_BYTES..=MAX_SEED_BYTES).contains(&seed.len()) {
+		if seed.len() < MIN_SEED_BYTES || seed.len() > MAX_SEED_BYTES {
 			return Err(Error::InvalidSeedLength(seed.len()));
 		}
 		out.master_in_place(seed);
 		for_each_child(path, |child| out.child_in_place(child))
+	}
+
+	/// Overwrites this key with the master key of `seed`.
+	// Never inlined: the HMAC output buffer must not sit in `derive`'s frame
+	// while the child steps run (hardware-wallet stack budget).
+	#[inline(never)]
+	fn master_in_place(&mut self, seed: &[u8]) {
+		// `result` holds secret_key || chain_code; the self-wiping buffer is
+		// zeroized on drop, after the halves are copied into this key's
+		// self-zeroizing `SensitiveBytes32` fields.
+		let mut result = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
+		hmac_sha512(b"Dilithium seed", &[seed], &mut result);
+		self.store(&result);
 	}
 
 	/// Borrow the derived secret key.
@@ -266,39 +280,38 @@ impl ExtendedPrivKey {
 
 	/// Overwrites this key with its child key at `child`, in place.
 	///
-	/// Stepping in place keeps the key material inside
+	/// This replaces the by-value `child()` (security review): returning a
+	/// fresh `ExtendedPrivKey` moved the child's secret key and chain code
+	/// through a dead `Result` slot on every derivation step (see
+	/// [`Self::derive`]). Stepping in place keeps the key material inside
 	/// this value's self-zeroizing fields; the parent's bytes are destroyed
 	/// by being overwritten with the child's.
-	// Never inlined: the HMAC output buffer must not sit in `derive`'s frame
-	// while the master step runs below it (hardware-wallet stack budget).
+	// Never inlined, for the stack budget as in `master_in_place`.
 	#[inline(never)]
 	pub fn child_in_place(&mut self, child: ChildNumber) {
 		let index = (child.index | HARDENED).to_be_bytes();
-		let mut output = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
+		// See `master_in_place` for the lifecycle of the self-wiping `result` buffer.
+		let mut result = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
 		hmac_sha512(
 			self.chain_code.as_bytes(),
 			&[&[0], self.secret_key.as_bytes(), &index],
-			&mut output,
+			&mut result,
 		);
-		self.store(&output);
-	}
-
-	/// Overwrites this key with the master key of `seed`.
-	// Never inlined, for the stack budget as above.
-	#[inline(never)]
-	fn master_in_place(&mut self, seed: &[u8]) {
-		let mut output = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
-		hmac_sha512(b"Dilithium seed", &[seed], &mut output);
-		self.store(&output);
+		self.store(&result);
 	}
 
 	// Never inlined: both steps share one body and keep a smaller frame
 	// (hardware-wallet code and stack budget).
 	#[inline(never)]
-	fn store(&mut self, output: &[u8; HMAC_OUTPUT_BYTES]) {
-		let (secret_key, chain_code) = output.split_at(HMAC_OUTPUT_BYTES / 2);
-		self.secret_key.as_mut_bytes().copy_from_slice(secret_key);
-		self.chain_code.as_mut_bytes().copy_from_slice(chain_code);
+	fn store(&mut self, result: &[u8; HMAC_OUTPUT_BYTES]) {
+		self.secret_key.as_mut_bytes().copy_from_slice(&result[..32]);
+		self.chain_code.as_mut_bytes().copy_from_slice(&result[32..]);
+	}
+}
+
+impl core::fmt::Debug for ExtendedPrivKey {
+	fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+		f.debug_struct("ExtendedPrivKey").finish_non_exhaustive()
 	}
 }
 
