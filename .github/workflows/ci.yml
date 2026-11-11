@@ -102,7 +102,8 @@ jobs:
             }
             echo "::endgroup::"
           }
-          for probe in import_stack_zeroization sign_stack_zeroization sensitive_bytes_stack_zeroization; do
+          for probe in import_stack_zeroization sign_stack_zeroization sensitive_bytes_stack_zeroization \
+              secret_residue_stack_zeroization; do
             run_probe -p qp-rusty-crystals-dilithium --all-features --test "$probe"
           done
           for probe in dkg_stack_zeroization signing_stack_zeroization dealer_stack_zeroization \
