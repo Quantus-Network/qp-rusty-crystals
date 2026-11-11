@@ -147,10 +147,19 @@ This repository has 100% code coverage for all critical logic and functionality.
 
 ## License
 
-[Apache-2.0](LICENSE) for every crate in this workspace.
+| Crate | License |
+|-------|---------|
+| `qp-rusty-crystals-dilithium` | [Apache-2.0](LICENSE) |
+| `qp-rusty-crystals-hdwallet` | [GPL-3.0-only](hdwallet/LICENSE) |
+| `qp-rusty-crystals-threshold` | [Apache-2.0](LICENSE) |
+| `qp-rusty-crystals-lattice-attack` | [Apache-2.0](LICENSE) |
+
+The hdwallet crate is GPL-3.0-only because its `hderive` module is derived from tiny-hderive, which is GPL-3.0.
 
 Versions of `qp-rusty-crystals-dilithium` up to and including 4.1.1 are GPL-3.0-only: they contained code from Quantum Blockchains' GPL-3.0 Rust port of pq-crystals. That code has since been replaced by a re-implementation from the pq-crystals reference.
 
 ## Acknowledgements
 
 The ML-DSA arithmetic, packing and Keccak code is a Rust port of the [pq-crystals](https://github.com/pq-crystals/dilithium) reference implementation, which its authors release as public domain (CC0) or under Apache-2.0.
+
+The hdwallet `hderive` module was ported from [nam-tiny-hderive](https://github.com/namada-net/tiny-hderive), the Namada fork of [tiny-hderive](https://github.com/maciejhirsz/tiny-hderive).

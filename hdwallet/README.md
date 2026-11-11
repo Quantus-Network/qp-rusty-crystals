@@ -132,4 +132,4 @@ is enabled; the multi-variant suite runs for whichever features are active.
 
 ## License
 
-Apache-2.0 - See [LICENSE](LICENSE) for details.
+GPL-3.0-only - See [LICENSE](LICENSE) for details. The `hderive` module is derived from [tiny-hderive](https://github.com/maciejhirsz/tiny-hderive) (through the Namada fork, `nam-tiny-hderive`), which is licensed under GPL-3.0.
