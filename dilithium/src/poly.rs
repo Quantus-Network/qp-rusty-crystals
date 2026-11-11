@@ -362,14 +362,23 @@ pub(crate) fn t1_unpack(r: &mut Poly, a: &[u8]) {
 	}
 }
 
+/// Makes the compiler keep a secret staging buffer in its own memory, which the caller wipes,
+/// rather than in registers that it may spill to frame slots nothing wipes.
+#[inline(always)]
+fn pin_staging<T>(staging: &mut T) {
+	core::hint::black_box(staging);
+}
+
 /// Packs t0 (coefficients in `(-2^(D-1), 2^(D-1)]`) as `2^(D-1) - coefficient` at 13 bits each.
 #[inline(never)]
 pub(crate) fn t0_pack(r: &mut [u8], a: &Poly) {
+	let r = &mut r[..params::POLYT0_PACKEDBYTES];
 	let mut t = [0i32; 8];
 	for i in 0..N / 8 {
 		for j in 0..8 {
 			t[j] = D_SHL - a.coeffs[8 * i + j];
 		}
+		pin_staging(&mut t);
 		r[13 * i + 0] = t[0] as u8;
 		r[13 * i + 1] = (t[0] >> 8 | t[1] << 5) as u8;
 		r[13 * i + 2] = (t[1] >> 3) as u8;
@@ -643,12 +652,14 @@ pub(crate) fn eta_pack<const ETA: usize>(r: &mut [u8], a: &Poly) {
 		assert!(ETA == 2 || ETA == 4, "unsupported ETA parameter");
 	}
 	let eta = ETA as i32;
+	let r = &mut r[..params::polyeta_packedbytes(ETA)];
 	let mut t = [0u8; 8];
 	if ETA == 2 {
 		for i in 0..N / 8 {
 			for j in 0..8 {
 				t[j] = (eta - a.coeffs[8 * i + j]) as u8;
 			}
+			pin_staging(&mut t);
 			r[3 * i + 0] = t[0] | t[1] << 3 | t[2] << 6;
 			r[3 * i + 1] = t[2] >> 2 | t[3] << 1 | t[4] << 4 | t[5] << 7;
 			r[3 * i + 2] = t[5] >> 1 | t[6] << 2 | t[7] << 5;
@@ -657,6 +668,7 @@ pub(crate) fn eta_pack<const ETA: usize>(r: &mut [u8], a: &Poly) {
 		for i in 0..N / 2 {
 			t[0] = (eta - a.coeffs[2 * i + 0]) as u8;
 			t[1] = (eta - a.coeffs[2 * i + 1]) as u8;
+			pin_staging(&mut t);
 			r[i] = t[0] | t[1] << 4;
 		}
 	}
