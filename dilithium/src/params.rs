@@ -10,17 +10,18 @@
 //! call sites and downstream consumers that predate the multi-variant
 //! frontends and were audited against those names.
 
+// Specification defined constants (shared by all variants)
+pub const Q: i32 = (1 << 23) - (1 << 13) + 1; //prime defining the field
+pub const N: i32 = 256; //ring defining polynomial degree
+pub const R: i32 = 1753; //2Nth root of unity mod Q
+pub const D: i32 = 13; //dropped bits
+
+// Implementation specific values (shared by all variants)
 pub const SEEDBYTES: usize = 32;
 pub const CRHBYTES: usize = 64;
-pub const TR_BYTES: usize = 64;
-pub const N: i32 = 256;
-pub const Q: i32 = 8380417;
-pub const D: i32 = 13;
-/// A primitive 2N-th root of unity modulo Q.
-pub const R: i32 = 1753;
-
 pub const POLYT1_PACKEDBYTES: usize = 320;
 pub const POLYT0_PACKEDBYTES: usize = 416;
+pub const TR_BYTES: usize = 64;
 
 // Packed-size helpers, derived from a variant's base parameters. These are
 // `const fn` so const-generic code can assert, at compile time, that the
@@ -94,7 +95,7 @@ pub const fn signbytes(
 macro_rules! derived_params {
 	() => {
 		pub const BETA: usize = super::beta(TAU, ETA);
-		pub const C_DASH_BYTES: usize = COLLISION_STRENGTH / 4;
+		pub const C_DASH_BYTES: usize = (COLLISION_STRENGTH * 2) / 8;
 		pub const POLYZ_PACKEDBYTES: usize = super::polyz_packedbytes(GAMMA1);
 		pub const POLYW1_PACKEDBYTES: usize = super::polyw1_packedbytes(GAMMA2);
 		pub const POLYETA_PACKEDBYTES: usize = super::polyeta_packedbytes(ETA);
@@ -109,12 +110,12 @@ macro_rules! derived_params {
 pub mod ml_dsa_44 {
 	use super::Q;
 
-	pub const TAU: usize = 39;
+	pub const TAU: usize = 39; //number of +-1s in c
 	pub const CHALLENGE_ENTROPY: usize = 192;
-	pub const GAMMA1: usize = 1 << 17;
-	pub const GAMMA2: usize = (Q as usize - 1) / 88;
-	pub const K: usize = 4;
-	pub const L: usize = 4;
+	pub const GAMMA1: usize = 1 << 17; //y coefficient range
+	pub const GAMMA2: usize = (Q as usize - 1) / 88; //low-order rounding range
+	pub const K: usize = 4; //rows in A
+	pub const L: usize = 4; //columns in A
 	pub const ETA: usize = 2;
 	pub const OMEGA: usize = 80;
 	pub const COLLISION_STRENGTH: usize = 128;
@@ -126,12 +127,12 @@ pub mod ml_dsa_44 {
 pub mod ml_dsa_65 {
 	use super::Q;
 
-	pub const TAU: usize = 49;
+	pub const TAU: usize = 49; //number of +-1s in c
 	pub const CHALLENGE_ENTROPY: usize = 225;
-	pub const GAMMA1: usize = 1 << 19;
-	pub const GAMMA2: usize = (Q as usize - 1) / 32;
-	pub const K: usize = 6;
-	pub const L: usize = 5;
+	pub const GAMMA1: usize = 1 << 19; //y coefficient range
+	pub const GAMMA2: usize = (Q as usize - 1) / 32; //low-order rounding range
+	pub const K: usize = 6; //rows in A
+	pub const L: usize = 5; //columns in A
 	pub const ETA: usize = 4;
 	pub const OMEGA: usize = 55;
 	pub const COLLISION_STRENGTH: usize = 192;
@@ -143,12 +144,12 @@ pub mod ml_dsa_65 {
 pub mod ml_dsa_87 {
 	use super::Q;
 
-	pub const TAU: usize = 60;
+	pub const TAU: usize = 60; //number of +-1s in c
 	pub const CHALLENGE_ENTROPY: usize = 257;
-	pub const GAMMA1: usize = 1 << 19;
-	pub const GAMMA2: usize = (Q as usize - 1) / 32;
-	pub const K: usize = 8;
-	pub const L: usize = 7;
+	pub const GAMMA1: usize = 1 << 19; //y coefficient range
+	pub const GAMMA2: usize = (Q as usize - 1) / 32; //low-order rounding range
+	pub const K: usize = 8; //rows in A
+	pub const L: usize = 7; //columns in A
 	pub const ETA: usize = 2;
 	pub const OMEGA: usize = 75;
 	pub const COLLISION_STRENGTH: usize = 256;

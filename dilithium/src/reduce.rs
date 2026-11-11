@@ -1,25 +1,34 @@
 use crate::params::Q;
 
-/// Inverse of Q modulo 2^32.
-const Q_INV: i32 = 58728449;
+pub const Q_INV: i32 = 58728449; // q^(-1) mod 2^32
 
+/// For integer a with -2^{31} * Q <= a < 2^31 * Q,
+/// compute r \equiv 2^{-32} * a (mod Q) such that -Q < r < Q.
+///
 /// The domain is half-open (security review): at exactly a = 2^31 * Q the
 /// signed low word `a * Q_INV mod± 2^32` truncates to `i32::MIN` (Q is odd),
 /// and `(a - i32::MIN * Q) >> 32` evaluates to exactly `Q` — the
 /// representative the output contract excludes. The negative endpoint is
 /// safe (it reduces to 0), so it stays inclusive.
+///
+/// Returns r.
 pub fn montgomery_reduce(a: i64) -> i32 {
 	let t = (a as i32).wrapping_mul(Q_INV);
 	((a - t as i64 * Q as i64) >> 32) as i32
 }
 
-/// Reduces `a <= 2^31 - 2^22 - 1` to a representative modulo Q in `[-6283008, 6283008]`.
+/// For finite field element a with a <= 2^{31} - 2^{22} - 1,
+/// compute r \equiv a (mod Q) such that -6283008 <= r <= 6283008.
+//
+/// Returns r.
 pub fn reduce32(a: i32) -> i32 {
 	let t = (a + (1 << 22)) >> 23;
 	a - t * Q
 }
 
-/// Adds Q to a negative `a`, branch-free.
+/// Add Q if input coefficient is negative.
+///
+/// Returns r.
 pub fn caddq(a: i32) -> i32 {
 	a + ((a >> 31) & Q)
 }

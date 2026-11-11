@@ -93,37 +93,38 @@ fn rol(a: u64, offset: u64) -> u64 {
 	a.rotate_left(offset as u32)
 }
 
-/// Reads eight bytes as a little-endian `u64`.
+/// Load 8 bytes into uint64_t in little-endian order
 #[inline]
 fn load64(x: &[u8; 8]) -> u64 {
 	u64::from_le_bytes(*x)
 }
 
-const KECCAKF_ROUND_CONSTANTS: [u64; NROUNDS] = [
-	0x0000000000000001,
-	0x0000000000008082,
-	0x800000000000808a,
-	0x8000000080008000,
-	0x000000000000808b,
-	0x0000000080000001,
-	0x8000000080008081,
-	0x8000000000008009,
-	0x000000000000008a,
-	0x0000000000000088,
-	0x0000000080008009,
-	0x000000008000000a,
-	0x000000008000808b,
-	0x800000000000008b,
-	0x8000000000008089,
-	0x8000000000008003,
-	0x8000000000008002,
-	0x8000000000000080,
-	0x000000000000800a,
-	0x800000008000000a,
-	0x8000000080008081,
-	0x8000000000008080,
-	0x0000000080000001,
-	0x8000000080008008,
+/// Keccak round constants
+const KECCAKF_ROUNDCONSTANTS: [u64; NROUNDS] = [
+	0x0000000000000001u64,
+	0x0000000000008082u64,
+	0x800000000000808au64,
+	0x8000000080008000u64,
+	0x000000000000808bu64,
+	0x0000000080000001u64,
+	0x8000000080008081u64,
+	0x8000000000008009u64,
+	0x000000000000008au64,
+	0x0000000000000088u64,
+	0x0000000080008009u64,
+	0x000000008000000au64,
+	0x000000008000808bu64,
+	0x800000000000008bu64,
+	0x8000000000008089u64,
+	0x8000000000008003u64,
+	0x8000000000008002u64,
+	0x8000000000000080u64,
+	0x000000000000800au64,
+	0x800000008000000au64,
+	0x8000000080008081u64,
+	0x8000000000008080u64,
+	0x0000000080000001u64,
+	0x8000000080008008u64,
 ];
 
 /// Chi step on one row of five lanes.
@@ -210,6 +211,8 @@ fn keccakf1600_round(a: [u64; 25], round_constant: u64) -> [u64; 25] {
 	]
 }
 
+/// The Keccak F1600 Permutation
+///
 /// Secret-scrubbing boundary: this permutation unrolls the sponge into ~25 lane
 /// locals plus per-round temporaries. These are deliberately *not* individually
 /// zeroized. Doing so would be security theater with a real cost: `zeroize`'s
@@ -223,7 +226,7 @@ fn keccakf1600_round(a: [u64; 25], round_constant: u64) -> [u64; 25] {
 /// responsible for wiping those (see `poly::uniform_eta` / `uniform_gamma1`).
 fn keccakf1600_statepermute(state: &mut [u64; 25]) {
 	let mut a = *state;
-	for pair in KECCAKF_ROUND_CONSTANTS.chunks_exact(2) {
+	for pair in KECCAKF_ROUNDCONSTANTS.chunks_exact(2) {
 		a = keccakf1600_round(keccakf1600_round(a, pair[0]), pair[1]);
 	}
 	*state = a;
@@ -274,7 +277,7 @@ fn keccak_squeeze<const R: usize>(out: &mut [u8], state: &mut KeccakState<R>) {
 	}
 }
 
-/// Zeroes `s`, absorbs `input` at rate `R` and pads with domain byte `p`; no final permutation.
+/// Absorb step of Keccak; non-incremental, starts by zeroeing the state.
 fn keccak_absorb_once<const R: usize>(s: &mut [u64; 25], input: &[u8], p: u8) {
 	s.fill(0);
 
@@ -328,7 +331,7 @@ fn keccak_squeezeblocks<const R: usize>(out: &mut [[u8; R]], state: &mut KeccakS
 	state.pos = R;
 }
 
-/// Absorbs `input` into a SHAKE128 state; may be called repeatedly before finalizing.
+/// Absorb step of the SHAKE128 XOF; incremental.
 pub fn shake128_absorb(state: &mut Shake128State, input: &[u8]) {
 	keccak_absorb(state, input);
 }
@@ -341,6 +344,7 @@ pub fn shake128_finalize(state: &mut Shake128State) {
 
 /// Squeeze step of SHAKE128 XOF. Squeezes one full block of SHAKE128_RATE bytes
 /// per entry of `output`, continuing the canonical output stream.
+/// Can be called multiple times to keep squeezing.
 ///
 /// Taking whole blocks (`[[u8; SHAKE128_RATE]]`) instead of a flat slice plus a
 /// block count makes an inconsistent count/capacity pair unrepresentable: the
@@ -350,7 +354,7 @@ pub fn shake128_squeezeblocks(output: &mut [[u8; SHAKE128_RATE]], state: &mut Sh
 	keccak_squeezeblocks(output, state);
 }
 
-/// Absorbs `input` into a SHAKE256 state; may be called repeatedly before finalizing.
+/// Absorb step of the SHAKE256 XOF; incremental.
 pub fn shake256_absorb(state: &mut Shake256State, input: &[u8]) {
 	keccak_absorb(state, input);
 }
@@ -362,11 +366,12 @@ pub fn shake256_finalize(state: &mut Shake256State) {
 }
 
 /// Squeeze step of SHAKE256 XOF. Squeezes arbitrarily many bytes.
+/// Can be called multiple times to keep squeezing.
 pub fn shake256_squeeze(out: &mut [u8], state: &mut Shake256State) {
 	keccak_squeeze(out, state);
 }
 
-/// One-shot SHAKE256 absorb: resets `state`, absorbs `input` and leaves it ready to squeeze.
+/// Initialize, absorb into and finalize SHAKE256 XOF; non-incremental.
 pub fn shake256_absorb_once(state: &mut Shake256State, input: &[u8]) {
 	keccak_absorb_once::<SHAKE256_RATE>(&mut state.s, input, 0x1F);
 	state.pos = SHAKE256_RATE;
@@ -375,6 +380,7 @@ pub fn shake256_absorb_once(state: &mut Shake256State, input: &[u8]) {
 
 /// Squeeze step of SHAKE256 XOF. Squeezes one full block of SHAKE256_RATE bytes
 /// per entry of `out`, continuing the canonical output stream.
+/// Can be called multiple times to keep squeezing.
 ///
 /// Taking whole blocks (`[[u8; SHAKE256_RATE]]`) instead of a flat slice plus a
 /// block count makes an inconsistent count/capacity pair unrepresentable: the
@@ -384,7 +390,7 @@ pub fn shake256_squeezeblocks(out: &mut [[u8; SHAKE256_RATE]], state: &mut Shake
 	keccak_squeezeblocks(out, state);
 }
 
-/// One-shot SHAKE256: fills all of `output` with the XOF output for `input`.
+/// SHAKE256 XOF with non-incremental API
 pub fn shake256(output: &mut [u8], input: &[u8]) {
 	let mut state = Shake256State::default();
 	shake256_absorb_once(&mut state, input);

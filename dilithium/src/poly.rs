@@ -48,7 +48,6 @@ use crate::{fips202, ntt, params, reduce, rounding};
 use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 const N: usize = params::N as usize;
-/// `2^(D-1)`, the offset of the packed t0 encoding.
 const D_SHL: i32 = 1 << (params::D - 1);
 
 /// A polynomial in `Z_q[X]/(X^256 + 1)`, stored as 256 signed 32-bit coefficients.
@@ -142,7 +141,7 @@ pub fn reduce(a: &mut Poly) {
 	}
 }
 
-/// Adds Q to every negative coefficient.
+/// For all coefficients of in/out polynomial add Q if coefficient is negative.
 #[inline(never)]
 pub fn caddq(a: &mut Poly) {
 	for c in a.coeffs.iter_mut() {
@@ -150,7 +149,7 @@ pub fn caddq(a: &mut Poly) {
 	}
 }
 
-/// Adds `b` to `a` coefficient-wise, without modular reduction.
+/// Add polynomials in place. No modular reduction is performed.
 #[inline(never)]
 pub fn add_ip(a: &mut Poly, b: &Poly) {
 	for (x, y) in a.coeffs.iter_mut().zip(b.coeffs.iter()) {
@@ -158,7 +157,7 @@ pub fn add_ip(a: &mut Poly, b: &Poly) {
 	}
 }
 
-/// Subtracts `b` from `a` coefficient-wise, without modular reduction.
+/// Subtract polynomials in place. No modular reduction is performed.
 #[inline(never)]
 pub fn sub_ip(a: &mut Poly, b: &Poly) {
 	for (x, y) in a.coeffs.iter_mut().zip(b.coeffs.iter()) {
@@ -166,7 +165,7 @@ pub fn sub_ip(a: &mut Poly, b: &Poly) {
 	}
 }
 
-/// Multiplies every coefficient by `2^D` in place (a left shift), without modular reduction.
+/// Multiply polynomial by 2^D without modular reduction.
 ///
 /// # Preconditions
 ///
@@ -190,7 +189,7 @@ pub(crate) fn shiftl(a: &mut Poly) {
 	}
 }
 
-/// Forward NTT in place, without modular reduction; magnitudes can grow by up to `8*Q`.
+/// Inplace forward NTT. Coefficients can grow by 8*Q in absolute value.
 ///
 /// # Preconditions
 ///
@@ -207,7 +206,9 @@ pub fn ntt(a: &mut Poly) {
 	ntt::ntt(&mut a.coeffs);
 }
 
-/// Inverse NTT in place, times the Montgomery factor `2^32`; output coefficients lie in `(-Q, Q)`.
+/// Inplace inverse NTT and multiplication by 2^{32}.
+/// Input coefficients need to be less than Q in absolute value and output coefficients are again
+/// bounded by Q.
 ///
 /// # Preconditions
 ///
@@ -225,7 +226,8 @@ pub fn invntt_tomont(a: &mut Poly) {
 	ntt::invntt_tomont(&mut a.coeffs);
 }
 
-/// Sets `c` to the NTT-domain (coefficient-wise) product `a * b * 2^-32`, reduced into `(-Q, Q)`.
+/// Pointwise multiplication of polynomials in NTT domain representation and multiplication of
+/// resulting polynomial by 2^{-32}.
 ///
 /// # Preconditions
 ///
@@ -253,7 +255,8 @@ pub fn pointwise_montgomery(c: &mut Poly, a: &Poly, b: &Poly) {
 	}
 }
 
-/// Power2Round: splits each coefficient of `a1` into high bits (left in `a1`) and low bits (`a0`).
+/// For all coefficients c of the input polynomial, compute c0, c1 such that c mod Q = c1*2^D + c0
+/// with -2^{D-1} < c0 <= 2^{D-1}.
 ///
 /// Coefficients may be any representative in `(-Q, Q)` (the range guaranteed
 /// by [`Poly::from_coeffs`]): [`rounding::power2round`] canonicalizes a signed
@@ -268,7 +271,7 @@ pub fn power2round(a1: &mut Poly, a0: &mut Poly) {
 	}
 }
 
-/// Checks, without early exit, whether any coefficient of `a` has absolute value `>= b`.
+/// Check infinity norm of polynomial against given bound.
 ///
 /// Total for all `i32` coefficient values: the absolute value is computed in
 /// `i64`, so no input can overflow the arithmetic or wrap into a wrong result.
@@ -300,7 +303,11 @@ pub fn check_norm(a: &Poly, b: i32) -> bool {
 	result
 }
 
-/// Rejection-samples values in `[0, Q)` from 3-byte chunks of `buf` into `a`; returns the count.
+/// Sample uniformly random coefficients in [0, Q-1] by performing rejection sampling on array of
+/// random bytes.
+///
+/// Returns number of sampled coefficients. Can be smaller than a.len() if not enough random bytes
+/// were given.
 pub fn rej_uniform(a: &mut [i32], buf: &[u8]) -> usize {
 	let mut ctr = 0;
 	for bytes in buf.chunks_exact(3) {
@@ -320,7 +327,8 @@ pub fn rej_uniform(a: &mut [i32], buf: &[u8]) -> usize {
 // three-byte candidates.
 const UNIFORM_NBLOCKS: usize = 768usize.div_ceil(fips202::SHAKE128_RATE);
 
-/// RejNTTPoly: fills `a` with uniform coefficients in `[0, Q)` from SHAKE128(seed || nonce).
+/// Sample polynomial with uniformly random coefficients in [0, Q-1] by performing rejection
+/// sampling using the output stream of SHAKE128(seed|nonce).
 pub fn uniform(a: &mut Poly, seed: &[u8; params::SEEDBYTES], nonce: u16) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake128_stream_init(&mut state, seed, nonce);
@@ -339,7 +347,8 @@ pub fn uniform(a: &mut Poly, seed: &[u8; params::SEEDBYTES], nonce: u16) {
 	}
 }
 
-/// Packs t1 (coefficients in `[0, 2^10)`) at 10 bits per coefficient.
+/// Bit-pack polynomial t1 with coefficients fitting in 10 bits.
+/// Input coefficients are assumed to be standard representatives.
 pub(crate) fn t1_pack(r: &mut [u8], a: &Poly) {
 	for i in 0..N / 4 {
 		let c = &a.coeffs[4 * i..4 * i + 4];
@@ -369,7 +378,7 @@ fn pin_staging<T>(staging: &mut T) {
 	core::hint::black_box(staging);
 }
 
-/// Packs t0 (coefficients in `(-2^(D-1), 2^(D-1)]`) as `2^(D-1) - coefficient` at 13 bits each.
+/// Bit-pack polynomial t0 with coefficients in [-2^{D-1}, 2^{D-1}].
 #[inline(never)]
 pub(crate) fn t0_pack(r: &mut [u8], a: &Poly) {
 	let r = &mut r[..params::POLYT0_PACKEDBYTES];
@@ -398,7 +407,7 @@ pub(crate) fn t0_pack(r: &mut [u8], a: &Poly) {
 	t.zeroize();
 }
 
-/// Unpacks t0 from 13 bits per coefficient into `(-2^(D-1), 2^(D-1)]`.
+/// Unpack polynomial t0 with coefficients in ]-2^{D-1}, 2^{D-1}].
 #[inline(never)]
 pub(crate) fn t0_unpack(r: &mut Poly, a: &[u8]) {
 	for i in 0..N / 8 {
@@ -419,7 +428,9 @@ pub(crate) fn t0_unpack(r: &mut Poly, a: &[u8]) {
 // up to the same block count, so this is not variant-dependent.
 const UNIFORM_GAMMA1_NBLOCKS: usize = 640usize.div_ceil(fips202::SHAKE256_RATE);
 
-/// Decompose: splits each coefficient `c` of `a1` in place so that `c = a1*2*GAMMA2 + a0 (mod Q)`.
+/// For all coefficients c of the input polynomial, compute high and low bits c0, c1 such c mod Q =
+/// c1*ALPHA + c0 with -ALPHA/2 < c0 <= ALPHA/2 except c1 = (Q-1)/ALPHA where we set c1 = 0 and
+/// -ALPHA/2 <= c0 = c mod Q - Q < 0.
 ///
 /// Coefficients may be any representative in `(-Q, Q)` (the range guaranteed
 /// by [`Poly::from_coeffs`]): [`rounding::decompose`] canonicalizes a signed
@@ -439,7 +450,8 @@ pub fn decompose<const GAMMA2: usize>(a1: &mut Poly, a0: &mut Poly) {
 	}
 }
 
-/// Writes the hint polynomial for the low parts `a0` and high parts `a1`; returns its weight.
+/// Compute hint polynomial, the coefficients of which indicate whether the low bits of the
+/// corresponding coefficient of the input polynomial overflow into the high bits.
 pub fn make_hint<const GAMMA2: usize>(h: &mut Poly, a0: &Poly, a1: &Poly) -> i32 {
 	let mut s = 0;
 	for i in 0..N {
@@ -449,14 +461,15 @@ pub fn make_hint<const GAMMA2: usize>(h: &mut Poly, a0: &Poly, a1: &Poly) -> i32
 	s
 }
 
-/// UseHint: replaces each coefficient of `a` by its high bits, adjusted where `hint` is nonzero.
+/// Use hint polynomial to correct the high bits of a polynomial.
 pub fn use_hint<const GAMMA2: usize>(a: &mut Poly, hint: &Poly) {
 	for i in 0..N {
 		a.coeffs[i] = rounding::use_hint::<GAMMA2>(a.coeffs[i], hint.coeffs[i]);
 	}
 }
 
-/// Writes rejection-sampled coefficients in `[-ETA, ETA]` from `buf` to `a`; returns how many.
+/// Sample uniformly random coefficients in [-ETA, ETA] by performing rejection sampling using array
+/// of random bytes.
 ///
 /// Each nibble of the input is an acceptance candidate. For `ETA = 2` a
 /// nibble `< 15` is accepted and folded mod 5 (fixed-point division by 5), so
@@ -464,6 +477,9 @@ pub fn use_hint<const GAMMA2: usize>(a: &mut Poly, hint: &Poly) {
 /// accepted and used directly, so the acceptance probability is 9/16; callers
 /// sizing their input for a target output count must account for the lower
 /// rate (see [`uniform_eta`]).
+///
+/// Returns number of sampled coefficients. Can be smaller than a.len() if not enough random bytes
+/// were given.
 ///
 /// Note: Returns immediately if output slice is empty. For non-empty output, always processes
 /// all input bytes to maintain constant-time behavior.
@@ -512,7 +528,8 @@ pub fn rej_eta<const ETA: usize>(a: &mut [i32], buf: &[u8]) -> usize {
 	ctr
 }
 
-/// RejBoundedPoly: samples coefficients in `[-ETA, ETA]` from SHAKE256(seed || nonce).
+/// Sample polynomial with uniformly random coefficients in [-ETA,ETA] by performing rejection
+/// sampling using the output stream from SHAKE256(seed|nonce).
 pub fn uniform_eta<const ETA: usize>(
 	output_polynomial: &mut Poly,
 	seed: &[u8; params::CRHBYTES],
@@ -600,7 +617,8 @@ pub fn uniform_gamma1<const GAMMA1: usize, const PZ: usize>(
 	buf.zeroize();
 }
 
-/// SampleInBall: expands `seed` into `c`, with `TAU` coefficients in `{-1, 1}` and all others 0.
+/// Implementation of H. Samples polynomial with TAU nonzero coefficients in {-1,1} using the output
+/// stream of SHAKE256(seed).
 ///
 /// This is deliberately plain (variable-time) rejection sampling: its timing depends only on
 /// the bytes of `seed = c~ = H(mu, w1)`, a hash output. For an accepted attempt c~ is published
@@ -626,6 +644,7 @@ pub fn challenge<const TAU: usize, const CD: usize>(c: &mut Poly, seed: &[u8; CD
 	let mut signs = u64::from_le_bytes(signs);
 
 	c.coeffs.fill(0);
+	// Fisher-Yates style: for each position, rejection-sample a valid index b <= i.
 	for i in N - TAU..N {
 		let mut b = [0u8; 1];
 		loop {
@@ -677,7 +696,7 @@ pub(crate) fn eta_pack<const ETA: usize>(r: &mut [u8], a: &Poly) {
 	t.zeroize();
 }
 
-/// Inverse of `eta_pack`: unpacks `a` into `r` and reports whether the encoding was canonical.
+/// Unpack polynomial with coefficients in [-ETA,ETA].
 ///
 /// The packed encoding stores `ETA - coefficient` per slot (3-bit slots for
 /// `ETA = 2`, 4-bit slots for `ETA = 4`). Not every slot value is canonical:
@@ -717,7 +736,8 @@ pub(crate) fn eta_unpack<const ETA: usize>(r: &mut Poly, a: &[u8]) -> bool {
 	canonical
 }
 
-/// Bit-packs a polynomial with coefficients in `[-GAMMA1 + 1, GAMMA1]` into `r`.
+/// Bit-pack polynomial z with coefficients in [-(GAMMA1 - 1), GAMMA1 - 1].
+/// Input coefficients are assumed to be standard representatives.
 ///
 /// The encoding stores `GAMMA1 - coefficient`: 20 bits per coefficient (2
 /// coefficients per 5 bytes) for `GAMMA1 = 2^19`, 18 bits per coefficient (4
@@ -756,7 +776,8 @@ pub fn z_pack<const GAMMA1: usize, const PZ: usize>(r: &mut [u8; PZ], a: &Poly) 
 	}
 }
 
-/// Inverse of `z_pack`: unpacks `a` into `r`, with coefficients in `[-GAMMA1 + 1, GAMMA1]`.
+/// Unpack polynomial z with coefficients in [-(GAMMA1 - 1), GAMMA1 - 1].
+/// Output coefficients are standard representatives.
 ///
 /// The input is an exact-size array so a truncated slice is rejected at compile
 /// time rather than panicking on an out-of-bounds read.

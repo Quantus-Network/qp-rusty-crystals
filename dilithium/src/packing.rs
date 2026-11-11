@@ -2,7 +2,7 @@ use crate::{params, poly, polyvec::Polyvec};
 
 const N: usize = params::N as usize;
 
-/// pkEncode: writes the public key `rho || t1` into `pk`, with `t1` at 10 bits per coefficient.
+/// Bit-pack public key pk = (rho, t1).
 ///
 /// Generic over the variant's row count `K`; `PK` is the packed public key
 /// size, checked against `K` at compile time.
@@ -22,7 +22,7 @@ pub fn pack_pk<const K: usize, const PK: usize>(
 	}
 }
 
-/// Inverse of [`pack_pk`]: splits `pk` into `rho` and the unpacked `t1`.
+/// Unpack public key pk = (rho, t1).
 pub fn unpack_pk<const K: usize, const PK: usize>(
 	rho: &mut [u8; params::SEEDBYTES],
 	t1: &mut Polyvec<K>,
@@ -38,7 +38,7 @@ pub fn unpack_pk<const K: usize, const PK: usize>(
 	}
 }
 
-/// skEncode: writes the secret key `rho || key || tr || s1 || s2 || t0` into `sk`.
+/// Bit-pack secret key sk = (rho, key, tr, s1, s2, t0).
 ///
 /// Generic over the variant's `K`/`L`/`ETA`; `SK` is the packed secret key
 /// size, checked for consistency at compile time.
@@ -55,27 +55,33 @@ pub fn pack_sk<const K: usize, const L: usize, const ETA: usize, const SK: usize
 	const {
 		assert!(SK == params::secretkeybytes(K, L, ETA));
 	}
-	let eta_bytes = params::polyeta_packedbytes(ETA);
+	let peta = params::polyeta_packedbytes(ETA);
+
 	sk[..params::SEEDBYTES].copy_from_slice(rho);
 	let mut idx = params::SEEDBYTES;
+
 	sk[idx..idx + params::SEEDBYTES].copy_from_slice(key);
 	idx += params::SEEDBYTES;
+
 	sk[idx..idx + params::TR_BYTES].copy_from_slice(tr);
 	idx += params::TR_BYTES;
+
 	for i in 0..L {
-		poly::eta_pack::<ETA>(&mut sk[idx + i * eta_bytes..], &s1.vec[i]);
+		poly::eta_pack::<ETA>(&mut sk[idx + i * peta..], &s1.vec[i]);
 	}
-	idx += L * eta_bytes;
+	idx += L * peta;
+
 	for i in 0..K {
-		poly::eta_pack::<ETA>(&mut sk[idx + i * eta_bytes..], &s2.vec[i]);
+		poly::eta_pack::<ETA>(&mut sk[idx + i * peta..], &s2.vec[i]);
 	}
-	idx += K * eta_bytes;
+	idx += K * peta;
+
 	for i in 0..K {
 		poly::t0_pack(&mut sk[idx + i * params::POLYT0_PACKEDBYTES..], &t0.vec[i]);
 	}
 }
 
-/// skDecode: splits `sk` into `rho`, `key`, `tr` and the unpacked `s1`, `s2` and `t0`.
+/// Unpack secret key sk = (rho, key, tr, s1, s2, t0).
 ///
 /// Returns `false` if the packed `s1`/`s2` regions contain a non-canonical
 /// eta slot — an encoding that would decode to a coefficient outside
@@ -96,32 +102,39 @@ pub fn unpack_sk<const K: usize, const L: usize, const ETA: usize, const SK: usi
 	const {
 		assert!(SK == params::secretkeybytes(K, L, ETA));
 	}
-	let eta_bytes = params::polyeta_packedbytes(ETA);
+	let peta = params::polyeta_packedbytes(ETA);
+
 	rho.copy_from_slice(&sk[..params::SEEDBYTES]);
 	let mut idx = params::SEEDBYTES;
+
 	key.copy_from_slice(&sk[idx..idx + params::SEEDBYTES]);
 	idx += params::SEEDBYTES;
+
 	tr.copy_from_slice(&sk[idx..idx + params::TR_BYTES]);
 	idx += params::TR_BYTES;
+
 	// Accumulate with `&` rather than short-circuiting so every polynomial is
 	// unpacked and checked regardless of earlier results (data-independent
 	// control flow; honest keys always pass anyway).
 	let mut canonical = true;
 	for i in 0..L {
-		canonical &= poly::eta_unpack::<ETA>(&mut s1.vec[i], &sk[idx + i * eta_bytes..]);
+		canonical &= poly::eta_unpack::<ETA>(&mut s1.vec[i], &sk[idx + i * peta..]);
 	}
-	idx += L * eta_bytes;
+	idx += L * peta;
+
 	for i in 0..K {
-		canonical &= poly::eta_unpack::<ETA>(&mut s2.vec[i], &sk[idx + i * eta_bytes..]);
+		canonical &= poly::eta_unpack::<ETA>(&mut s2.vec[i], &sk[idx + i * peta..]);
 	}
-	idx += K * eta_bytes;
+	idx += K * peta;
+
 	for i in 0..K {
 		poly::t0_unpack(&mut t0.vec[i], &sk[idx + i * params::POLYT0_PACKEDBYTES..]);
 	}
+
 	canonical
 }
 
-/// sigEncode: writes `c || z || h` into `sig`; `c = None` leaves the challenge bytes untouched.
+/// Bit-pack signature sig = (c, z, h).
 ///
 /// Generic over the variant's `K`/`L`/`GAMMA1`/`OMEGA`; `CD` is the challenge
 /// size (lambda/4), `PZ` the packed size of one `z` polynomial, and `SIG` the
@@ -183,7 +196,7 @@ pub fn pack_sig<
 	}
 }
 
-/// sigDecode: splits `sig` into the challenge seed `c`, the vector `z` and the hint vector `h`.
+/// Unpack signature sig = (z, h, c).
 ///
 /// The hint vector is sparse: only the coefficients listed in the encoded hint
 /// section are set to 1. `h` is therefore zeroed on entry so the output represents
