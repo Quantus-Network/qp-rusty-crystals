@@ -496,6 +496,37 @@ mod hdwallet_tests {
 	}
 
 	#[test]
+	fn test_nfkd_owned_matches_unicode_normalization() {
+		use unicode_normalization::UnicodeNormalization;
+
+		let check = |s: &str| {
+			let expected: String = s.nfkd().collect();
+			let normalized = crate::nfkd_owned(s);
+			assert_eq!(normalized.as_ref().map_or(s, |n| n.as_str()), expected, "input {s:?}");
+		};
+
+		// Every scalar value on its own.
+		let mut utf8 = [0u8; 4];
+		for c in '\0'..=char::MAX {
+			check(c.encode_utf8(&mut utf8));
+		}
+
+		// Reordering: every sequence of four of these. They are a starter, a
+		// letter that decomposes, a long compatibility decomposition, a
+		// Hangul syllable and combining marks of seven classes.
+		const ALPHABET: [char; 12] = [
+			'a', '\u{e9}', '\u{1e9b}', '\u{fdfa}', '\u{ac01}', '\u{334}', '\u{3099}', '\u{5b0}',
+			'\u{327}', '\u{323}', '\u{301}', '\u{345}',
+		];
+		for sequence in 0..ALPHABET.len().pow(4) {
+			let s: String = (0..4)
+				.map(|i| ALPHABET[sequence / ALPHABET.len().pow(i) % ALPHABET.len()])
+				.collect();
+			check(&s);
+		}
+	}
+
+	#[test]
 	fn test_derive_key_from_seed_different_paths() {
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();

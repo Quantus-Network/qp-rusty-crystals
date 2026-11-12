@@ -31,7 +31,10 @@ use alloc::{
 use core::str::FromStr;
 #[cfg(feature = "ml-dsa-87")]
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
-use unicode_normalization::{is_nfkd_quick, IsNormalized, UnicodeNormalization};
+use unicode_normalization::{
+	char::{canonical_combining_class, decompose_compatible},
+	is_nfkd_quick, IsNormalized,
+};
 
 use zeroize::{Zeroize, Zeroizing};
 
@@ -157,14 +160,31 @@ fn nfkd_owned(s: &str) -> Option<Zeroizing<String>> {
 		IsNormalized::Yes => None,
 		// `Maybe` is treated as not-normalized; NFKD is idempotent, so re-normalizing is safe.
 		_ => {
-			// One allocation of the final size, filled in place (security
-			// review): a `String` grown by `collect` frees each outgrown
-			// block unwiped, still holding a prefix of the normalized
-			// secret, where `Zeroizing` never reaches (pinned by the
-			// normalization heap-zeroization probe).
+			// Decomposed and reordered here rather than through `str::nfkd`
+			// (security review): that iterator keeps its pending characters
+			// in a buffer of its own, inline and then on the heap, and drops
+			// it unwiped. Both buffers below are allocated once at their
+			// final size and wiped on drop: one that grows frees each
+			// outgrown block as it is, still holding a prefix of the secret,
+			// where `Zeroizing` never reaches (pinned by the normalization
+			// heap-zeroization probe).
+			let mut len = 0;
+			s.chars().for_each(|c| decompose_compatible(c, |_| len += 1));
+			let mut chars = Zeroizing::new(Vec::with_capacity(len));
+			s.chars().for_each(|c| decompose_compatible(c, |d| chars.push(d)));
+			// Canonical ordering: a combining mark moves ahead of every
+			// preceding mark of a higher class, text order kept within a class.
+			for i in 1..chars.len() {
+				let class = canonical_combining_class(chars[i]);
+				let mut j = i;
+				while class != 0 && j > 0 && canonical_combining_class(chars[j - 1]) > class {
+					chars.swap(j - 1, j);
+					j -= 1;
+				}
+			}
 			let mut normalized =
-				Zeroizing::new(String::with_capacity(s.nfkd().map(char::len_utf8).sum()));
-			normalized.extend(s.nfkd());
+				Zeroizing::new(String::with_capacity(chars.iter().map(|c| c.len_utf8()).sum()));
+			normalized.extend(chars.iter());
 			Some(normalized)
 		},
 	}
