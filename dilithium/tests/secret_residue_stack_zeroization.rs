@@ -8,7 +8,7 @@
 //! that differ only in s1, s2 and t0, so every stack byte that differs
 //! afterwards is secret residue.
 //!
-//! Key generation and import produce public output that depends on
+//! Key generation, import and signing produce public output that depends on
 //! the secret, so they cannot be compared that way. For those the secret
 //! vectors are recomputed and every run of their coefficients is searched for,
 //! which also finds a copy the compiler spilled only in part.
@@ -19,7 +19,7 @@
 
 use core::hint::black_box;
 
-use qp_rusty_crystals_dilithium::{packing, params, poly::Poly, polyvec, polyvec::Polyvec};
+use qp_rusty_crystals_dilithium::{packing, params, poly, poly::Poly, polyvec, polyvec::Polyvec};
 use qp_rusty_crystals_test_utils::{probe_stack_for_coefficients, stack_residue_diff};
 use zeroize::Zeroize;
 
@@ -39,6 +39,14 @@ fn ntt_of<const N: usize>(v: &Polyvec<N>) -> Polyvec<N> {
 	let mut v_hat = v.clone();
 	polyvec::ntt(&mut v_hat);
 	v_hat
+}
+
+/// `c * v` as signing computes it, from both operands in NTT form.
+fn product<const N: usize>(c_hat: &Poly, v_hat: &Polyvec<N>) -> Polyvec<N> {
+	let mut cv = Polyvec::default();
+	polyvec::pointwise_poly_montgomery(&mut cv, c_hat, v_hat);
+	polyvec::invntt_tomont(&mut cv);
+	cv
 }
 
 /// Asserts that `operation` leaves none of `secrets` on the stack, after
@@ -72,7 +80,10 @@ macro_rules! secret_residue_tests {
 		mod $mod_name {
 			use super::*;
 			use qp_rusty_crystals_dilithium::{
-				params::$mod_name::{ETA, GAMMA2, K, L, SECRETKEYBYTES as SK},
+				params::$mod_name::{
+					C_DASH_BYTES as CD, ETA, GAMMA1, GAMMA2, K, L, OMEGA, POLYZ_PACKEDBYTES as PZ,
+					SECRETKEYBYTES as SK, SIGNBYTES as SIG, TAU,
+				},
 				$mod_name::{Keypair, SecretKey},
 			};
 
@@ -161,6 +172,71 @@ macro_rules! secret_residue_tests {
 				]
 			}
 
+			/// The key's secret vectors and those of the attempt that produced
+			/// `sig`, recomputed from the signature: the mask `y = z - c*s1`, the
+			/// commitment `w = A*y` with its low bits `w0`, and the products of
+			/// the challenge with `s1`, `s2` and `t0`.
+			fn signing_secrets(parts: &Parts, sig: &[u8; SIG]) -> Vec<(&'static str, Vec<i32>)> {
+				let mut c_tilde = [0u8; CD];
+				let mut z = Polyvec::<L>::default();
+				let mut hint = Polyvec::<K>::default();
+				assert!(packing::unpack_sig::<K, L, GAMMA1, OMEGA, CD, PZ, SIG>(
+					&mut c_tilde,
+					&mut z,
+					&mut hint,
+					sig
+				));
+				let mut c_hat = Poly::default();
+				poly::challenge::<TAU, CD>(&mut c_hat, &c_tilde);
+				poly::ntt(&mut c_hat);
+
+				let (s2_hat, t0_hat) = (ntt_of(&parts.s2), ntt_of(&parts.t0));
+				let cs1 = product(&c_hat, &ntt_of(&parts.s1));
+				let cs2 = product(&c_hat, &s2_hat);
+				let mut ct0 = product(&c_hat, &t0_hat);
+				polyvec::reduce(&mut ct0);
+
+				let mut y = z.clone();
+				polyvec::sub(&mut y, &cs1);
+				polyvec::reduce(&mut y);
+				let y_hat = ntt_of(&y);
+				let mut w1 = Polyvec::<K>::default();
+				polyvec::matrix_pointwise_montgomery_streamed(&mut w1, &parts.rho, &y_hat);
+				polyvec::reduce(&mut w1);
+				polyvec::invntt_tomont(&mut w1);
+				polyvec::caddq(&mut w1);
+				let w = w1.clone();
+				let mut w0 = Polyvec::<K>::default();
+				polyvec::decompose::<K, GAMMA2>(&mut w1, &mut w0);
+
+				let mut w0_cs2 = w0.clone();
+				polyvec::sub(&mut w0_cs2, &cs2);
+				polyvec::reduce(&mut w0_cs2);
+				let mut hint_input = w0_cs2.clone();
+				polyvec::add(&mut hint_input, &ct0);
+
+				// A wrong recomputation would not reproduce the signature's hint.
+				let mut recomputed_hint = Polyvec::<K>::default();
+				polyvec::make_hint::<K, GAMMA2>(&mut recomputed_hint, &hint_input, &w1);
+				assert_eq!(coefficients(&recomputed_hint), coefficients(&hint));
+
+				let mut secrets = key_secrets(parts);
+				secrets.extend([
+					("ntt(s2)", coefficients(&s2_hat)),
+					("ntt(t0)", coefficients(&t0_hat)),
+					("y", coefficients(&y)),
+					("ntt(y)", coefficients(&y_hat)),
+					("c*s1", coefficients(&cs1)),
+					("c*s2", coefficients(&cs2)),
+					("c*t0", coefficients(&ct0)),
+					("w", coefficients(&w)),
+					("w0", coefficients(&w0)),
+					("w0 - c*s2", coefficients(&w0_cs2)),
+					("w0 - c*s2 + c*t0", coefficients(&hint_input)),
+				]);
+				secrets
+			}
+
 			#[test]
 			fn key_generation_and_import_leave_no_secret_vectors_on_the_stack() {
 				let mut seed = SEED;
@@ -178,6 +254,20 @@ macro_rules! secret_residue_tests {
 				assert_no_secret_vectors(&secrets, "secret key import", || {
 					let mut imported = SecretKey::from_bytes(sk.as_slice()).expect("valid key");
 					imported.zeroize();
+				});
+			}
+
+			#[test]
+			fn signing_leaves_no_secret_vectors_on_the_stack() {
+				let mut seed = SEED;
+				let keypair = Keypair::generate(&mut (&mut seed).into());
+				let message = b"secret residue stack probe";
+				let signature = keypair.sign(message, None, None).expect("signing succeeds");
+				let secrets = signing_secrets(&unpacked(&keypair), &signature);
+
+				assert_no_secret_vectors(&secrets, "signing", || {
+					let signature = keypair.sign(message, None, None);
+					black_box(&signature);
 				});
 			}
 

@@ -280,6 +280,7 @@ pub fn power2round(a1: &mut Poly, a0: &mut Poly) {
 /// then *pass* the norm check instead of failing it.)
 ///
 /// Returns true if norm exceeds the bound OR if b > (Q-1)/8, false otherwise.
+#[inline(never)]
 pub fn check_norm(a: &Poly, b: i32) -> bool {
 	let mut result = false;
 

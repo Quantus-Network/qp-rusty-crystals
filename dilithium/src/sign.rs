@@ -492,15 +492,16 @@ fn compute_and_check_challenge_t0<const K: usize, const GAMMA2: usize>(
 
 fn compute_and_check_hint_vector<const K: usize, const GAMMA2: usize, const OMEGA: usize>(
 	hint_vector_h: &mut Polyvec<K>,
-	commitment_w0: &Polyvec<K>,
+	commitment_w0: &mut Polyvec<K>,
 	challenge_t0: &Polyvec<K>,
 	commitment_w1: &Polyvec<K>,
 ) -> bool {
-	let mut w0_plus_challenge_t0 = commitment_w0.clone();
-	polyvec::add(&mut w0_plus_challenge_t0, challenge_t0);
+	// `commitment_w0` becomes `w0 + c*t0` in place: it is not read again
+	// before the next attempt recomputes it, and a copy of it would be one
+	// more secret vector to wipe.
+	polyvec::add(commitment_w0, challenge_t0);
 
-	let hint_weight =
-		polyvec::make_hint::<K, GAMMA2>(hint_vector_h, &w0_plus_challenge_t0, commitment_w1);
+	let hint_weight = polyvec::make_hint::<K, GAMMA2>(hint_vector_h, commitment_w0, commitment_w1);
 
 	hint_weight <= OMEGA as i32
 }
@@ -522,7 +523,7 @@ fn generate_masking_vector_and_commitment<
 ) {
 	polyvec::uniform_gamma1::<L, GAMMA1, PZ>(masking_vector_y, signing_entropy, attempt_nonce);
 
-	*signature_z_temp = masking_vector_y.clone();
+	copy_polyvec(signature_z_temp, masking_vector_y);
 	polyvec::ntt(signature_z_temp);
 	polyvec::matrix_pointwise_montgomery_streamed(commitment_w1, public_seed_rho, signature_z_temp);
 	polyvec::reduce(commitment_w1);
@@ -665,7 +666,7 @@ pub(crate) fn signature_var<
 
 		let condition4 = compute_and_check_hint_vector::<K, GAMMA2, OMEGA>(
 			&mut hint_vector_h,
-			&commitment_w0,
+			&mut commitment_w0,
 			&challenge_t0,
 			&commitment_w1,
 		);
