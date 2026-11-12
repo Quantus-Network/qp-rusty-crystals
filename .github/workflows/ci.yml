@@ -105,6 +105,11 @@ jobs:
           for probe in import_stack_zeroization sign_stack_zeroization sensitive_bytes_stack_zeroization \
               secret_residue_stack_zeroization; do
             run_probe -p qp-rusty-crystals-dilithium --all-features --test "$probe"
+            # Residue depends on codegen: one codegen unit and the generic CPU model
+            # (aarch64 Linux's default) leaked where the default build did not.
+            CARGO_TARGET_DIR=target/generic-cgu1 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+              RUSTFLAGS="-C target-cpu=generic" \
+              run_probe -p qp-rusty-crystals-dilithium --all-features --test "$probe"
           done
           for probe in dkg_stack_zeroization signing_stack_zeroization dealer_stack_zeroization \
               share_import_stack_zeroization; do
