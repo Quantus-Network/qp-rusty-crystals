@@ -205,10 +205,11 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-stack-${{ hashFiles('**/Cargo.lock') }}
-      # Worst single frame is currently ~107 KB (sign::signature). A 128 KB budget
-      # leaves headroom for noise but trips if the ~56 KB materialized matrix A
-      # ever comes back. The script installs its own pinned nightly + llvm-tools.
-      - name: Check per-function stack frames against budget
+      # Worst entry point is currently ~79 KB (ML-DSA-87 SecretKey::sign, own frame
+      # plus callees). A 128 KB budget leaves headroom for noise but trips if the
+      # ~56 KB materialized matrix A ever comes back. The script installs its own
+      # pinned nightly + llvm-tools.
+      - name: Check entry-point worst-case stack against budget
         run: ./stack-check.sh 128
 
   security-audit:
