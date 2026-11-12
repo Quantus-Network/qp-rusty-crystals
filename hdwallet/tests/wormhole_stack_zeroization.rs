@@ -25,7 +25,10 @@
 //! only compiled for optimized builds (`cargo test --release`).
 #![cfg(all(not(debug_assertions), feature = "ml-dsa-87"))]
 
-use qp_rusty_crystals_hdwallet::{SensitiveBytes32, WormholePair};
+use qp_rusty_crystals_hdwallet::{
+	derive_wormhole_from_mnemonic, generate_wormhole_from_seed, SensitiveBytes32, SensitiveBytes64,
+	WormholePair,
+};
 use qp_rusty_crystals_test_utils::{probe_stack_for, probe_stack_for_named};
 
 // The wormhole path only computes Poseidon hashes; 1 MiB is ample.
@@ -81,5 +84,90 @@ fn wormhole_secrets_never_survive_pair_drop() {
 		leaked.is_empty(),
 		"wormhole material survived in dead stack memory after the pair was dropped: {leaked:?} \
 		 (the secret alone derives the address; first_hash is the proving reveal)"
+	);
+}
+
+const SEED_64: [u8; 64] = *b"wormhole-probe-seed-first-half0Awormhole-probe-seed-second-half0";
+/// Derives an unrelated pair: the scan must never report it.
+const OTHER_SEED_64: [u8; 64] =
+	*b"wormhole-probe-other-seed-half0Awormhole-probe-other-seed-half0B";
+const PATH: &str = "m/44'/189189189'/0'/0'/0'";
+const MNEMONIC: &str =
+	"legal winner thank year wave sausage worth useful legal winner thank yellow";
+
+fn seed_holder_64(seed: &[u8; 64]) -> SensitiveBytes64 {
+	let mut holder = SensitiveBytes64::zeroed();
+	holder.as_mut_bytes().copy_from_slice(seed);
+	holder
+}
+
+/// Security review: the derivation entrypoints must uphold the same property
+/// as `generate_new`. They used to return `Result<WormholePair, _>` by
+/// value; the temporary that value is moved out of is never dropped, so the
+/// pair's own zeroizing wrappers could not reach it and both `secret` and
+/// `first_hash` stayed in dead stack memory — while the test above, which
+/// calls `generate_new` directly, kept passing. The entrypoints now fill a
+/// caller-owned pair in place.
+///
+/// `derive` fills the pair under test and `unrelated` a different one, whose
+/// secrets the scan must not report.
+fn assert_no_wormhole_residue(
+	entrypoint: &str,
+	derive: impl Fn(&mut WormholePair),
+	unrelated: impl Fn(&mut WormholePair),
+) {
+	// Reference values, computed outside any probed region.
+	let mut pair = WormholePair::zeroed();
+	derive(&mut pair);
+	let (secret, first_hash) = (*pair.secret().as_bytes(), *pair.first_hash());
+	unrelated(&mut pair);
+	let (other_secret, other_first_hash) = (*pair.secret().as_bytes(), *pair.first_hash());
+	let patterns = [
+		("secret", &secret[..]),
+		("first_hash", &first_hash[..]),
+		("unrelated secret", &other_secret[..]),
+		("unrelated first_hash", &other_first_hash[..]),
+	];
+
+	// Sanity: the technique detects unwiped copies, and only those planted.
+	let planted = probe_stack_for_named(STACK_BYTES, &patterns, || {
+		let leaked: [[u8; 32]; 2] = [secret, first_hash];
+		core::hint::black_box(&leaked);
+	});
+	assert_eq!(planted, ["secret", "first_hash"], "probe self-check failed");
+
+	let leaked = probe_stack_for_named(STACK_BYTES, &patterns, || {
+		let mut pair = WormholePair::zeroed();
+		derive(&mut pair);
+		core::hint::black_box(&pair);
+	});
+	assert!(
+		leaked.is_empty(),
+		"{entrypoint} left wormhole material in dead stack memory after the pair was dropped: \
+		 {leaked:?}"
+	);
+}
+
+#[test]
+fn wormhole_secrets_never_survive_seed_derivation() {
+	let derive = |seed: &[u8; 64], out: &mut WormholePair| {
+		generate_wormhole_from_seed(&seed_holder_64(seed), PATH, out).unwrap()
+	};
+	assert_no_wormhole_residue(
+		"generate_wormhole_from_seed",
+		|out| derive(&SEED_64, out),
+		|out| derive(&OTHER_SEED_64, out),
+	);
+}
+
+#[test]
+fn wormhole_secrets_never_survive_mnemonic_derivation() {
+	let derive = |passphrase: Option<&str>, out: &mut WormholePair| {
+		derive_wormhole_from_mnemonic(MNEMONIC, passphrase, PATH, out).unwrap()
+	};
+	assert_no_wormhole_residue(
+		"derive_wormhole_from_mnemonic",
+		|out| derive(None, out),
+		|out| derive(Some("other"), out),
 	);
 }

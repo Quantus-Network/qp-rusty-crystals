@@ -392,11 +392,15 @@ pub fn derive_key_from_mnemonic(
 /// Takes the mnemonic by reference and does not copy it into a heap buffer,
 /// avoiding a redundant duplicate of the secret. The caller retains ownership
 /// of the `&str` and is responsible for zeroizing the source buffer itself.
+///
+/// The pair is written in place into the caller-provided `out`; see
+/// [`generate_wormhole_from_seed`]. On error, `out` is untouched.
 pub fn derive_wormhole_from_mnemonic(
 	mnemonic: &str,
 	passphrase: Option<&str>,
 	path: &str,
-) -> Result<WormholePair, HDLatticeError> {
+	out: &mut WormholePair,
+) -> Result<(), HDLatticeError> {
 	check_wormhole_path(path)?;
 	// The stretched seed is filled in place and lent to
 	// `generate_wormhole_from_seed`; moving it there by value left this
@@ -404,7 +408,7 @@ pub fn derive_wormhole_from_mnemonic(
 	// probe). It drops — and wipes — here.
 	let mut seed = SensitiveBytes64::zeroed();
 	parse_mnemonic_to_seed_into(mnemonic, passphrase, seed.as_mut_bytes())?;
-	generate_wormhole_from_seed(&seed, path)
+	generate_wormhole_from_seed(&seed, path, out)
 }
 
 /// Generate a wormhole pair from a seed at the given path
@@ -415,10 +419,18 @@ pub fn derive_wormhole_from_mnemonic(
 /// stays dead and unwiped, outside the reach of `ZeroizeOnDrop`. The seed
 /// stays in the caller's self-zeroizing storage and is wiped in place when
 /// the caller drops it.
+///
+/// The pair is likewise written in place into the caller-provided `out`
+/// (start from [`WormholePair::zeroed`]) rather than returned by value: the
+/// temporary a `Result<WormholePair, _>` is moved out of is never dropped,
+/// which left the wormhole `secret` and `first_hash` in dead stack memory
+/// (pinned by the wormhole stack-zeroization probe). On error, `out` is
+/// untouched.
 pub fn generate_wormhole_from_seed(
 	seed: &SensitiveBytes64,
 	path: &str,
-) -> Result<WormholePair, HDLatticeError> {
+	out: &mut WormholePair,
+) -> Result<(), HDLatticeError> {
 	check_wormhole_path(path)?;
 
 	// Same HMAC-SHA512 tree derivation as the keypair entrypoints; only the
@@ -427,7 +439,8 @@ pub fn generate_wormhole_from_seed(
 	// cheap and idempotent.) Seed and entropy are self-zeroizing.
 	let mut entropy = SensitiveBytes32::zeroed();
 	derive_entropy_from_seed(seed, path, &mut entropy)?;
-	Ok(WormholePair::generate_new(&mut entropy))
+	WormholePair::generate_into(&mut entropy, out);
+	Ok(())
 }
 
 /// Validate a wormhole derivation path: generic path checks plus the

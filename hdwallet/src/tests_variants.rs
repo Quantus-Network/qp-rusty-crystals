@@ -112,11 +112,12 @@ fn top_level_api_is_ml_dsa_87() {
 /// on builds with no ML-DSA feature at all.
 #[test]
 fn variant_independent_surface_available() {
-	let pair =
-		crate::generate_wormhole_from_seed(&test_seed(), "m/44'/189189189'/0'/0'/0'").unwrap();
+	let path = "m/44'/189189189'/0'/0'/0'";
+	let mut pair = crate::WormholePair::zeroed();
+	crate::generate_wormhole_from_seed(&test_seed(), path, &mut pair).unwrap();
 	// Determinism of the variant-independent path.
-	let pair2 =
-		crate::generate_wormhole_from_seed(&test_seed(), "m/44'/189189189'/0'/0'/0'").unwrap();
+	let mut pair2 = crate::WormholePair::zeroed();
+	crate::generate_wormhole_from_seed(&test_seed(), path, &mut pair2).unwrap();
 	assert_eq!(pair.address(), pair2.address());
 }
 

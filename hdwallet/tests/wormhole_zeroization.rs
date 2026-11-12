@@ -1,7 +1,7 @@
 //! Regression test (security review): wormhole address derivation must never
 //! free heap memory that still contains the secret.
 //!
-//! `generate_pair_from_secret` encodes the secret as Goldilocks felts and
+//! `fill_pair_from_secret` encodes the secret as Goldilocks felts and
 //! copies them into a heap-backed `Vec` preimage for Poseidon hashing. That
 //! vector used to be `clear()`ed — which resets the length but does not touch
 //! the backing allocation — so the felt-encoded secret survived in freed heap

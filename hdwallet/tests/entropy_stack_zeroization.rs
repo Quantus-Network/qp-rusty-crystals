@@ -20,7 +20,7 @@
 
 use qp_rusty_crystals_hdwallet::{
 	derive_key_from_seed, generate_wormhole_from_seed, hderive::ExtendedPrivKey,
-	ml_dsa_87::Keypair, SensitiveBytes64,
+	ml_dsa_87::Keypair, SensitiveBytes64, WormholePair,
 };
 use qp_rusty_crystals_test_utils::probe_stack_for;
 
@@ -86,7 +86,8 @@ fn derived_entropy_never_survives_wormhole_generation() {
 
 	let holder = seed_holder();
 	let leaked = probe_stack_for(STACK_BYTES, &entropy, move || {
-		let pair = generate_wormhole_from_seed(&holder, WORMHOLE_PATH).unwrap();
+		let mut pair = WormholePair::zeroed();
+		generate_wormhole_from_seed(&holder, WORMHOLE_PATH, &mut pair).unwrap();
 		core::hint::black_box(&pair);
 	});
 	assert!(

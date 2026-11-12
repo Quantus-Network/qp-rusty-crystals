@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod hdwallet_tests {
 	use crate::{
-		generate_mnemonic, generate_wormhole_from_seed, mnemonic_to_seed,
-		test_vectors::get_test_vectors, HDLatticeError, SensitiveBytes64,
+		generate_mnemonic, mnemonic_to_seed, test_vectors::get_test_vectors, HDLatticeError,
+		SensitiveBytes64, WormholePair,
 	};
 	use alloc::{
 		borrow::ToOwned,
@@ -44,6 +44,25 @@ mod hdwallet_tests {
 	) -> Result<Keypair, HDLatticeError> {
 		let mut keypair = Keypair::zeroed();
 		crate::derive_key_from_mnemonic(mnemonic, passphrase, path, &mut keypair).map(|()| keypair)
+	}
+
+	/// Test helper: by-value form of [`crate::generate_wormhole_from_seed`].
+	fn generate_wormhole_from_seed(
+		seed: &SensitiveBytes64,
+		path: &str,
+	) -> Result<WormholePair, HDLatticeError> {
+		let mut pair = WormholePair::zeroed();
+		crate::generate_wormhole_from_seed(seed, path, &mut pair).map(|()| pair)
+	}
+
+	/// Test helper: by-value form of [`crate::derive_wormhole_from_mnemonic`].
+	fn derive_wormhole_from_mnemonic(
+		mnemonic: &str,
+		passphrase: Option<&str>,
+		path: &str,
+	) -> Result<WormholePair, HDLatticeError> {
+		let mut pair = WormholePair::zeroed();
+		crate::derive_wormhole_from_mnemonic(mnemonic, passphrase, path, &mut pair).map(|()| pair)
 	}
 
 	#[test]
@@ -333,7 +352,6 @@ mod hdwallet_tests {
 	// Regenerate with `print_wormhole_golden` if the derivation is intentionally changed.
 	#[test]
 	fn test_wormhole_known_values() {
-		use crate::derive_wormhole_from_mnemonic;
 		use hex_literal::hex;
 
 		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
@@ -359,7 +377,6 @@ mod hdwallet_tests {
 	#[test]
 	#[ignore]
 	fn print_wormhole_golden() {
-		use crate::derive_wormhole_from_mnemonic;
 		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
 		let w = derive_wormhole_from_mnemonic(mnemonic, None, "m/44'/189189189'/0'").unwrap();
 		let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
@@ -647,7 +664,7 @@ mod hdwallet_tests {
 
 	#[test]
 	fn test_derive_rejects_oversized_path() {
-		use crate::{generate_wormhole_from_seed, MAX_DERIVATION_PATH_BYTES};
+		use crate::MAX_DERIVATION_PATH_BYTES;
 
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
@@ -671,7 +688,7 @@ mod hdwallet_tests {
 
 	#[test]
 	fn test_derive_rejects_too_deep_path() {
-		use crate::{generate_wormhole_from_seed, MAX_DERIVATION_DEPTH};
+		use crate::MAX_DERIVATION_DEPTH;
 
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
@@ -699,7 +716,7 @@ mod hdwallet_tests {
 	/// Bip39Error would prove the expensive mnemonic work ran first.
 	#[test]
 	fn test_mnemonic_helpers_validate_path_before_seed_stretching() {
-		use crate::{derive_wormhole_from_mnemonic, MAX_DERIVATION_PATH_BYTES};
+		use crate::MAX_DERIVATION_PATH_BYTES;
 
 		let bogus_mnemonic = "not a valid bip39 mnemonic phrase at all";
 		let mut oversized = String::from("m");
@@ -814,5 +831,21 @@ mod hdwallet_tests {
 		crate::derive_key_from_mnemonic(mnemonic, None, "abc", &mut keypair).unwrap_err();
 		crate::derive_key_from_mnemonic("not a mnemonic", None, path, &mut keypair).unwrap_err();
 		assert_eq!(keypair.to_bytes(), before);
+	}
+
+	/// Same contract for the wormhole entrypoints and their `WormholePair`.
+	#[test]
+	fn test_wormhole_error_leaves_out_untouched() {
+		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let path = "m/44'/189189189'/0'";
+		let seed = seed_from(mnemonic.to_string(), None);
+		let mut pair = WormholePair::zeroed();
+		crate::generate_wormhole_from_seed(&seed, path, &mut pair).unwrap();
+		let before = generate_wormhole_from_seed(&seed, path).unwrap();
+
+		crate::generate_wormhole_from_seed(&seed, "m/44'/60'/0'", &mut pair).unwrap_err();
+		crate::derive_wormhole_from_mnemonic(mnemonic, None, "abc", &mut pair).unwrap_err();
+		crate::derive_wormhole_from_mnemonic("not a mnemonic", None, path, &mut pair).unwrap_err();
+		assert!(pair == before);
 	}
 }

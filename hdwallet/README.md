@@ -102,9 +102,10 @@ Wormhole address derivation is Poseidon-based and independent of the ML-DSA
 parameter set. It requires the wormhole coin type (`189189189'`) in the path:
 
 ```rust
-use qp_rusty_crystals_hdwallet::derive_wormhole_from_mnemonic;
+use qp_rusty_crystals_hdwallet::{derive_wormhole_from_mnemonic, WormholePair};
 
-let pair = derive_wormhole_from_mnemonic(&mnemonic, None, "m/44'/189189189'/0'/0'/0'")?;
+let mut pair = WormholePair::zeroed();
+derive_wormhole_from_mnemonic(&mnemonic, None, "m/44'/189189189'/0'/0'/0'", &mut pair)?;
 println!("Address: {}", hex::encode(pair.address()));
 ```
 
