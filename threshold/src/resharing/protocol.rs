@@ -2444,8 +2444,10 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		)
 		.map_err(ResharingProtocolError::ShareVerificationFailed)?;
 
-		let mut s1_acc = [[0i64; N as usize]; L];
-		let mut s2_acc = [[0i64; N as usize]; K];
+		// The sum is this party's recovered partial secret for the signing set,
+		// so it is wiped on drop (security review).
+		let mut s1_acc = Zeroizing::new([[0i64; N as usize]; L]);
+		let mut s2_acc = Zeroizing::new([[0i64; N as usize]; K]);
 
 		for translated in translated_masks {
 			let share = self.new_shares.get(&translated).ok_or_else(|| {
@@ -4888,6 +4890,62 @@ mod tests {
 			assert!(
 				leaked.is_empty(),
 				"derive_subshares_with_session_seed left the subset PRF seed in dead stack memory"
+			);
+		}
+
+		/// Security review: `recovered_partial_weighted_norm` sums a signing
+		/// set's subset shares into stack arrays. The sum is the party's
+		/// recovered partial secret for that set, the same secret Round 3
+		/// signs with, and the arrays were not wiped.
+		#[test]
+		fn recovered_partial_never_survives_norm_guard() {
+			// Party 1 of a 2-of-3 committee, with honest new shares.
+			let (mut protocol, original) = share_recovery_fixture();
+			for (&mask, data) in original.shares() {
+				let mut share = NewShareData::new();
+				share.s1 = data.s1;
+				share.s2 = data.s2;
+				protocol.new_shares.insert(mask, Box::new(share));
+			}
+
+			// Each signing set's recovered partial as the guard sums it:
+			// the first 64 centered coefficients of each polynomial.
+			let sharing_patterns =
+				crate::protocol::secret_sharing::compute_sharing_patterns(2, 3).unwrap();
+			let mut patterns = Vec::new();
+			for set in generate_subset_masks(3, 2).into_iter().filter(|set| set & 0b010 != 0) {
+				let masks = crate::protocol::secret_sharing::translated_subset_masks(
+					&sharing_patterns,
+					set,
+					1,
+					2,
+					3,
+				)
+				.unwrap();
+				for i in 0..L + K {
+					let mut bytes = Vec::new();
+					for j in 0..64 {
+						let sum: i64 = masks
+							.iter()
+							.map(|mask| {
+								let share = &protocol.new_shares[mask];
+								let c = if i < L { share.s1[i][j] } else { share.s2[i - L][j] };
+								center_mod_q(c) as i64
+							})
+							.sum();
+						bytes.extend_from_slice(&sum.to_le_bytes());
+					}
+					patterns.push((format!("set {set:#b} recovered partial [{i}]"), bytes));
+				}
+			}
+			let named: Vec<_> = patterns.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
+
+			let leaked = probe_stack_for_named(STACK_BYTES, &named, || {
+				protocol.verify_recovered_partial_norms().expect("honest shares pass the guard");
+			});
+			assert!(
+				leaked.is_empty(),
+				"the norm guard left recovered partials in dead stack memory: {leaked:?}"
 			);
 		}
 	}
