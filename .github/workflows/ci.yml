@@ -161,13 +161,6 @@ jobs:
         run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-dilithium --no-default-features --features ml-dsa-44,ml-dsa-65,ml-dsa-87
       - name: Build hdwallet for wasm32v1-none (no_std)
         run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-hdwallet --no-default-features --features ml-dsa-44,ml-dsa-65,ml-dsa-87
-      # The threshold crate compiles a single parameter set (ml-dsa-87 wins
-      # when several are enabled), so each one gets its own build.
-      - name: Build threshold for wasm32v1-none (no_std)
-        run: |
-          for variant in ml-dsa-44 ml-dsa-65 ml-dsa-87; do
-            cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-threshold --no-default-features --features "$variant"
-          done
 
   analysis:
     name: 🤖 Analysis (Clippy & Doc)

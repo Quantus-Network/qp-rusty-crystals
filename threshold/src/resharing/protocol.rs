@@ -39,11 +39,9 @@
 //! do not advance past those states until they know `Act`.
 
 use alloc::{
-	boxed::Box,
 	collections::{BTreeMap, BTreeSet},
 	format,
 	string::{String, ToString},
-	vec,
 	vec::Vec,
 };
 use core::fmt;
@@ -2365,7 +2363,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 
 			let weighted_norm =
 				self.recovered_partial_weighted_norm(&sharing_patterns, signing_mask, my_idx, nu)?;
-			let challenge_bound = weighted_norm * libm::sqrt(TAU as f64);
+			let challenge_bound = weighted_norm * (TAU as f64).sqrt();
 			if challenge_bound > bound {
 				// `signing_mask` was generated for this committee, so every
 				// set bit is in range. A `None` here would mean an internal
@@ -2486,7 +2484,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			})
 			.sum();
 
-		Ok(libm::sqrt(s1_sq / (nu * nu) + s2_sq))
+		Ok((s1_sq / (nu * nu) + s2_sq).sqrt())
 	}
 
 	/// All members of new subset J must produce identical `s_J^new` (and thus identical
@@ -2813,9 +2811,9 @@ fn binomial(n: u32, k: u32) -> u64 {
 fn partial_secret_norm_bound(threshold: u32, parties: u32, nu: f64) -> f64 {
 	let num_secrets = {
 		let c = binomial(parties, threshold - 1) as f64;
-		libm::ceil(c / threshold as f64)
+		(c / threshold as f64).ceil()
 	};
-	libm::sqrt(TAU as f64) * secret_norm_envelope(threshold, parties, nu, num_secrets)
+	(TAU as f64).sqrt() * secret_norm_envelope(threshold, parties, nu, num_secrets)
 }
 
 /// Norm bound for a single stored RSS subset share (`B_G` analog).
@@ -2854,7 +2852,7 @@ fn secret_norm_envelope(threshold: u32, parties: u32, nu: f64, num_secrets: f64)
 	let n = N as f64;
 	let dim = n * (K as f64 + L as f64 / (nu * nu));
 	let var_eta = ETA as f64 * (ETA as f64 + 1.0) / 3.0;
-	1.3 * libm::sqrt(dim * var_eta * num_secrets) * resharing_norm_enlargement(threshold, parties)
+	1.3 * (dim * var_eta * num_secrets).sqrt() * resharing_norm_enlargement(threshold, parties)
 }
 
 fn single_share_weighted_norm(share: &NewShareData, nu: f64) -> f64 {
@@ -2876,7 +2874,7 @@ fn single_share_weighted_norm(share: &NewShareData, nu: f64) -> f64 {
 			x * x
 		})
 		.sum();
-	libm::sqrt(s1_sq / (nu * nu) + s2_sq)
+	(s1_sq / (nu * nu) + s2_sq).sqrt()
 }
 
 /// Per-config enlargement factor `κ` applied to the keygen-calibrated bound `B`.
