@@ -2327,7 +2327,8 @@ mod tests {
 			dkg_participants,
 		);
 		let tweak = [0x55u8; 32];
-		let contribution = derive_dkg_contribution(&master_share, &tweak);
+		let mut contribution = [0u8; 32];
+		derive_dkg_contribution(&master_share, &tweak, &mut contribution);
 
 		let nonce_a = [0xA1u8; 32];
 		let nonce_b = [0xB2u8; 32];
