@@ -25,7 +25,7 @@ use crate::{
 			normalize_assuming_le2q, pack_signature, poly_pack_w, unpack_polyvec_w,
 			HyperballSampleVector,
 		},
-		secret_sharing::{recover_share, SecretShare},
+		secret_sharing::{recover_share, RecoveredShare},
 	},
 };
 
@@ -216,32 +216,6 @@ pub(crate) fn verify_commitment_hash(
 ) -> bool {
 	let computed_hash = compute_commitment_hash(ssid, party_id, commitment_data);
 	computed_hash == *expected_hash
-}
-
-/// Convert PrivateKeyShare to the SecretShare format used by recover_share.
-///
-/// This copies the raw secret `s1`/`s2` share material, so it must remain
-/// crate-internal: exposing it publicly would defeat the intentional opacity
-/// of `PrivateKeyShare`.
-pub(crate) fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
-	let mut shares: BTreeMap<u16, SecretShare> = BTreeMap::new();
-
-	for (subset_id, share_data) in share.shares() {
-		let mut s1_share = polyvec::Polyvec::<L>::default();
-		let mut s2_share = polyvec::Polyvec::<K>::default();
-
-		for i in 0..L {
-			s1_share.vec[i].coeffs_mut().copy_from_slice(&share_data.s1[i]);
-		}
-
-		for i in 0..K {
-			s2_share.vec[i].coeffs_mut().copy_from_slice(&share_data.s2[i]);
-		}
-
-		shares.insert(*subset_id, SecretShare { s1_share, s2_share });
-	}
-
-	shares
 }
 
 /// Unpack a commitment from 23-bit packed format.
@@ -510,22 +484,21 @@ pub(crate) fn generate_round3_response(
 	round1: &Round1Data,
 	round2: &Round2Data,
 ) -> ThresholdResult<Vec<polyvec::Polyvec<L>>> {
-	// Convert shares
-	let shares = convert_shares(private_key);
-
 	// Get active parties directly from the ParticipantList
 	// This supports arbitrary participant IDs (not necessarily sequential)
 	let active_party_ids: Vec<ParticipantId> = round2.active_participants.iter().collect();
 
 	// Recover the partial secret for this party (in NTT domain)
 	// The recover_share function uses dkg_participants to map arbitrary IDs to indices
-	let (s1_ntt, s2_ntt) = recover_share(
-		&shares,
+	let mut recovered = RecoveredShare::default();
+	recover_share(
+		private_key.shares(),
 		private_key.party_id(),
 		&active_party_ids,
 		private_key.threshold(),
 		private_key.total_parties(),
 		private_key.dkg_participants(),
+		&mut recovered,
 	)?;
 
 	let k = config.k_iterations() as usize;
@@ -591,7 +564,7 @@ pub(crate) fn generate_round3_response(
 		// the inverse NTT's input contract directly.
 		let mut z = polyvec::Polyvec::<L>::default();
 		for j in 0..L {
-			poly::pointwise_montgomery(&mut z.vec[j], &challenge_ntt, &s1_ntt.vec[j]);
+			poly::pointwise_montgomery(&mut z.vec[j], &challenge_ntt, &recovered.s1.vec[j]);
 			poly::invntt_tomont(&mut z.vec[j]);
 		}
 		// Normalize z
@@ -606,7 +579,7 @@ pub(crate) fn generate_round3_response(
 		// Compute c·s2
 		let mut cs2 = polyvec::Polyvec::<K>::default();
 		for j in 0..K {
-			poly::pointwise_montgomery(&mut cs2.vec[j], &challenge_ntt, &s2_ntt.vec[j]);
+			poly::pointwise_montgomery(&mut cs2.vec[j], &challenge_ntt, &recovered.s2.vec[j]);
 			poly::invntt_tomont(&mut cs2.vec[j]);
 		}
 		// Normalize cs2

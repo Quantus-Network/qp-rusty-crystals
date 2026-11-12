@@ -1,16 +1,16 @@
 //! Regression test (security review): threshold signing must not leave the
-//! per-signature mask randomness in dead stack memory.
+//! per-signature mask randomness or the signer's secret share in dead stack
+//! memory.
 //!
 //! Round 1 (`round1_commit_with_seed`) squeezes a SHAKE stream and rejection-
 //! samples it into the hyperball mask y. That raw stream is the most
 //! dangerous transient in the whole signing flow: y itself never leaves the
 //! signer, but the Round 3 response z = y + c*s is published, so anyone who
 //! recovers y from process memory recovers the secret share s. The stream's
-//! raw bytes exist only during Round 1 sampling — later rounds handle y and s
-//! in coefficient form inside `ZeroizeOnDrop` polyvecs — so Round 1 is where
-//! stack residue of this secret can occur, and what this probe targets. The
-//! companion heap test (`heap_zeroization.rs`, scenario 3) covers the same
-//! stream's heap-side scratch buffer.
+//! raw bytes exist only during Round 1 sampling, so the first two probes
+//! target Round 1. The companion heap test (`heap_zeroization.rs`, scenario
+//! 3) covers the same stream's heap-side scratch buffer. Round 3 handles s
+//! itself, and the last probe covers it.
 //!
 //! Detection uses the same painted-stack technique as the dealer and DKG
 //! probes: run Round 1 on a sentinel-painted stack via `psm::on_stack`, then
@@ -26,11 +26,19 @@
 //! assertion is only meaningful once those are elided.
 #![cfg(not(debug_assertions))]
 
+#[path = "common/share_patterns.rs"]
+mod share_patterns;
 #[path = "common/stack_patterns.rs"]
 mod stack_patterns;
 
+use qp_rusty_crystals_dilithium::poly;
 use qp_rusty_crystals_test_utils::{probe_stack_for, probe_stack_for_named};
-use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig, ThresholdSigner};
+use qp_rusty_crystals_threshold::{
+	generate_with_dealer,
+	params::{K, L, Q},
+	PrivateKeyShare, ThresholdConfig, ThresholdSigner,
+};
+use share_patterns::{decode_share, named, poly_pattern, share_patterns, Coeffs};
 use stack_patterns::{hyperball_stream_pattern, round1_iteration_seeds};
 
 // 16 MiB: Round 1 drives hyperball rejection sampling across all commitment
@@ -105,4 +113,66 @@ fn round1_leaves_no_nonce_seed_copies_on_the_stack() {
 			.expect("round 1 commit succeeds");
 	});
 	assert!(leaked.is_empty(), "round 1 left nonce seeds in stack memory: {leaked:?}");
+}
+
+/// Party 0's recovered partial secret as named scan patterns.
+///
+/// Round 3 sums the NTT of the subset shares assigned to the signer's slot in
+/// the signing set. Party 0 holds slot 0 whenever it signs, and the sharing
+/// patterns give slot 0 every subset that contains it, so the sum runs over
+/// all of party 0's subset shares. Each sum is reduced to [0, Q), as the
+/// recovery leaves it.
+fn party0_recovered_patterns(share: &PrivateKeyShare) -> Vec<(String, Vec<u8>)> {
+	let (_, subsets) = decode_share(share);
+	(0..L + K)
+		.map(|i| {
+			let mut sum: Coeffs = [0; 256];
+			for (_, polys) in &subsets {
+				let mut ntt = poly::Poly::default();
+				ntt.coeffs_mut().copy_from_slice(&polys[i]);
+				poly::ntt(&mut ntt);
+				for (s, c) in sum.iter_mut().zip(ntt.coeffs()) {
+					*s = (*s + c.rem_euclid(Q)) % Q;
+				}
+			}
+			(format!("recovered (NTT) [{i}]"), poly_pattern(&sum))
+		})
+		.collect()
+}
+
+/// Regression test (security review): Round 3 must not leave the signer's
+/// subset shares or its recovered partial secret in dead stack memory.
+///
+/// Round 3 recovers the signer's partial secret for the signing set from its
+/// subset shares and multiplies it by the challenge. Every polynomial of both
+/// is scanned, for the smallest, the default and a larger committee.
+#[test]
+fn round3_leaves_no_share_copies_on_the_stack() {
+	for parties in [2, 3, 5] {
+		let config = ThresholdConfig::new(2, parties).expect("valid config");
+		let (pk, shares) = generate_with_dealer(&[7u8; 32], config).expect("keygen succeeds");
+		let mut patterns = share_patterns(&shares[0]);
+		patterns.extend(party0_recovered_patterns(&shares[0]));
+
+		let mut signers = shares
+			.into_iter()
+			.take(2)
+			.map(|share| ThresholdSigner::new(share, pk.clone(), config).expect("signer"));
+		let (mut a, mut b) = (signers.next().unwrap(), signers.next().unwrap());
+		let ssid = [0x11u8; 32];
+		let r1a = a.round1_commit_with_seed(&ssid, &[0x5Au8; 32]).expect("round 1");
+		let r1b = b.round1_commit_with_seed(&ssid, &[0x6Bu8; 32]).expect("round 1");
+		let r2b = b.round2_reveal(&ssid, b"message", b"ctx", &[r1a]).expect("round 2");
+		a.round2_reveal(&ssid, b"message", b"ctx", core::slice::from_ref(&r1b))
+			.expect("round 2");
+
+		let leaked = probe_stack_for_named(STACK_BYTES, &named(&patterns), || {
+			a.round3_respond(&ssid, core::slice::from_ref(&r1b), core::slice::from_ref(&r2b))
+				.expect("round 3");
+		});
+		assert!(
+			leaked.is_empty(),
+			"2-of-{parties} round 3 left secrets in stack memory: {leaked:?}"
+		);
+	}
 }
