@@ -6,7 +6,10 @@
 //! threshold. Unit-test probes that cannot take a `dev-dependency` keep a
 //! local copy.
 
-use std::alloc::{alloc, dealloc, Layout};
+use std::{
+	alloc::{alloc, dealloc, Layout},
+	collections::HashSet,
+};
 
 const PAINT: u8 = 0xAA;
 const ALIGN: usize = 4096;
@@ -124,4 +127,37 @@ pub fn stack_residue_diff<T>(
 		);
 	}
 	differing.len()
+}
+
+/// Coefficients per window in [`probe_stack_for_coefficients`].
+const COEFFICIENT_RUN: usize = 8;
+
+/// Run `f` on a freshly painted stack of `stack_bytes`, then look for each
+/// named vector as stored `i32` coefficients. A vector is found when any
+/// `COEFFICIENT_RUN` consecutive coefficients of it, not all zero, appear
+/// at a word-aligned stack offset, so a partial or spilled copy is detected
+/// as well as a whole one. Returns the names of those found.
+pub fn probe_stack_for_coefficients<F: FnOnce()>(
+	stack_bytes: usize,
+	vectors: &[(&str, &[i32])],
+	f: F,
+) -> Vec<String> {
+	const RUN_BYTES: usize = 4 * COEFFICIENT_RUN;
+	let mut stack = PaintedStack::new(stack_bytes);
+	let region = stack.run(f);
+	let on_stack: HashSet<&[u8]> = region.windows(RUN_BYTES).step_by(4).collect();
+	let mut found = Vec::new();
+	for (name, coefficients) in vectors {
+		let stored: Vec<u8> = coefficients.iter().flat_map(|c| c.to_ne_bytes()).collect();
+		let copies = stored
+			.windows(RUN_BYTES)
+			.step_by(4)
+			.filter(|run| run.iter().any(|&b| b != 0) && on_stack.contains(run))
+			.count();
+		if copies > 0 {
+			eprintln!("probe: {copies} coefficient runs of {name:?} found on the stack");
+			found.push((*name).to_string());
+		}
+	}
+	found
 }

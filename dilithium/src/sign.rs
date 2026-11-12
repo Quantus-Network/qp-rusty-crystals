@@ -27,6 +27,15 @@ const fn assert_sign_params<
 	assert!(SIG == params::signbytes(K, L, GAMMA1, OMEGA, CD));
 }
 
+/// Copy `src` into `dst` in place. Secret vectors are copied this way rather
+/// than with `Polyvec::clone`, which builds its result in a temporary that is
+/// moved out and never wiped.
+fn copy_polyvec<const N: usize>(dst: &mut Polyvec<N>, src: &Polyvec<N>) {
+	for (d, s) in dst.vec.iter_mut().zip(src.vec.iter()) {
+		d.coeffs = s.coeffs;
+	}
+}
+
 /// Derive the public high bits `t1` and secret low bits `t0` from the public
 /// seed `rho` and secret vectors `s1`, `s2`.
 ///
@@ -36,26 +45,30 @@ const fn assert_sign_params<
 /// go through this single routine, so the public key derived at import can
 /// never disagree with the one produced at generation. The transient NTT copy
 /// of `s1` is zeroized before returning.
+///
+/// `t1` and `t0` are written through `&mut` (security review): returned by
+/// value, the secret `t0` was moved out of this frame and the dead source
+/// copy stayed behind, beyond the reach of the caller's zeroize.
 fn derive_public_components<const K: usize, const L: usize>(
+	t1: &mut Polyvec<K>,
+	t0: &mut Polyvec<K>,
 	rho: &[u8; params::SEEDBYTES],
 	s1: &Polyvec<L>,
 	s2: &Polyvec<K>,
-) -> (Polyvec<K>, Polyvec<K>) {
-	let mut s1hat = s1.clone();
+) {
+	let mut s1hat = Polyvec::<L>::default();
+	copy_polyvec(&mut s1hat, s1);
 	polyvec::ntt(&mut s1hat);
 
-	let mut t1 = Polyvec::<K>::default();
-	polyvec::matrix_pointwise_montgomery_streamed(&mut t1, rho, &s1hat);
-	polyvec::reduce(&mut t1);
-	polyvec::invntt_tomont(&mut t1);
-	polyvec::add(&mut t1, s2);
-	polyvec::caddq(&mut t1);
+	polyvec::matrix_pointwise_montgomery_streamed(t1, rho, &s1hat);
+	polyvec::reduce(t1);
+	polyvec::invntt_tomont(t1);
+	polyvec::add(t1, s2);
+	polyvec::caddq(t1);
 
-	let mut t0 = Polyvec::<K>::default();
-	polyvec::power2round(&mut t1, &mut t0);
+	polyvec::power2round(t1, t0);
 
 	s1hat.zeroize();
-	(t1, t0)
 }
 
 /// Generate public and private key for an arbitrary ML-DSA parameter set.
@@ -107,7 +120,9 @@ pub(crate) fn keypair_var<
 	let mut s2 = Polyvec::<K>::default();
 	polyvec::uniform_eta::<K, ETA>(&mut s2, &rhoprime, L as u16);
 
-	let (t1, mut t0) = derive_public_components(&rho, &s1, &s2);
+	let mut t1 = Polyvec::<K>::default();
+	let mut t0 = Polyvec::<K>::default();
+	derive_public_components(&mut t1, &mut t0, &rho, &s1, &s2);
 
 	packing::pack_pk(pk, &rho, &t1);
 
@@ -222,7 +237,9 @@ pub(crate) fn public_key_from_secret_var<
 		return None;
 	}
 
-	let (t1, mut t0_derived) = derive_public_components(&rho, &s1, &s2);
+	let mut t1 = Polyvec::<K>::default();
+	let mut t0_derived = Polyvec::<K>::default();
+	derive_public_components(&mut t1, &mut t0_derived, &rho, &s1, &s2);
 
 	// Reject a secret key whose derived t1 is degenerate (same predicate the verifier and
 	// PublicKey::from_bytes apply): such a public key would admit a keyless forgery. An honest
