@@ -1,7 +1,8 @@
 // tests/sign_integration_tests.rs
 
 use qp_rusty_crystals_hdwallet::{
-	derive_key_from_seed, generate_mnemonic, mnemonic_to_seed, SensitiveBytes32, SensitiveBytes64,
+	generate_mnemonic, ml_dsa_87::Keypair, mnemonic_to_seed, HDLatticeError, SensitiveBytes32,
+	SensitiveBytes64,
 };
 use rand::{Rng, RngExt};
 
@@ -11,6 +12,13 @@ fn seed_from(mnemonic: &str) -> SensitiveBytes64 {
 	mnemonic_to_seed(mnemonic.to_string(), None, &mut seed)
 		.expect("Failed to create seed from mnemonic");
 	seed
+}
+
+/// Test helper: by-value form of `derive_key_from_seed`, which fills
+/// caller-owned storage. Tests have no stack residue to guard.
+fn derive_key_from_seed(seed: &SensitiveBytes64, path: &str) -> Result<Keypair, HDLatticeError> {
+	let mut keypair = Keypair::zeroed();
+	qp_rusty_crystals_hdwallet::derive_key_from_seed(seed, path, &mut keypair).map(|()| keypair)
 }
 
 fn get_random_bytes() -> [u8; 32] {

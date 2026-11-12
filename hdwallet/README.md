@@ -23,8 +23,8 @@ qp-rusty-crystals-hdwallet = { version = "3.0", features = ["ml-dsa-44", "ml-dsa
 ```
 
 Each enabled feature exposes a key-derivation module (`ml_dsa_44`, `ml_dsa_65`,
-`ml_dsa_87`) with `derive_key_from_seed` / `derive_key_from_mnemonic` returning
-that variant's `Keypair`. The top-level `derive_key_from_seed` /
+`ml_dsa_87`) with `derive_key_from_seed` / `derive_key_from_mnemonic` filling
+a caller-provided `Keypair` of that variant. The top-level `derive_key_from_seed` /
 `derive_key_from_mnemonic` functions are the original ML-DSA-87 API and require
 the `ml-dsa-87` feature.
 
@@ -48,7 +48,7 @@ qp-rusty-crystals-hdwallet = "3.1"
 ### Basic Example
 
 ```rust
-use qp_rusty_crystals_hdwallet::{derive_key_from_mnemonic, generate_mnemonic};
+use qp_rusty_crystals_hdwallet::{derive_key_from_mnemonic, generate_mnemonic, ml_dsa_87::Keypair};
 
 // Generate secure entropy for a new mnemonic. The phrase is returned as a
 // self-wiping `Zeroizing<String>`: its heap contents are zeroized on drop.
@@ -57,8 +57,11 @@ getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
 let mnemonic = generate_mnemonic((&mut entropy).into())?;
 println!("Mnemonic: {}", mnemonic.as_str());
 
-// Derive an ML-DSA-87 keypair at a BIP-44 path
-let keypair = derive_key_from_mnemonic(&mnemonic, None, "m/44'/189189'/0'/0'/0'")?;
+// Derive an ML-DSA-87 keypair at a BIP-44 path. The keypair is written into
+// caller-owned storage instead of being returned: a returned secret key is
+// moved, and the moved-from stack slot is never wiped.
+let mut keypair = Keypair::zeroed();
+derive_key_from_mnemonic(&mnemonic, None, "m/44'/189189'/0'/0'/0'", &mut keypair)?;
 
 // Sign and verify with the derived keypair
 let message = b"Hello, quantum-safe wallet!";
@@ -78,14 +81,18 @@ would leave an unwiped copy of the seed in the caller's dead stack slot —
 so one holder can derive keys at many paths and wipes itself when dropped:
 
 ```rust
-use qp_rusty_crystals_hdwallet::{derive_key_from_seed, mnemonic_to_seed, SensitiveBytes64};
+use qp_rusty_crystals_hdwallet::{
+    derive_key_from_seed, ml_dsa_87::Keypair, mnemonic_to_seed, SensitiveBytes64,
+};
 
 // The seed is written into a caller-provided self-zeroizing buffer;
 // the mnemonic string is consumed and zeroized.
 let mut seed = SensitiveBytes64::zeroed();
 mnemonic_to_seed(mnemonic, None, &mut seed)?;
-let keypair = derive_key_from_seed(&seed, "m/44'/189189'/0'/0'/0'")?;
-let another = derive_key_from_seed(&seed, "m/44'/189189'/1'/0'/0'")?;
+let mut keypair = Keypair::zeroed();
+derive_key_from_seed(&seed, "m/44'/189189'/0'/0'/0'", &mut keypair)?;
+let mut another = Keypair::zeroed();
+derive_key_from_seed(&seed, "m/44'/189189'/1'/0'/0'", &mut another)?;
 // `seed` zeroizes its storage when it goes out of scope.
 ```
 

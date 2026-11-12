@@ -28,7 +28,7 @@
 
 use qp_rusty_crystals_hdwallet::{
 	derive_key_from_mnemonic, derive_key_from_seed, derive_wormhole_from_mnemonic,
-	generate_wormhole_from_seed, mnemonic_to_seed, SensitiveBytes64,
+	generate_wormhole_from_seed, ml_dsa_87::Keypair, mnemonic_to_seed, SensitiveBytes64,
 };
 use qp_rusty_crystals_test_utils::probe_stack_for_named;
 
@@ -72,7 +72,8 @@ fn seed_never_survives_key_derivation() {
 	let leaked = probe_stack_for_named(STACK_BYTES, &seed_patterns(&SEED), || {
 		let mut seed = SensitiveBytes64::zeroed();
 		seed.as_mut_bytes().copy_from_slice(&SEED);
-		let keypair = derive_key_from_seed(&seed, PATH).unwrap();
+		let mut keypair = Keypair::zeroed();
+		derive_key_from_seed(&seed, PATH, &mut keypair).unwrap();
 		core::hint::black_box(&keypair);
 		// `seed` drops here and wipes its storage in place.
 	});
@@ -111,7 +112,8 @@ fn stretched_seed_never_survives_mnemonic_key_derivation() {
 	assert_probe_detects(&reference);
 
 	let leaked = probe_stack_for_named(STACK_BYTES, &seed_patterns(&reference), || {
-		let keypair = derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
+		let mut keypair = Keypair::zeroed();
+		derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut keypair).unwrap();
 		core::hint::black_box(&keypair);
 	});
 	assert!(

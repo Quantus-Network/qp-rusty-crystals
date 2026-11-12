@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod hdwallet_tests {
 	use crate::{
-		derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed, mnemonic_to_seed,
+		generate_mnemonic, generate_wormhole_from_seed, mnemonic_to_seed,
 		test_vectors::get_test_vectors, HDLatticeError, SensitiveBytes64,
 	};
 	use alloc::{
@@ -24,6 +24,26 @@ mod hdwallet_tests {
 		let mut seed = SensitiveBytes64::zeroed();
 		mnemonic_to_seed(mnemonic, passphrase, &mut seed).expect("valid mnemonic");
 		seed
+	}
+
+	/// Test helper: by-value form of [`crate::derive_key_from_seed`], which
+	/// fills caller-owned storage. Tests have no stack residue to guard.
+	fn derive_key_from_seed(
+		seed: &SensitiveBytes64,
+		path: &str,
+	) -> Result<Keypair, HDLatticeError> {
+		let mut keypair = Keypair::zeroed();
+		crate::derive_key_from_seed(seed, path, &mut keypair).map(|()| keypair)
+	}
+
+	/// Test helper: by-value form of [`crate::derive_key_from_mnemonic`].
+	fn derive_key_from_mnemonic(
+		mnemonic: &str,
+		passphrase: Option<&str>,
+		path: &str,
+	) -> Result<Keypair, HDLatticeError> {
+		let mut keypair = Keypair::zeroed();
+		crate::derive_key_from_mnemonic(mnemonic, passphrase, path, &mut keypair).map(|()| keypair)
 	}
 
 	#[test]
@@ -436,11 +456,9 @@ mod hdwallet_tests {
 
 		// Same guarantee through the borrowing derivation helpers.
 		let key_composed =
-			crate::derive_key_from_mnemonic(mnemonic, Some(composed), "m/44'/189189'/0'/0'/0'")
-				.unwrap();
+			derive_key_from_mnemonic(mnemonic, Some(composed), "m/44'/189189'/0'/0'/0'").unwrap();
 		let key_decomposed =
-			crate::derive_key_from_mnemonic(mnemonic, Some(decomposed), "m/44'/189189'/0'/0'/0'")
-				.unwrap();
+			derive_key_from_mnemonic(mnemonic, Some(decomposed), "m/44'/189189'/0'/0'/0'").unwrap();
 		assert_eq!(key_composed.secret().to_bytes(), key_decomposed.secret().to_bytes());
 	}
 
@@ -681,9 +699,7 @@ mod hdwallet_tests {
 	/// Bip39Error would prove the expensive mnemonic work ran first.
 	#[test]
 	fn test_mnemonic_helpers_validate_path_before_seed_stretching() {
-		use crate::{
-			derive_key_from_mnemonic, derive_wormhole_from_mnemonic, MAX_DERIVATION_PATH_BYTES,
-		};
+		use crate::{derive_wormhole_from_mnemonic, MAX_DERIVATION_PATH_BYTES};
 
 		let bogus_mnemonic = "not a valid bip39 mnemonic phrase at all";
 		let mut oversized = String::from("m");
@@ -723,7 +739,7 @@ mod hdwallet_tests {
 	/// scans, and PBKDF2 work before any rejection.
 	#[test]
 	fn test_rejects_oversized_mnemonic_and_passphrase() {
-		use crate::{derive_key_from_mnemonic, MAX_MNEMONIC_BYTES, MAX_PASSPHRASE_BYTES};
+		use crate::{MAX_MNEMONIC_BYTES, MAX_PASSPHRASE_BYTES};
 
 		let valid = "rocket primary way job input cactus submit menu zoo burger rent impose";
 
@@ -781,5 +797,22 @@ mod hdwallet_tests {
 		let seed = seed_from(mnemonic, None);
 		derive_key_from_seed(&seed, &max_depth)
 			.expect("path at exactly MAX_DERIVATION_DEPTH must succeed");
+	}
+
+	/// The keypair entrypoints fill a caller-provided `Keypair`; a failed
+	/// derivation must leave whatever it already held untouched.
+	#[test]
+	fn test_derive_key_error_leaves_out_untouched() {
+		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let path = "m/44'/0'/0'/0'/0'";
+		let seed = seed_from(mnemonic.to_string(), None);
+		let mut keypair = Keypair::zeroed();
+		crate::derive_key_from_seed(&seed, path, &mut keypair).unwrap();
+		let before = keypair.to_bytes();
+
+		crate::derive_key_from_seed(&seed, "abc", &mut keypair).unwrap_err();
+		crate::derive_key_from_mnemonic(mnemonic, None, "abc", &mut keypair).unwrap_err();
+		crate::derive_key_from_mnemonic("not a mnemonic", None, path, &mut keypair).unwrap_err();
+		assert_eq!(keypair.to_bytes(), before);
 	}
 }

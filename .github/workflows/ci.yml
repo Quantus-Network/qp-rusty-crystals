@@ -124,7 +124,7 @@ jobs:
           # so they must additionally pass under optimized codegen.
           for probe in bip39_stack_zeroization entropy_stack_zeroization \
               hderive_stack_zeroization wormhole_stack_zeroization \
-              seed_stack_zeroization \
+              seed_stack_zeroization keypair_stack_zeroization \
               mnemonic_heap_zeroization mnemonic_word_pointer_zeroization; do
             run_probe -p qp-rusty-crystals-hdwallet --test "$probe"
           done

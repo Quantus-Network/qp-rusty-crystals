@@ -271,15 +271,25 @@ macro_rules! mldsa_variant_module {
 			/// keeps the seed in the caller's self-zeroizing storage, which
 			/// is wiped in place when the caller drops it (pinned by the
 			/// seed stack-zeroization probe).
+			///
+			/// The keypair is written in place into the caller-provided
+			/// `out` (start from [`Keypair::zeroed`]) rather than returned
+			/// by value, for the same reason (security review): a
+			/// `Result<Keypair, _>` return is moved out of a temporary that
+			/// is never dropped, which left the complete packed secret key
+			/// in dead stack memory (pinned by the keypair
+			/// stack-zeroization probe). On error, `out` is untouched.
 			pub fn derive_key_from_seed(
 				seed: &SensitiveBytes64,
 				path: &str,
-			) -> Result<Keypair, HDLatticeError> {
-				// The entropy is filled in place and lent to `generate`,
+				out: &mut Keypair,
+			) -> Result<(), HDLatticeError> {
+				// The entropy is filled in place and lent to `generate_into`,
 				// which wipes it; it never crosses a boundary by value.
 				let mut entropy = SensitiveBytes32::zeroed();
 				crate::derive_entropy_from_seed(seed, path, &mut entropy)?;
-				Ok(Keypair::generate(&mut entropy))
+				Keypair::generate_into(&mut entropy, out);
+				Ok(())
 			}
 
 			#[doc = concat!("Derive an ", $doc_name, " keypair from a mnemonic with passphrase.")]
@@ -292,11 +302,16 @@ macro_rules! mldsa_variant_module {
 			/// Takes the mnemonic by reference and does not copy it into a heap buffer,
 			/// avoiding a redundant duplicate of the secret. The caller retains ownership
 			/// of the `&str` and is responsible for zeroizing the source buffer itself.
+			///
+			/// The keypair is written in place into the caller-provided
+			/// `out`; see [`derive_key_from_seed`]. On error, `out` is
+			/// untouched.
 			pub fn derive_key_from_mnemonic(
 				mnemonic: &str,
 				passphrase: Option<&str>,
 				path: &str,
-			) -> Result<Keypair, HDLatticeError> {
+				out: &mut Keypair,
+			) -> Result<(), HDLatticeError> {
 				crate::check_derivation_path(path)?;
 				// The stretched seed is filled in place and lent to
 				// `derive_key_from_seed`; moving it there by value left this
@@ -304,7 +319,7 @@ macro_rules! mldsa_variant_module {
 				// stack-zeroization probe). It drops — and wipes — here.
 				let mut seed = SensitiveBytes64::zeroed();
 				crate::parse_mnemonic_to_seed_into(mnemonic, passphrase, seed.as_mut_bytes())?;
-				derive_key_from_seed(&seed, path)
+				derive_key_from_seed(&seed, path, out)
 			}
 		}
 	};
@@ -326,12 +341,19 @@ mldsa_variant_module!(ml_dsa_87, "ml-dsa-87", "ML-DSA-87");
 /// stays dead and unwiped, outside the reach of `ZeroizeOnDrop`. The seed
 /// stays in the caller's self-zeroizing storage and is wiped in place when
 /// the caller drops it.
+///
+/// The keypair is likewise written in place into the caller-provided `out`
+/// (start from [`Keypair::zeroed`]) rather than returned by value: the
+/// temporary a `Result<Keypair, _>` is moved out of is never dropped, which
+/// left the complete packed secret key in dead stack memory. On error, `out`
+/// is untouched.
 #[cfg(feature = "ml-dsa-87")]
 pub fn derive_key_from_seed(
 	seed: &SensitiveBytes64,
 	path: &str,
-) -> Result<Keypair, HDLatticeError> {
-	ml_dsa_87::derive_key_from_seed(seed, path)
+	out: &mut Keypair,
+) -> Result<(), HDLatticeError> {
+	ml_dsa_87::derive_key_from_seed(seed, path, out)
 }
 
 /// Keypair (ML-DSA-87) derivation from mnemonic with passphrase.
@@ -348,13 +370,17 @@ pub fn derive_key_from_seed(
 /// Takes the mnemonic by reference and does not copy it into a heap buffer,
 /// avoiding a redundant duplicate of the secret. The caller retains ownership
 /// of the `&str` and is responsible for zeroizing the source buffer itself.
+///
+/// The keypair is written in place into the caller-provided `out`; see
+/// [`derive_key_from_seed`]. On error, `out` is untouched.
 #[cfg(feature = "ml-dsa-87")]
 pub fn derive_key_from_mnemonic(
 	mnemonic: &str,
 	passphrase: Option<&str>,
 	path: &str,
-) -> Result<Keypair, HDLatticeError> {
-	ml_dsa_87::derive_key_from_mnemonic(mnemonic, passphrase, path)
+	out: &mut Keypair,
+) -> Result<(), HDLatticeError> {
+	ml_dsa_87::derive_key_from_mnemonic(mnemonic, passphrase, path, out)
 }
 
 /// Wormhole pair derivation from mnemonic with passphrase.
