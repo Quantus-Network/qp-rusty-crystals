@@ -251,7 +251,7 @@ mod tests {
 			party_id,
 			3,
 			2,
-			[key_byte; 32],
+			&[key_byte; 32],
 			[0u8; 32],
 			[0u8; 64],
 			shares,
@@ -423,7 +423,7 @@ mod tests {
 			0,
 			3,
 			2,
-			[1u8; 32],
+			&[1u8; 32],
 			[0u8; 32],
 			[0u8; 64],
 			shares.clone(),
@@ -433,7 +433,7 @@ mod tests {
 			0,
 			3,
 			2,
-			[2u8; 32], // different `key`, same shares
+			&[2u8; 32], // different `key`, same shares
 			[0u8; 32],
 			[0u8; 64],
 			shares,

@@ -246,7 +246,7 @@ pub fn generate_with_dealer(
 			party_id,
 			parties,
 			threshold,
-			party_keys[party_id as usize],
+			&party_keys[party_id as usize],
 			rho,
 			tr,
 			shares_data,

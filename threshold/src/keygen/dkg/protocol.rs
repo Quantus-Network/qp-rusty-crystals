@@ -2056,20 +2056,19 @@ fn build_private_share<S: TranscriptSigner>(
 	let mut combined_shares: BTreeMap<SubsetMask, SecretShareData> = BTreeMap::new();
 	for (subset_mask, contribution) in my_contributions {
 		// Convert from Vec to fixed-size arrays
-		let mut s1_arr = [[0i32; 256]; L];
+		//
+		// Filled heap-to-heap in a zeroed map entry (security review): stack
+		// arrays moved into a by-value `SecretShareData` argument to insert
+		// pass the coefficients through a temporary that wiping the arrays
+		// does not reach (mirrors the resharing path's
+		// `build_private_key_share`).
+		let entry = combined_shares.entry(*subset_mask).or_insert_with(SecretShareData::zeroed);
 		for (i, poly) in contribution.s1.iter().enumerate().take(L) {
-			s1_arr[i] = *poly;
+			entry.s1[i] = *poly;
 		}
-		let mut s2_arr = [[0i32; 256]; K];
 		for (i, poly) in contribution.s2.iter().enumerate().take(K) {
-			s2_arr[i] = *poly;
+			entry.s2[i] = *poly;
 		}
-		combined_shares.insert(*subset_mask, SecretShareData { s1: s1_arr, s2: s2_arr });
-		// `SecretShareData` is `ZeroizeOnDrop`, but the arrays are `Copy`, so the
-		// construction above left the secret coefficients in these stack locals;
-		// wipe the source copies now.
-		s1_arr.zeroize();
-		s2_arr.zeroize();
 	}
 
 	// Derive `party_key` from the actual secret share polynomials so that this byte
@@ -2116,7 +2115,7 @@ fn build_private_share<S: TranscriptSigner>(
 		config.my_party_id(),
 		config.total_parties(),
 		config.threshold(),
-		party_key,
+		&party_key,
 		*rho,
 		tr,
 		combined_shares,
@@ -2321,7 +2320,7 @@ mod tests {
 			0,
 			3,
 			2,
-			[0u8; 32],
+			&[0u8; 32],
 			[0u8; 32],
 			[0u8; 64],
 			shares,

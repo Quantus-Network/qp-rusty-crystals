@@ -2746,7 +2746,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			self.config.my_party_id(),
 			self.config.new_participants().len() as u32,
 			self.config.new_threshold(),
-			party_key,
+			&party_key,
 			rho,
 			tr,
 			shares_data,
