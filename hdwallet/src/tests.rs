@@ -92,7 +92,7 @@ mod hdwallet_tests {
 		let mut entropy = [43u8; 32];
 
 		// Test generating new mnemonic (returned inside a Zeroizing wrapper)
-		let mnemonic = generate_mnemonic((&mut entropy).into()).unwrap();
+		let mnemonic = generate_mnemonic(&mut (&mut entropy).into()).unwrap();
 		assert_eq!(mnemonic.split_whitespace().count(), 24);
 
 		// Test creating seeds from mnemonic - demonstrate explicit copying
@@ -174,7 +174,7 @@ mod hdwallet_tests {
 			.map(|_| {
 				let mut rng = StdRng::from_seed(seed);
 				rng.fill_bytes(&mut seed);
-				let mnemonic = generate_mnemonic((&mut seed).into()).unwrap();
+				let mnemonic = generate_mnemonic(&mut (&mut seed).into()).unwrap();
 				let path = generate_random_path();
 				let seed = seed_from(mnemonic.to_string(), None);
 				let k = derive_key_from_seed(&seed, &path).unwrap();
@@ -257,7 +257,7 @@ mod hdwallet_tests {
 				e
 			})) {
 			let expected = bip39::Mnemonic::from_entropy(&entropy).unwrap().to_string();
-			let phrase = generate_mnemonic((&mut { entropy }).into()).unwrap();
+			let phrase = generate_mnemonic(&mut (&mut { entropy }).into()).unwrap();
 			assert_eq!(*phrase, expected);
 		}
 	}
@@ -268,7 +268,7 @@ mod hdwallet_tests {
 		let mut seed = [42u8; 32];
 		let mut rng = StdRng::from_seed(seed);
 		rng.fill_bytes(&mut seed);
-		let mnemonic = generate_mnemonic((&mut seed).into())
+		let mnemonic = generate_mnemonic(&mut (&mut seed).into())
 			.unwrap_or_else(|_| panic!("Failed to generate mnemonic for 24 words"));
 
 		// Split mnemonic into words and count them
@@ -609,21 +609,21 @@ mod hdwallet_tests {
 		let mut seed_bytes = [1u8; 64];
 
 		// Wrap in SensitiveBytes - this zeroizes the original data
-		let sensitive_entropy = SensitiveBytes32::from(&mut entropy);
+		let mut sensitive_entropy = SensitiveBytes32::from(&mut entropy);
 		let sensitive_seed = SensitiveBytes64::from(&mut seed_bytes);
 
-		// Use the wrapped data - generate_mnemonic moves the entropy;
-		// derive_key_from_seed borrows the seed (security review: a by-value
-		// move would leave the caller's slot dead and unwiped), so the same
-		// seed holder can derive at several paths and is wiped when dropped.
-		let mnemonic = generate_mnemonic(sensitive_entropy).unwrap();
+		// Use the wrapped data - generate_mnemonic borrows the entropy and
+		// wipes it in place; derive_key_from_seed borrows the seed (security
+		// review: a by-value move would leave the caller's slot dead and
+		// unwiped), so the same seed holder can derive at several paths and
+		// is wiped when dropped.
+		let mnemonic = generate_mnemonic(&mut sensitive_entropy).unwrap();
 		let seed_from_mnemonic = seed_from(mnemonic.to_string(), None);
 		let _key = derive_key_from_seed(&sensitive_seed, "m/44'/0'/0'/0'/0'").unwrap();
 		let _key_again = derive_key_from_seed(&sensitive_seed, "m/44'/0'/0'/0'/1'").unwrap();
 
-		// After this point, sensitive_entropy is consumed.
-		// The following would not compile if uncommented:
-		// let _mnemonic2 = generate_mnemonic(sensitive_entropy);
+		// After this point, sensitive_entropy is consumed: it holds zeros.
+		assert_eq!(sensitive_entropy.as_bytes(), &[0u8; 32]);
 
 		// Test that regular arrays still work with auto-conversion
 		let mut raw_seed = [2u8; 64];

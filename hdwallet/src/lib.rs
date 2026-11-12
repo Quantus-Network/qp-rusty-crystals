@@ -33,7 +33,7 @@ use core::str::FromStr;
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 use unicode_normalization::{is_nfkd_quick, IsNormalized, UnicodeNormalization};
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 // The historical test suite and its vendored vectors are ML-DSA-87 keys.
 #[cfg(all(test, feature = "ml-dsa-87"))]
@@ -465,8 +465,11 @@ fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 
 /// Generate a new random mnemonic with 24 words = 32 bytes
 ///
-/// This function takes ownership of the entropy for security (move semantics).
-/// The entropy parameter is zeroized before returning.
+/// The entropy is borrowed mutably and zeroized in place after use (security
+/// review): taking it by value would move — i.e. copy — it through a dead
+/// stack slot that is never dropped, so `ZeroizeOnDrop` could not wipe it.
+/// The caller's value is all zeros afterwards; the bip39 stack-residue
+/// regression test pins this.
 ///
 /// The phrase is returned inside a [`Zeroizing`] wrapper (security review):
 /// the recovery phrase yields the entire HD wallet, so it must not outlive
@@ -481,11 +484,14 @@ fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 /// # Security Note
 /// Always use cryptographically secure random entropy (e.g., from `getrandom::getrandom()`).
 /// Never use predictable strings, timestamps, or user input as entropy sources.
-pub fn generate_mnemonic(entropy: SensitiveBytes32) -> Result<Zeroizing<String>, HDLatticeError> {
+pub fn generate_mnemonic(
+	entropy: &mut SensitiveBytes32,
+) -> Result<Zeroizing<String>, HDLatticeError> {
 	// The secret word indices live only in this wiping buffer, which is
 	// filled in place and never moved (see the `mnemonic` module).
 	let mut indices = Zeroizing::new([0u16; mnemonic::MAX_WORDS]);
 	mnemonic::encode_256(entropy.as_bytes(), &mut indices);
+	entropy.as_mut_bytes().zeroize();
 
 	// Collect the word pointers in one tight pass, then `join` — do NOT
 	// stream straight into a growing String: an iterator borrowing the
@@ -515,8 +521,6 @@ pub fn generate_mnemonic(entropy: SensitiveBytes32) -> Result<Zeroizing<String>,
 	}
 	core::hint::black_box(&mut words);
 	drop(words);
-
-	// entropy is automatically zeroized when it drops
 
 	Ok(result)
 }

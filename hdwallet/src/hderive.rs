@@ -22,26 +22,43 @@ pub enum Error {
 const HMAC_BLOCK_BYTES: usize = 128;
 const HMAC_OUTPUT_BYTES: usize = 64;
 
-/// SHA-512 over `first` followed by the concatenation of `rest`, writing the
-/// digest into `out` and volatile-wiping the hasher state in place afterwards.
+/// Hashers that [`digest_wiped`] may overwrite with zeros in place.
 ///
-/// This is the only function in the crate containing `unsafe`; every other
+/// # Safety
+/// The implementing type must be a flat struct (word state, length counter,
+/// block buffer, position), containing no pointers or Drop glue, so writing
+/// zeros over it is sound and it may be dropped afterwards.
+pub(crate) unsafe trait FlatHasher: Digest + sha2::digest::FixedOutputReset {}
+
+// SAFETY: `sha2` 0.10 defines both as flat structs of exactly that shape.
+unsafe impl FlatHasher for sha2::Sha256 {}
+unsafe impl FlatHasher for Sha512 {}
+
+/// Digest `D` over `first` followed by the concatenation of `rest`, writing
+/// the `N`-byte digest into `out` and volatile-wiping the hasher state in
+/// place afterwards.
+///
+/// Together with the [`FlatHasher`] impls above, and apart from the volatile
+/// felt wipe in `wormhole.rs`, this is the only `unsafe` in the crate; every other
 /// primitive that hashes secret material is built on it. It exists because
 /// `sha2` 0.10 has no zeroizing drop semantics: a plainly dropped `Sha512`
 /// leaves its block buffer — still holding input bytes verbatim — in a dead
 /// stack frame (security review). The hasher here is only driven through
 /// `&mut` methods (never moved), so wiping it in place erases every copy.
-fn sha512_wiped(first: &[u8], rest: &[&[u8]], out: &mut [u8; HMAC_OUTPUT_BYTES]) {
-	let mut hasher = Sha512::new();
-	hasher.update(first);
+pub(crate) fn digest_wiped<D: FlatHasher, const N: usize>(
+	first: &[u8],
+	rest: &[&[u8]],
+	out: &mut [u8; N],
+) {
+	let mut hasher = D::new();
+	Digest::update(&mut hasher, first);
 	for part in rest {
-		hasher.update(part);
+		Digest::update(&mut hasher, part);
 	}
-	hasher.finalize_into_reset(GenericArray::from_mut_slice(&mut out[..]));
+	Digest::finalize_into_reset(&mut hasher, GenericArray::from_mut_slice(&mut out[..]));
 
-	// SAFETY: `Sha512` is a flat struct (word state, length counter, block
-	// buffer, position), containing no pointers or Drop glue, so writing
-	// zeros over it is sound and it may be dropped afterwards.
+	// SAFETY: `D` is a flat struct (see [`FlatHasher`]), so writing zeros
+	// over it is sound and it may be dropped afterwards.
 	unsafe { zeroize::zeroize_flat_type(&mut hasher) };
 }
 
@@ -54,7 +71,7 @@ fn sha512_wiped(first: &[u8], rest: &[&[u8]], out: &mut [u8; HMAC_OUTPUT_BYTES])
 /// frame, its block buffer holds message bytes verbatim, and its consuming
 /// `finalize(self)` moves all of that around the stack unwiped. Here every
 /// secret-bearing buffer is under our control: the ipad/opad key blocks are
-/// self-wiping and both hash passes go through [`sha512_wiped`].
+/// self-wiping and both hash passes go through [`digest_wiped`].
 ///
 /// Only keys up to one block are supported (the longer-key hashing step of
 /// RFC 2104 is intentionally omitted); callers pass 14, 32, or 64 bytes.
@@ -74,8 +91,8 @@ fn hmac_sha512(key: &[u8], message_parts: &[&[u8]], out: &mut [u8; HMAC_OUTPUT_B
 	// The pads are always passed as slices: passing the (Copy) arrays by
 	// value would leave unwiped copies of key material on the stack.
 	let mut inner_hash = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
-	sha512_wiped(ipad.as_slice(), message_parts, &mut inner_hash);
-	sha512_wiped(opad.as_slice(), &[inner_hash.as_slice()], out);
+	digest_wiped::<Sha512, HMAC_OUTPUT_BYTES>(ipad.as_slice(), message_parts, &mut inner_hash);
+	digest_wiped::<Sha512, HMAC_OUTPUT_BYTES>(opad.as_slice(), &[inner_hash.as_slice()], out);
 }
 
 /// PBKDF2-HMAC-SHA512 restricted to a single 64-byte output block (all this
@@ -98,7 +115,7 @@ pub(crate) fn pbkdf2_hmac_sha512(
 	// the PBKDF2 password — is typically longer than 128 bytes.
 	let mut hashed_key = Zeroizing::new([0u8; HMAC_OUTPUT_BYTES]);
 	let key: &[u8] = if password.len() > HMAC_BLOCK_BYTES {
-		sha512_wiped(password, &[], &mut hashed_key);
+		digest_wiped::<Sha512, HMAC_OUTPUT_BYTES>(password, &[], &mut hashed_key);
 		&hashed_key[..]
 	} else {
 		password

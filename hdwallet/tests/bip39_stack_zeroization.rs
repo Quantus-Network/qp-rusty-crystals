@@ -26,7 +26,7 @@ use bip39::Language;
 use qp_rusty_crystals_hdwallet::{
 	generate_mnemonic, mnemonic_to_seed, SensitiveBytes32, SensitiveBytes64,
 };
-use qp_rusty_crystals_test_utils::probe_stack_for;
+use qp_rusty_crystals_test_utils::{probe_stack_for, probe_stack_for_named};
 
 // 4 MiB: comfortably above what PBKDF2 seed stretching needs.
 const STACK_BYTES: usize = 4 * 1024 * 1024;
@@ -79,10 +79,10 @@ fn mnemonic_word_indices_never_survive_on_the_stack() {
 	// expected pattern is computed from a non-probed run with the same
 	// entropy (generation is deterministic in the entropy).
 	let entropy = [0x27u8; 32];
-	let generated = generate_mnemonic(SensitiveBytes32::from(&mut { entropy })).unwrap();
+	let generated = generate_mnemonic(&mut SensitiveBytes32::from(&mut { entropy })).unwrap();
 	let generated_pattern = word_index_pattern(&generated);
 	let generation_leaked = probe_stack_for(STACK_BYTES, &generated_pattern, || {
-		let phrase = generate_mnemonic(SensitiveBytes32::from(&mut { entropy })).unwrap();
+		let phrase = generate_mnemonic(&mut SensitiveBytes32::from(&mut { entropy })).unwrap();
 		core::hint::black_box(&phrase);
 	});
 
@@ -127,5 +127,41 @@ fn seed_produced_by_mnemonic_to_seed_wipes_itself_on_drop() {
 		!leaked,
 		"the seed produced by mnemonic_to_seed() survived in dead stack memory \
 		 after the caller's SensitiveBytes64 was dropped"
+	);
+}
+
+// Regression test (security review): the entropy given to `generate_mnemonic`
+// must leave no copy in dead stack memory. It is the wallet: the phrase is
+// just its encoding.
+//
+// The BIP-39 checksum is the first byte of SHA-256(entropy), and a plainly
+// dropped `Sha256` kept the entropy verbatim in its block buffer (observed on
+// Linux arm64; whether later frames happen to overwrite that buffer varies by
+// target). The checksum now goes through the hasher that is wiped in place,
+// and the entropy is borrowed and wiped in the caller's own storage rather
+// than taken by value.
+#[test]
+fn entropy_never_survives_mnemonic_generation() {
+	const ENTROPY: [u8; 32] = *b"bip39-entropy-probe-pattern-0032";
+	// Unrelated entropy: the scan must never report it.
+	const OTHER_ENTROPY: [u8; 32] = *b"bip39-entropy-probe-unrelated-32";
+	let patterns = [("entropy", &ENTROPY[..]), ("unrelated entropy", &OTHER_ENTROPY[..])];
+
+	// Sanity: the technique detects an unwiped copy, and only the planted one.
+	let planted = probe_stack_for_named(STACK_BYTES, &patterns, || {
+		let leaked = ENTROPY;
+		core::hint::black_box(&leaked);
+	});
+	assert_eq!(planted, ["entropy"], "probe self-check failed");
+
+	let leaked = probe_stack_for_named(STACK_BYTES, &patterns, || {
+		let mut entropy = SensitiveBytes32::zeroed();
+		entropy.as_mut_bytes().copy_from_slice(&ENTROPY);
+		let phrase = generate_mnemonic(&mut entropy).unwrap();
+		core::hint::black_box(&phrase);
+	});
+	assert!(
+		leaked.is_empty(),
+		"generate_mnemonic() left its entropy in dead stack memory: {leaked:?}"
 	);
 }

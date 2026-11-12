@@ -54,7 +54,7 @@ use qp_rusty_crystals_hdwallet::{derive_key_from_mnemonic, generate_mnemonic, ml
 // self-wiping `Zeroizing<String>`: its heap contents are zeroized on drop.
 let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
-let mnemonic = generate_mnemonic((&mut entropy).into())?;
+let mnemonic = generate_mnemonic(&mut (&mut entropy).into())?;
 println!("Mnemonic: {}", mnemonic.as_str());
 
 // Derive an ML-DSA-87 keypair at a BIP-44 path. The keypair is written into
