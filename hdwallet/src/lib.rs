@@ -156,7 +156,17 @@ fn nfkd_owned(s: &str) -> Option<Zeroizing<String>> {
 	match is_nfkd_quick(s.chars()) {
 		IsNormalized::Yes => None,
 		// `Maybe` is treated as not-normalized; NFKD is idempotent, so re-normalizing is safe.
-		_ => Some(Zeroizing::new(s.nfkd().collect())),
+		_ => {
+			// One allocation of the final size, filled in place (security
+			// review): a `String` grown by `collect` frees each outgrown
+			// block unwiped, still holding a prefix of the normalized
+			// secret, where `Zeroizing` never reaches (pinned by the
+			// normalization heap-zeroization probe).
+			let mut normalized =
+				Zeroizing::new(String::with_capacity(s.nfkd().map(char::len_utf8).sum()));
+			normalized.extend(s.nfkd());
+			Some(normalized)
+		},
 	}
 }
 
