@@ -309,9 +309,9 @@ pub fn check_norm(a: &Poly, b: i32) -> bool {
 ///
 /// Returns number of sampled coefficients. Can be smaller than a.len() if not enough random bytes
 /// were given.
-pub fn rej_uniform(a: &mut [i32], buf: &[u8]) -> usize {
+pub fn rej_uniform(a: &mut [i32], mut buf: &[u8]) -> usize {
 	let mut ctr = 0;
-	for bytes in buf.chunks_exact(3) {
+	while let Some((bytes, rest)) = buf.split_first_chunk::<3>() {
 		if ctr == a.len() {
 			break;
 		}
@@ -320,6 +320,7 @@ pub fn rej_uniform(a: &mut [i32], buf: &[u8]) -> usize {
 			a[ctr] = t;
 			ctr += 1;
 		}
+		buf = rest;
 	}
 	ctr
 }
@@ -351,24 +352,27 @@ pub fn uniform(a: &mut Poly, seed: &[u8; params::SEEDBYTES], nonce: u16) {
 /// Bit-pack polynomial t1 with coefficients fitting in 10 bits.
 /// Input coefficients are assumed to be standard representatives.
 pub(crate) fn t1_pack(r: &mut [u8], a: &Poly) {
-	for i in 0..N / 4 {
-		let c = &a.coeffs[4 * i..4 * i + 4];
-		r[5 * i + 0] = c[0] as u8;
-		r[5 * i + 1] = (c[0] >> 8 | c[1] << 2) as u8;
-		r[5 * i + 2] = (c[1] >> 6 | c[2] << 4) as u8;
-		r[5 * i + 3] = (c[2] >> 4 | c[3] << 6) as u8;
-		r[5 * i + 4] = (c[3] >> 2) as u8;
+	let r: &mut [u8; params::POLYT1_PACKEDBYTES] =
+		r.first_chunk_mut().expect("t1 output too short");
+	let (r, _) = r.as_chunks_mut::<5>();
+	for (r, c) in r.iter_mut().zip(a.coeffs.as_chunks::<4>().0) {
+		r[0] = c[0] as u8;
+		r[1] = (c[0] >> 8 | c[1] << 2) as u8;
+		r[2] = (c[1] >> 6 | c[2] << 4) as u8;
+		r[3] = (c[2] >> 4 | c[3] << 6) as u8;
+		r[4] = (c[3] >> 2) as u8;
 	}
 }
 
 /// Unpacks t1 from 10 bits per coefficient into `[0, 2^10)`.
 pub(crate) fn t1_unpack(r: &mut Poly, a: &[u8]) {
-	for i in 0..N / 4 {
-		let b = |k: usize| a[5 * i + k] as i32;
-		r.coeffs[4 * i + 0] = (b(0) | b(1) << 8) & 0x3FF;
-		r.coeffs[4 * i + 1] = (b(1) >> 2 | b(2) << 6) & 0x3FF;
-		r.coeffs[4 * i + 2] = (b(2) >> 4 | b(3) << 4) & 0x3FF;
-		r.coeffs[4 * i + 3] = (b(3) >> 6 | b(4) << 2) & 0x3FF;
+	let a: &[u8; params::POLYT1_PACKEDBYTES] = a.first_chunk().expect("t1 input too short");
+	let (a, _) = a.as_chunks::<5>();
+	for (r, a) in r.coeffs.as_chunks_mut::<4>().0.iter_mut().zip(a) {
+		let v = u64::from_le_bytes([a[0], a[1], a[2], a[3], a[4], 0, 0, 0]);
+		for (j, r) in r.iter_mut().enumerate() {
+			*r = (v >> (10 * j)) as i32 & 0x3FF;
+		}
 	}
 }
 
@@ -411,16 +415,18 @@ pub(crate) fn t0_pack(r: &mut [u8], a: &Poly) {
 /// Unpack polynomial t0 with coefficients in ]-2^{D-1}, 2^{D-1}].
 #[inline(never)]
 pub(crate) fn t0_unpack(r: &mut Poly, a: &[u8]) {
-	for i in 0..N / 8 {
-		let b = |k: usize| a[13 * i + k] as i32;
-		r.coeffs[8 * i + 0] = D_SHL - ((b(0) | b(1) << 8) & 0x1FFF);
-		r.coeffs[8 * i + 1] = D_SHL - ((b(1) >> 5 | b(2) << 3 | b(3) << 11) & 0x1FFF);
-		r.coeffs[8 * i + 2] = D_SHL - ((b(3) >> 2 | b(4) << 6) & 0x1FFF);
-		r.coeffs[8 * i + 3] = D_SHL - ((b(4) >> 7 | b(5) << 1 | b(6) << 9) & 0x1FFF);
-		r.coeffs[8 * i + 4] = D_SHL - ((b(6) >> 4 | b(7) << 4 | b(8) << 12) & 0x1FFF);
-		r.coeffs[8 * i + 5] = D_SHL - ((b(8) >> 1 | b(9) << 7) & 0x1FFF);
-		r.coeffs[8 * i + 6] = D_SHL - ((b(9) >> 6 | b(10) << 2 | b(11) << 10) & 0x1FFF);
-		r.coeffs[8 * i + 7] = D_SHL - ((b(11) >> 3 | b(12) << 5) & 0x1FFF);
+	let a: &[u8; params::POLYT0_PACKEDBYTES] = a.first_chunk().expect("t0 input too short");
+	let (a, _) = a.as_chunks::<13>();
+	for (r, a) in r.coeffs.as_chunks_mut::<8>().0.iter_mut().zip(a) {
+		let b = |k: usize| a[k] as i32;
+		r[0] = D_SHL - ((b(0) | b(1) << 8) & 0x1FFF);
+		r[1] = D_SHL - ((b(1) >> 5 | b(2) << 3 | b(3) << 11) & 0x1FFF);
+		r[2] = D_SHL - ((b(3) >> 2 | b(4) << 6) & 0x1FFF);
+		r[3] = D_SHL - ((b(4) >> 7 | b(5) << 1 | b(6) << 9) & 0x1FFF);
+		r[4] = D_SHL - ((b(6) >> 4 | b(7) << 4 | b(8) << 12) & 0x1FFF);
+		r[5] = D_SHL - ((b(8) >> 1 | b(9) << 7) & 0x1FFF);
+		r[6] = D_SHL - ((b(9) >> 6 | b(10) << 2 | b(11) << 10) & 0x1FFF);
+		r[7] = D_SHL - ((b(11) >> 3 | b(12) << 5) & 0x1FFF);
 	}
 }
 
@@ -753,26 +759,26 @@ pub fn z_pack<const GAMMA1: usize, const PZ: usize>(r: &mut [u8; PZ], a: &Poly) 
 	}
 	let gamma1 = GAMMA1 as i32;
 	if GAMMA1 == 1 << 17 {
-		for i in 0..N / 4 {
-			let t: [i32; 4] = core::array::from_fn(|j| gamma1 - a.coeffs[4 * i + j]);
-			r[9 * i + 0] = t[0] as u8;
-			r[9 * i + 1] = (t[0] >> 8) as u8;
-			r[9 * i + 2] = (t[0] >> 16 | t[1] << 2) as u8;
-			r[9 * i + 3] = (t[1] >> 6) as u8;
-			r[9 * i + 4] = (t[1] >> 14 | t[2] << 4) as u8;
-			r[9 * i + 5] = (t[2] >> 4) as u8;
-			r[9 * i + 6] = (t[2] >> 12 | t[3] << 6) as u8;
-			r[9 * i + 7] = (t[3] >> 2) as u8;
-			r[9 * i + 8] = (t[3] >> 10) as u8;
+		for (r, c) in r.as_chunks_mut::<9>().0.iter_mut().zip(a.coeffs.as_chunks::<4>().0) {
+			let t = [gamma1 - c[0], gamma1 - c[1], gamma1 - c[2], gamma1 - c[3]];
+			r[0] = t[0] as u8;
+			r[1] = (t[0] >> 8) as u8;
+			r[2] = (t[0] >> 16 | t[1] << 2) as u8;
+			r[3] = (t[1] >> 6) as u8;
+			r[4] = (t[1] >> 14 | t[2] << 4) as u8;
+			r[5] = (t[2] >> 4) as u8;
+			r[6] = (t[2] >> 12 | t[3] << 6) as u8;
+			r[7] = (t[3] >> 2) as u8;
+			r[8] = (t[3] >> 10) as u8;
 		}
 	} else {
-		for i in 0..N / 2 {
-			let t: [i32; 2] = core::array::from_fn(|j| gamma1 - a.coeffs[2 * i + j]);
-			r[5 * i + 0] = t[0] as u8;
-			r[5 * i + 1] = (t[0] >> 8) as u8;
-			r[5 * i + 2] = (t[0] >> 16 | t[1] << 4) as u8;
-			r[5 * i + 3] = (t[1] >> 4) as u8;
-			r[5 * i + 4] = (t[1] >> 12) as u8;
+		for (r, c) in r.as_chunks_mut::<5>().0.iter_mut().zip(a.coeffs.as_chunks::<2>().0) {
+			let t = [gamma1 - c[0], gamma1 - c[1]];
+			r[0] = t[0] as u8;
+			r[1] = (t[0] >> 8) as u8;
+			r[2] = (t[0] >> 16 | t[1] << 4) as u8;
+			r[3] = (t[1] >> 4) as u8;
+			r[4] = (t[1] >> 12) as u8;
 		}
 	}
 }
@@ -789,18 +795,18 @@ pub fn z_unpack<const GAMMA1: usize, const PZ: usize>(r: &mut Poly, a: &[u8; PZ]
 	}
 	let gamma1 = GAMMA1 as i32;
 	if GAMMA1 == 1 << 17 {
-		for i in 0..N / 4 {
-			let b = |k: usize| a[9 * i + k] as i32;
-			r.coeffs[4 * i + 0] = gamma1 - ((b(0) | b(1) << 8 | b(2) << 16) & 0x3FFFF);
-			r.coeffs[4 * i + 1] = gamma1 - ((b(2) >> 2 | b(3) << 6 | b(4) << 14) & 0x3FFFF);
-			r.coeffs[4 * i + 2] = gamma1 - ((b(4) >> 4 | b(5) << 4 | b(6) << 12) & 0x3FFFF);
-			r.coeffs[4 * i + 3] = gamma1 - ((b(6) >> 6 | b(7) << 2 | b(8) << 10) & 0x3FFFF);
+		for (r, a) in r.coeffs.as_chunks_mut::<4>().0.iter_mut().zip(a.as_chunks::<9>().0) {
+			let b = |k: usize| a[k] as i32;
+			r[0] = gamma1 - ((b(0) | b(1) << 8 | b(2) << 16) & 0x3FFFF);
+			r[1] = gamma1 - ((b(2) >> 2 | b(3) << 6 | b(4) << 14) & 0x3FFFF);
+			r[2] = gamma1 - ((b(4) >> 4 | b(5) << 4 | b(6) << 12) & 0x3FFFF);
+			r[3] = gamma1 - ((b(6) >> 6 | b(7) << 2 | b(8) << 10) & 0x3FFFF);
 		}
 	} else {
-		for i in 0..N / 2 {
-			let b = |k: usize| a[5 * i + k] as i32;
-			r.coeffs[2 * i + 0] = gamma1 - ((b(0) | b(1) << 8 | b(2) << 16) & 0xFFFFF);
-			r.coeffs[2 * i + 1] = gamma1 - (b(2) >> 4 | b(3) << 4 | b(4) << 12);
+		for (r, a) in r.coeffs.as_chunks_mut::<2>().0.iter_mut().zip(a.as_chunks::<5>().0) {
+			let b = |k: usize| a[k] as i32;
+			r[0] = gamma1 - ((b(0) | b(1) << 8 | b(2) << 16) & 0xFFFFF);
+			r[1] = gamma1 - (b(2) >> 4 | b(3) << 4 | b(4) << 12);
 		}
 	}
 }
@@ -816,15 +822,16 @@ pub(crate) fn w1_pack<const GAMMA2: usize>(r: &mut [u8], a: &Poly) {
 		let _ = params::polyw1_packedbytes(GAMMA2);
 	}
 	if GAMMA2 == (params::Q as usize - 1) / 88 {
-		for i in 0..N / 4 {
-			let c = &a.coeffs[4 * i..4 * i + 4];
-			r[3 * i + 0] = (c[0] | c[1] << 6) as u8;
-			r[3 * i + 1] = (c[1] >> 2 | c[2] << 4) as u8;
-			r[3 * i + 2] = (c[2] >> 4 | c[3] << 2) as u8;
+		let r: &mut [u8; 3 * N / 4] = r.first_chunk_mut().expect("w1 output too short");
+		for (r, c) in r.as_chunks_mut::<3>().0.iter_mut().zip(a.coeffs.as_chunks::<4>().0) {
+			r[0] = (c[0] | c[1] << 6) as u8;
+			r[1] = (c[1] >> 2 | c[2] << 4) as u8;
+			r[2] = (c[2] >> 4 | c[3] << 2) as u8;
 		}
 	} else {
-		for i in 0..N / 2 {
-			r[i] = (a.coeffs[2 * i + 0] | a.coeffs[2 * i + 1] << 4) as u8;
+		let r: &mut [u8; N / 2] = r.first_chunk_mut().expect("w1 output too short");
+		for (r, c) in r.iter_mut().zip(a.coeffs.as_chunks::<2>().0) {
+			*r = (c[0] | c[1] << 4) as u8;
 		}
 	}
 }

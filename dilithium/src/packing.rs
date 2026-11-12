@@ -1,4 +1,5 @@
 use crate::{params, poly, polyvec::Polyvec};
+use zeroize::Zeroize;
 
 const N: usize = params::N as usize;
 
@@ -249,20 +250,20 @@ pub fn unpack_sig<
 		assert!(SIG == params::signbytes(K, L, GAMMA1, OMEGA, CD));
 	}
 	// Overwrite, don't merge: clear any prior hint bits before decoding this signature.
-	*h = Polyvec::<K>::default();
+	h.zeroize();
 
 	c.copy_from_slice(&sig[..CD]);
 
-	let mut idx = CD;
-	// Exact-size chunks: each `&[u8; PZ]` is produced by the split,
+	// Exact-size chunks: each `&[u8; PZ]` is split off the front,
 	// so a truncated per-polynomial slice can't reach `z_unpack`.
-	let (z_chunks, _) = sig[idx..].as_chunks::<PZ>();
-	for (chunk, zi) in z_chunks.iter().zip(z.vec.iter_mut()).take(L) {
+	let mut rest = &sig[CD..];
+	for zi in z.vec.iter_mut() {
+		let (chunk, tail) = rest.split_first_chunk::<PZ>().expect("signature too short");
 		poly::z_unpack::<GAMMA1, PZ>(zi, chunk);
+		rest = tail;
 	}
-	idx += L * PZ;
 
-	let (positions, counts) = sig[idx..].split_at(OMEGA);
+	let (positions, counts) = rest.split_at(OMEGA);
 	let mut k = 0;
 	for (h_i, &count) in h.vec.iter_mut().zip(counts) {
 		let end = count as usize;

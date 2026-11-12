@@ -69,18 +69,31 @@ pub fn invntt_tomont(a: &mut [i32; N]) {
 		while start < N {
 			k -= 1;
 			let zeta = -ZETAS[k] as i64;
-			for j in start..start + len {
-				let t = a[j];
-				a[j] = t + a[j + len];
-				a[j + len] = montgomery_reduce(zeta * (t - a[j + len]) as i64);
+			let (lo, hi) = a[start..start + 2 * len].split_at_mut(len);
+			for (x, y) in lo.iter_mut().zip(hi) {
+				no_unroll_on_arm();
+				let t = *x;
+				*x = t + *y;
+				*y = montgomery_reduce(zeta * (t - *y) as i64);
 			}
 			start += 2 * len;
 		}
-		len <<= 1;
+		// An opaque width keeps LLVM from unrolling the layers into one block that holds the
+		// coefficients in registers across layers and spills them to stack slots nothing wipes.
+		len = core::hint::black_box(len << 1);
 	}
 	for j in 0..N {
+		no_unroll_on_arm();
 		a[j] = montgomery_reduce(F * a[j] as i64);
 	}
+}
+
+/// On 32-bit Arm, LLVM unrolls the butterfly and scaling loops and spills loaded coefficients to
+/// stack slots nothing wipes. An empty barrier in the loop body stops that unrolling.
+#[inline(always)]
+fn no_unroll_on_arm() {
+	#[cfg(target_arch = "arm")]
+	core::hint::black_box(());
 }
 
 #[cfg(test)]

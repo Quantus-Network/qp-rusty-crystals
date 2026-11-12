@@ -226,8 +226,10 @@ fn keccakf1600_round(a: [u64; 25], round_constant: u64) -> [u64; 25] {
 /// responsible for wiping those (see `poly::uniform_eta` / `uniform_gamma1`).
 fn keccakf1600_statepermute(state: &mut [u64; 25]) {
 	let mut a = *state;
-	for pair in KECCAKF_ROUNDCONSTANTS.chunks_exact(2) {
-		a = keccakf1600_round(keccakf1600_round(a, pair[0]), pair[1]);
+	// One round per iteration: two inlined rounds spill more lanes to stack slots nothing wipes
+	// and double the code size.
+	for &round_constant in KECCAKF_ROUNDCONSTANTS.iter() {
+		a = keccakf1600_round(a, round_constant);
 	}
 	*state = a;
 }
