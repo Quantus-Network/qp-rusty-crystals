@@ -4,7 +4,7 @@
 //! for the resharing protocol that enables changing the participant set while
 //! preserving the same public key.
 
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 use core::fmt;
 
 use borsh::{BorshDeserialize, BorshSerialize};

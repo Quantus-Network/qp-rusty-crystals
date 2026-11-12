@@ -41,7 +41,7 @@
 //! - `my_shared_secrets` / `shared_secrets` - shared secrets for subset derivation
 //! - `my_contributions` - secret key shares (s1, s2 polynomials)
 
-use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec};
 use core::fmt;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
