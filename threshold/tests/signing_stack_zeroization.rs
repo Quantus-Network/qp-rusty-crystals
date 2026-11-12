@@ -29,20 +29,24 @@
 #[path = "common/stack_patterns.rs"]
 mod stack_patterns;
 
-use qp_rusty_crystals_test_utils::probe_stack_for;
+use qp_rusty_crystals_test_utils::{probe_stack_for, probe_stack_for_named};
 use qp_rusty_crystals_threshold::{generate_with_dealer, ThresholdConfig, ThresholdSigner};
-use stack_patterns::hyperball_stream_pattern;
+use stack_patterns::{hyperball_stream_pattern, round1_iteration_seeds};
 
 // 16 MiB: Round 1 drives hyperball rejection sampling across all commitment
 // iterations plus the packing of the commitment hash input.
 const STACK_BYTES: usize = 16 * 1024 * 1024;
 
+/// Party 0's signer for a dealer-generated key, ready for Round 1.
+fn party0_signer(config: ThresholdConfig) -> ThresholdSigner {
+	let (pk, shares) = generate_with_dealer(&[7u8; 32], config).expect("keygen succeeds");
+	ThresholdSigner::new(shares.into_iter().next().unwrap(), pk, config).expect("signer")
+}
+
 #[test]
 fn round1_leaves_no_mask_stream_copies_on_the_stack() {
 	let config = ThresholdConfig::new(2, 3).expect("valid config");
-	let (pk, shares) = generate_with_dealer(&[7u8; 32], config).expect("keygen succeeds");
-	let mut signer =
-		ThresholdSigner::new(shares.into_iter().next().unwrap(), pk, config).expect("signer");
+	let mut signer = party0_signer(config);
 	let sign_ssid = [0x5Cu8; 32];
 	let round1_seed = [0x33u8; 32];
 	let pattern = hyperball_stream_pattern(&sign_ssid, &round1_seed);
@@ -68,4 +72,37 @@ fn round1_leaves_no_mask_stream_copies_on_the_stack() {
 			.expect("round 1 commit succeeds");
 	});
 	assert!(!leaked, "round 1 left the raw mask stream in stack memory");
+}
+
+/// Regression test (security review): Round 1 must not leave any iteration's
+/// nonce seed in dead stack memory.
+///
+/// Each commitment iteration derives `iter_seed` — the round seed itself up
+/// to two known bytes — and from it the `iter_rho_prime` its mask is sampled
+/// from. Either one regenerates the mask y, exactly like the raw stream
+/// above. The iterations reuse the same stack slots, so what stays behind
+/// belongs to the *last* iteration, which the iteration-0 stream probe never
+/// looks at; every iteration's pair is scanned here.
+#[test]
+fn round1_leaves_no_nonce_seed_copies_on_the_stack() {
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let mut signer = party0_signer(config);
+	let sign_ssid = [0x5Cu8; 32];
+	let round1_seed = [0x33u8; 32];
+	let seeds: Vec<_> = (0..config.k_iterations() as u16)
+		.map(|k_iter| round1_iteration_seeds(&sign_ssid, &round1_seed, k_iter))
+		.collect();
+	let patterns: Vec<(&str, &[u8])> = seeds
+		.iter()
+		.flat_map(|(iter_seed, iter_rho_prime)| {
+			[("iter_seed", &iter_seed[..]), ("iter_rho_prime", &iter_rho_prime[..])]
+		})
+		.collect();
+
+	let leaked = probe_stack_for_named(STACK_BYTES, &patterns, || {
+		signer
+			.round1_commit_with_seed(&sign_ssid, &round1_seed)
+			.expect("round 1 commit succeeds");
+	});
+	assert!(leaked.is_empty(), "round 1 left nonce seeds in stack memory: {leaked:?}");
 }
