@@ -134,17 +134,27 @@ impl<const VECS: usize> NttAccumulator<VECS> {
 		}
 	}
 
+	/// Finalize the accumulator into `polys`, reducing all coefficients mod Q
+	/// to [0, Q).
+	///
+	/// Writes into caller-provided storage (security review): a sum of secret
+	/// shares is itself secret, and a result returned by value is moved,
+	/// leaving a copy in a stack slot that no drop wipes.
+	pub fn finalize_into(&self, polys: &mut [poly::Poly; VECS]) {
+		for (poly, accs) in polys.iter_mut().zip(self.coeffs.iter()) {
+			for (coeff, &acc) in poly.coeffs_mut().iter_mut().zip(accs.iter()) {
+				*coeff = (acc % (Q as u64)) as i32;
+			}
+		}
+	}
+
 	/// Finalize the accumulator, reducing all coefficients mod Q.
 	///
 	/// Returns an array of polynomials with coefficients in [0, Q).
 	pub fn finalize_to_polys(self) -> [poly::Poly; VECS] {
-		core::array::from_fn(|i| {
-			let mut poly = poly::Poly::default();
-			for (j, &acc) in self.coeffs[i].iter().enumerate() {
-				poly.coeffs_mut()[j] = (acc % (Q as u64)) as i32;
-			}
-			poly
-		})
+		let mut polys = core::array::from_fn(|_| poly::Poly::default());
+		self.finalize_into(&mut polys);
+		polys
 	}
 }
 
