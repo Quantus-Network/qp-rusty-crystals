@@ -31,9 +31,12 @@ use alloc::{
 use core::str::FromStr;
 #[cfg(feature = "ml-dsa-87")]
 use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
-use unicode_normalization::{is_nfkd_quick, IsNormalized, UnicodeNormalization};
+use unicode_normalization::{
+	char::{canonical_combining_class, decompose_compatible},
+	is_nfkd_quick, IsNormalized,
+};
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 // The historical test suite and its vendored vectors are ML-DSA-87 keys.
 #[cfg(all(test, feature = "ml-dsa-87"))]
@@ -156,7 +159,34 @@ fn nfkd_owned(s: &str) -> Option<Zeroizing<String>> {
 	match is_nfkd_quick(s.chars()) {
 		IsNormalized::Yes => None,
 		// `Maybe` is treated as not-normalized; NFKD is idempotent, so re-normalizing is safe.
-		_ => Some(Zeroizing::new(s.nfkd().collect())),
+		_ => {
+			// Decomposed and reordered here rather than through `str::nfkd`
+			// (security review): that iterator keeps its pending characters
+			// in a buffer of its own, inline and then on the heap, and drops
+			// it unwiped. Both buffers below are allocated once at their
+			// final size and wiped on drop: one that grows frees each
+			// outgrown block as it is, still holding a prefix of the secret,
+			// where `Zeroizing` never reaches (pinned by the normalization
+			// heap-zeroization probe).
+			let mut len = 0;
+			s.chars().for_each(|c| decompose_compatible(c, |_| len += 1));
+			let mut chars = Zeroizing::new(Vec::with_capacity(len));
+			s.chars().for_each(|c| decompose_compatible(c, |d| chars.push(d)));
+			// Canonical ordering: a combining mark moves ahead of every
+			// preceding mark of a higher class, text order kept within a class.
+			for i in 1..chars.len() {
+				let class = canonical_combining_class(chars[i]);
+				let mut j = i;
+				while class != 0 && j > 0 && canonical_combining_class(chars[j - 1]) > class {
+					chars.swap(j - 1, j);
+					j -= 1;
+				}
+			}
+			let mut normalized =
+				Zeroizing::new(String::with_capacity(chars.iter().map(|c| c.len_utf8()).sum()));
+			normalized.extend(chars.iter());
+			Some(normalized)
+		},
 	}
 }
 
@@ -271,15 +301,25 @@ macro_rules! mldsa_variant_module {
 			/// keeps the seed in the caller's self-zeroizing storage, which
 			/// is wiped in place when the caller drops it (pinned by the
 			/// seed stack-zeroization probe).
+			///
+			/// The keypair is written in place into the caller-provided
+			/// `out` (start from [`Keypair::zeroed`]) rather than returned
+			/// by value, for the same reason (security review): a
+			/// `Result<Keypair, _>` return is moved out of a temporary that
+			/// is never dropped, which left the complete packed secret key
+			/// in dead stack memory (pinned by the keypair
+			/// stack-zeroization probe). On error, `out` is untouched.
 			pub fn derive_key_from_seed(
 				seed: &SensitiveBytes64,
 				path: &str,
-			) -> Result<Keypair, HDLatticeError> {
-				// The entropy is filled in place and lent to `generate`,
+				out: &mut Keypair,
+			) -> Result<(), HDLatticeError> {
+				// The entropy is filled in place and lent to `generate_into`,
 				// which wipes it; it never crosses a boundary by value.
 				let mut entropy = SensitiveBytes32::zeroed();
 				crate::derive_entropy_from_seed(seed, path, &mut entropy)?;
-				Ok(Keypair::generate(&mut entropy))
+				Keypair::generate_into(&mut entropy, out);
+				Ok(())
 			}
 
 			#[doc = concat!("Derive an ", $doc_name, " keypair from a mnemonic with passphrase.")]
@@ -292,11 +332,16 @@ macro_rules! mldsa_variant_module {
 			/// Takes the mnemonic by reference and does not copy it into a heap buffer,
 			/// avoiding a redundant duplicate of the secret. The caller retains ownership
 			/// of the `&str` and is responsible for zeroizing the source buffer itself.
+			///
+			/// The keypair is written in place into the caller-provided
+			/// `out`; see [`derive_key_from_seed`]. On error, `out` is
+			/// untouched.
 			pub fn derive_key_from_mnemonic(
 				mnemonic: &str,
 				passphrase: Option<&str>,
 				path: &str,
-			) -> Result<Keypair, HDLatticeError> {
+				out: &mut Keypair,
+			) -> Result<(), HDLatticeError> {
 				crate::check_derivation_path(path)?;
 				// The stretched seed is filled in place and lent to
 				// `derive_key_from_seed`; moving it there by value left this
@@ -304,7 +349,7 @@ macro_rules! mldsa_variant_module {
 				// stack-zeroization probe). It drops — and wipes — here.
 				let mut seed = SensitiveBytes64::zeroed();
 				crate::parse_mnemonic_to_seed_into(mnemonic, passphrase, seed.as_mut_bytes())?;
-				derive_key_from_seed(&seed, path)
+				derive_key_from_seed(&seed, path, out)
 			}
 		}
 	};
@@ -326,12 +371,19 @@ mldsa_variant_module!(ml_dsa_87, "ml-dsa-87", "ML-DSA-87");
 /// stays dead and unwiped, outside the reach of `ZeroizeOnDrop`. The seed
 /// stays in the caller's self-zeroizing storage and is wiped in place when
 /// the caller drops it.
+///
+/// The keypair is likewise written in place into the caller-provided `out`
+/// (start from [`Keypair::zeroed`]) rather than returned by value: the
+/// temporary a `Result<Keypair, _>` is moved out of is never dropped, which
+/// left the complete packed secret key in dead stack memory. On error, `out`
+/// is untouched.
 #[cfg(feature = "ml-dsa-87")]
 pub fn derive_key_from_seed(
 	seed: &SensitiveBytes64,
 	path: &str,
-) -> Result<Keypair, HDLatticeError> {
-	ml_dsa_87::derive_key_from_seed(seed, path)
+	out: &mut Keypair,
+) -> Result<(), HDLatticeError> {
+	ml_dsa_87::derive_key_from_seed(seed, path, out)
 }
 
 /// Keypair (ML-DSA-87) derivation from mnemonic with passphrase.
@@ -348,13 +400,17 @@ pub fn derive_key_from_seed(
 /// Takes the mnemonic by reference and does not copy it into a heap buffer,
 /// avoiding a redundant duplicate of the secret. The caller retains ownership
 /// of the `&str` and is responsible for zeroizing the source buffer itself.
+///
+/// The keypair is written in place into the caller-provided `out`; see
+/// [`derive_key_from_seed`]. On error, `out` is untouched.
 #[cfg(feature = "ml-dsa-87")]
 pub fn derive_key_from_mnemonic(
 	mnemonic: &str,
 	passphrase: Option<&str>,
 	path: &str,
-) -> Result<Keypair, HDLatticeError> {
-	ml_dsa_87::derive_key_from_mnemonic(mnemonic, passphrase, path)
+	out: &mut Keypair,
+) -> Result<(), HDLatticeError> {
+	ml_dsa_87::derive_key_from_mnemonic(mnemonic, passphrase, path, out)
 }
 
 /// Wormhole pair derivation from mnemonic with passphrase.
@@ -366,11 +422,15 @@ pub fn derive_key_from_mnemonic(
 /// Takes the mnemonic by reference and does not copy it into a heap buffer,
 /// avoiding a redundant duplicate of the secret. The caller retains ownership
 /// of the `&str` and is responsible for zeroizing the source buffer itself.
+///
+/// The pair is written in place into the caller-provided `out`; see
+/// [`generate_wormhole_from_seed`]. On error, `out` is untouched.
 pub fn derive_wormhole_from_mnemonic(
 	mnemonic: &str,
 	passphrase: Option<&str>,
 	path: &str,
-) -> Result<WormholePair, HDLatticeError> {
+	out: &mut WormholePair,
+) -> Result<(), HDLatticeError> {
 	check_wormhole_path(path)?;
 	// The stretched seed is filled in place and lent to
 	// `generate_wormhole_from_seed`; moving it there by value left this
@@ -378,7 +438,7 @@ pub fn derive_wormhole_from_mnemonic(
 	// probe). It drops — and wipes — here.
 	let mut seed = SensitiveBytes64::zeroed();
 	parse_mnemonic_to_seed_into(mnemonic, passphrase, seed.as_mut_bytes())?;
-	generate_wormhole_from_seed(&seed, path)
+	generate_wormhole_from_seed(&seed, path, out)
 }
 
 /// Generate a wormhole pair from a seed at the given path
@@ -389,10 +449,18 @@ pub fn derive_wormhole_from_mnemonic(
 /// stays dead and unwiped, outside the reach of `ZeroizeOnDrop`. The seed
 /// stays in the caller's self-zeroizing storage and is wiped in place when
 /// the caller drops it.
+///
+/// The pair is likewise written in place into the caller-provided `out`
+/// (start from [`WormholePair::zeroed`]) rather than returned by value: the
+/// temporary a `Result<WormholePair, _>` is moved out of is never dropped,
+/// which left the wormhole `secret` and `first_hash` in dead stack memory
+/// (pinned by the wormhole stack-zeroization probe). On error, `out` is
+/// untouched.
 pub fn generate_wormhole_from_seed(
 	seed: &SensitiveBytes64,
 	path: &str,
-) -> Result<WormholePair, HDLatticeError> {
+	out: &mut WormholePair,
+) -> Result<(), HDLatticeError> {
 	check_wormhole_path(path)?;
 
 	// Same HMAC-SHA512 tree derivation as the keypair entrypoints; only the
@@ -401,7 +469,8 @@ pub fn generate_wormhole_from_seed(
 	// cheap and idempotent.) Seed and entropy are self-zeroizing.
 	let mut entropy = SensitiveBytes32::zeroed();
 	derive_entropy_from_seed(seed, path, &mut entropy)?;
-	Ok(WormholePair::generate_new(&mut entropy))
+	WormholePair::generate_into(&mut entropy, out);
+	Ok(())
 }
 
 /// Validate a wormhole derivation path: generic path checks plus the
@@ -426,8 +495,11 @@ fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 
 /// Generate a new random mnemonic with 24 words = 32 bytes
 ///
-/// This function takes ownership of the entropy for security (move semantics).
-/// The entropy parameter is zeroized before returning.
+/// The entropy is borrowed mutably and zeroized in place after use (security
+/// review): taking it by value would move — i.e. copy — it through a dead
+/// stack slot that is never dropped, so `ZeroizeOnDrop` could not wipe it.
+/// The caller's value is all zeros afterwards; the bip39 stack-residue
+/// regression test pins this.
 ///
 /// The phrase is returned inside a [`Zeroizing`] wrapper (security review):
 /// the recovery phrase yields the entire HD wallet, so it must not outlive
@@ -442,11 +514,14 @@ fn check_derivation_path(path: &str) -> Result<(), HDLatticeError> {
 /// # Security Note
 /// Always use cryptographically secure random entropy (e.g., from `getrandom::getrandom()`).
 /// Never use predictable strings, timestamps, or user input as entropy sources.
-pub fn generate_mnemonic(entropy: SensitiveBytes32) -> Result<Zeroizing<String>, HDLatticeError> {
+pub fn generate_mnemonic(
+	entropy: &mut SensitiveBytes32,
+) -> Result<Zeroizing<String>, HDLatticeError> {
 	// The secret word indices live only in this wiping buffer, which is
 	// filled in place and never moved (see the `mnemonic` module).
 	let mut indices = Zeroizing::new([0u16; mnemonic::MAX_WORDS]);
 	mnemonic::encode_256(entropy.as_bytes(), &mut indices);
+	entropy.as_mut_bytes().zeroize();
 
 	// Collect the word pointers in one tight pass, then `join` — do NOT
 	// stream straight into a growing String: an iterator borrowing the
@@ -476,8 +551,6 @@ pub fn generate_mnemonic(entropy: SensitiveBytes32) -> Result<Zeroizing<String>,
 	}
 	core::hint::black_box(&mut words);
 	drop(words);
-
-	// entropy is automatically zeroized when it drops
 
 	Ok(result)
 }

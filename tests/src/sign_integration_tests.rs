@@ -1,7 +1,8 @@
 // tests/sign_integration_tests.rs
 
 use qp_rusty_crystals_hdwallet::{
-	derive_key_from_seed, generate_mnemonic, mnemonic_to_seed, SensitiveBytes32, SensitiveBytes64,
+	generate_mnemonic, ml_dsa_87::Keypair, mnemonic_to_seed, HDLatticeError, SensitiveBytes32,
+	SensitiveBytes64,
 };
 use rand::{Rng, RngExt};
 
@@ -11,6 +12,13 @@ fn seed_from(mnemonic: &str) -> SensitiveBytes64 {
 	mnemonic_to_seed(mnemonic.to_string(), None, &mut seed)
 		.expect("Failed to create seed from mnemonic");
 	seed
+}
+
+/// Test helper: by-value form of `derive_key_from_seed`, which fills
+/// caller-owned storage. Tests have no stack residue to guard.
+fn derive_key_from_seed(seed: &SensitiveBytes64, path: &str) -> Result<Keypair, HDLatticeError> {
+	let mut keypair = Keypair::zeroed();
+	qp_rusty_crystals_hdwallet::derive_key_from_seed(seed, path, &mut keypair).map(|()| keypair)
 }
 
 fn get_random_bytes() -> [u8; 32] {
@@ -25,7 +33,8 @@ fn test_sign() {
 	let mut entropy = get_random_bytes();
 
 	// Step 1: Generate a random mnemonic and derive Dilithium keypair
-	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
+	let mnemonic =
+		generate_mnemonic(&mut (&mut entropy).into()).expect("Failed to generate mnemonic");
 	let seed = seed_from(&mnemonic);
 	let dilithium_keypair =
 		derive_key_from_seed(&seed, "m/44'/0'/0'/0'/0'").expect("Failed to derive key");
@@ -47,7 +56,8 @@ fn test_sign_multiple_messages() {
 	let mut entropy = [0u8; 32];
 	rand::rng().fill_bytes(&mut entropy);
 
-	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
+	let mnemonic =
+		generate_mnemonic(&mut (&mut entropy).into()).expect("Failed to generate mnemonic");
 	let seed = seed_from(&mnemonic);
 	let dilithium_keypair =
 		derive_key_from_seed(&seed, "m/44'/0'/0'/0'/0'").expect("Failed to derive key");
@@ -73,7 +83,8 @@ fn test_hedged_vs_deterministic_signing() {
 	let mut entropy = [0u8; 32];
 	rand::rng().fill_bytes(&mut entropy);
 
-	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
+	let mnemonic =
+		generate_mnemonic(&mut (&mut entropy).into()).expect("Failed to generate mnemonic");
 	let seed = seed_from(&mnemonic);
 	let dilithium_keypair =
 		derive_key_from_seed(&seed, "m/44'/0'/0'/0'/0'").expect("Failed to derive key");
@@ -111,9 +122,9 @@ fn test_cross_keypair_verification_fails() {
 	rand::rng().fill_bytes(&mut entropy2);
 
 	let mnemonic1 =
-		generate_mnemonic((&mut entropy1).into()).expect("Failed to generate mnemonic 1");
+		generate_mnemonic(&mut (&mut entropy1).into()).expect("Failed to generate mnemonic 1");
 	let mnemonic2 =
-		generate_mnemonic((&mut entropy2).into()).expect("Failed to generate mnemonic 2");
+		generate_mnemonic(&mut (&mut entropy2).into()).expect("Failed to generate mnemonic 2");
 
 	let seed1 = seed_from(&mnemonic1);
 	let seed2 = seed_from(&mnemonic2);
@@ -142,7 +153,8 @@ fn test_corrupted_signature_fails() {
 	let mut entropy = [0u8; 32];
 	rand::rng().fill_bytes(&mut entropy);
 
-	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
+	let mnemonic =
+		generate_mnemonic(&mut (&mut entropy).into()).expect("Failed to generate mnemonic");
 	let seed = seed_from(&mnemonic);
 	let dilithium_keypair =
 		derive_key_from_seed(&seed, "m/44'/0'/0'/0'/0'").expect("Failed to derive key");
@@ -182,9 +194,9 @@ fn test_same_seed_produces_same_keypair() {
 	let mut entropy2 = [0x42u8; 32];
 
 	let mnemonic1 =
-		generate_mnemonic((&mut entropy1).into()).expect("Failed to generate mnemonic 1");
+		generate_mnemonic(&mut (&mut entropy1).into()).expect("Failed to generate mnemonic 1");
 	let mnemonic2 =
-		generate_mnemonic((&mut entropy2).into()).expect("Failed to generate mnemonic 2");
+		generate_mnemonic(&mut (&mut entropy2).into()).expect("Failed to generate mnemonic 2");
 
 	// Same seed should produce same mnemonic
 	assert_eq!(mnemonic1, mnemonic2);
@@ -215,7 +227,8 @@ fn test_stress_multiple_signatures() {
 	let mut entropy = [0u8; 32];
 	rand::rng().fill_bytes(&mut entropy);
 
-	let mnemonic = generate_mnemonic((&mut entropy).into()).expect("Failed to generate mnemonic");
+	let mnemonic =
+		generate_mnemonic(&mut (&mut entropy).into()).expect("Failed to generate mnemonic");
 	let seed = seed_from(&mnemonic);
 	let dilithium_keypair =
 		derive_key_from_seed(&seed, "m/44'/0'/0'/0'/0'").expect("Failed to derive key");

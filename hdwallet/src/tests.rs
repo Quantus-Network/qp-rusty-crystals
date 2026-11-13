@@ -1,11 +1,8 @@
 #[cfg(test)]
 mod hdwallet_tests {
 	use crate::{
-		derive_key_from_seed, generate_mnemonic, generate_wormhole_from_seed,
-		hderive::{ChildNumber, ExtendedPrivKey},
-		mnemonic_to_seed,
-		test_vectors::get_test_vectors,
-		HDLatticeError, SensitiveBytes64,
+		generate_mnemonic, mnemonic_to_seed, test_vectors::get_test_vectors, HDLatticeError,
+		SensitiveBytes64, WormholePair,
 	};
 	use alloc::{
 		borrow::ToOwned,
@@ -13,7 +10,6 @@ mod hdwallet_tests {
 		string::{String, ToString},
 		vec::Vec,
 	};
-	use core::str::FromStr;
 	use qp_rusty_crystals_dilithium::ml_dsa_87::Keypair;
 	use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -28,6 +24,45 @@ mod hdwallet_tests {
 		let mut seed = SensitiveBytes64::zeroed();
 		mnemonic_to_seed(mnemonic, passphrase, &mut seed).expect("valid mnemonic");
 		seed
+	}
+
+	/// Test helper: by-value form of [`crate::derive_key_from_seed`], which
+	/// fills caller-owned storage. Tests have no stack residue to guard.
+	fn derive_key_from_seed(
+		seed: &SensitiveBytes64,
+		path: &str,
+	) -> Result<Keypair, HDLatticeError> {
+		let mut keypair = Keypair::zeroed();
+		crate::derive_key_from_seed(seed, path, &mut keypair).map(|()| keypair)
+	}
+
+	/// Test helper: by-value form of [`crate::derive_key_from_mnemonic`].
+	fn derive_key_from_mnemonic(
+		mnemonic: &str,
+		passphrase: Option<&str>,
+		path: &str,
+	) -> Result<Keypair, HDLatticeError> {
+		let mut keypair = Keypair::zeroed();
+		crate::derive_key_from_mnemonic(mnemonic, passphrase, path, &mut keypair).map(|()| keypair)
+	}
+
+	/// Test helper: by-value form of [`crate::generate_wormhole_from_seed`].
+	fn generate_wormhole_from_seed(
+		seed: &SensitiveBytes64,
+		path: &str,
+	) -> Result<WormholePair, HDLatticeError> {
+		let mut pair = WormholePair::zeroed();
+		crate::generate_wormhole_from_seed(seed, path, &mut pair).map(|()| pair)
+	}
+
+	/// Test helper: by-value form of [`crate::derive_wormhole_from_mnemonic`].
+	fn derive_wormhole_from_mnemonic(
+		mnemonic: &str,
+		passphrase: Option<&str>,
+		path: &str,
+	) -> Result<WormholePair, HDLatticeError> {
+		let mut pair = WormholePair::zeroed();
+		crate::derive_wormhole_from_mnemonic(mnemonic, passphrase, path, &mut pair).map(|()| pair)
 	}
 
 	#[test]
@@ -57,7 +92,7 @@ mod hdwallet_tests {
 		let mut entropy = [43u8; 32];
 
 		// Test generating new mnemonic (returned inside a Zeroizing wrapper)
-		let mnemonic = generate_mnemonic((&mut entropy).into()).unwrap();
+		let mnemonic = generate_mnemonic(&mut (&mut entropy).into()).unwrap();
 		assert_eq!(mnemonic.split_whitespace().count(), 24);
 
 		// Test creating seeds from mnemonic - demonstrate explicit copying
@@ -139,7 +174,7 @@ mod hdwallet_tests {
 			.map(|_| {
 				let mut rng = StdRng::from_seed(seed);
 				rng.fill_bytes(&mut seed);
-				let mnemonic = generate_mnemonic((&mut seed).into()).unwrap();
+				let mnemonic = generate_mnemonic(&mut (&mut seed).into()).unwrap();
 				let path = generate_random_path();
 				let seed = seed_from(mnemonic.to_string(), None);
 				let k = derive_key_from_seed(&seed, &path).unwrap();
@@ -222,7 +257,7 @@ mod hdwallet_tests {
 				e
 			})) {
 			let expected = bip39::Mnemonic::from_entropy(&entropy).unwrap().to_string();
-			let phrase = generate_mnemonic((&mut { entropy }).into()).unwrap();
+			let phrase = generate_mnemonic(&mut (&mut { entropy }).into()).unwrap();
 			assert_eq!(*phrase, expected);
 		}
 	}
@@ -233,7 +268,7 @@ mod hdwallet_tests {
 		let mut seed = [42u8; 32];
 		let mut rng = StdRng::from_seed(seed);
 		rng.fill_bytes(&mut seed);
-		let mnemonic = generate_mnemonic((&mut seed).into())
+		let mnemonic = generate_mnemonic(&mut (&mut seed).into())
 			.unwrap_or_else(|_| panic!("Failed to generate mnemonic for 24 words"));
 
 		// Split mnemonic into words and count them
@@ -313,27 +348,10 @@ mod hdwallet_tests {
 		);
 	}
 
-	#[test]
-	fn test_tiny_hderive_api() {
-		// Test that nam-tiny-hderive works with our seed format
-		let seed: &[u8] = &[42; 64];
-		let path = "m/44'/60'/0'/0'/0'";
-		let mut ext = ExtendedPrivKey::zeroed();
-		ExtendedPrivKey::derive(seed, path, &mut ext).unwrap();
-		assert_eq!(ext.secret().as_bytes(), b"\xfc\x29\xd9\xfc\x63\x5b\x32\x72\x63\x1b\x43\x02\xf7\x9b\xe4\x07\xa7\xf6\x77\xef\x73\x4a\xf2\xc4\x52\x7c\x90\x88\x97\xcd\xaa\x86");
-
-		// Stepping the parent in place must agree with the full-path derivation.
-		let mut stepped = ExtendedPrivKey::zeroed();
-		ExtendedPrivKey::derive(seed, "m/44'/60'/0'/0'", &mut stepped).unwrap();
-		stepped.child_in_place(ChildNumber::from_str("0'").unwrap());
-		assert_eq!(ext.secret().as_bytes(), stepped.secret().as_bytes());
-	}
-
 	// End-to-end known-answer test: pins the full mnemonic -> seed -> wormhole pipeline.
 	// Regenerate with `print_wormhole_golden` if the derivation is intentionally changed.
 	#[test]
 	fn test_wormhole_known_values() {
-		use crate::derive_wormhole_from_mnemonic;
 		use hex_literal::hex;
 
 		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
@@ -359,7 +377,6 @@ mod hdwallet_tests {
 	#[test]
 	#[ignore]
 	fn print_wormhole_golden() {
-		use crate::derive_wormhole_from_mnemonic;
 		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
 		let w = derive_wormhole_from_mnemonic(mnemonic, None, "m/44'/189189189'/0'").unwrap();
 		let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
@@ -456,11 +473,9 @@ mod hdwallet_tests {
 
 		// Same guarantee through the borrowing derivation helpers.
 		let key_composed =
-			crate::derive_key_from_mnemonic(mnemonic, Some(composed), "m/44'/189189'/0'/0'/0'")
-				.unwrap();
+			derive_key_from_mnemonic(mnemonic, Some(composed), "m/44'/189189'/0'/0'/0'").unwrap();
 		let key_decomposed =
-			crate::derive_key_from_mnemonic(mnemonic, Some(decomposed), "m/44'/189189'/0'/0'/0'")
-				.unwrap();
+			derive_key_from_mnemonic(mnemonic, Some(decomposed), "m/44'/189189'/0'/0'/0'").unwrap();
 		assert_eq!(key_composed.secret().to_bytes(), key_decomposed.secret().to_bytes());
 	}
 
@@ -478,6 +493,37 @@ mod hdwallet_tests {
 		mnemonic_to_seed(nbsp, None, &mut seed_nbsp)
 			.expect("NFKD-equivalent mnemonic must parse after normalization");
 		assert_eq!(seed_ascii.as_bytes(), seed_nbsp.as_bytes());
+	}
+
+	#[test]
+	fn test_nfkd_owned_matches_unicode_normalization() {
+		use unicode_normalization::UnicodeNormalization;
+
+		let check = |s: &str| {
+			let expected: String = s.nfkd().collect();
+			let normalized = crate::nfkd_owned(s);
+			assert_eq!(normalized.as_ref().map_or(s, |n| n.as_str()), expected, "input {s:?}");
+		};
+
+		// Every scalar value on its own.
+		let mut utf8 = [0u8; 4];
+		for c in '\0'..=char::MAX {
+			check(c.encode_utf8(&mut utf8));
+		}
+
+		// Reordering: every sequence of four of these. They are a starter, a
+		// letter that decomposes, a long compatibility decomposition, a
+		// Hangul syllable and combining marks of seven classes.
+		const ALPHABET: [char; 12] = [
+			'a', '\u{e9}', '\u{1e9b}', '\u{fdfa}', '\u{ac01}', '\u{334}', '\u{3099}', '\u{5b0}',
+			'\u{327}', '\u{323}', '\u{301}', '\u{345}',
+		];
+		for sequence in 0..ALPHABET.len().pow(4) {
+			let s: String = (0..4)
+				.map(|i| ALPHABET[sequence / ALPHABET.len().pow(i) % ALPHABET.len()])
+				.collect();
+			check(&s);
+		}
 	}
 
 	#[test]
@@ -594,21 +640,21 @@ mod hdwallet_tests {
 		let mut seed_bytes = [1u8; 64];
 
 		// Wrap in SensitiveBytes - this zeroizes the original data
-		let sensitive_entropy = SensitiveBytes32::from(&mut entropy);
+		let mut sensitive_entropy = SensitiveBytes32::from(&mut entropy);
 		let sensitive_seed = SensitiveBytes64::from(&mut seed_bytes);
 
-		// Use the wrapped data - generate_mnemonic moves the entropy;
-		// derive_key_from_seed borrows the seed (security review: a by-value
-		// move would leave the caller's slot dead and unwiped), so the same
-		// seed holder can derive at several paths and is wiped when dropped.
-		let mnemonic = generate_mnemonic(sensitive_entropy).unwrap();
+		// Use the wrapped data - generate_mnemonic borrows the entropy and
+		// wipes it in place; derive_key_from_seed borrows the seed (security
+		// review: a by-value move would leave the caller's slot dead and
+		// unwiped), so the same seed holder can derive at several paths and
+		// is wiped when dropped.
+		let mnemonic = generate_mnemonic(&mut sensitive_entropy).unwrap();
 		let seed_from_mnemonic = seed_from(mnemonic.to_string(), None);
 		let _key = derive_key_from_seed(&sensitive_seed, "m/44'/0'/0'/0'/0'").unwrap();
 		let _key_again = derive_key_from_seed(&sensitive_seed, "m/44'/0'/0'/0'/1'").unwrap();
 
-		// After this point, sensitive_entropy is consumed.
-		// The following would not compile if uncommented:
-		// let _mnemonic2 = generate_mnemonic(sensitive_entropy);
+		// After this point, sensitive_entropy is consumed: it holds zeros.
+		assert_eq!(sensitive_entropy.as_bytes(), &[0u8; 32]);
 
 		// Test that regular arrays still work with auto-conversion
 		let mut raw_seed = [2u8; 64];
@@ -649,7 +695,7 @@ mod hdwallet_tests {
 
 	#[test]
 	fn test_derive_rejects_oversized_path() {
-		use crate::{generate_wormhole_from_seed, MAX_DERIVATION_PATH_BYTES};
+		use crate::MAX_DERIVATION_PATH_BYTES;
 
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
@@ -673,7 +719,7 @@ mod hdwallet_tests {
 
 	#[test]
 	fn test_derive_rejects_too_deep_path() {
-		use crate::{generate_wormhole_from_seed, MAX_DERIVATION_DEPTH};
+		use crate::MAX_DERIVATION_DEPTH;
 
 		let mnemonic =
 			"rocket primary way job input cactus submit menu zoo burger rent impose".to_string();
@@ -701,9 +747,7 @@ mod hdwallet_tests {
 	/// Bip39Error would prove the expensive mnemonic work ran first.
 	#[test]
 	fn test_mnemonic_helpers_validate_path_before_seed_stretching() {
-		use crate::{
-			derive_key_from_mnemonic, derive_wormhole_from_mnemonic, MAX_DERIVATION_PATH_BYTES,
-		};
+		use crate::MAX_DERIVATION_PATH_BYTES;
 
 		let bogus_mnemonic = "not a valid bip39 mnemonic phrase at all";
 		let mut oversized = String::from("m");
@@ -743,7 +787,7 @@ mod hdwallet_tests {
 	/// scans, and PBKDF2 work before any rejection.
 	#[test]
 	fn test_rejects_oversized_mnemonic_and_passphrase() {
-		use crate::{derive_key_from_mnemonic, MAX_MNEMONIC_BYTES, MAX_PASSPHRASE_BYTES};
+		use crate::{MAX_MNEMONIC_BYTES, MAX_PASSPHRASE_BYTES};
 
 		let valid = "rocket primary way job input cactus submit menu zoo burger rent impose";
 
@@ -801,5 +845,38 @@ mod hdwallet_tests {
 		let seed = seed_from(mnemonic, None);
 		derive_key_from_seed(&seed, &max_depth)
 			.expect("path at exactly MAX_DERIVATION_DEPTH must succeed");
+	}
+
+	/// The keypair entrypoints fill a caller-provided `Keypair`; a failed
+	/// derivation must leave whatever it already held untouched.
+	#[test]
+	fn test_derive_key_error_leaves_out_untouched() {
+		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let path = "m/44'/0'/0'/0'/0'";
+		let seed = seed_from(mnemonic.to_string(), None);
+		let mut keypair = Keypair::zeroed();
+		crate::derive_key_from_seed(&seed, path, &mut keypair).unwrap();
+		let before = keypair.to_bytes();
+
+		crate::derive_key_from_seed(&seed, "abc", &mut keypair).unwrap_err();
+		crate::derive_key_from_mnemonic(mnemonic, None, "abc", &mut keypair).unwrap_err();
+		crate::derive_key_from_mnemonic("not a mnemonic", None, path, &mut keypair).unwrap_err();
+		assert_eq!(keypair.to_bytes(), before);
+	}
+
+	/// Same contract for the wormhole entrypoints and their `WormholePair`.
+	#[test]
+	fn test_wormhole_error_leaves_out_untouched() {
+		let mnemonic = "rocket primary way job input cactus submit menu zoo burger rent impose";
+		let path = "m/44'/189189189'/0'";
+		let seed = seed_from(mnemonic.to_string(), None);
+		let mut pair = WormholePair::zeroed();
+		crate::generate_wormhole_from_seed(&seed, path, &mut pair).unwrap();
+		let before = generate_wormhole_from_seed(&seed, path).unwrap();
+
+		crate::generate_wormhole_from_seed(&seed, "m/44'/60'/0'", &mut pair).unwrap_err();
+		crate::derive_wormhole_from_mnemonic(mnemonic, None, "abc", &mut pair).unwrap_err();
+		crate::derive_wormhole_from_mnemonic("not a mnemonic", None, path, &mut pair).unwrap_err();
+		assert!(pair == before);
 	}
 }

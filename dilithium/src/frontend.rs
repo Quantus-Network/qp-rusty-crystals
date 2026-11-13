@@ -123,15 +123,60 @@ macro_rules! define_ml_dsa {
 				// same tail-construction shape keeps `from_bytes` clean under
 				// the `import_stack_zeroization` probes.
 				let mut sk = Zeroizing::new([0u8; SECRETKEYBYTES]);
-				$crate::sign::keypair_var::<K, L, ETA, PUBLICKEYBYTES, SECRETKEYBYTES>(
-					&mut pk, &mut sk, entropy,
-				);
-				entropy.as_mut_bytes().zeroize();
-				let public = PublicKey::from_bytes(&pk).expect("Should never fail");
+				let public = Keypair::generate_packed(&mut pk, &mut sk, entropy);
 				// Constructed directly rather than via `SecretKey::from_bytes`:
 				// a freshly generated key is consistent by construction, and the
 				// import-path validation would redo the keygen-scale derivation.
 				Keypair { secret: SecretKey { bytes: *sk }, public }
+			}
+
+			/// All-zero placeholder to be filled in place by
+			/// [`Keypair::generate_into`]. Constructed by the caller so the
+			/// keypair never has to be returned by value across the frames
+			/// that produced it.
+			///
+			/// A placeholder does **not** satisfy the secret/public
+			/// correspondence invariant described on [`Keypair`] until it has
+			/// been filled: its secret half is not a usable key and its public
+			/// half is the all-zero key that [`PublicKey::from_bytes`] rejects
+			/// as degenerate. Do not sign, verify or serialize with it.
+			pub fn zeroed() -> Keypair {
+				Keypair {
+					secret: SecretKey { bytes: [0u8; SECRETKEYBYTES] },
+					public: PublicKey { bytes: [0u8; PUBLICKEYBYTES] },
+				}
+			}
+
+			/// Generate a keypair in place, into the caller-provided `out`.
+			///
+			/// Same key generation as [`Keypair::generate`] — identical keys
+			/// for identical entropy, and the entropy is likewise zeroized in
+			/// place after use — but the packed keys are written straight
+			/// into `out` rather than returned by value (security review). A
+			/// returned `Keypair` is moved — i.e. copied — whenever the
+			/// caller forwards it (wraps it in a `Result`, returns it from
+			/// its own frame); whether the compiler elides that copy varies
+			/// by target and version, and the moved-from slot keeps the full
+			/// packed secret key, dead but never dropped, beyond the reach of
+			/// `ZeroizeOnDrop`. With an out-parameter the secret key only
+			/// ever exists inside the caller's self-wiping `Keypair`.
+			pub fn generate_into(entropy: &mut SensitiveBytes32, out: &mut Keypair) {
+				Keypair::generate_packed(&mut out.public.bytes, &mut out.secret.bytes, entropy);
+			}
+
+			/// Key generation into the caller's packed buffers, shared by
+			/// [`Keypair::generate`] and [`Keypair::generate_into`]. Wipes
+			/// `entropy` in place and returns the validated public key.
+			fn generate_packed(
+				pk: &mut [u8; PUBLICKEYBYTES],
+				sk: &mut [u8; SECRETKEYBYTES],
+				entropy: &mut SensitiveBytes32,
+			) -> PublicKey {
+				$crate::sign::keypair_var::<K, L, ETA, PUBLICKEYBYTES, SECRETKEYBYTES>(
+					pk, sk, entropy,
+				);
+				entropy.as_mut_bytes().zeroize();
+				PublicKey::from_bytes(pk).expect("Should never fail")
 			}
 
 			/// The secret half.

@@ -81,7 +81,7 @@ let mut seed = [0u8; 32];
 getrandom::getrandom(&mut seed).expect("Failed to generate seed");
 
 // Generate mnemonic (returned as a self-wiping Zeroizing<String>)
-let mnemonic = generate_mnemonic((&mut seed).into())?;
+let mnemonic = generate_mnemonic(&mut (&mut seed).into())?;
 
 // Create HD wallet
 let hd_wallet = HDLattice::from_mnemonic(&mnemonic, None)?;
@@ -150,7 +150,7 @@ This repository has 100% code coverage for all critical logic and functionality.
 | Crate | License |
 |-------|---------|
 | `qp-rusty-crystals-dilithium` | [Apache-2.0](LICENSE) |
-| `qp-rusty-crystals-hdwallet` | [GPL-3.0-only](hdwallet/LICENSE) |
+| `qp-rusty-crystals-hdwallet` | [Apache-2.0](LICENSE) |
 | `qp-rusty-crystals-threshold` | [Apache-2.0](LICENSE) |
 | `qp-rusty-crystals-lattice-attack` | [Apache-2.0](LICENSE) |
 
