@@ -2444,8 +2444,10 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 		)
 		.map_err(ResharingProtocolError::ShareVerificationFailed)?;
 
-		let mut s1_acc = [[0i64; N as usize]; L];
-		let mut s2_acc = [[0i64; N as usize]; K];
+		// The sum is this party's recovered partial secret for the signing set,
+		// so it is wiped on drop (security review).
+		let mut s1_acc = Zeroizing::new([[0i64; N as usize]; L]);
+		let mut s2_acc = Zeroizing::new([[0i64; N as usize]; K]);
 
 		for translated in translated_masks {
 			let share = self.new_shares.get(&translated).ok_or_else(|| {
@@ -2744,7 +2746,7 @@ impl<S: TranscriptSigner> ResharingProtocol<S> {
 			self.config.my_party_id(),
 			self.config.new_participants().len() as u32,
 			self.config.new_threshold(),
-			party_key,
+			&party_key,
 			rho,
 			tr,
 			shares_data,
@@ -3007,10 +3009,14 @@ fn derive_subshares_with_session_seed(
 	// Build a PRF seed from (domain || session_seed || I_mask || s1 || s2).
 	// All members of subset I know `s_i` and have computed the same session_seed,
 	// so they derive the same PRF seed.
-	let prf_seed = build_subset_seed_with_session(i_mask, s_i, session_seed);
+	// The seed expands to every sub-share of `s_i`, so it is squeezed straight
+	// into this zeroize-on-drop buffer (security review): returned by value
+	// into a plain local, it stayed in the dead frame.
+	let mut prf_seed = Zeroizing::new([0u8; 64]);
+	build_subset_seed_with_session(i_mask, s_i, session_seed, &mut prf_seed);
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, BOUNDED_SPLIT_DOMAIN);
-	fips202::shake256_absorb(&mut state, &prf_seed);
+	fips202::shake256_absorb(&mut state, &*prf_seed);
 	for &j_mask in new_subsets {
 		fips202::shake256_absorb(&mut state, &j_mask.to_le_bytes());
 	}
@@ -3214,11 +3220,15 @@ fn sample_uniform_usize(state: &mut fips202::Shake256State, upper: usize) -> usi
 }
 
 /// Build subset seed incorporating the public session seed.
+///
+/// Squeezed into `seed` rather than returned by value, so the caller's
+/// zeroizing buffer holds the only copy.
 fn build_subset_seed_with_session(
 	i_mask: SubsetMask,
 	s_i: &SecretShareData,
 	session_seed: &[u8; 32],
-) -> [u8; 64] {
+	seed: &mut [u8; 64],
+) {
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, SUBSET_SEED_DOMAIN);
 	// Mix in session seed for per-session randomization.
@@ -3243,9 +3253,7 @@ fn build_subset_seed_with_session(
 		fips202::shake256_absorb(&mut state, &buf);
 	}
 	fips202::shake256_finalize(&mut state);
-	let mut out = [0u8; 64];
-	fips202::shake256_squeeze(&mut out, &mut state);
-	out
+	fips202::shake256_squeeze(seed, &mut state);
 }
 
 /// Compute commitment to entropy: H("resharing-entropy-commit-v1" || entropy).
@@ -3456,10 +3464,11 @@ mod tests {
 	fn test_subset_seed_is_deterministic_for_same_share() {
 		let s = SecretShareData { s1: [[3i32; N as usize]; L], s2: [[5i32; N as usize]; K] };
 		let session_seed = [42u8; 32];
-		assert_eq!(
-			build_subset_seed_with_session(0b011, &s, &session_seed),
-			build_subset_seed_with_session(0b011, &s, &session_seed)
-		);
+		let mut seeds = [[0u8; 64]; 2];
+		for seed in seeds.iter_mut() {
+			build_subset_seed_with_session(0b011, &s, &session_seed, seed);
+		}
+		assert_eq!(seeds[0], seeds[1]);
 	}
 
 	#[test]
@@ -4852,6 +4861,91 @@ mod tests {
 			assert!(
 				leaked.is_empty(),
 				"build_private_key_share left new-share coefficients in dead stack memory"
+			);
+		}
+
+		/// Security review: `derive_subshares_with_session_seed` held the
+		/// per-subset PRF seed in a plain `[u8; 64]` local, returned by value
+		/// from `build_subset_seed_with_session` and never wiped. With the
+		/// public session data, that seed regenerates every sub-share the
+		/// old share is split into.
+		#[test]
+		fn subset_prf_seed_never_survives_subshare_derivation() {
+			let s = SecretShareData { s1: [[3i32; N as usize]; L], s2: [[5i32; N as usize]; K] };
+			let session_seed = [0x5Au8; 32];
+			let new_subsets = generate_subset_masks(3, 2);
+			let mut prf_seed = [0u8; 64];
+			build_subset_seed_with_session(0b011, &s, &session_seed, &mut prf_seed);
+
+			let leaked = probe_stack_for_named(STACK_BYTES, &[("PRF seed", &prf_seed[..])], || {
+				let subshares = derive_subshares_with_session_seed(
+					0b011,
+					&s,
+					&new_subsets,
+					&session_seed,
+					new_subsets.len(),
+				);
+				core::hint::black_box(&subshares);
+			});
+			assert!(
+				leaked.is_empty(),
+				"derive_subshares_with_session_seed left the subset PRF seed in dead stack memory"
+			);
+		}
+
+		/// Security review: `recovered_partial_weighted_norm` sums a signing
+		/// set's subset shares into stack arrays. The sum is the party's
+		/// recovered partial secret for that set, the same secret Round 3
+		/// signs with, and the arrays were not wiped.
+		#[test]
+		fn recovered_partial_never_survives_norm_guard() {
+			// Party 1 of a 2-of-3 committee, with honest new shares.
+			let (mut protocol, original) = share_recovery_fixture();
+			for (&mask, data) in original.shares() {
+				let mut share = NewShareData::new();
+				share.s1 = data.s1;
+				share.s2 = data.s2;
+				protocol.new_shares.insert(mask, Box::new(share));
+			}
+
+			// Each signing set's recovered partial as the guard sums it:
+			// the first 64 centered coefficients of each polynomial.
+			let sharing_patterns =
+				crate::protocol::secret_sharing::compute_sharing_patterns(2, 3).unwrap();
+			let mut patterns = Vec::new();
+			for set in generate_subset_masks(3, 2).into_iter().filter(|set| set & 0b010 != 0) {
+				let masks = crate::protocol::secret_sharing::translated_subset_masks(
+					&sharing_patterns,
+					set,
+					1,
+					2,
+					3,
+				)
+				.unwrap();
+				for i in 0..L + K {
+					let mut bytes = Vec::new();
+					for j in 0..64 {
+						let sum: i64 = masks
+							.iter()
+							.map(|mask| {
+								let share = &protocol.new_shares[mask];
+								let c = if i < L { share.s1[i][j] } else { share.s2[i - L][j] };
+								center_mod_q(c) as i64
+							})
+							.sum();
+						bytes.extend_from_slice(&sum.to_le_bytes());
+					}
+					patterns.push((format!("set {set:#b} recovered partial [{i}]"), bytes));
+				}
+			}
+			let named: Vec<_> = patterns.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
+
+			let leaked = probe_stack_for_named(STACK_BYTES, &named, || {
+				protocol.verify_recovered_partial_norms().expect("honest shares pass the guard");
+			});
+			assert!(
+				leaked.is_empty(),
+				"the norm guard left recovered partials in dead stack memory: {leaked:?}"
 			);
 		}
 	}

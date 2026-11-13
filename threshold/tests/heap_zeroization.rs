@@ -311,7 +311,8 @@ fn secret_intermediates_are_wiped_before_their_heap_memory_is_freed() {
 		"derive_dkg_contribution (share-digest buffer)",
 		share_coefficient_pattern(),
 		|| {
-			let contribution = derive_dkg_contribution(&share, &[0x11u8; 32]);
+			let mut contribution = [0u8; 32];
+			derive_dkg_contribution(&share, &[0x11u8; 32], &mut contribution);
 			assert_ne!(contribution, [0u8; 32]);
 		},
 	);

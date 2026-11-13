@@ -7,7 +7,7 @@
 use alloc::{collections::BTreeMap, string::ToString, vec, vec::Vec};
 
 use qp_rusty_crystals_dilithium::{fips202, poly, polyvec};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
 	config::ThresholdConfig,
@@ -25,7 +25,7 @@ use crate::{
 			normalize_assuming_le2q, pack_signature, poly_pack_w, unpack_polyvec_w,
 			HyperballSampleVector,
 		},
-		secret_sharing::{recover_share, SecretShare},
+		secret_sharing::{recover_share, RecoveredShare},
 	},
 };
 
@@ -42,8 +42,6 @@ pub(crate) struct Round1Data {
 	pub(crate) hyperball_samples: Vec<HyperballSampleVector>,
 	/// The commitment hash that was broadcast.
 	pub(crate) commitment_hash: [u8; 32],
-	/// Random bytes used for commitment.
-	pub(crate) rho_prime: [u8; 64],
 }
 
 /// Internal state after Round 2 completes.
@@ -220,32 +218,6 @@ pub(crate) fn verify_commitment_hash(
 	computed_hash == *expected_hash
 }
 
-/// Convert PrivateKeyShare to the SecretShare format used by recover_share.
-///
-/// This copies the raw secret `s1`/`s2` share material, so it must remain
-/// crate-internal: exposing it publicly would defeat the intentional opacity
-/// of `PrivateKeyShare`.
-pub(crate) fn convert_shares(share: &PrivateKeyShare) -> BTreeMap<u16, SecretShare> {
-	let mut shares: BTreeMap<u16, SecretShare> = BTreeMap::new();
-
-	for (subset_id, share_data) in share.shares() {
-		let mut s1_share = polyvec::Polyvec::<L>::default();
-		let mut s2_share = polyvec::Polyvec::<K>::default();
-
-		for i in 0..L {
-			s1_share.vec[i].coeffs_mut().copy_from_slice(&share_data.s1[i]);
-		}
-
-		for i in 0..K {
-			s2_share.vec[i].coeffs_mut().copy_from_slice(&share_data.s2[i]);
-		}
-
-		shares.insert(*subset_id, SecretShare { s1_share, s2_share });
-	}
-
-	shares
-}
-
 /// Unpack a commitment from 23-bit packed format.
 ///
 /// Returns an error if the commitment has an invalid size or contains
@@ -297,17 +269,6 @@ pub(crate) fn generate_round1(
 	config: &ThresholdConfig,
 	seed: &[u8; 32],
 ) -> ThresholdResult<Round1Data> {
-	// Generate deterministic random bytes for commitment.
-	// We bind the SSID into the derivation so that a fresh attempt_nonce
-	// (which changes the SSID) forces fresh nonces even if seed is reused.
-	let mut rho_prime = [0u8; 64];
-	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, seed);
-	fips202::shake256_absorb(&mut state, ssid);
-	fips202::shake256_absorb(&mut state, b"rho_prime");
-	fips202::shake256_finalize(&mut state);
-	fips202::shake256_squeeze(&mut rho_prime, &mut state);
-
 	let k_iterations = config.k_iterations() as usize;
 	let mut w_commitments = Vec::with_capacity(k_iterations);
 	let mut hyperball_samples = Vec::with_capacity(k_iterations);
@@ -323,19 +284,27 @@ pub(crate) fn generate_round1(
 		let mut hyperball_sample = HyperballSampleVector::new(sample_size);
 
 		// Create unique seed for this iteration
-		let mut iter_seed = [0u8; 32];
+		//
+		// `iter_seed` is the round seed up to two known bytes and
+		// `iter_rho_prime` expands to this iteration's mask, so both are
+		// zeroize-on-drop (security review): as plain arrays, the last
+		// iteration's pair stayed in the dead frame.
+		let mut iter_seed = Zeroizing::new([0u8; 32]);
 		iter_seed.copy_from_slice(seed);
 		iter_seed[0] ^= k_iter as u8;
 		iter_seed[31] ^= (k_iter >> 8) as u8;
 
-		let mut iter_rho_prime = [0u8; 64];
+		// Generate deterministic random bytes for commitment.
+		// We bind the SSID into the derivation so that a fresh attempt_nonce
+		// (which changes the SSID) forces fresh nonces even if seed is reused.
+		let mut iter_rho_prime = Zeroizing::new([0u8; 64]);
 		let mut state = fips202::KeccakState::default();
-		fips202::shake256_absorb(&mut state, &iter_seed);
+		fips202::shake256_absorb(&mut state, &*iter_seed);
 		fips202::shake256_absorb(&mut state, ssid);
 		fips202::shake256_absorb(&mut state, b"rho_prime");
 		fips202::shake256_absorb(&mut state, &[k_iter as u8]);
 		fips202::shake256_finalize(&mut state);
-		fips202::shake256_squeeze(&mut iter_rho_prime, &mut state);
+		fips202::shake256_squeeze(&mut *iter_rho_prime, &mut state);
 
 		// Sample from hyperball using threshold parameters
 		let (_, r_prime, nu) = get_hyperball_params(config.threshold(), config.total_parties())
@@ -396,7 +365,7 @@ pub(crate) fn generate_round1(
 	// The SSID binds this commitment to the specific signing session
 	let commitment_hash = compute_commitment_hash(ssid, private_key.party_id(), &w_packed);
 
-	Ok(Round1Data { w_commitments, hyperball_samples, commitment_hash, rho_prime })
+	Ok(Round1Data { w_commitments, hyperball_samples, commitment_hash })
 }
 
 /// Pack w using 23-bit encoding.
@@ -515,22 +484,21 @@ pub(crate) fn generate_round3_response(
 	round1: &Round1Data,
 	round2: &Round2Data,
 ) -> ThresholdResult<Vec<polyvec::Polyvec<L>>> {
-	// Convert shares
-	let shares = convert_shares(private_key);
-
 	// Get active parties directly from the ParticipantList
 	// This supports arbitrary participant IDs (not necessarily sequential)
 	let active_party_ids: Vec<ParticipantId> = round2.active_participants.iter().collect();
 
 	// Recover the partial secret for this party (in NTT domain)
 	// The recover_share function uses dkg_participants to map arbitrary IDs to indices
-	let (s1_ntt, s2_ntt) = recover_share(
-		&shares,
+	let mut recovered = RecoveredShare::default();
+	recover_share(
+		private_key.shares(),
 		private_key.party_id(),
 		&active_party_ids,
 		private_key.threshold(),
 		private_key.total_parties(),
 		private_key.dkg_participants(),
+		&mut recovered,
 	)?;
 
 	let k = config.k_iterations() as usize;
@@ -596,7 +564,7 @@ pub(crate) fn generate_round3_response(
 		// the inverse NTT's input contract directly.
 		let mut z = polyvec::Polyvec::<L>::default();
 		for j in 0..L {
-			poly::pointwise_montgomery(&mut z.vec[j], &challenge_ntt, &s1_ntt.vec[j]);
+			poly::pointwise_montgomery(&mut z.vec[j], &challenge_ntt, &recovered.s1.vec[j]);
 			poly::invntt_tomont(&mut z.vec[j]);
 		}
 		// Normalize z
@@ -611,7 +579,7 @@ pub(crate) fn generate_round3_response(
 		// Compute c·s2
 		let mut cs2 = polyvec::Polyvec::<K>::default();
 		for j in 0..K {
-			poly::pointwise_montgomery(&mut cs2.vec[j], &challenge_ntt, &s2_ntt.vec[j]);
+			poly::pointwise_montgomery(&mut cs2.vec[j], &challenge_ntt, &recovered.s2.vec[j]);
 			poly::invntt_tomont(&mut cs2.vec[j]);
 		}
 		// Normalize cs2

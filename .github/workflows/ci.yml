@@ -109,12 +109,18 @@ jobs:
               share_import_stack_zeroization; do
             run_probe -p qp-rusty-crystals-threshold --test "$probe"
           done
+          # Release-gated probe inside the resharing integration suite, which
+          # owns the full-protocol harness it drives.
+          run_probe -p qp-rusty-crystals-threshold --test resharing_tests \
+            resharing_leaves_no_new_share_copies_on_the_stack
           # Release-gated unit test inside the threshold lib (painted-stack
           # probe over the derivation digest).
           run_probe -p qp-rusty-crystals-threshold --lib shares_digest_never_survives_derivation
           # Release-gated `stack_probes` unit modules inside the threshold lib
           # (DKG subset seeds / queued Round 1 privates, resharing final-share
-          # assembly): unit-level probes that scan the stack immediately after
+          # assembly, sub-share PRF seed and recovered-partial norm guard,
+          # derivation contribution):
+          # unit-level probes that scan the stack immediately after
           # the function under test, where an end-to-end run would overwrite
           # the residue before a probe could see it.
           run_probe -p qp-rusty-crystals-threshold --lib stack_probes

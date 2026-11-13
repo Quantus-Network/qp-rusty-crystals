@@ -29,6 +29,9 @@
 //! assertion is only meaningful once those are elided.
 #![cfg(not(debug_assertions))]
 
+#[path = "common/share_patterns.rs"]
+mod share_patterns;
+
 use std::collections::BTreeMap;
 
 use qp_rusty_crystals_test_utils::probe_stack_for_named;
@@ -39,6 +42,7 @@ use qp_rusty_crystals_threshold::{
 	},
 	ThresholdConfig,
 };
+use share_patterns::{named, share_patterns};
 
 // 16 MiB: the DKG state machine drives keygen-scale work (K x L matrix
 // expansion, NTT chains) for three parties plus serialization buffers.
@@ -84,6 +88,8 @@ impl TranscriptSigner for TestSigner {
 struct CapturedSecrets {
 	shared_secrets: Vec<[u8; SHARED_SECRET_SIZE]>,
 	subset_seeds: Vec<[u8; SUBSET_SEED_SIZE]>,
+	/// Key seed and coefficient patterns of every party's output share.
+	output_shares: Vec<(String, Vec<u8>)>,
 }
 
 /// Run a deterministic 2-of-3 DKG among three in-process parties. All
@@ -122,6 +128,7 @@ fn run_local_dkg_2of3(capture: bool) -> Option<CapturedSecrets> {
 
 	let mut queues: Vec<Vec<(u32, Vec<u8>)>> = vec![Vec::new(); participants.len()];
 	let mut captured_frames: Vec<Vec<u8>> = Vec::new();
+	let mut output_shares = Vec::new();
 	let mut done = vec![false; participants.len()];
 	for _ in 0..1000 {
 		if done.iter().all(|&d| d) {
@@ -155,7 +162,12 @@ fn run_local_dkg_2of3(capture: bool) -> Option<CapturedSecrets> {
 					}
 					queues[to as usize].push((i as u32, std::mem::take(&mut *data)));
 				},
-				DkgAction::Return(_output) => {
+				DkgAction::Return(output) => {
+					// As with the frames, only the reference run reads the
+					// output share.
+					if capture {
+						output_shares.extend(share_patterns(&output.private_share));
+					}
 					done[i] = true;
 				},
 			}
@@ -163,7 +175,7 @@ fn run_local_dkg_2of3(capture: bool) -> Option<CapturedSecrets> {
 	}
 	assert!(done.iter().all(|&d| d), "DKG must complete");
 	if capture {
-		Some(extract_secrets(&captured_frames))
+		Some(extract_secrets(&captured_frames, output_shares))
 	} else {
 		None
 	}
@@ -173,7 +185,7 @@ fn run_local_dkg_2of3(capture: bool) -> Option<CapturedSecrets> {
 /// Round 1 private messages and each party's randomness from the Round 2
 /// broadcasts, then recompute every subset seed exactly as the protocol does
 /// (`R` = randomness concatenated in ascending party order).
-fn extract_secrets(frames: &[Vec<u8>]) -> CapturedSecrets {
+fn extract_secrets(frames: &[Vec<u8>], output_shares: Vec<(String, Vec<u8>)>) -> CapturedSecrets {
 	let mut per_subset_ks: BTreeMap<SubsetMask, [u8; SHARED_SECRET_SIZE]> = BTreeMap::new();
 	let mut randomness: BTreeMap<u32, [u8; RANDOMNESS_SIZE]> = BTreeMap::new();
 	for frame in frames {
@@ -198,7 +210,11 @@ fn extract_secrets(frames: &[Vec<u8>]) -> CapturedSecrets {
 		.iter()
 		.map(|(&subset, ks)| h_keygen(subset, ks, &global_randomness))
 		.collect();
-	CapturedSecrets { shared_secrets: per_subset_ks.into_values().collect(), subset_seeds }
+	CapturedSecrets {
+		shared_secrets: per_subset_ks.into_values().collect(),
+		subset_seeds,
+		output_shares,
+	}
 }
 
 #[test]
@@ -236,4 +252,26 @@ fn dkg_leaves_no_secret_copies_on_the_stack() {
 		let _ = run_local_dkg_2of3(false);
 	});
 	assert!(leaked.is_empty(), "the DKG left plaintext secrets in stack memory: {leaked:?}");
+}
+
+/// Regression test (security review): a completed DKG must not leave any
+/// party's output share — its key seed or its share coefficients — in dead
+/// stack memory.
+///
+/// The output is the party's long-term signing share. It is assembled once,
+/// then handed over by value (boxed, cloned into the returned action), and
+/// each of those moves used to leave a copy that no drop reaches; what stays
+/// behind belongs to whichever party completes last, so every party's share
+/// is scanned.
+#[test]
+fn dkg_leaves_no_output_share_copies_on_the_stack() {
+	let mut patterns =
+		run_local_dkg_2of3(true).expect("reference run captures secrets").output_shares;
+	patterns.sort();
+	patterns.dedup();
+
+	let leaked = probe_stack_for_named(STACK_BYTES, &named(&patterns), || {
+		let _ = run_local_dkg_2of3(false);
+	});
+	assert!(leaked.is_empty(), "the DKG left output share secrets in stack memory: {leaked:?}");
 }

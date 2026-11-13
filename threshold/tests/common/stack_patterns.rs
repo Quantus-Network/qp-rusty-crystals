@@ -5,18 +5,36 @@
 
 use qp_rusty_crystals_dilithium::fips202;
 
+/// The nonce seeds of iteration `k_iter` of `round1_commit_with_seed(ssid,
+/// seed)`, recomputed through the public fips202 API: `iter_seed` (the round
+/// seed with the iteration index XORed into bytes 0 and 31) and the
+/// `iter_rho_prime` squeezed from it, which the iteration's mask is sampled
+/// from.
+pub fn round1_iteration_seeds(
+	ssid: &[u8; 32],
+	seed: &[u8; 32],
+	k_iter: u16,
+) -> ([u8; 32], [u8; 64]) {
+	let mut iter_seed = *seed;
+	iter_seed[0] ^= k_iter as u8;
+	iter_seed[31] ^= (k_iter >> 8) as u8;
+
+	let mut state = fips202::KeccakState::default();
+	fips202::shake256_absorb(&mut state, &iter_seed);
+	fips202::shake256_absorb(&mut state, ssid);
+	fips202::shake256_absorb(&mut state, b"rho_prime");
+	fips202::shake256_absorb(&mut state, &[k_iter as u8]);
+	fips202::shake256_finalize(&mut state);
+	let mut iter_rho_prime = [0u8; 64];
+	fips202::shake256_squeeze(&mut iter_rho_prime, &mut state);
+	(iter_seed, iter_rho_prime)
+}
+
 /// First 32 bytes of the SHAKE256 stream `sample_hyperball` squeezes for
 /// iteration 0 of `round1_commit_with_seed(ssid, seed)`. Recomputed through
 /// the public fips202 API (iteration 0 leaves the seed unmodified).
 pub fn hyperball_stream_pattern(ssid: &[u8; 32], seed: &[u8; 32]) -> [u8; 32] {
-	let mut state = fips202::KeccakState::default();
-	fips202::shake256_absorb(&mut state, seed);
-	fips202::shake256_absorb(&mut state, ssid);
-	fips202::shake256_absorb(&mut state, b"rho_prime");
-	fips202::shake256_absorb(&mut state, &[0u8]);
-	fips202::shake256_finalize(&mut state);
-	let mut iter_rho_prime = [0u8; 64];
-	fips202::shake256_squeeze(&mut iter_rho_prime, &mut state);
+	let (_, iter_rho_prime) = round1_iteration_seeds(ssid, seed, 0);
 
 	let mut state = fips202::KeccakState::default();
 	fips202::shake256_absorb(&mut state, b"H");
