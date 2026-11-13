@@ -19,7 +19,8 @@
 #![cfg(all(not(debug_assertions), feature = "ml-dsa-87"))]
 
 use qp_rusty_crystals_hdwallet::{
-	derive_key_from_seed, generate_wormhole_from_seed, hderive::ExtendedPrivKey, SensitiveBytes64,
+	derive_key_from_seed, generate_wormhole_from_seed, hderive::ExtendedPrivKey,
+	ml_dsa_87::Keypair, SensitiveBytes64, WormholePair,
 };
 use qp_rusty_crystals_test_utils::probe_stack_for;
 
@@ -63,7 +64,8 @@ fn derived_entropy_never_survives_key_generation() {
 	// remain anywhere on the stack.
 	let holder = seed_holder();
 	let leaked = probe_stack_for(STACK_BYTES, &entropy, move || {
-		let keypair = derive_key_from_seed(&holder, PATH).unwrap();
+		let mut keypair = Keypair::zeroed();
+		derive_key_from_seed(&holder, PATH, &mut keypair).unwrap();
 		core::hint::black_box(&keypair);
 	});
 	assert!(
@@ -84,7 +86,8 @@ fn derived_entropy_never_survives_wormhole_generation() {
 
 	let holder = seed_holder();
 	let leaked = probe_stack_for(STACK_BYTES, &entropy, move || {
-		let pair = generate_wormhole_from_seed(&holder, WORMHOLE_PATH).unwrap();
+		let mut pair = WormholePair::zeroed();
+		generate_wormhole_from_seed(&holder, WORMHOLE_PATH, &mut pair).unwrap();
 		core::hint::black_box(&pair);
 	});
 	assert!(

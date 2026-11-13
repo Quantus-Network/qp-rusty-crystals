@@ -23,8 +23,8 @@ qp-rusty-crystals-hdwallet = { version = "3.0", features = ["ml-dsa-44", "ml-dsa
 ```
 
 Each enabled feature exposes a key-derivation module (`ml_dsa_44`, `ml_dsa_65`,
-`ml_dsa_87`) with `derive_key_from_seed` / `derive_key_from_mnemonic` returning
-that variant's `Keypair`. The top-level `derive_key_from_seed` /
+`ml_dsa_87`) with `derive_key_from_seed` / `derive_key_from_mnemonic` filling
+a caller-provided `Keypair` of that variant. The top-level `derive_key_from_seed` /
 `derive_key_from_mnemonic` functions are the original ML-DSA-87 API and require
 the `ml-dsa-87` feature.
 
@@ -48,17 +48,20 @@ qp-rusty-crystals-hdwallet = "3.1"
 ### Basic Example
 
 ```rust
-use qp_rusty_crystals_hdwallet::{derive_key_from_mnemonic, generate_mnemonic};
+use qp_rusty_crystals_hdwallet::{derive_key_from_mnemonic, generate_mnemonic, ml_dsa_87::Keypair};
 
 // Generate secure entropy for a new mnemonic. The phrase is returned as a
 // self-wiping `Zeroizing<String>`: its heap contents are zeroized on drop.
 let mut entropy = [0u8; 32];
 getrandom::getrandom(&mut entropy).expect("Failed to generate entropy");
-let mnemonic = generate_mnemonic((&mut entropy).into())?;
+let mnemonic = generate_mnemonic(&mut (&mut entropy).into())?;
 println!("Mnemonic: {}", mnemonic.as_str());
 
-// Derive an ML-DSA-87 keypair at a BIP-44 path
-let keypair = derive_key_from_mnemonic(&mnemonic, None, "m/44'/189189'/0'/0'/0'")?;
+// Derive an ML-DSA-87 keypair at a BIP-44 path. The keypair is written into
+// caller-owned storage instead of being returned: a returned secret key is
+// moved, and the moved-from stack slot is never wiped.
+let mut keypair = Keypair::zeroed();
+derive_key_from_mnemonic(&mnemonic, None, "m/44'/189189'/0'/0'/0'", &mut keypair)?;
 
 // Sign and verify with the derived keypair
 let message = b"Hello, quantum-safe wallet!";
@@ -78,14 +81,18 @@ would leave an unwiped copy of the seed in the caller's dead stack slot —
 so one holder can derive keys at many paths and wipes itself when dropped:
 
 ```rust
-use qp_rusty_crystals_hdwallet::{derive_key_from_seed, mnemonic_to_seed, SensitiveBytes64};
+use qp_rusty_crystals_hdwallet::{
+    derive_key_from_seed, ml_dsa_87::Keypair, mnemonic_to_seed, SensitiveBytes64,
+};
 
 // The seed is written into a caller-provided self-zeroizing buffer;
 // the mnemonic string is consumed and zeroized.
 let mut seed = SensitiveBytes64::zeroed();
 mnemonic_to_seed(mnemonic, None, &mut seed)?;
-let keypair = derive_key_from_seed(&seed, "m/44'/189189'/0'/0'/0'")?;
-let another = derive_key_from_seed(&seed, "m/44'/189189'/1'/0'/0'")?;
+let mut keypair = Keypair::zeroed();
+derive_key_from_seed(&seed, "m/44'/189189'/0'/0'/0'", &mut keypair)?;
+let mut another = Keypair::zeroed();
+derive_key_from_seed(&seed, "m/44'/189189'/1'/0'/0'", &mut another)?;
 // `seed` zeroizes its storage when it goes out of scope.
 ```
 
@@ -95,9 +102,10 @@ Wormhole address derivation is Poseidon-based and independent of the ML-DSA
 parameter set. It requires the wormhole coin type (`189189189'`) in the path:
 
 ```rust
-use qp_rusty_crystals_hdwallet::derive_wormhole_from_mnemonic;
+use qp_rusty_crystals_hdwallet::{derive_wormhole_from_mnemonic, WormholePair};
 
-let pair = derive_wormhole_from_mnemonic(&mnemonic, None, "m/44'/189189189'/0'/0'/0'")?;
+let mut pair = WormholePair::zeroed();
+derive_wormhole_from_mnemonic(&mnemonic, None, "m/44'/189189189'/0'/0'/0'", &mut pair)?;
 println!("Address: {}", hex::encode(pair.address()));
 ```
 
@@ -132,4 +140,6 @@ is enabled; the multi-variant suite runs for whichever features are active.
 
 ## License
 
-GPL-3.0-only - See [LICENSE](LICENSE) for details. The `hderive` module is derived from [tiny-hderive](https://github.com/maciejhirsz/tiny-hderive) (through the Namada fork, `nam-tiny-hderive`), which is licensed under GPL-3.0.
+Apache-2.0 - See [LICENSE](LICENSE) for details.
+
+Versions up to and including 4.1.1 are GPL-3.0-only: their `hderive` module was derived from [tiny-hderive](https://github.com/maciejhirsz/tiny-hderive), which is licensed under GPL-3.0. That code has since been replaced by a re-implementation written from a specification.

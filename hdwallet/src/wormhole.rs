@@ -108,6 +108,15 @@ impl PartialEq for WormholePair {
 impl Eq for WormholePair {}
 
 impl WormholePair {
+	/// All-zero placeholder, intended to be filled by [`Self::generate_into`].
+	pub fn zeroed() -> WormholePair {
+		WormholePair {
+			address: [0u8; 32],
+			first_hash: SensitiveBytes32::zeroed(),
+			secret: SensitiveBytes32::zeroed(),
+		}
+	}
+
 	/// Generates a new `WormholePair` from user-supplied entropy.
 	///
 	/// The seed is borrowed mutably and zeroized in place after use
@@ -115,7 +124,37 @@ impl WormholePair {
 	/// through a dead stack slot that is never dropped, so `ZeroizeOnDrop`
 	/// could not wipe it. The caller's value is all zeros afterwards; the
 	/// entropy stack-residue regression test pins this.
+	///
+	/// The pair is returned by value, so a caller that hands it on (returns
+	/// it, wraps it in a `Result`) moves it and leaves the secret in the
+	/// moved-from slot. Use [`Self::generate_into`] to fill storage the
+	/// final owner already holds.
 	pub fn generate_new(seed: &mut SensitiveBytes32) -> WormholePair {
+		let mut pair = WormholePair::zeroed();
+		WormholePair::generate_into(seed, &mut pair);
+		// Tail construction, with both sensitive values swapped straight
+		// from `pair` into the returned value: returning the named local
+		// would leave a moved-from copy, whereas its wrappers are left
+		// zeroed rather than dead-with-plaintext (pinned by the release-mode
+		// `wormhole_stack_zeroization` probe).
+		WormholePair {
+			address: pair.address,
+			first_hash: core::mem::replace(&mut pair.first_hash, SensitiveBytes32::zeroed()),
+			secret: core::mem::replace(&mut pair.secret, SensitiveBytes32::zeroed()),
+		}
+	}
+
+	/// Generates a `WormholePair` from user-supplied entropy in place, into
+	/// the caller-provided `out`.
+	///
+	/// Same derivation as [`Self::generate_new`], and the seed is likewise
+	/// zeroized in place after use. The pair is written in place rather than
+	/// returned by value (security review): a returned pair that the caller
+	/// forwards is moved out of a temporary that is never dropped, which
+	/// left `secret` and `first_hash` in dead stack memory. With an
+	/// out-parameter they only ever exist inside the caller's
+	/// self-zeroizing pair.
+	pub fn generate_into(seed: &mut SensitiveBytes32, out: &mut WormholePair) {
 		let mut hashed_seed = hash_bytes(seed.as_bytes());
 		let mut secret = SensitiveBytes32::new(&mut hashed_seed);
 		seed.as_mut_bytes().zeroize();
@@ -123,10 +162,10 @@ impl WormholePair {
 		// Lend the secret rather than moving it (security review): a
 		// by-value argument copies the wrapper into the callee's frame and
 		// leaves this local's slot dead but never dropped, beyond
-		// `ZeroizeOnDrop`. The callee swaps the secret into the returned
-		// pair, so `secret` holds zeros when this frame drops (pinned by the
-		// release-mode `wormhole_stack_zeroization` probe).
-		WormholePair::generate_pair_from_secret(&mut secret)
+		// `ZeroizeOnDrop`. The callee copies the secret into `out` and wipes
+		// the source, so `secret` holds zeros when this frame drops (pinned
+		// by the release-mode `wormhole_stack_zeroization` probe).
+		WormholePair::fill_pair_from_secret(&mut secret, out)
 	}
 
 	/// The deterministic Poseidon-derived address (public data).
@@ -152,21 +191,22 @@ impl WormholePair {
 	// verification is re-derivation plus an address comparison, which
 	// callers that hold the secret can do directly.
 
-	/// Internal function that generates a `WormholePair` from a given secret.
+	/// Internal function that generates a `WormholePair` from a given secret,
+	/// in place into `out`.
 	///
 	/// This function performs a secondary Poseidon hash over the salt + hashed secret
 	/// to derive the wormhole address.
 	///
 	/// # Security Note
 	/// The secret never leaves its [`SensitiveBytes32`] wrapper (security
-	/// review): it is borrowed for the felt encoding and then *swapped* into
-	/// the returned pair, leaving the caller's wrapper zeroed. The previous
+	/// review): it is borrowed for the felt encoding and then copied into
+	/// `out`'s own wrapper, leaving the caller's wrapper zeroed. The previous
 	/// shape — take the wrapper by value, unwrap it with `into_bytes`, and
 	/// re-wrap into a named `result` — left three dead stack copies of the
 	/// secret (the moved-from parameter, the extracted plain array's source,
 	/// and the moved-from `result`), all beyond `ZeroizeOnDrop`'s reach. The
 	/// release-mode `wormhole_stack_zeroization` probe pins the fixed shape.
-	fn generate_pair_from_secret(secret: &mut SensitiveBytes32) -> WormholePair {
+	fn fill_pair_from_secret(secret: &mut SensitiveBytes32, out: &mut WormholePair) {
 		let salt_felt = string_to_felts(ADDRESS_SALT);
 		// Encode the 32-byte secret as 4 felts via the 8-bytes/felt `bytes_to_digest_lossy`.
 		// This encoding is non-injective (limbs ≥ the Goldilocks prime are reduced),
@@ -200,15 +240,14 @@ impl WormholePair {
 		zeroize_felts(&mut secret_felt);
 		zeroize_felts(&mut preimage_felts);
 
-		// Tail construction, with both sensitive values swapped straight
-		// from their wrappers into the pair: no named local holds the pair
-		// (a later return would leave a moved-from copy), and the source
-		// wrappers are left zeroed rather than dead-with-plaintext.
-		WormholePair {
-			address: second_hash,
-			first_hash: core::mem::replace(&mut first_hash, SensitiveBytes32::zeroed()),
-			secret: core::mem::replace(secret, SensitiveBytes32::zeroed()),
-		}
+		// Guarded copies into `out`'s wrappers, byte for byte: assigning a
+		// whole wrapper (`out.secret = ...`) would build it in a temporary
+		// and move it in, leaving that temporary dead-with-plaintext. The
+		// sources end up zeroed: `secret` here, `first_hash` when it drops.
+		out.address = second_hash;
+		out.first_hash.as_mut_bytes().copy_from_slice(first_hash.as_bytes());
+		out.secret.as_mut_bytes().copy_from_slice(secret.as_bytes());
+		secret.as_mut_bytes().zeroize();
 	}
 }
 
@@ -224,6 +263,15 @@ mod tests {
 		hash_twice,
 		serialization::{bytes_to_digest_lossy, bytes_to_felts},
 	};
+
+	impl WormholePair {
+		/// Test helper: by-value form of [`WormholePair::fill_pair_from_secret`].
+		fn generate_pair_from_secret(secret: &mut SensitiveBytes32) -> WormholePair {
+			let mut pair = WormholePair::zeroed();
+			WormholePair::fill_pair_from_secret(secret, &mut pair);
+			pair
+		}
+	}
 
 	#[test]
 	fn test_generate_pair_from_secret() {

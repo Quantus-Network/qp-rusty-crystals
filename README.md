@@ -81,7 +81,7 @@ let mut seed = [0u8; 32];
 getrandom::getrandom(&mut seed).expect("Failed to generate seed");
 
 // Generate mnemonic (returned as a self-wiping Zeroizing<String>)
-let mnemonic = generate_mnemonic((&mut seed).into())?;
+let mnemonic = generate_mnemonic(&mut (&mut seed).into())?;
 
 // Create HD wallet
 let hd_wallet = HDLattice::from_mnemonic(&mnemonic, None)?;
@@ -150,15 +150,15 @@ This repository has 100% code coverage for all critical logic and functionality.
 | Crate | License |
 |-------|---------|
 | `qp-rusty-crystals-dilithium` | [GPL-3.0-only](dilithium/LICENSE) |
-| `qp-rusty-crystals-hdwallet` | [GPL-3.0-only](hdwallet/LICENSE) |
+| `qp-rusty-crystals-hdwallet` | [Apache-2.0](LICENSE) |
 | `qp-rusty-crystals-threshold` | [Apache-2.0](LICENSE) |
 | `qp-rusty-crystals-lattice-attack` | [Apache-2.0](LICENSE) |
 
-The dilithium crate is GPL-3.0-only because it is derived from Quantum Blockchains' GPL-3.0 Rust port (see Acknowledgements). The hdwallet crate is GPL-3.0-only because its `hderive` module is derived from tiny-hderive, which is GPL-3.0. The other crates depend on dilithium, so any build that includes them must also comply with GPL-3.0 for the dilithium code.
+The dilithium crate is GPL-3.0-only because it is derived from Quantum Blockchains' GPL-3.0 Rust port (see Acknowledgements). The other crates depend on dilithium, so any build that includes them must also comply with GPL-3.0 for the dilithium code.
+
+Versions of `qp-rusty-crystals-hdwallet` up to and including 4.1.1 are GPL-3.0-only: their `hderive` module was derived from [tiny-hderive](https://github.com/maciejhirsz/tiny-hderive), which is licensed under GPL-3.0. That code has since been replaced by a re-implementation written from a specification.
 
 ## Acknowledgements
 
 The ml-dsa code was lifted with minimal changes from [Quantum Blockchain's port](https://github.com/Quantum-Blockchains/dilithium)
 of [pq-crystals](https://github.com/pq-crystals/dilithium) to Rust.
-
-The hdwallet `hderive` module was ported from [nam-tiny-hderive](https://github.com/namada-net/tiny-hderive), the Namada fork of [tiny-hderive](https://github.com/maciejhirsz/tiny-hderive).
