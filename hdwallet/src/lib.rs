@@ -56,31 +56,40 @@ pub use wormhole::WormholePair;
 // Import and re-export SensitiveBytes types from dilithium
 pub use qp_rusty_crystals_dilithium::{SensitiveBytes32, SensitiveBytes64};
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum HDLatticeError {
-	#[error("BIP39 error: {0}")]
 	Bip39Error(String),
-	#[error("Key derivation failed: {0}")]
 	KeyDerivationFailed(String),
-	#[error("Bad entropy bit count: {0}")]
 	BadEntropyBitCount(usize),
-	#[error("Mnemonic derivation failed: {0}")]
 	MnemonicDerivationFailed(String),
-	#[error("Invalid wormhole path: {0}")]
 	InvalidWormholePath(String),
-	#[error("Invalid BIP44 path: {0}")]
 	InvalidPath(String),
-	#[error("Derivation path too long: {0} bytes")]
 	PathTooLong(usize),
-	#[error("Derivation path too deep: {0} segments")]
 	PathTooDeep(usize),
-	#[error("Mnemonic too long: {0} bytes")]
 	MnemonicTooLong(usize),
-	#[error("Passphrase too long: {0} bytes")]
 	PassphraseTooLong(usize),
-	#[error("hderive error: {0:?}")]
 	GenericError(hderive::Error),
 }
+
+impl core::fmt::Display for HDLatticeError {
+	fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+		match self {
+			Self::Bip39Error(e) => write!(f, "BIP39 error: {e}"),
+			Self::KeyDerivationFailed(e) => write!(f, "Key derivation failed: {e}"),
+			Self::BadEntropyBitCount(n) => write!(f, "Bad entropy bit count: {n}"),
+			Self::MnemonicDerivationFailed(e) => write!(f, "Mnemonic derivation failed: {e}"),
+			Self::InvalidWormholePath(p) => write!(f, "Invalid wormhole path: {p}"),
+			Self::InvalidPath(p) => write!(f, "Invalid BIP44 path: {p}"),
+			Self::PathTooLong(n) => write!(f, "Derivation path too long: {n} bytes"),
+			Self::PathTooDeep(n) => write!(f, "Derivation path too deep: {n} segments"),
+			Self::MnemonicTooLong(n) => write!(f, "Mnemonic too long: {n} bytes"),
+			Self::PassphraseTooLong(n) => write!(f, "Passphrase too long: {n} bytes"),
+			Self::GenericError(e) => write!(f, "hderive error: {e:?}"),
+		}
+	}
+}
+
+impl core::error::Error for HDLatticeError {}
 
 pub const ROOT_PATH: &str = "m";
 pub const PURPOSE: &str = "44'";

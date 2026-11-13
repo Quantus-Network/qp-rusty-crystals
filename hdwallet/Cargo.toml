@@ -20,7 +20,6 @@ categories = ["cryptography"]
 # Parameter sets are selected through this crate's own ml-dsa-* features
 # (workspace pins dilithium with default-features = false).
 qp-rusty-crystals-dilithium = { workspace = true }
-thiserror.workspace = true
 unicode-normalization.workspace = true
 qp-poseidon-core.workspace = true
 zeroize = { workspace = true, features = ["alloc"] }
@@ -44,7 +43,7 @@ qp-rusty-crystals-test-utils = { workspace = true }
 
 [features]
 default = ["ml-dsa-87", "std"]
-std = ["thiserror/std"]
+std = []
 # ML-DSA parameter sets. Additive: enabling several exposes a key-derivation
 # module per variant (`ml_dsa_44` / `ml_dsa_65` / `ml_dsa_87`). The top-level
 # `derive_key_*` functions remain the ML-DSA-87 API and require `ml-dsa-87`.
