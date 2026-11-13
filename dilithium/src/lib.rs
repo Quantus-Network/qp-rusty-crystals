@@ -232,24 +232,4 @@ mod tests {
 		assert!(a.ct_eq(&b));
 		assert!(!a.ct_eq(&c));
 	}
-
-	#[test]
-	fn params() {
-		assert_eq!(crate::params::Q, 8380417);
-		assert_eq!(crate::params::N, 256);
-		assert_eq!(crate::params::R, 1753);
-		assert_eq!(crate::params::D, 13);
-	}
-	#[test]
-	fn params_lvl5() {
-		assert_eq!(crate::params::TAU, 60);
-		assert_eq!(crate::params::CHALLENGE_ENTROPY, 257);
-		assert_eq!(crate::params::GAMMA1, 524288);
-		assert_eq!(crate::params::GAMMA2, 261888);
-		assert_eq!(crate::params::K, 8);
-		assert_eq!(crate::params::L, 7);
-		assert_eq!(crate::params::ETA, 2);
-		assert_eq!(crate::params::BETA, 120);
-		assert_eq!(crate::params::OMEGA, 75);
-	}
 }

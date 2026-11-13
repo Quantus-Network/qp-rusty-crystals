@@ -186,6 +186,49 @@ mod tests {
 		assert_eq!(ml_dsa_87::SIGNBYTES, 4627);
 	}
 
+	/// Per-variant parameters, pinned against FIPS 204 Table 1 (rows tau, lambda,
+	/// gamma1, gamma2, k, l, eta, beta, omega, challenge entropy).
+	#[test]
+	fn fips204_table1_parameters() {
+		macro_rules! row {
+			($v:ident) => {
+				[
+					$v::TAU,
+					$v::COLLISION_STRENGTH,
+					$v::GAMMA1,
+					$v::GAMMA2,
+					$v::K,
+					$v::L,
+					$v::ETA,
+					$v::BETA,
+					$v::OMEGA,
+					$v::CHALLENGE_ENTROPY,
+				]
+			};
+		}
+		assert_eq!(row!(ml_dsa_44), [39, 128, 1 << 17, 95232, 4, 4, 2, 78, 80, 192]);
+		assert_eq!(row!(ml_dsa_65), [49, 192, 1 << 19, 261888, 6, 5, 4, 196, 55, 225]);
+		assert_eq!(row!(ml_dsa_87), [60, 256, 1 << 19, 261888, 8, 7, 2, 120, 75, 257]);
+
+		assert_eq!([ml_dsa_44::C_DASH_BYTES, ml_dsa_44::POLYVECH_PACKEDBYTES], [32, 84]);
+		assert_eq!([ml_dsa_65::C_DASH_BYTES, ml_dsa_65::POLYVECH_PACKEDBYTES], [48, 61]);
+		assert_eq!([ml_dsa_87::C_DASH_BYTES, ml_dsa_87::POLYVECH_PACKEDBYTES], [64, 83]);
+	}
+
+	/// The ring constants, with `R` checked to be a primitive 2N-th root of
+	/// unity (`R^N = -1 mod Q`) and the t1/t0 sizes checked as 10 and 13 bits
+	/// per coefficient.
+	#[test]
+	fn shared_constants() {
+		assert_eq!([Q, N, D, R], [8380417, 256, 13, 1753]);
+		let r_pow_n = (0..N).fold(1i64, |acc, _| acc * R as i64 % Q as i64);
+		assert_eq!(r_pow_n, Q as i64 - 1);
+
+		assert_eq!([SEEDBYTES, CRHBYTES, TR_BYTES], [32, 64, 64]);
+		assert_eq!(POLYT1_PACKEDBYTES, 10 * N as usize / 8);
+		assert_eq!(POLYT0_PACKEDBYTES, D as usize * N as usize / 8);
+	}
+
 	/// The top-level re-exports must keep exposing the ML-DSA-87 values that
 	/// all existing call sites were audited against.
 	#[test]

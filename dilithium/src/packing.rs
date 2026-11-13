@@ -1,4 +1,5 @@
 use crate::{params, poly, polyvec::Polyvec};
+use zeroize::Zeroize;
 
 const N: usize = params::N as usize;
 
@@ -6,12 +7,7 @@ const N: usize = params::N as usize;
 ///
 /// Generic over the variant's row count `K`; `PK` is the packed public key
 /// size, checked against `K` at compile time.
-///
-/// # Arguments
-///
-/// * 'pk' - output buffer for public key (PUBLICKEYBYTES)
-/// * 'rho' - const reference to rho of SEEDBYTES length
-/// * 't1' - const reference to t1
+#[inline(never)]
 pub fn pack_pk<const K: usize, const PK: usize>(
 	pk: &mut [u8; PK],
 	rho: &[u8; params::SEEDBYTES],
@@ -22,17 +18,12 @@ pub fn pack_pk<const K: usize, const PK: usize>(
 	}
 	pk[..params::SEEDBYTES].copy_from_slice(rho);
 	for i in 0..K {
-		poly::t1_pack(&mut pk[params::SEEDBYTES + i * params::POLYT1_PACKEDBYTES..], &t1.vec[i]);
+		let at = params::SEEDBYTES + i * params::POLYT1_PACKEDBYTES;
+		poly::t1_pack(&mut pk[at..], &t1.vec[i]);
 	}
 }
 
 /// Unpack public key pk = (rho, t1).
-///
-/// # Arguments
-///
-/// * 'rho' - output for rho value of SEEDBYTES length
-/// * 't1' - output for t1 value
-/// * 'pk' - const reference to public key
 pub fn unpack_pk<const K: usize, const PK: usize>(
 	rho: &mut [u8; params::SEEDBYTES],
 	t1: &mut Polyvec<K>,
@@ -43,7 +34,8 @@ pub fn unpack_pk<const K: usize, const PK: usize>(
 	}
 	rho.copy_from_slice(&pk[..params::SEEDBYTES]);
 	for i in 0..K {
-		poly::t1_unpack(&mut t1.vec[i], &pk[params::SEEDBYTES + i * params::POLYT1_PACKEDBYTES..]);
+		let at = params::SEEDBYTES + i * params::POLYT1_PACKEDBYTES;
+		poly::t1_unpack(&mut t1.vec[i], &pk[at..]);
 	}
 }
 
@@ -51,6 +43,7 @@ pub fn unpack_pk<const K: usize, const PK: usize>(
 ///
 /// Generic over the variant's `K`/`L`/`ETA`; `SK` is the packed secret key
 /// size, checked for consistency at compile time.
+#[inline(never)]
 pub fn pack_sk<const K: usize, const L: usize, const ETA: usize, const SK: usize>(
 	sk: &mut [u8; SK],
 	rho: &[u8; params::SEEDBYTES],
@@ -257,40 +250,35 @@ pub fn unpack_sig<
 		assert!(SIG == params::signbytes(K, L, GAMMA1, OMEGA, CD));
 	}
 	// Overwrite, don't merge: clear any prior hint bits before decoding this signature.
-	*h = Polyvec::<K>::default();
+	h.zeroize();
 
 	c.copy_from_slice(&sig[..CD]);
 
-	let mut idx = CD;
-	// Exact-size chunks: each `&[u8; PZ]` is produced by the split,
+	// Exact-size chunks: each `&[u8; PZ]` is split off the front,
 	// so a truncated per-polynomial slice can't reach `z_unpack`.
-	let (z_chunks, _) = sig[idx..].as_chunks::<PZ>();
-	for (chunk, zi) in z_chunks.iter().zip(z.vec.iter_mut()).take(L) {
+	let mut rest = &sig[CD..];
+	for zi in z.vec.iter_mut() {
+		let (chunk, tail) = rest.split_first_chunk::<PZ>().expect("signature too short");
 		poly::z_unpack::<GAMMA1, PZ>(zi, chunk);
+		rest = tail;
 	}
-	idx += L * PZ;
 
-	let mut k: usize = 0;
-	for i in 0..K {
-		if sig[idx + OMEGA + i] < k as u8 || sig[idx + OMEGA + i] > OMEGA as u8 {
+	let (positions, counts) = rest.split_at(OMEGA);
+	let mut k = 0;
+	for (h_i, &count) in h.vec.iter_mut().zip(counts) {
+		let end = count as usize;
+		if end < k || end > OMEGA {
 			return false;
 		}
-		for j in k..sig[idx + OMEGA + i] as usize {
-			if j > k && sig[idx + j as usize] <= sig[idx + j as usize - 1] {
+		for j in k..end {
+			if j > k && positions[j] <= positions[j - 1] {
 				return false;
 			}
-			h.vec[i].coeffs[sig[idx + j] as usize] = 1;
+			h_i.coeffs[positions[j] as usize] = 1;
 		}
-		k = sig[idx + OMEGA + i] as usize;
+		k = end;
 	}
-
-	for j in k..OMEGA {
-		if sig[idx + j as usize] > 0 {
-			return false;
-		}
-	}
-
-	true
+	positions[k..].iter().all(|&position| position == 0)
 }
 
 #[cfg(test)]

@@ -64,7 +64,7 @@ macro_rules! define_ml_dsa {
 
 		pub type Signature = [u8; SIGNBYTES];
 
-		/// A pair of private and public keys.
+		/// An ML-DSA keypair: a secret signing key together with its matching public key.
 		///
 		/// `Clone` is intentionally not derived because the embedded `SecretKey` is sensitive.
 		/// To explicitly copy a keypair (e.g. to move it into a closure), serialize and
@@ -104,12 +104,7 @@ macro_rules! define_ml_dsa {
 		}
 
 		impl Keypair {
-			/// Generate a Keypair instance.
-			///
-			/// # Arguments
-			///
-			/// * 'entropy' - bytes for determining the generation process (must be at least 32
-			///   bytes)
+			/// Deterministically derives a keypair from a 32-byte seed (`ML-DSA.KeyGen_internal`).
 			///
 			/// The entropy is borrowed mutably and zeroized in place after use
 			/// (security review): taking it by value would move — i.e. copy —
@@ -240,7 +235,7 @@ macro_rules! define_ml_dsa {
 				Ok(Keypair { secret, public })
 			}
 
-			/// Convert a Keypair to a bytes array.
+			/// Serializes the keypair: secret key bytes first, then public key bytes.
 			///
 			/// Returns a self-wiping buffer containing private and public key bytes.
 			/// The buffer contains the full secret key, so it is `Zeroizing`: it is
@@ -253,7 +248,7 @@ macro_rules! define_ml_dsa {
 				Zeroizing::new(*result)
 			}
 
-			/// Create a Keypair from bytes.
+			/// Parses a keypair from its `to_bytes` form: secret key bytes, then public key bytes.
 			///
 			/// # Consistency check
 			///
@@ -306,7 +301,7 @@ macro_rules! define_ml_dsa {
 				Ok(Keypair { secret: SecretKey { bytes: *secret_bytes }, public })
 			}
 
-			/// Compute a signature for a given message.
+			/// Signs `msg` with the secret half, bound to the optional context string `ctx`.
 			///
 			/// # Arguments
 			///
@@ -335,7 +330,7 @@ macro_rules! define_ml_dsa {
 				self.secret.sign(msg, ctx, hedge)
 			}
 
-			/// Verify a signature for a given message with a public key.
+			/// Verifies `sig` for `msg` and context `ctx` with the public half of this keypair.
 			pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool {
 				self.public.verify(msg, sig, ctx)
 			}
@@ -357,7 +352,7 @@ macro_rules! define_ml_dsa {
 			}
 		}
 
-		/// Private key.
+		/// An ML-DSA secret (signing) key, kept in its packed byte encoding and wiped on drop.
 		///
 		/// `Clone` is intentionally not derived because the underlying bytes are sensitive.
 		/// To explicitly copy a secret key, use `SecretKey::from_bytes(&sk.to_bytes())?`,
@@ -415,7 +410,7 @@ macro_rules! define_ml_dsa {
 				Ok(SecretKey { bytes: *sk })
 			}
 
-			/// Compute a signature for a given message.
+			/// Signs `msg` with optional context `ctx`; fails if either exceeds its size limit.
 			///
 			/// See [`Keypair::sign`] for the argument contract, in particular the
 			/// deterministic-vs-hedged trade-off of `hedge` and why it is passed
@@ -459,12 +454,12 @@ macro_rules! define_ml_dsa {
 		}
 
 		impl PublicKey {
-			/// Returns a copy of underlying bytes.
+			/// Returns a copy of the packed public key bytes (`rho || t1`).
 			pub fn to_bytes(&self) -> [u8; PUBLICKEYBYTES] {
 				self.bytes
 			}
 
-			/// Create a PublicKey from bytes.
+			/// Parses a packed public key; rejects a wrong length or a degenerate, forgeable `t1`.
 			pub fn from_bytes(bytes: &[u8]) -> Result<PublicKey, KeyParsingError> {
 				let bytes: [u8; PUBLICKEYBYTES] =
 					bytes.try_into().map_err(|_| KeyParsingError::BadPublicKey)?;
@@ -482,7 +477,7 @@ macro_rules! define_ml_dsa {
 				Ok(PublicKey { bytes })
 			}
 
-			/// Verify a signature for a given message with a public key.
+			/// Verifies `sig` for `msg` and context `ctx`; `false` on invalid or malformed input.
 			pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool {
 				let sig: &[u8; SIGNBYTES] = match sig.try_into() {
 					Ok(s) => s,

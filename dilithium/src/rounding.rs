@@ -18,10 +18,6 @@ const fn assert_supported_gamma2(gamma2: usize) {
 /// For finite field element a, compute high and low bits a0, a1 such that a mod^+ Q = a1*2^D + a0
 /// with -2^{D-1} < a0 <= 2^{D-1}.
 ///
-/// # Arguments
-///
-/// * 'a' - input element
-///
 /// # Preconditions
 ///
 /// `a` must lie in `(-Q, Q)` — the range guaranteed by
@@ -33,17 +29,14 @@ const fn assert_supported_gamma2(gamma2: usize) {
 /// overflow the `i32` arithmetic below: a panic in overflow-checked builds,
 /// silent wraparound (and a corrupt decomposition) otherwise. Checked with
 /// `debug_assert!`.
-///
-/// Returns a touple (a0, a1).
 pub fn power2round(a: i32) -> (i32, i32) {
 	use crate::params::D;
 	debug_assert!(-Q < a && a < Q, "power2round input outside (-Q, Q)");
 	// Canonicalize to the standard representative in [0, Q); branchless, so
 	// constant-time, and identity for inputs already in [0, Q).
 	let a = crate::reduce::caddq(a);
-	let a1: i32 = (a + (1 << (D - 1)) - 1) >> D;
-	let a0: i32 = a - (a1 << D);
-	(a0, a1)
+	let a1 = (a + (1 << (D - 1)) - 1) >> D;
+	(a - (a1 << D), a1)
 }
 
 /// For finite field element a, compute high and low bits a0, a1 such that a mod^+ Q = a1*ALPHA + a0
@@ -58,10 +51,6 @@ pub fn power2round(a: i32) -> (i32, i32) {
 /// conditional instead of a mask). Both arms are verified exhaustively over
 /// `[0, Q)` against the FIPS 204 definition in this module's tests.
 ///
-/// # Arguments
-///
-/// * 'a' - input element
-///
 /// # Preconditions
 ///
 /// `a` must lie in `(-Q, Q)` — the range guaranteed by
@@ -72,8 +61,6 @@ pub fn power2round(a: i32) -> (i32, i32) {
 /// in `[0, Q)`. Inputs outside `(-Q, Q)` violate the contract and can
 /// overflow the `i32` arithmetic below (panic in overflow-checked builds,
 /// silent wraparound otherwise). Checked with `debug_assert!`.
-///
-/// Returns a touple (a0, a1).
 pub fn decompose<const GAMMA2: usize>(a: i32) -> (i32, i32) {
 	const {
 		assert_supported_gamma2(GAMMA2);
@@ -82,8 +69,7 @@ pub fn decompose<const GAMMA2: usize>(a: i32) -> (i32, i32) {
 	// Canonicalize to the standard representative in [0, Q); branchless, so
 	// constant-time, and identity for inputs already in [0, Q).
 	let a = crate::reduce::caddq(a);
-	let gamma2 = GAMMA2 as i32;
-	let mut a1: i32 = (a + 127) >> 7;
+	let mut a1 = (a + 127) >> 7;
 	if GAMMA2 == GAMMA2_32 {
 		a1 = (a1 * 1025 + (1 << 21)) >> 22;
 		a1 &= 15;
@@ -94,7 +80,7 @@ pub fn decompose<const GAMMA2: usize>(a: i32) -> (i32, i32) {
 		// mask is all-ones exactly then, and 44 ^ 44 == 0.
 		a1 ^= ((43 - a1) >> 31) & a1;
 	}
-	let mut a0: i32 = a - a1 * 2 * gamma2;
+	let mut a0 = a - a1 * 2 * GAMMA2 as i32;
 	a0 -= (((Q - 1) / 2 - a0) >> 31) & Q;
 	(a0, a1)
 }
