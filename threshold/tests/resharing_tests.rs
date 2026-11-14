@@ -19,6 +19,10 @@ use qp_rusty_crystals_threshold::resharing::{
 mod common;
 use common::{new_test_protocol, TestSigner};
 
+#[cfg(not(debug_assertions))]
+#[path = "common/share_patterns.rs"]
+mod share_patterns;
+
 /// Local reimplementation of the crate's (now crate-private) subset enumerator,
 /// used only to build expected combinations in these tests. The crate no longer
 /// re-exports its internal `generate_subsets_of_size` helper.
@@ -5203,6 +5207,51 @@ fn test_new_member_waits_for_nondealer_round3() {
 			"party {party_id} did not complete after the delayed Round 3 arrived \
 			 (state: {:?})",
 			protocol.state()
+		);
+	}
+}
+
+/// Regression test (security review): a full resharing must not leave any new
+/// member's share — its key seed or its share coefficients — in dead stack
+/// memory.
+///
+/// Each new share is assembled once, then handed over by value (stored as the
+/// completed output, cloned into the returned action), and each of those
+/// moves used to leave a copy that no drop reaches. Run for an unchanged
+/// committee and for one with a joining member, who has no old share.
+/// Painted-stack technique as in the `*_stack_zeroization` probes, and
+/// release-only for the same reason: the assertion is about optimized codegen.
+#[cfg(not(debug_assertions))]
+#[test]
+fn resharing_leaves_no_new_share_copies_on_the_stack() {
+	use qp_rusty_crystals_test_utils::probe_stack_for_named;
+	use share_patterns::{named, share_patterns};
+
+	let config = ThresholdConfig::new(2, 3).expect("valid config");
+	let (public_key, shares) = generate_with_dealer(&[42u8; 32], config).expect("keygen succeeds");
+	let old_shares: HashMap<u32, PrivateKeyShare> =
+		shares.into_iter().map(|share| (share.party_id(), share)).collect();
+	for new_committee in [vec![0, 1, 2], vec![0, 1, 2, 3]] {
+		let reshare = || {
+			let committee = new_committee.clone();
+			run_resharing_protocol(2, vec![0, 1, 2], 2, committee, &old_shares, &public_key)
+				.expect("resharing succeeds")
+		};
+
+		// Reference run (unprobed): learn the secrets the probed run must
+		// wipe. The harness seeds every party deterministically, so both runs
+		// produce byte-identical new shares.
+		let mut patterns: Vec<_> = reshare().values().flat_map(share_patterns).collect();
+		patterns.sort();
+		patterns.dedup();
+
+		// 16 MiB: every party's dealing, aggregation and transcript checks.
+		let leaked = probe_stack_for_named(16 * 1024 * 1024, &named(&patterns), || {
+			std::hint::black_box(&reshare());
+		});
+		assert!(
+			leaked.is_empty(),
+			"resharing to {new_committee:?} left new-share secrets in stack memory: {leaked:?}"
 		);
 	}
 }

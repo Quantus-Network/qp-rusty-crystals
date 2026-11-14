@@ -14,27 +14,26 @@ use alloc::{
 	vec::Vec,
 };
 
-use qp_rusty_crystals_dilithium::{poly, polyvec};
+use qp_rusty_crystals_dilithium::polyvec;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
 	error::{ThresholdError, ThresholdResult},
+	keys::SecretShareData,
 	params::{K, L},
 	participants::{ParticipantId, ParticipantList},
 	protocol::primitives::{NttAccumulatorK, NttAccumulatorL},
 };
 
-/// Secret share for a single party.
+/// A party's recovered partial secret for one signing set, in NTT form.
 ///
-/// Contains raw secret `s1`/`s2` share material and must never leave the
-/// crate; `PrivateKeyShare` is the only share-bearing type in the public API
-/// and it is intentionally opaque.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct SecretShare {
-	/// Share of the s1 polynomial vector.
-	pub(crate) s1_share: polyvec::Polyvec<L>,
-	/// Share of the s2 polynomial vector.
-	pub(crate) s2_share: polyvec::Polyvec<K>,
+/// [`recover_share`] fills it in place (security review): the recovered
+/// partial is secret, and one returned by value is moved, leaving a copy in a
+/// stack slot that no drop wipes.
+#[derive(Default, Zeroize, ZeroizeOnDrop)]
+pub(crate) struct RecoveredShare {
+	pub(crate) s1: polyvec::Polyvec<L>,
+	pub(crate) s2: polyvec::Polyvec<K>,
 }
 
 /// Compute sharing patterns for a (threshold, parties) configuration.
@@ -229,18 +228,16 @@ pub(crate) fn translated_subset_masks(
 /// * `threshold` - The threshold value (t)
 /// * `parties` - Total number of parties (n)
 /// * `dkg_participants` - The participant list from DKG, mapping arbitrary IDs to indices
-///
-/// # Returns
-///
-/// A tuple of (s1_ntt, s2_ntt) representing the recovered secret shares in NTT domain.
-pub fn recover_share(
-	shares: &BTreeMap<u16, SecretShare>,
+/// * `recovered` - Receives the recovered partial secret in NTT domain
+pub(crate) fn recover_share(
+	shares: &BTreeMap<u16, SecretShareData>,
 	party_id: ParticipantId,
 	active_parties: &[ParticipantId],
 	threshold: u32,
 	parties: u32,
 	dkg_participants: &ParticipantList,
-) -> ThresholdResult<(polyvec::Polyvec<L>, polyvec::Polyvec<K>)> {
+	recovered: &mut RecoveredShare,
+) -> ThresholdResult<()> {
 	// Get the DKG index for my party_id
 	let my_dkg_index = dkg_participants.index_of(party_id).ok_or_else(|| {
 		ThresholdError::InvalidConfiguration(format!(
@@ -286,27 +283,13 @@ pub fn recover_share(
 			))
 		})?;
 
-		// Convert share to NTT domain and accumulate
-		let mut s1_ntt = share.s1_share.clone();
-		let mut s2_ntt = share.s2_share.clone();
-
-		for s1_poly in s1_ntt.vec.iter_mut().take(L) {
-			poly::ntt(s1_poly);
-		}
-		for s2_poly in s2_ntt.vec.iter_mut().take(K) {
-			poly::ntt(s2_poly);
-		}
-
-		// Accumulate in u64 to avoid overflow
-		s1_acc.add_polyvec_l(&s1_ntt);
-		s2_acc.add_polyvec_k(&s2_ntt);
+		s1_acc.add_ntt(&share.s1);
+		s2_acc.add_ntt(&share.s2);
 	}
 
-	// Finalize accumulators (reduces mod Q)
-	let s1_combined = s1_acc.finalize_l();
-	let s2_combined = s2_acc.finalize_k();
-
-	Ok((s1_combined, s2_combined))
+	s1_acc.finalize_into(&mut recovered.s1.vec);
+	s2_acc.finalize_into(&mut recovered.s2.vec);
+	Ok(())
 }
 
 #[cfg(test)]
@@ -509,12 +492,20 @@ mod tests {
 		let dkg_participants = ParticipantList::new(&[10, 20, 30]).unwrap();
 
 		// Empty shares map (we'll fail before needing shares)
-		let shares: BTreeMap<u16, SecretShare> = BTreeMap::new();
+		let shares: BTreeMap<u16, SecretShareData> = BTreeMap::new();
 
 		// Active parties include party 99 which is NOT in dkg_participants
 		let active_parties = vec![10, 20, 99];
 
-		let result = recover_share(&shares, 10, &active_parties, 2, 3, &dkg_participants);
+		let result = recover_share(
+			&shares,
+			10,
+			&active_parties,
+			2,
+			3,
+			&dkg_participants,
+			&mut RecoveredShare::default(),
+		);
 
 		assert!(result.is_err());
 		match result {
@@ -539,13 +530,21 @@ mod tests {
 		let dkg_participants = ParticipantList::new(&[10, 20, 30]).unwrap();
 
 		// Empty shares map - no shares at all
-		let shares: BTreeMap<u16, SecretShare> = BTreeMap::new();
+		let shares: BTreeMap<u16, SecretShareData> = BTreeMap::new();
 
 		// Valid active parties
 		let active_parties = vec![10, 20];
 
 		// This should fail because the required shares are missing
-		let result = recover_share(&shares, 10, &active_parties, 2, 3, &dkg_participants);
+		let result = recover_share(
+			&shares,
+			10,
+			&active_parties,
+			2,
+			3,
+			&dkg_participants,
+			&mut RecoveredShare::default(),
+		);
 
 		assert!(result.is_err());
 		match result {

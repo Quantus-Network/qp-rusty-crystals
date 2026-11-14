@@ -103,10 +103,10 @@ const N_COEFFS: usize = N as usize;
 ///
 /// ```ignore
 /// let mut acc = NttAccumulator::<L>::new();
-/// for poly in ntt_polys {
-///     acc.add(&poly);
+/// for share in shares {
+///     acc.add_ntt(&share.s1);
 /// }
-/// let result: Polyvec<L> = acc.finalize();
+/// acc.finalize_into(&mut result.vec);
 /// ```
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct NttAccumulator<const VECS: usize> {
@@ -134,17 +134,33 @@ impl<const VECS: usize> NttAccumulator<VECS> {
 		}
 	}
 
-	/// Finalize the accumulator, reducing all coefficients mod Q.
+	/// Add the NTT of each of `polys`.
 	///
-	/// Returns an array of polynomials with coefficients in [0, Q).
-	pub fn finalize_to_polys(self) -> [poly::Poly; VECS] {
-		core::array::from_fn(|i| {
-			let mut poly = poly::Poly::default();
-			for (j, &acc) in self.coeffs[i].iter().enumerate() {
-				poly.coeffs_mut()[j] = (acc % (Q as u64)) as i32;
+	/// Each polynomial is transformed in one zeroize-on-drop scratch
+	/// polynomial (security review): `polys` are secret share coefficients,
+	/// and transforming a cloned polynomial vector leaves its copies in stack
+	/// slots that no drop wipes.
+	pub fn add_ntt(&mut self, polys: &[[i32; N_COEFFS]; VECS]) {
+		let mut scratch = poly::Poly::default();
+		for (vec_idx, coeffs) in polys.iter().enumerate() {
+			scratch.coeffs_mut().copy_from_slice(coeffs);
+			poly::ntt(&mut scratch);
+			self.add_poly(vec_idx, &scratch);
+		}
+	}
+
+	/// Finalize the accumulator into `polys`, reducing all coefficients mod Q
+	/// to [0, Q).
+	///
+	/// Writes into caller-provided storage (security review): a sum of secret
+	/// shares is itself secret, and a result returned by value is moved,
+	/// leaving a copy in a stack slot that no drop wipes.
+	pub fn finalize_into(&self, polys: &mut [poly::Poly; VECS]) {
+		for (poly, accs) in polys.iter_mut().zip(self.coeffs.iter()) {
+			for (coeff, &acc) in poly.coeffs_mut().iter_mut().zip(accs.iter()) {
+				*coeff = (acc % (Q as u64)) as i32;
 			}
-			poly
-		})
+		}
 	}
 }
 
@@ -166,35 +182,6 @@ impl NttAccumulatorL {
 		for (i, poly) in vec.vec.iter().enumerate().take(L) {
 			self.add_poly(i, poly);
 		}
-	}
-
-	/// Finalize to a `Polyvec<L>`.
-	pub fn finalize_l(self) -> polyvec::Polyvec<L> {
-		let polys = self.finalize_to_polys();
-		let mut result = polyvec::Polyvec::<L>::default();
-		for (i, poly) in polys.into_iter().enumerate() {
-			result.vec[i] = poly;
-		}
-		result
-	}
-}
-
-impl NttAccumulatorK {
-	/// Add all polynomials from a `Polyvec<K>`.
-	pub fn add_polyvec_k(&mut self, vec: &polyvec::Polyvec<K>) {
-		for (i, poly) in vec.vec.iter().enumerate().take(K) {
-			self.add_poly(i, poly);
-		}
-	}
-
-	/// Finalize to a `Polyvec<K>`.
-	pub fn finalize_k(self) -> polyvec::Polyvec<K> {
-		let polys = self.finalize_to_polys();
-		let mut result = polyvec::Polyvec::<K>::default();
-		for (i, poly) in polys.into_iter().enumerate() {
-			result.vec[i] = poly;
-		}
-		result
 	}
 }
 

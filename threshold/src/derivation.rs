@@ -91,9 +91,12 @@ const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v3"
 /// # Arguments
 /// * `master_share` - This party's master private key share
 /// * `tweak` - The derivation tweak (computed from account_id + path by the caller)
+/// * `contribution` - Receives the 32-byte contribution passed as the `seed` argument to
+///   [`crate::keygen::dkg::Dkg::new`]
 ///
-/// # Returns
-/// A 32-byte contribution passed as the `seed` argument to [`crate::keygen::dkg::Dkg::new`].
+/// The contribution is written into the caller's buffer rather than returned
+/// (security review): a by-value return leaves a copy in this function's dead
+/// frame that no wipe by the caller reaches. Keep the buffer zeroizing.
 ///
 /// # Session freshness
 ///
@@ -115,7 +118,11 @@ const DKG_CONTRIBUTION_DOMAIN: &[u8] = b"near-mpc-dilithium-dkg-contribution-v3"
 /// `derive_dkg_contribution` for any party — even though `party_id`, `tweak`, and
 /// `rho` are public. Version and suite bind the digest to the active ML-DSA
 /// parameter set (same discipline as the DKG / signing / resharing SSIDs).
-pub fn derive_dkg_contribution(master_share: &PrivateKeyShare, tweak: &[u8; 32]) -> [u8; 32] {
+pub fn derive_dkg_contribution(
+	master_share: &PrivateKeyShare,
+	tweak: &[u8; 32],
+	contribution: &mut [u8; 32],
+) {
 	let party_id_bytes = master_share.party_id().to_le_bytes();
 	// The digest is secret-share-derived keying material, so it lives in a
 	// self-wiping buffer filled in place (security review): a plain local —
@@ -133,10 +140,7 @@ pub fn derive_dkg_contribution(master_share: &PrivateKeyShare, tweak: &[u8; 32])
 	fips202::shake256_absorb(&mut state, &*shares_digest);
 	fips202::shake256_finalize(&mut state);
 
-	let mut contribution = [0u8; 32];
-	fips202::shake256_squeeze(&mut contribution, &mut state);
-
-	contribution
+	fips202::shake256_squeeze(contribution, &mut state);
 }
 
 /// Hash all secret share polynomials into `digest` (64 bytes of keying material).
@@ -251,12 +255,20 @@ mod tests {
 			party_id,
 			3,
 			2,
-			[key_byte; 32],
+			&[key_byte; 32],
 			[0u8; 32],
 			[0u8; 64],
 			shares,
 			dkg_participants,
 		)
+	}
+
+	/// By-value form of the function under test, for assertions (shadows the
+	/// glob import).
+	fn derive_dkg_contribution(share: &PrivateKeyShare, tweak: &[u8; 32]) -> [u8; 32] {
+		let mut contribution = [0u8; 32];
+		super::derive_dkg_contribution(share, tweak, &mut contribution);
+		contribution
 	}
 
 	/// Create a test tweak (simulates what the contract would compute)
@@ -332,6 +344,33 @@ mod tests {
 			"the secret-share digest survived in dead stack memory after \
 			 derive_dkg_contribution returned"
 		);
+	}
+
+	#[cfg(not(debug_assertions))]
+	mod stack_probes {
+		use super::*;
+		use qp_rusty_crystals_test_utils::probe_stack_for;
+
+		/// Regression probe (security review): `derive_dkg_contribution`
+		/// returned the contribution by value, so a copy stayed in its dead
+		/// frame however the caller wiped the returned array. The
+		/// contribution is this party's DKG seed for the derived key.
+		#[test]
+		fn contribution_never_survives_derivation() {
+			let share = create_test_share(0, 42);
+			let tweak = [0x5Au8; 32];
+			let expected = derive_dkg_contribution(&share, &tweak);
+
+			let leaked = probe_stack_for(1024 * 1024, &expected, || {
+				let mut contribution = Zeroizing::new([0u8; 32]);
+				crate::derivation::derive_dkg_contribution(&share, &tweak, &mut contribution);
+				core::hint::black_box(&contribution);
+			});
+			assert!(
+				!leaked,
+				"the contribution survived in dead stack memory after its buffer was wiped"
+			);
+		}
 	}
 
 	#[test]
@@ -423,7 +462,7 @@ mod tests {
 			0,
 			3,
 			2,
-			[1u8; 32],
+			&[1u8; 32],
 			[0u8; 32],
 			[0u8; 64],
 			shares.clone(),
@@ -433,7 +472,7 @@ mod tests {
 			0,
 			3,
 			2,
-			[2u8; 32], // different `key`, same shares
+			&[2u8; 32], // different `key`, same shares
 			[0u8; 32],
 			[0u8; 64],
 			shares,

@@ -33,7 +33,6 @@ libm = { workspace = true }
 borsh = { workspace = true }
 criterion = { workspace = true }
 hex = { workspace = true }
-hex-literal = { workspace = true }
 rand = { workspace = true }
 # Painted-stack probe for stack-zeroization regression tests (also used
 # directly by the unit-test probe in `derivation.rs`).

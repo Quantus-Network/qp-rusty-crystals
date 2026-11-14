@@ -11,7 +11,7 @@
 
 use qp_rusty_crystals_dilithium::fips202;
 use qp_rusty_crystals_threshold::{
-	derive_dkg_contribution, generate_with_dealer,
+	generate_with_dealer,
 	keygen::dkg::{run_local_dkg, TranscriptSigner},
 	verify_signature, DerivedKeyId, PrivateKeyShare, ThresholdConfig, ThresholdSigner,
 };
@@ -72,6 +72,13 @@ fn create_test_shares(seed: [u8; 32], threshold: u32, total: u32) -> Vec<Private
 	let config = ThresholdConfig::new(threshold, total).expect("valid config");
 	let (_public_key, shares) = generate_with_dealer(&seed, config).expect("keygen succeeds");
 	shares
+}
+
+/// By-value form of the crate's `derive_dkg_contribution`, for assertions.
+fn derive_dkg_contribution(share: &PrivateKeyShare, tweak: &[u8; 32]) -> [u8; 32] {
+	let mut contribution = [0u8; 32];
+	qp_rusty_crystals_threshold::derive_dkg_contribution(share, tweak, &mut contribution);
+	contribution
 }
 
 /// Test that DKG contributions are deterministic for the same share + tweak

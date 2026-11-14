@@ -5,6 +5,7 @@
 //! prevent accidental exposure of secret material.
 
 use alloc::{
+	boxed::Box,
 	collections::{BTreeMap, BTreeSet},
 	format,
 };
@@ -172,7 +173,12 @@ pub struct PrivateKeyShare {
 	/// The sequential indices (0, 1, 2, ...) are used for share subset masks.
 	dkg_participants: ParticipantList,
 	/// Private key seed.
-	key: [u8; 32],
+	///
+	/// Boxed (security review): a share is returned, stored and handed between
+	/// owners by value, and a move is a bytewise copy whose source no drop
+	/// wipes. Behind a box the seed has one heap home, wiped in place on drop,
+	/// and a move copies only the pointer.
+	key: Box<[u8; 32]>,
 	/// Random seed rho (same as public key).
 	rho: [u8; 32],
 	/// Hash of public key for signing.
@@ -295,7 +301,7 @@ impl BorshDeserialize for PrivateKeyShare {
 			total_parties,
 			threshold,
 			dkg_participants,
-			key: *key,
+			key: boxed_key(&key),
 			rho: *rho,
 			tr: *tr,
 			shares,
@@ -367,18 +373,29 @@ impl SecretShareData {
 	}
 }
 
+/// Copy a key seed into its own heap allocation (see `PrivateKeyShare::key`).
+///
+/// The box is allocated zeroed and filled through a reference: `Box::new(*key)`
+/// would itself pass the seed by value.
+fn boxed_key(key: &[u8; 32]) -> Box<[u8; 32]> {
+	let mut boxed = Box::new([0u8; 32]);
+	boxed.copy_from_slice(key);
+	boxed
+}
+
 impl PrivateKeyShare {
 	/// Create a new private key share.
 	pub(crate) fn new(
 		party_id: ParticipantId,
 		total_parties: u32,
 		threshold: u32,
-		key: [u8; 32],
+		key: &[u8; 32],
 		rho: [u8; 32],
 		tr: [u8; TR_SIZE],
 		shares: BTreeMap<u16, SecretShareData>,
 		dkg_participants: ParticipantList,
 	) -> Self {
+		let key = boxed_key(key);
 		Self { party_id, total_parties, threshold, key, rho, tr, shares, dkg_participants }
 	}
 
@@ -431,15 +448,25 @@ impl PrivateKeyShare {
 /// and the secret-bearing field list is visible at the duplication site.
 impl Clone for PrivateKeyShare {
 	fn clone(&self) -> Self {
+		// Copy each subset share heap-to-heap into a zeroed entry of the new
+		// map (security review): `BTreeMap::clone` clones every ~15 KiB value
+		// by value before moving it into its node, leaving the coefficients
+		// in a stack temporary that no drop reaches.
+		let mut shares = BTreeMap::new();
+		for (mask, data) in &self.shares {
+			let entry = shares.entry(*mask).or_insert_with(SecretShareData::zeroed);
+			entry.s1 = data.s1;
+			entry.s2 = data.s2;
+		}
 		Self {
 			party_id: self.party_id,
 			total_parties: self.total_parties,
 			threshold: self.threshold,
 			dkg_participants: self.dkg_participants.clone(),
-			key: self.key,
+			key: boxed_key(&self.key),
 			rho: self.rho,
 			tr: self.tr,
-			shares: self.shares.clone(),
+			shares,
 		}
 	}
 }
@@ -531,7 +558,7 @@ mod tests {
 			0,
 			3,
 			2,
-			[0x42u8; 32],
+			&[0x42u8; 32],
 			[0u8; 32],
 			[0u8; TR_SIZE],
 			BTreeMap::new(),
@@ -560,7 +587,7 @@ mod tests {
 			0,
 			3,
 			2,
-			[0x42u8; 32],
+			&[0x42u8; 32],
 			[0x43u8; 32],
 			[0x44u8; TR_SIZE],
 			shares,
@@ -573,10 +600,10 @@ mod tests {
 		original.zeroize();
 
 		// The original is wiped...
-		assert_eq!(original.key, [0u8; 32]);
+		assert_eq!(*original.key, [0u8; 32]);
 		assert!(original.shares.is_empty());
 		// ...and the clone is untouched: an independent lifecycle.
-		assert_eq!(copy.key, [0x42u8; 32], "zeroizing one copy must not erase another");
+		assert_eq!(*copy.key, [0x42u8; 32], "zeroizing one copy must not erase another");
 		assert_eq!(copy.shares.len(), 2);
 		assert_eq!(copy.shares[&0b011].s1[0][0], 7);
 	}
@@ -588,14 +615,14 @@ mod tests {
 			0,
 			3,
 			2,
-			[0x42u8; 32],
+			&[0x42u8; 32],
 			[0x43u8; 32],
 			[0x44u8; TR_SIZE],
 			BTreeMap::new(),
 			dkg_participants,
 		);
 		pk_share.zeroize();
-		assert_eq!(pk_share.key, [0u8; 32]);
+		assert_eq!(*pk_share.key, [0u8; 32]);
 		assert_eq!(pk_share.rho, [0u8; 32]);
 		assert_eq!(pk_share.tr, [0u8; TR_SIZE]);
 	}
@@ -620,7 +647,7 @@ mod tests {
 			0,
 			3,
 			2,
-			[0x11u8; 32],
+			&[0x11u8; 32],
 			[0x22u8; 32],
 			[0x33u8; TR_SIZE],
 			shares,
@@ -643,7 +670,7 @@ mod tests {
 				0,
 				3,
 				2,
-				[0x11u8; 32],
+				&[0x11u8; 32],
 				[0x22u8; 32],
 				[0x33u8; TR_SIZE],
 				shares,
@@ -685,7 +712,7 @@ mod tests {
 				party_id,
 				total_parties,
 				threshold,
-				[0x11u8; 32],
+				&[0x11u8; 32],
 				[0x22u8; 32],
 				[0x33u8; TR_SIZE],
 				shares,
@@ -763,7 +790,7 @@ mod tests {
 				party_id,
 				3,
 				2,
-				[0x11u8; 32],
+				&[0x11u8; 32],
 				[0x22u8; 32],
 				[0x33u8; TR_SIZE],
 				shares,

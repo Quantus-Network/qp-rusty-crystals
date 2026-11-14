@@ -1035,7 +1035,7 @@ mod tests {
 			0,         // party_id
 			3,         // total_parties
 			2,         // threshold
-			[0u8; 32], // key
+			&[0; 32],  // key
 			[0u8; 32], // rho
 			private_tr,
 			BTreeMap::new(), // shares (empty is fine for this test)
@@ -1088,7 +1088,7 @@ mod tests {
 			good.party_id(),
 			good.total_parties(),
 			good.threshold(),
-			[0u8; 32],
+			&[0u8; 32],
 			bad_rho,
 			*good.tr(),
 			good.shares().clone(),
@@ -1127,7 +1127,7 @@ mod tests {
 			99,
 			good.total_parties(),
 			good.threshold(),
-			[0u8; 32],
+			&[0u8; 32],
 			*good.rho(),
 			*good.tr(),
 			good.shares().clone(),
@@ -1149,7 +1149,7 @@ mod tests {
 			good22.party_id(),
 			good22.total_parties(),
 			good22.threshold(),
-			[0u8; 32],
+			&[0u8; 32],
 			*good22.rho(),
 			*good22.tr(),
 			good22.shares().clone(),
