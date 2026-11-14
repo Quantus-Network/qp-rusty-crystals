@@ -33,7 +33,7 @@ use qp_poseidon_core::{
 	Goldilocks,
 };
 extern crate alloc;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use qp_rusty_crystals_dilithium::{ct_eq_32, SensitiveBytes32};
 use zeroize::Zeroize;
 
@@ -71,6 +71,11 @@ fn zeroize_felts(felts: &mut [Goldilocks]) {
 /// zeroizes on drop, so any duplication must be explicit
 /// (`pair.secret().as_bytes()`), making it visible at the call site. Prefer
 /// passing `&WormholePair` instead.
+///
+/// Both wrappers live in heap blocks of their own (security review): a Rust
+/// move is a bytewise copy whose source is never dropped, so secrets stored
+/// inline stayed behind, unwiped, wherever a pair was moved from. Moving a
+/// pair now copies two pointers and the public address.
 pub struct WormholePair {
 	/// Deterministic Poseidon-derived address.
 	address: [u8; 32],
@@ -79,10 +84,10 @@ pub struct WormholePair {
 	/// gets the same move-only, zeroize-on-drop wrapper as `secret`
 	/// (security review): a bare `[u8; 32]` would survive the pair's drop
 	/// in the released stack frame or heap allocation.
-	first_hash: SensitiveBytes32,
+	first_hash: Box<SensitiveBytes32>,
 	/// The hashed secret used to generate this address. Move-only and zeroized
 	/// on drop; read the raw bytes via `secret().as_bytes()`.
-	secret: SensitiveBytes32,
+	secret: Box<SensitiveBytes32>,
 }
 
 // `secret` and `first_hash` are `SensitiveBytes32` (which is not
@@ -112,8 +117,8 @@ impl WormholePair {
 	pub fn zeroed() -> WormholePair {
 		WormholePair {
 			address: [0u8; 32],
-			first_hash: SensitiveBytes32::zeroed(),
-			secret: SensitiveBytes32::zeroed(),
+			first_hash: Box::new(SensitiveBytes32::zeroed()),
+			secret: Box::new(SensitiveBytes32::zeroed()),
 		}
 	}
 
@@ -125,23 +130,17 @@ impl WormholePair {
 	/// could not wipe it. The caller's value is all zeros afterwards; the
 	/// entropy stack-residue regression test pins this.
 	///
-	/// The pair is returned by value, so a caller that hands it on (returns
-	/// it, wraps it in a `Result`) moves it and leaves the secret in the
-	/// moved-from slot. Use [`Self::generate_into`] to fill storage the
-	/// final owner already holds.
+	/// The pair is returned by value and may be handed on (returned, wrapped
+	/// in a `Result`, boxed): its secrets live in heap blocks of their own,
+	/// so a move copies pointers and never the secrets. Use
+	/// [`Self::generate_into`] to fill storage the final owner already holds.
 	pub fn generate_new(seed: &mut SensitiveBytes32) -> WormholePair {
 		let mut pair = WormholePair::zeroed();
 		WormholePair::generate_into(seed, &mut pair);
-		// Tail construction, with both sensitive values swapped straight
-		// from `pair` into the returned value: returning the named local
-		// would leave a moved-from copy, whereas its wrappers are left
-		// zeroed rather than dead-with-plaintext (pinned by the release-mode
-		// `wormhole_stack_zeroization` probe).
-		WormholePair {
-			address: pair.address,
-			first_hash: core::mem::replace(&mut pair.first_hash, SensitiveBytes32::zeroed()),
-			secret: core::mem::replace(&mut pair.secret, SensitiveBytes32::zeroed()),
-		}
+		// Returning the named local moves two pointers and the public
+		// address; the sensitive values stay in their heap blocks (pinned by
+		// the release-mode `wormhole_stack_zeroization` probe).
+		pair
 	}
 
 	/// Generates a `WormholePair` from user-supplied entropy in place, into
@@ -149,11 +148,9 @@ impl WormholePair {
 	///
 	/// Same derivation as [`Self::generate_new`], and the seed is likewise
 	/// zeroized in place after use. The pair is written in place rather than
-	/// returned by value (security review): a returned pair that the caller
-	/// forwards is moved out of a temporary that is never dropped, which
-	/// left `secret` and `first_hash` in dead stack memory. With an
-	/// out-parameter they only ever exist inside the caller's
-	/// self-zeroizing pair.
+	/// returned by value (security review), for a caller whose pair already
+	/// sits where it will live. `secret` and `first_hash` only ever exist
+	/// inside that pair's own self-zeroizing heap blocks.
 	pub fn generate_into(seed: &mut SensitiveBytes32, out: &mut WormholePair) {
 		let mut hashed_seed = hash_bytes(seed.as_bytes());
 		let mut secret = SensitiveBytes32::new(&mut hashed_seed);
@@ -405,8 +402,8 @@ mod tests {
 			let mut secret = secret;
 			WormholePair {
 				address,
-				first_hash: SensitiveBytes32::new(&mut first_hash),
-				secret: SensitiveBytes32::new(&mut secret),
+				first_hash: Box::new(SensitiveBytes32::new(&mut first_hash)),
+				secret: Box::new(SensitiveBytes32::new(&mut secret)),
 			}
 		};
 

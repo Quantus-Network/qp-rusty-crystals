@@ -11,7 +11,7 @@
 //! `into_bytes` additionally handed back a plain `Copy` array with no
 //! erasure obligation at all. The fixed pipeline keeps the secret inside the
 //! wrapper (no extraction API), lends it to the derivation by reference, and
-//! swaps it into the tail-constructed pair, so every dead slot holds zeros.
+//! copies it into the pair's own heap block, so every dead slot holds zeros.
 //!
 //! This test also depends on `qp-poseidon-core >= 3.1.0` (its own
 //! `tests/stack_zeroization.rs`): the secret *is* a Poseidon digest, and
@@ -170,4 +170,47 @@ fn wormhole_secrets_never_survive_mnemonic_derivation() {
 		|out| derive(None, out),
 		|out| derive(Some("other"), out),
 	);
+}
+
+/// Security review: handing a pair on must not copy its secrets. A Rust move
+/// is a bytewise copy whose source is never dropped, so with `secret` and
+/// `first_hash` stored inline in the struct each of these shapes left them
+/// in the moved-from stack slot, beyond the reach of `ZeroizeOnDrop`. They
+/// live in heap blocks of their own instead, and a move copies only the
+/// pointers to them.
+#[test]
+fn moving_a_wormhole_pair_leaves_no_secrets_on_the_stack() {
+	#[inline(never)]
+	fn chosen_by_a_branch(seed: &mut SensitiveBytes32, placeholder: bool) -> WormholePair {
+		let pair =
+			if placeholder { WormholePair::zeroed() } else { WormholePair::generate_new(seed) };
+		core::hint::black_box(&pair);
+		pair
+	}
+	#[inline(never)]
+	fn filled_then_returned(seed: &mut SensitiveBytes32) -> WormholePair {
+		let mut pair = WormholePair::zeroed();
+		WormholePair::generate_into(seed, &mut pair);
+		pair
+	}
+
+	let (secret, first_hash) = reference_pair_bytes();
+	let patterns = [("secret", &secret[..]), ("first_hash", &first_hash[..])];
+
+	let shapes: [(&str, fn(&mut SensitiveBytes32)); 2] = [
+		("chosen by a branch", |seed| {
+			core::hint::black_box(&chosen_by_a_branch(seed, core::hint::black_box(false)));
+		}),
+		("filled in place, then returned", |seed| {
+			core::hint::black_box(&filled_then_returned(seed));
+		}),
+	];
+	for (shape, run) in shapes {
+		let mut seed = seed_holder();
+		let leaked = probe_stack_for_named(STACK_BYTES, &patterns, || run(&mut seed));
+		assert!(
+			leaked.is_empty(),
+			"a wormhole pair that was {shape} left {leaked:?} in dead stack memory"
+		);
+	}
 }
