@@ -3,7 +3,7 @@ name = "qp-rusty-crystals-lattice-attack"
 version = "0.1.0"
 edition = "2021"
 publish = false
-license = "GPL-3.0"
+license = "Apache-2.0"
 description = "Timed lattice-reduction challenge and verifier for the ML-DSA key-recovery lattice"
 
 [dependencies]

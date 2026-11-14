@@ -162,7 +162,7 @@ cargo bench -p qp-rusty-crystals-threshold -- signing_4round
 
 ## License
 
-GPL-3.0 License - see the parent qp-rusty-crystals project.
+Apache-2.0 - See [LICENSE](LICENSE) for details.
 
 ## References
 

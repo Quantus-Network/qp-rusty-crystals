@@ -18,8 +18,10 @@
 use alloc::string::String;
 use core::fmt;
 
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use zeroize::Zeroizing;
+
+use crate::hderive::digest_wiped;
 
 mod words;
 
@@ -62,8 +64,14 @@ impl std::error::Error for MnemonicError {}
 /// Word indices for 32 bytes of entropy: the 256 entropy bits followed by
 /// the first 8 bits of `SHA-256(entropy)`, read as 24 big-endian 11-bit
 /// groups. Written in place into `indices`.
+///
+/// The checksum goes through [`digest_wiped`] (security review): a plainly
+/// dropped `Sha256` left the entropy verbatim in its block buffer, in dead
+/// stack memory (pinned by the bip39 stack-zeroization probe).
 pub(crate) fn encode_256(entropy: &[u8; 32], indices: &mut [u16; MAX_WORDS]) {
-	let checksum = Sha256::digest(entropy)[0];
+	let mut digest = Zeroizing::new([0u8; 32]);
+	digest_wiped::<Sha256, 32>(entropy, &[], &mut digest);
+	let checksum = digest[0];
 	for (i, index) in indices.iter_mut().enumerate() {
 		let mut v = 0u16;
 		for bit in i * 11..(i + 1) * 11 {
@@ -96,7 +104,8 @@ pub(crate) fn validate(phrase: &str) -> Result<usize, MnemonicError> {
 	for (i, byte) in entropy[..entropy_bytes].iter_mut().enumerate() {
 		*byte = (0..8).fold(0u8, |acc, j| (acc << 1) | bit(i * 8 + j) as u8);
 	}
-	let digest = Sha256::digest(&entropy[..entropy_bytes]);
+	let mut digest = Zeroizing::new([0u8; 32]);
+	digest_wiped::<Sha256, 32>(&entropy[..entropy_bytes], &[], &mut digest);
 	let ok = (0..entropy_bytes / 4)
 		.all(|i| bit(entropy_bytes * 8 + i) == u16::from((digest[i / 8] >> (7 - i % 8)) & 1));
 	if ok {

@@ -82,7 +82,7 @@ fn generated_mnemonic_word_pointers_never_survive_in_freed_heap_memory() {
 	// sequence.
 	let mut entropy = ENTROPY;
 	SCANNING.store(true, Ordering::SeqCst);
-	let phrase = generate_mnemonic(SensitiveBytes32::from(&mut entropy)).unwrap();
+	let phrase = generate_mnemonic(&mut SensitiveBytes32::from(&mut entropy)).unwrap();
 	core::hint::black_box(&phrase);
 	drop(phrase);
 	SCANNING.store(false, Ordering::SeqCst);

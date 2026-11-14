@@ -45,6 +45,9 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
+          # aarch64 Linux: what a build leaves in dead stack memory depends on
+          # the target, and probes have failed on this one alone.
+          - ubuntu-24.04-arm
           - macos-latest
     steps:
       - uses: actions/checkout@v5
@@ -57,7 +60,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Build workspace
         run: cargo build --workspace --locked
       - name: Test workspace
@@ -102,8 +105,14 @@ jobs:
             }
             echo "::endgroup::"
           }
-          for probe in import_stack_zeroization sign_stack_zeroization sensitive_bytes_stack_zeroization; do
+          for probe in import_stack_zeroization sign_stack_zeroization sensitive_bytes_stack_zeroization \
+              secret_residue_stack_zeroization; do
             run_probe -p qp-rusty-crystals-dilithium --all-features --test "$probe"
+            # Residue depends on codegen: one codegen unit and the generic CPU model
+            # (aarch64 Linux's default) leaked where the default build did not.
+            CARGO_TARGET_DIR=target/generic-cgu1 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+              RUSTFLAGS="-C target-cpu=generic" \
+              run_probe -p qp-rusty-crystals-dilithium --all-features --test "$probe"
           done
           for probe in dkg_stack_zeroization signing_stack_zeroization dealer_stack_zeroization \
               share_import_stack_zeroization; do
@@ -130,7 +139,7 @@ jobs:
           # so they must additionally pass under optimized codegen.
           for probe in bip39_stack_zeroization entropy_stack_zeroization \
               hderive_stack_zeroization wormhole_stack_zeroization \
-              seed_stack_zeroization \
+              seed_stack_zeroization keypair_stack_zeroization \
               mnemonic_heap_zeroization mnemonic_word_pointer_zeroization; do
             run_probe -p qp-rusty-crystals-hdwallet --test "$probe"
           done
@@ -210,10 +219,11 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-stack-${{ hashFiles('**/Cargo.lock') }}
-      # Worst single frame is currently ~107 KB (sign::signature). A 128 KB budget
-      # leaves headroom for noise but trips if the ~56 KB materialized matrix A
-      # ever comes back. The script installs its own pinned nightly + llvm-tools.
-      - name: Check per-function stack frames against budget
+      # Worst entry point is currently ~79 KB (ML-DSA-87 SecretKey::sign, own frame
+      # plus callees). A 128 KB budget leaves headroom for noise but trips if the
+      # ~56 KB materialized matrix A ever comes back. The script installs its own
+      # pinned nightly + llvm-tools.
+      - name: Check entry-point worst-case stack against budget
         run: ./stack-check.sh 128
 
   security-audit:

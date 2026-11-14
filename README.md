@@ -81,7 +81,7 @@ let mut seed = [0u8; 32];
 getrandom::getrandom(&mut seed).expect("Failed to generate seed");
 
 // Generate mnemonic (returned as a self-wiping Zeroizing<String>)
-let mnemonic = generate_mnemonic((&mut seed).into())?;
+let mnemonic = generate_mnemonic(&mut (&mut seed).into())?;
 
 // Create HD wallet
 let hd_wallet = HDLattice::from_mnemonic(&mnemonic, None)?;
@@ -147,9 +147,19 @@ This repository has 100% code coverage for all critical logic and functionality.
 
 ## License
 
-[GPL-3.0](LICENSE) - See LICENSE file for details.
+| Crate | License |
+|-------|---------|
+| `qp-rusty-crystals-dilithium` | [Apache-2.0](LICENSE) |
+| `qp-rusty-crystals-hdwallet` | [Apache-2.0](LICENSE) |
+| `qp-rusty-crystals-threshold` | [Apache-2.0](LICENSE) |
+| `qp-rusty-crystals-lattice-attack` | [Apache-2.0](LICENSE) |
+
+Versions of `qp-rusty-crystals-hdwallet` up to and including 4.1.1 are GPL-3.0-only: their `hderive` module was derived from tiny-hderive, which is licensed under GPL-3.0. That code has since been replaced by a re-implementation written from a specification.
+
+Versions of `qp-rusty-crystals-dilithium` up to and including 4.1.1 are GPL-3.0-only: they contained code from Quantum Blockchains' GPL-3.0 Rust port of pq-crystals. That code has since been replaced by a re-implementation from the pq-crystals reference.
 
 ## Acknowledgements
 
-The ml-dsa code was lifted with minimal changes from [Quantum Blockchain's port](https://github.com/Quantum-Blockchains/dilithium)
-of [pq-crystals](https://github.com/pq-crystals/dilithium) to Rust.
+The ML-DSA arithmetic, packing and Keccak code is a Rust port of the [pq-crystals](https://github.com/pq-crystals/dilithium) reference implementation, which its authors release as public domain (CC0) or under Apache-2.0.
+
+Up to and including version 4.1.1, the hdwallet `hderive` module was ported from [nam-tiny-hderive](https://github.com/namada-net/tiny-hderive), the Namada fork of [tiny-hderive](https://github.com/maciejhirsz/tiny-hderive). The current module is a re-implementation written from a specification.
