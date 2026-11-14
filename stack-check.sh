@@ -9,8 +9,9 @@
 # hardware.
 #
 # Ground truth for total task stack is still the on-device FreeRTOS high-water mark. Calls
-# that leave the crate (the memory intrinsics, panic paths) and indirect calls are not
-# followed, so the on-device figure is slightly higher.
+# that leave the crate cannot be measured here: the firmware's memory and allocator routines
+# are charged a fixed allowance, and the panic entry points, which do not return, end the
+# chain. Any other callee without a known frame, and any indirect call, fails the check.
 #
 # Usage: ./stack-check.sh [budget_kb]
 #   ML_DSA_SETS="44 65 87"   parameter sets to measure (default: all three)
@@ -70,23 +71,49 @@ for functions, size in pairs:
     for f in functions.split(','):
         frames[symbol(f)] = max(frames.get(symbol(f), 0), int(size, 16))
 
-calls, current = {}, None
+calls, indirect, current = {}, set(), None
 for line in open(disassembly_path):
     header = re.match(r'[0-9a-f]+ <(.+)>:$', line)
     if header:
         current = symbol(header.group(1))
         continue
-    call = re.search(r'R_ARM_THM_(?:CALL|JUMP24)\s+(\S+)', line)
-    if call and current:
-        calls.setdefault(current, set()).add(symbol(call.group(1)))
+    reloc = re.search(r'R_ARM_(\w+)\s+(\S+)', line)
+    if reloc and current:
+        kind, target = reloc.groups()
+        if re.fullmatch(r'THM_(CALL|JUMP\d+)', kind):
+            calls.setdefault(current, set()).add(symbol(target))
+        elif kind not in ('THM_MOVW_ABS_NC', 'THM_MOVT_ABS', 'ABS32'):
+            sys.exit(f"FAIL: unhandled relocation R_ARM_{kind} in {demangle(current)}")
+    elif current and re.search(r'\sbl?x\w*\s+(?!lr)\w', line):
+        indirect.add(current)
 
-totals = {}
+# Callees outside the crate have no frame here. The memory and allocator routines belong to
+# the firmware and are charged an allowance, not a measurement (the deepest of
+# compiler-builtins' own, memmove, takes 84 bytes); the panic and allocation-failure entry
+# points do not return.
+EXTERNAL = re.compile(r'(__aeabi_)?mem(cpy|move|set|clr|cmp)[48]?|bcmp|\w*__rust_(alloc|alloc_zeroed|dealloc|realloc|no_alloc_shim\w*)')
+EXTERNAL_BYTES = 256
+DIVERGES = re.compile(r'core::panicking::\S+|core::\S+_fail(ed)?|alloc::(raw_vec::handle_error|alloc::handle_alloc_error)')
+
+totals, charged, ended = {}, set(), set()
 def total(f, chain=()):
     if f not in totals:
         if f in chain:
             sys.exit(f"FAIL: recursion through {demangle(f)}, worst-case stack is unbounded")
-        callees = [total(c, chain + (f,)) for c in calls.get(f, ()) if c in frames]
-        totals[f] = frames[f] + max(callees, default=0)
+        if f in indirect:
+            sys.exit(f"FAIL: indirect call in {demangle(f)}, worst-case stack is unbounded")
+        deepest = 0
+        for c in calls.get(f, ()):
+            if c in frames:
+                deepest = max(deepest, total(c, chain + (f,)))
+            elif EXTERNAL.fullmatch(c):
+                charged.add(c)
+                deepest = max(deepest, EXTERNAL_BYTES)
+            elif DIVERGES.fullmatch(demangle(c)):
+                ended.add(c)
+            else:
+                sys.exit(f"FAIL: no stack size for {demangle(c)}, called from {demangle(f)}")
+        totals[f] = frames[f] + deepest
     return totals[f]
 
 print(f"\n=== ML-DSA-{param_set}: thumbv7em worst-case stack (bytes) ===")
@@ -102,6 +129,8 @@ for entry in ('Keypair::generate', 'Keypair::from_bytes', 'SecretKey::from_bytes
         sys.exit(f"FAIL: cannot measure {entry}: {len(found)} matching symbols with a call graph")
     worst = max(worst, total(found[0]))
     print(f"    {total(found[0]):8d}  {entry}")
+print(f"\n  outside the crate: {len(charged)} memory and allocator routines charged "
+      f"{EXTERNAL_BYTES} bytes each, {len(ended)} entry points that do not return")
 
 if budget_kb:
     print(f"\n  budget: {budget_kb} KB, worst entry point: {worst/1024:.1f} KB")
