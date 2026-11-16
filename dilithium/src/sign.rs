@@ -27,6 +27,15 @@ const fn assert_sign_params<
 	assert!(SIG == params::signbytes(K, L, GAMMA1, OMEGA, CD));
 }
 
+/// Copy `src` into `dst` in place. Secret vectors are copied this way rather
+/// than with `Polyvec::clone`, which builds its result in a temporary that is
+/// moved out and never wiped.
+fn copy_polyvec<const N: usize>(dst: &mut Polyvec<N>, src: &Polyvec<N>) {
+	for (d, s) in dst.vec.iter_mut().zip(src.vec.iter()) {
+		d.coeffs = s.coeffs;
+	}
+}
+
 /// Derive the public high bits `t1` and secret low bits `t0` from the public
 /// seed `rho` and secret vectors `s1`, `s2`.
 ///
@@ -36,26 +45,30 @@ const fn assert_sign_params<
 /// go through this single routine, so the public key derived at import can
 /// never disagree with the one produced at generation. The transient NTT copy
 /// of `s1` is zeroized before returning.
+///
+/// `t1` and `t0` are written through `&mut` (security review): returned by
+/// value, the secret `t0` was moved out of this frame and the dead source
+/// copy stayed behind, beyond the reach of the caller's zeroize.
 fn derive_public_components<const K: usize, const L: usize>(
+	t1: &mut Polyvec<K>,
+	t0: &mut Polyvec<K>,
 	rho: &[u8; params::SEEDBYTES],
 	s1: &Polyvec<L>,
 	s2: &Polyvec<K>,
-) -> (Polyvec<K>, Polyvec<K>) {
-	let mut s1hat = s1.clone();
+) {
+	let mut s1hat = Polyvec::<L>::default();
+	copy_polyvec(&mut s1hat, s1);
 	polyvec::ntt(&mut s1hat);
 
-	let mut t1 = Polyvec::<K>::default();
-	polyvec::matrix_pointwise_montgomery_streamed(&mut t1, rho, &s1hat);
-	polyvec::reduce(&mut t1);
-	polyvec::invntt_tomont(&mut t1);
-	polyvec::add(&mut t1, s2);
-	polyvec::caddq(&mut t1);
+	polyvec::matrix_pointwise_montgomery_streamed(t1, rho, &s1hat);
+	polyvec::reduce(t1);
+	polyvec::invntt_tomont(t1);
+	polyvec::add(t1, s2);
+	polyvec::caddq(t1);
 
-	let mut t0 = Polyvec::<K>::default();
-	polyvec::power2round(&mut t1, &mut t0);
+	polyvec::power2round(t1, t0);
 
 	s1hat.zeroize();
-	(t1, t0)
 }
 
 /// Generate public and private key for an arbitrary ML-DSA parameter set.
@@ -80,8 +93,7 @@ pub(crate) fn keypair_var<
 		assert!(PK == params::publickeybytes(K));
 		assert!(SK == params::secretkeybytes(K, L, ETA));
 	}
-	const SEEDBUF_LEN: usize = 2 * params::SEEDBYTES + params::CRHBYTES;
-	let mut seedbuf = [0u8; SEEDBUF_LEN];
+	let mut seedbuf = [0u8; 2 * params::SEEDBYTES + params::CRHBYTES];
 	// Build preimage = seed || K || L in a fixed stack buffer. A growable
 	// Vec would reallocate while holding the seed (Vec::new +
 	// extend_from_slice sizes capacity exactly, so the pushes force a
@@ -94,13 +106,13 @@ pub(crate) fn keypair_var<
 	fips202::shake256(&mut seedbuf, &preimage);
 
 	let mut rho = [0u8; params::SEEDBYTES];
-	rho.copy_from_slice(&seedbuf[..params::SEEDBYTES]);
-
 	let mut rhoprime = [0u8; params::CRHBYTES];
-	rhoprime.copy_from_slice(&seedbuf[params::SEEDBYTES..params::SEEDBYTES + params::CRHBYTES]);
-
 	let mut key = [0u8; params::SEEDBYTES];
-	key.copy_from_slice(&seedbuf[params::SEEDBYTES + params::CRHBYTES..]);
+	let (rho_bytes, rest) = seedbuf.split_at(params::SEEDBYTES);
+	let (rhoprime_bytes, key_bytes) = rest.split_at(params::CRHBYTES);
+	rho.copy_from_slice(rho_bytes);
+	rhoprime.copy_from_slice(rhoprime_bytes);
+	key.copy_from_slice(key_bytes);
 
 	let mut s1 = Polyvec::<L>::default();
 	polyvec::uniform_eta::<L, ETA>(&mut s1, &rhoprime, 0);
@@ -108,7 +120,9 @@ pub(crate) fn keypair_var<
 	let mut s2 = Polyvec::<K>::default();
 	polyvec::uniform_eta::<K, ETA>(&mut s2, &rhoprime, L as u16);
 
-	let (t1, mut t0) = derive_public_components(&rho, &s1, &s2);
+	let mut t1 = Polyvec::<K>::default();
+	let mut t0 = Polyvec::<K>::default();
+	derive_public_components(&mut t1, &mut t0, &rho, &s1, &s2);
 
 	packing::pack_pk(pk, &rho, &t1);
 
@@ -223,7 +237,9 @@ pub(crate) fn public_key_from_secret_var<
 		return None;
 	}
 
-	let (t1, mut t0_derived) = derive_public_components(&rho, &s1, &s2);
+	let mut t1 = Polyvec::<K>::default();
+	let mut t0_derived = Polyvec::<K>::default();
+	derive_public_components(&mut t1, &mut t0_derived, &rho, &s1, &s2);
 
 	// Reject a secret key whose derived t1 is degenerate (same predicate the verifier and
 	// PublicKey::from_bytes apply): such a public key would admit a keyless forgery. An honest
@@ -476,15 +492,16 @@ fn compute_and_check_challenge_t0<const K: usize, const GAMMA2: usize>(
 
 fn compute_and_check_hint_vector<const K: usize, const GAMMA2: usize, const OMEGA: usize>(
 	hint_vector_h: &mut Polyvec<K>,
-	commitment_w0: &Polyvec<K>,
+	commitment_w0: &mut Polyvec<K>,
 	challenge_t0: &Polyvec<K>,
 	commitment_w1: &Polyvec<K>,
 ) -> bool {
-	let mut w0_plus_challenge_t0 = commitment_w0.clone();
-	polyvec::add(&mut w0_plus_challenge_t0, challenge_t0);
+	// `commitment_w0` becomes `w0 + c*t0` in place: it is not read again
+	// before the next attempt recomputes it, and a copy of it would be one
+	// more secret vector to wipe.
+	polyvec::add(commitment_w0, challenge_t0);
 
-	let hint_weight =
-		polyvec::make_hint::<K, GAMMA2>(hint_vector_h, &w0_plus_challenge_t0, commitment_w1);
+	let hint_weight = polyvec::make_hint::<K, GAMMA2>(hint_vector_h, commitment_w0, commitment_w1);
 
 	hint_weight <= OMEGA as i32
 }
@@ -506,7 +523,7 @@ fn generate_masking_vector_and_commitment<
 ) {
 	polyvec::uniform_gamma1::<L, GAMMA1, PZ>(masking_vector_y, signing_entropy, attempt_nonce);
 
-	*signature_z_temp = masking_vector_y.clone();
+	copy_polyvec(signature_z_temp, masking_vector_y);
 	polyvec::ntt(signature_z_temp);
 	polyvec::matrix_pointwise_montgomery_streamed(commitment_w1, public_seed_rho, signature_z_temp);
 	polyvec::reduce(commitment_w1);
@@ -649,7 +666,7 @@ pub(crate) fn signature_var<
 
 		let condition4 = compute_and_check_hint_vector::<K, GAMMA2, OMEGA>(
 			&mut hint_vector_h,
-			&commitment_w0,
+			&mut commitment_w0,
 			&challenge_t0,
 			&commitment_w1,
 		);
@@ -668,7 +685,7 @@ pub(crate) fn signature_var<
 	}
 }
 
-/// Verify a signature for a given message with a public key (parameterized).
+/// Verifies `sig` on `domain_prefix || m` under `pk` for an arbitrary ML-DSA parameter set.
 pub(crate) fn verify_var<
 	const K: usize,
 	const L: usize,
@@ -742,8 +759,11 @@ pub(crate) fn verify_var<
 	poly::ntt(&mut cp);
 	polyvec::shiftl(&mut t1);
 	polyvec::ntt(&mut t1);
-	let t1_2 = t1.clone();
-	polyvec::pointwise_poly_montgomery(&mut t1, &cp, &t1_2);
+	let mut t1_hat = Poly::default();
+	for t1_i in t1.vec.iter_mut() {
+		t1_hat.coeffs = t1_i.coeffs;
+		poly::pointwise_montgomery(t1_i, &cp, &t1_hat);
+	}
 
 	polyvec::sub(&mut w1, &t1);
 	polyvec::reduce(&mut w1);

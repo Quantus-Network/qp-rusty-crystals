@@ -23,22 +23,26 @@ macro_rules! variant_tests {
 		#[cfg(feature = $feature)]
 		mod $mod_name {
 			use super::{test_seed, MNEMONIC, PATH};
-			use crate::$mod_name::derive_key_from_mnemonic;
+			use crate::$mod_name::{derive_key_from_mnemonic, Keypair};
 
 			#[test]
 			fn derivation_is_deterministic_and_matches_seed_entrypoint() {
-				let key1 = derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
-				let key2 = derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
+				let mut key1 = Keypair::zeroed();
+				derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut key1).unwrap();
+				let mut key2 = Keypair::zeroed();
+				derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut key2).unwrap();
 				assert_eq!(key1.secret().to_bytes(), key2.secret().to_bytes());
 				assert_eq!(key1.public().bytes, key2.public().bytes);
 
-				let key3 = crate::$mod_name::derive_key_from_seed(&test_seed(), PATH).unwrap();
+				let mut key3 = Keypair::zeroed();
+				crate::$mod_name::derive_key_from_seed(&test_seed(), PATH, &mut key3).unwrap();
 				assert_eq!(key1.secret().to_bytes(), key3.secret().to_bytes());
 			}
 
 			#[test]
 			fn derived_key_signs_and_verifies() {
-				let keypair = derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
+				let mut keypair = Keypair::zeroed();
+				derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut keypair).unwrap();
 				let message = b"hdwallet multi-variant test message";
 				let signature = keypair.sign(message, None, None).expect("signing");
 				assert!(keypair.verify(message, &signature, None));
@@ -47,15 +51,20 @@ macro_rules! variant_tests {
 
 			#[test]
 			fn different_paths_derive_different_keys() {
-				let other =
-					derive_key_from_mnemonic(MNEMONIC, None, "m/44'/189189'/1'/0'/0'").unwrap();
-				let base = derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
+				let mut other = Keypair::zeroed();
+				derive_key_from_mnemonic(MNEMONIC, None, "m/44'/189189'/1'/0'/0'", &mut other)
+					.unwrap();
+				let mut base = Keypair::zeroed();
+				derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut base).unwrap();
 				assert_ne!(base.public().bytes.to_vec(), other.public().bytes.to_vec());
 			}
 
 			#[test]
 			fn invalid_path_is_rejected() {
-				assert!(derive_key_from_mnemonic(MNEMONIC, None, "not-a-path").is_err());
+				let mut keypair = Keypair::zeroed();
+				assert!(
+					derive_key_from_mnemonic(MNEMONIC, None, "not-a-path", &mut keypair).is_err()
+				);
 			}
 		}
 	};
@@ -71,9 +80,12 @@ variant_tests!(ml_dsa_87, "ml-dsa-87");
 #[cfg(all(feature = "ml-dsa-44", feature = "ml-dsa-65", feature = "ml-dsa-87"))]
 #[test]
 fn same_path_yields_independent_keys_per_variant() {
-	let k44 = crate::ml_dsa_44::derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
-	let k65 = crate::ml_dsa_65::derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
-	let k87 = crate::ml_dsa_87::derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
+	let mut k44 = crate::ml_dsa_44::Keypair::zeroed();
+	crate::ml_dsa_44::derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut k44).unwrap();
+	let mut k65 = crate::ml_dsa_65::Keypair::zeroed();
+	crate::ml_dsa_65::derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut k65).unwrap();
+	let mut k87 = crate::ml_dsa_87::Keypair::zeroed();
+	crate::ml_dsa_87::derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut k87).unwrap();
 
 	// Sizes differ per variant; compare the leading bytes of the packed keys
 	// (rho, the first 32 bytes, is derived from H(seed || k || l) and must
@@ -88,8 +100,10 @@ fn same_path_yields_independent_keys_per_variant() {
 #[cfg(feature = "ml-dsa-87")]
 #[test]
 fn top_level_api_is_ml_dsa_87() {
-	let via_top = crate::derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
-	let via_module = crate::ml_dsa_87::derive_key_from_mnemonic(MNEMONIC, None, PATH).unwrap();
+	let mut via_top = crate::ml_dsa_87::Keypair::zeroed();
+	crate::derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut via_top).unwrap();
+	let mut via_module = crate::ml_dsa_87::Keypair::zeroed();
+	crate::ml_dsa_87::derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut via_module).unwrap();
 	assert_eq!(via_top.secret().to_bytes(), via_module.secret().to_bytes());
 	assert_eq!(via_top.public().bytes, via_module.public().bytes);
 }
@@ -98,11 +112,12 @@ fn top_level_api_is_ml_dsa_87() {
 /// on builds with no ML-DSA feature at all.
 #[test]
 fn variant_independent_surface_available() {
-	let pair =
-		crate::generate_wormhole_from_seed(&test_seed(), "m/44'/189189189'/0'/0'/0'").unwrap();
+	let path = "m/44'/189189189'/0'/0'/0'";
+	let mut pair = crate::WormholePair::zeroed();
+	crate::generate_wormhole_from_seed(&test_seed(), path, &mut pair).unwrap();
 	// Determinism of the variant-independent path.
-	let pair2 =
-		crate::generate_wormhole_from_seed(&test_seed(), "m/44'/189189189'/0'/0'/0'").unwrap();
+	let mut pair2 = crate::WormholePair::zeroed();
+	crate::generate_wormhole_from_seed(&test_seed(), path, &mut pair2).unwrap();
 	assert_eq!(pair.address(), pair2.address());
 }
 
@@ -143,7 +158,8 @@ macro_rules! golden_vector_tests {
 						&crate::$vectors_mod::VECTORS[i];
 					assert_eq!(*expected_mnemonic, mnemonic);
 					assert_eq!(*expected_path, path);
-					let derived = derive_key_from_mnemonic(mnemonic, None, path).unwrap();
+					let mut derived = Keypair::zeroed();
+					derive_key_from_mnemonic(mnemonic, None, path, &mut derived).unwrap();
 					let expected = Keypair::from_bytes(expected_bytes).expect("golden keypair");
 					assert_eq!(
 						derived.secret().to_bytes(),
@@ -209,15 +225,13 @@ fn regenerate_variant_golden_vectors() {
 	}
 
 	emit("test_vectors_44.rs", "ML-DSA-44", |m, p| {
-		crate::ml_dsa_44::derive_key_from_mnemonic(m, None, p)
-			.unwrap()
-			.to_bytes()
-			.to_vec()
+		let mut keypair = crate::ml_dsa_44::Keypair::zeroed();
+		crate::ml_dsa_44::derive_key_from_mnemonic(m, None, p, &mut keypair).unwrap();
+		keypair.to_bytes().to_vec()
 	});
 	emit("test_vectors_65.rs", "ML-DSA-65", |m, p| {
-		crate::ml_dsa_65::derive_key_from_mnemonic(m, None, p)
-			.unwrap()
-			.to_bytes()
-			.to_vec()
+		let mut keypair = crate::ml_dsa_65::Keypair::zeroed();
+		crate::ml_dsa_65::derive_key_from_mnemonic(m, None, p, &mut keypair).unwrap();
+		keypair.to_bytes().to_vec()
 	});
 }

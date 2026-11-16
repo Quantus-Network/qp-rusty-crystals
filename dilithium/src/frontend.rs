@@ -64,7 +64,7 @@ macro_rules! define_ml_dsa {
 
 		pub type Signature = [u8; SIGNBYTES];
 
-		/// A pair of private and public keys.
+		/// An ML-DSA keypair: a secret signing key together with its matching public key.
 		///
 		/// `Clone` is intentionally not derived because the embedded `SecretKey` is sensitive.
 		/// To explicitly copy a keypair (e.g. to move it into a closure), serialize and
@@ -104,12 +104,7 @@ macro_rules! define_ml_dsa {
 		}
 
 		impl Keypair {
-			/// Generate a Keypair instance.
-			///
-			/// # Arguments
-			///
-			/// * 'entropy' - bytes for determining the generation process (must be at least 32
-			///   bytes)
+			/// Deterministically derives a keypair from a 32-byte seed (`ML-DSA.KeyGen_internal`).
 			///
 			/// The entropy is borrowed mutably and zeroized in place after use
 			/// (security review): taking it by value would move — i.e. copy —
@@ -118,25 +113,68 @@ macro_rules! define_ml_dsa {
 			/// consumed in the practical sense: it is all zeros afterwards.
 			pub fn generate(entropy: &mut SensitiveBytes32) -> Keypair {
 				let mut pk = [0u8; PUBLICKEYBYTES];
-				// The packed secret key lives in a self-wiping buffer, and the
-				// Keypair is built in tail position rather than through a named
-				// local that is returned afterwards (security review): binding
-				// the struct first and returning it later moves it out of this
-				// frame, and the dead source copy of the full packed key is
-				// beyond the reach of any zeroize call (the release-mode
-				// `sign_stack_zeroization` probe found two such copies). The
-				// same tail-construction shape keeps `from_bytes` clean under
-				// the `import_stack_zeroization` probes.
-				let mut sk = Zeroizing::new([0u8; SECRETKEYBYTES]);
-				$crate::sign::keypair_var::<K, L, ETA, PUBLICKEYBYTES, SECRETKEYBYTES>(
-					&mut pk, &mut sk, entropy,
-				);
-				entropy.as_mut_bytes().zeroize();
-				let public = PublicKey::from_bytes(&pk).expect("Should never fail");
+				// The packed secret key is generated straight into the key's own
+				// heap block (security review): a `Keypair` holds a pointer to
+				// it, so no move of the keypair, in this frame or in a caller's,
+				// copies secret bytes. Stored inline, the full packed key stayed
+				// behind in every slot a keypair was moved from, beyond the
+				// reach of any zeroize call (the release-mode
+				// `sign_stack_zeroization` probe found such copies). `from_bytes`
+				// fills the heap block the same way, under the
+				// `import_stack_zeroization` probes.
+				let mut secret = SecretKey::zeroed();
+				let public = Keypair::generate_packed(&mut pk, &mut secret.bytes, entropy);
 				// Constructed directly rather than via `SecretKey::from_bytes`:
 				// a freshly generated key is consistent by construction, and the
 				// import-path validation would redo the keygen-scale derivation.
-				Keypair { secret: SecretKey { bytes: *sk }, public }
+				Keypair { secret, public }
+			}
+
+			/// All-zero placeholder to be filled in place by
+			/// [`Keypair::generate_into`]. Constructed by the caller so the
+			/// keypair never has to be returned by value across the frames
+			/// that produced it.
+			///
+			/// A placeholder does **not** satisfy the secret/public
+			/// correspondence invariant described on [`Keypair`] until it has
+			/// been filled: its secret half is not a usable key and its public
+			/// half is the all-zero key that [`PublicKey::from_bytes`] rejects
+			/// as degenerate. Do not sign, verify or serialize with it.
+			pub fn zeroed() -> Keypair {
+				Keypair {
+					secret: SecretKey::zeroed(),
+					public: PublicKey { bytes: [0u8; PUBLICKEYBYTES] },
+				}
+			}
+
+			/// Generate a keypair in place, into the caller-provided `out`.
+			///
+			/// Same key generation as [`Keypair::generate`] — identical keys
+			/// for identical entropy, and the entropy is likewise zeroized in
+			/// place after use — but the packed keys are written straight
+			/// into `out` rather than returned by value (security review).
+			/// Either form may be handed on afterwards: the packed secret key
+			/// lives in the keypair's own heap block, so moving a `Keypair`
+			/// (wrapping it in a `Result`, returning it, boxing it) copies a
+			/// pointer and never the key. Use this form to fill a keypair
+			/// that already sits where it will live.
+			pub fn generate_into(entropy: &mut SensitiveBytes32, out: &mut Keypair) {
+				Keypair::generate_packed(&mut out.public.bytes, &mut out.secret.bytes, entropy);
+			}
+
+			/// Key generation into the caller's packed buffers, shared by
+			/// [`Keypair::generate`] and [`Keypair::generate_into`]. Wipes
+			/// `entropy` in place and returns the validated public key.
+			fn generate_packed(
+				pk: &mut [u8; PUBLICKEYBYTES],
+				sk: &mut [u8; SECRETKEYBYTES],
+				entropy: &mut SensitiveBytes32,
+			) -> PublicKey {
+				$crate::sign::keypair_var::<K, L, ETA, PUBLICKEYBYTES, SECRETKEYBYTES>(
+					pk, sk, entropy,
+				);
+				entropy.as_mut_bytes().zeroize();
+				PublicKey::from_bytes(pk).expect("Should never fail")
 			}
 
 			/// The secret half.
@@ -195,7 +233,7 @@ macro_rules! define_ml_dsa {
 				Ok(Keypair { secret, public })
 			}
 
-			/// Convert a Keypair to a bytes array.
+			/// Serializes the keypair: secret key bytes first, then public key bytes.
 			///
 			/// Returns a self-wiping buffer containing private and public key bytes.
 			/// The buffer contains the full secret key, so it is `Zeroizing`: it is
@@ -203,12 +241,12 @@ macro_rules! define_ml_dsa {
 			/// forget) manual cleanup. Deref to `[u8; KEYPAIRBYTES]` for access.
 			pub fn to_bytes(&self) -> Zeroizing<[u8; KEYPAIRBYTES]> {
 				let mut result = Zeroizing::new([0u8; KEYPAIRBYTES]);
-				result[..SECRETKEYBYTES].copy_from_slice(&self.secret.bytes);
+				result[..SECRETKEYBYTES].copy_from_slice(self.secret.bytes.as_slice());
 				result[SECRETKEYBYTES..].copy_from_slice(&self.public.to_bytes());
 				Zeroizing::new(*result)
 			}
 
-			/// Create a Keypair from bytes.
+			/// Parses a keypair from its `to_bytes` form: secret key bytes, then public key bytes.
 			///
 			/// # Consistency check
 			///
@@ -244,24 +282,23 @@ macro_rules! define_ml_dsa {
 					return Err(KeyParsingError::BadKeypair);
 				}
 				let (secret_slice, public_bytes) = bytes.split_at(SECRETKEYBYTES);
-				let mut secret_bytes = Zeroizing::new([0u8; SECRETKEYBYTES]);
-				secret_bytes.copy_from_slice(secret_slice);
+				let mut secret = SecretKey::zeroed();
+				secret.bytes.copy_from_slice(secret_slice);
 				let public =
 					PublicKey::from_bytes(public_bytes).map_err(|_| KeyParsingError::BadKeypair)?;
 
-				// Validate by borrowing the self-wiping buffer, then construct
-				// the Keypair directly. Building a `SecretKey` first and
-				// passing it to `from_parts` by value would move the array
-				// through an extra stack frame and leave a dead plaintext
-				// copy behind (caught by the release-mode
+				// Validate the key in its own heap block, then construct the
+				// Keypair directly. The secret bytes are never placed in a
+				// stack frame, so no move can leave a dead plaintext copy
+				// behind (pinned by the release-mode
 				// `import_stack_zeroization` probes). Going through
 				// `SecretKey::from_bytes` instead would redo the keygen-scale
 				// derivation that `check_correspondence` already performs.
-				Self::check_correspondence(&secret_bytes, &public)?;
-				Ok(Keypair { secret: SecretKey { bytes: *secret_bytes }, public })
+				Self::check_correspondence(&secret.bytes, &public)?;
+				Ok(Keypair { secret, public })
 			}
 
-			/// Compute a signature for a given message.
+			/// Signs `msg` with the secret half, bound to the optional context string `ctx`.
 			///
 			/// # Arguments
 			///
@@ -290,7 +327,7 @@ macro_rules! define_ml_dsa {
 				self.secret.sign(msg, ctx, hedge)
 			}
 
-			/// Verify a signature for a given message with a public key.
+			/// Verifies `sig` for `msg` and context `ctx` with the public half of this keypair.
 			pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool {
 				self.public.verify(msg, sig, ctx)
 			}
@@ -312,7 +349,7 @@ macro_rules! define_ml_dsa {
 			}
 		}
 
-		/// Private key.
+		/// An ML-DSA secret (signing) key, kept in its packed byte encoding and wiped on drop.
 		///
 		/// `Clone` is intentionally not derived because the underlying bytes are sensitive.
 		/// To explicitly copy a secret key, use `SecretKey::from_bytes(&sk.to_bytes())?`,
@@ -320,15 +357,25 @@ macro_rules! define_ml_dsa {
 		///
 		/// `Zeroize` is derived (in addition to `ZeroizeOnDrop`) so wrapper types that
 		/// embed a `SecretKey` can themselves `#[derive(Zeroize, ZeroizeOnDrop)]`.
+		///
+		/// The bytes live in a heap block of their own (security review): a Rust move
+		/// is a bytewise copy whose source is never dropped, so a key stored inline
+		/// stayed behind, unwiped, wherever a `SecretKey` or [`Keypair`] was moved
+		/// from. Moving either now copies a pointer and never the key.
 		#[derive(Zeroize, ZeroizeOnDrop)]
 		pub struct SecretKey {
-			bytes: [u8; SECRETKEYBYTES],
+			bytes: alloc::boxed::Box<[u8; SECRETKEYBYTES]>,
 		}
 
 		impl SecretKey {
+			/// All-zero key in a fresh heap block.
+			fn zeroed() -> SecretKey {
+				SecretKey { bytes: alloc::boxed::Box::new([0u8; SECRETKEYBYTES]) }
+			}
+
 			/// Returns a copy of the underlying bytes in a self-wiping buffer.
 			pub fn to_bytes(&self) -> Zeroizing<[u8; SECRETKEYBYTES]> {
-				Zeroizing::new(self.bytes)
+				Zeroizing::new(*self.bytes)
 			}
 
 			/// Create a SecretKey from bytes, validating packed-key invariants
@@ -356,8 +403,8 @@ macro_rules! define_ml_dsa {
 				if bytes.len() != SECRETKEYBYTES {
 					return Err(BadSecretKey);
 				}
-				let mut sk = Zeroizing::new([0u8; SECRETKEYBYTES]);
-				sk.copy_from_slice(bytes);
+				let mut sk = SecretKey::zeroed();
+				sk.bytes.copy_from_slice(bytes);
 				let pk_ok = $crate::sign::public_key_from_secret_var::<
 					K,
 					L,
@@ -365,12 +412,12 @@ macro_rules! define_ml_dsa {
 					GAMMA2,
 					PUBLICKEYBYTES,
 					SECRETKEYBYTES,
-				>(&sk);
+				>(&sk.bytes);
 				pk_ok.ok_or(BadSecretKey)?;
-				Ok(SecretKey { bytes: *sk })
+				Ok(sk)
 			}
 
-			/// Compute a signature for a given message.
+			/// Signs `msg` with optional context `ctx`; fails if either exceeds its size limit.
 			///
 			/// See [`Keypair::sign`] for the argument contract, in particular the
 			/// deterministic-vs-hedged trade-off of `hedge` and why it is passed
@@ -414,12 +461,12 @@ macro_rules! define_ml_dsa {
 		}
 
 		impl PublicKey {
-			/// Returns a copy of underlying bytes.
+			/// Returns a copy of the packed public key bytes (`rho || t1`).
 			pub fn to_bytes(&self) -> [u8; PUBLICKEYBYTES] {
 				self.bytes
 			}
 
-			/// Create a PublicKey from bytes.
+			/// Parses a packed public key; rejects a wrong length or a degenerate, forgeable `t1`.
 			pub fn from_bytes(bytes: &[u8]) -> Result<PublicKey, KeyParsingError> {
 				let bytes: [u8; PUBLICKEYBYTES] =
 					bytes.try_into().map_err(|_| KeyParsingError::BadPublicKey)?;
@@ -437,7 +484,7 @@ macro_rules! define_ml_dsa {
 				Ok(PublicKey { bytes })
 			}
 
-			/// Verify a signature for a given message with a public key.
+			/// Verifies `sig` for `msg` and context `ctx`; `false` on invalid or malformed input.
 			pub fn verify(&self, msg: &[u8], sig: &[u8], ctx: Option<&[u8]>) -> bool {
 				let sig: &[u8; SIGNBYTES] = match sig.try_into() {
 					Ok(s) => s,

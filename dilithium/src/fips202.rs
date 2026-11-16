@@ -80,7 +80,7 @@ pub type Shake128State = KeccakState<SHAKE128_RATE>;
 pub type Shake256State = KeccakState<SHAKE256_RATE>;
 
 impl<const R: usize> KeccakState<R> {
-	/// Set the state to the initial (absorbing) form.
+	/// Resets the sponge to its initial state: all-zero lanes, position 0, absorbing phase.
 	pub fn init(&mut self) {
 		self.s.fill(0);
 		self.pos = 0;
@@ -88,16 +88,9 @@ impl<const R: usize> KeccakState<R> {
 	}
 }
 
-/// No rolling defined in the language so got to do it ourselfs :(
-///
-/// # Arguments
-///
-/// * 'a' - number to rotate right
-/// * 'offset' - how many places to rotate
-///
-/// Returns the rotated number
+/// Rotates a lane left by `offset` bits.
 fn rol(a: u64, offset: u64) -> u64 {
-	(a << offset) ^ (a >> (64 - offset))
+	a.rotate_left(offset as u32)
 }
 
 /// Load 8 bytes into uint64_t in little-endian order
@@ -134,6 +127,90 @@ const KECCAKF_ROUNDCONSTANTS: [u64; NROUNDS] = [
 	0x8000000080008008u64,
 ];
 
+/// Chi step on one row of five lanes.
+fn chi([a, e, i, o, u]: [u64; 5]) -> [u64; 5] {
+	[a ^ (!e & i), e ^ (!i & o), i ^ (!o & u), o ^ (!u & a), u ^ (!a & e)]
+}
+
+/// One round of Keccak-f[1600]: theta, rho, pi, chi and iota applied to the lanes `a`.
+#[inline(always)]
+fn keccakf1600_round(a: [u64; 25], round_constant: u64) -> [u64; 25] {
+	let bca = a[0] ^ a[5] ^ a[10] ^ a[15] ^ a[20];
+	let bce = a[1] ^ a[6] ^ a[11] ^ a[16] ^ a[21];
+	let bci = a[2] ^ a[7] ^ a[12] ^ a[17] ^ a[22];
+	let bco = a[3] ^ a[8] ^ a[13] ^ a[18] ^ a[23];
+	let bcu = a[4] ^ a[9] ^ a[14] ^ a[19] ^ a[24];
+
+	let da = bcu ^ rol(bce, 1);
+	let de = bca ^ rol(bci, 1);
+	let di = bce ^ rol(bco, 1);
+	let d_o = bci ^ rol(bcu, 1);
+	let du = bco ^ rol(bca, 1);
+
+	let [eba, ebe, ebi, ebo, ebu] = chi([
+		a[0] ^ da,
+		rol(a[6] ^ de, 44),
+		rol(a[12] ^ di, 43),
+		rol(a[18] ^ d_o, 21),
+		rol(a[24] ^ du, 14),
+	]);
+	let [ega, ege, egi, ego, egu] = chi([
+		rol(a[3] ^ d_o, 28),
+		rol(a[9] ^ du, 20),
+		rol(a[10] ^ da, 3),
+		rol(a[16] ^ de, 45),
+		rol(a[22] ^ di, 61),
+	]);
+	let [eka, eke, eki, eko, eku] = chi([
+		rol(a[1] ^ de, 1),
+		rol(a[7] ^ di, 6),
+		rol(a[13] ^ d_o, 25),
+		rol(a[19] ^ du, 8),
+		rol(a[20] ^ da, 18),
+	]);
+	let [ema, eme, emi, emo, emu] = chi([
+		rol(a[4] ^ du, 27),
+		rol(a[5] ^ da, 36),
+		rol(a[11] ^ de, 10),
+		rol(a[17] ^ di, 15),
+		rol(a[23] ^ d_o, 56),
+	]);
+	let [esa, ese, esi, eso, esu] = chi([
+		rol(a[2] ^ di, 62),
+		rol(a[8] ^ d_o, 55),
+		rol(a[14] ^ du, 39),
+		rol(a[15] ^ da, 41),
+		rol(a[21] ^ de, 2),
+	]);
+	[
+		eba ^ round_constant,
+		ebe,
+		ebi,
+		ebo,
+		ebu,
+		ega,
+		ege,
+		egi,
+		ego,
+		egu,
+		eka,
+		eke,
+		eki,
+		eko,
+		eku,
+		ema,
+		eme,
+		emi,
+		emo,
+		emu,
+		esa,
+		ese,
+		esi,
+		eso,
+		esu,
+	]
+}
+
 /// The Keccak F1600 Permutation
 ///
 /// Secret-scrubbing boundary: this permutation unrolls the sponge into ~25 lane
@@ -148,270 +225,28 @@ const KECCAKF_ROUNDCONSTANTS: [u64; NROUNDS] = [
 /// state is dropped; callers that squeeze secrets into their own buffers are
 /// responsible for wiping those (see `poly::uniform_eta` / `uniform_gamma1`).
 fn keccakf1600_statepermute(state: &mut [u64; 25]) {
-	let mut aba = state[0];
-	let mut abe = state[1];
-	let mut abi = state[2];
-	let mut abo = state[3];
-	let mut abu = state[4];
-	let mut aga = state[5];
-	let mut age = state[6];
-	let mut agi = state[7];
-	let mut ago = state[8];
-	let mut agu = state[9];
-	let mut aka = state[10];
-	let mut ake = state[11];
-	let mut aki = state[12];
-	let mut ako = state[13];
-	let mut aku = state[14];
-	let mut ama = state[15];
-	let mut ame = state[16];
-	let mut ami = state[17];
-	let mut amo = state[18];
-	let mut amu = state[19];
-	let mut asa = state[20];
-	let mut ase = state[21];
-	let mut asi = state[22];
-	let mut aso = state[23];
-	let mut asu = state[24];
-
-	for round in (0..NROUNDS).step_by(2) {
-		let mut bca = aba ^ aga ^ aka ^ ama ^ asa;
-		let mut bce = abe ^ age ^ ake ^ ame ^ ase;
-		let mut bci = abi ^ agi ^ aki ^ ami ^ asi;
-		let mut bco = abo ^ ago ^ ako ^ amo ^ aso;
-		let mut bcu = abu ^ agu ^ aku ^ amu ^ asu;
-
-		let mut da = bcu ^ rol(bce, 1);
-		let mut de = bca ^ rol(bci, 1);
-		let mut di = bce ^ rol(bco, 1);
-		let mut d_o = bci ^ rol(bcu, 1);
-		let mut du = bco ^ rol(bca, 1);
-
-		aba ^= da;
-		bca = aba;
-		age ^= de;
-		bce = rol(age, 44);
-		aki ^= di;
-		bci = rol(aki, 43);
-		amo ^= d_o;
-		bco = rol(amo, 21);
-		asu ^= du;
-		bcu = rol(asu, 14);
-		let mut eba = bca ^ ((!bce) & bci);
-		eba ^= KECCAKF_ROUNDCONSTANTS[round];
-		let mut ebe = bce ^ ((!bci) & bco);
-		let mut ebi = bci ^ ((!bco) & bcu);
-		let mut ebo = bco ^ ((!bcu) & bca);
-		let mut ebu = bcu ^ ((!bca) & bce);
-
-		abo ^= d_o;
-		bca = rol(abo, 28);
-		agu ^= du;
-		bce = rol(agu, 20);
-		aka ^= da;
-		bci = rol(aka, 3);
-		ame ^= de;
-		bco = rol(ame, 45);
-		asi ^= di;
-		bcu = rol(asi, 61);
-		let mut ega = bca ^ ((!bce) & bci);
-		let mut ege = bce ^ ((!bci) & bco);
-		let mut egi = bci ^ ((!bco) & bcu);
-		let mut ego = bco ^ ((!bcu) & bca);
-		let mut egu = bcu ^ ((!bca) & bce);
-
-		abe ^= de;
-		bca = rol(abe, 1);
-		agi ^= di;
-		bce = rol(agi, 6);
-		ako ^= d_o;
-		bci = rol(ako, 25);
-		amu ^= du;
-		bco = rol(amu, 8);
-		asa ^= da;
-		bcu = rol(asa, 18);
-		let mut eka = bca ^ ((!bce) & bci);
-		let mut eke = bce ^ ((!bci) & bco);
-		let mut eki = bci ^ ((!bco) & bcu);
-		let mut eko = bco ^ ((!bcu) & bca);
-		let mut eku = bcu ^ ((!bca) & bce);
-
-		abu ^= du;
-		bca = rol(abu, 27);
-		aga ^= da;
-		bce = rol(aga, 36);
-		ake ^= de;
-		bci = rol(ake, 10);
-		ami ^= di;
-		bco = rol(ami, 15);
-		aso ^= d_o;
-		bcu = rol(aso, 56);
-		let mut ema = bca ^ ((!bce) & bci);
-		let mut eme = bce ^ ((!bci) & bco);
-		let mut emi = bci ^ ((!bco) & bcu);
-		let mut emo = bco ^ ((!bcu) & bca);
-		let mut emu = bcu ^ ((!bca) & bce);
-
-		abi ^= di;
-		bca = rol(abi, 62);
-		ago ^= d_o;
-		bce = rol(ago, 55);
-		aku ^= du;
-		bci = rol(aku, 39);
-		ama ^= da;
-		bco = rol(ama, 41);
-		ase ^= de;
-		bcu = rol(ase, 2);
-		let mut esa = bca ^ ((!bce) & bci);
-		let mut ese = bce ^ ((!bci) & bco);
-		let mut esi = bci ^ ((!bco) & bcu);
-		let mut eso = bco ^ ((!bcu) & bca);
-		let mut esu = bcu ^ ((!bca) & bce);
-
-		bca = eba ^ ega ^ eka ^ ema ^ esa;
-		bce = ebe ^ ege ^ eke ^ eme ^ ese;
-		bci = ebi ^ egi ^ eki ^ emi ^ esi;
-		bco = ebo ^ ego ^ eko ^ emo ^ eso;
-		bcu = ebu ^ egu ^ eku ^ emu ^ esu;
-
-		da = bcu ^ rol(bce, 1);
-		de = bca ^ rol(bci, 1);
-		di = bce ^ rol(bco, 1);
-		d_o = bci ^ rol(bcu, 1);
-		du = bco ^ rol(bca, 1);
-
-		eba ^= da;
-		bca = eba;
-		ege ^= de;
-		bce = rol(ege, 44);
-		eki ^= di;
-		bci = rol(eki, 43);
-		emo ^= d_o;
-		bco = rol(emo, 21);
-		esu ^= du;
-		bcu = rol(esu, 14);
-		aba = bca ^ ((!bce) & bci);
-		aba ^= KECCAKF_ROUNDCONSTANTS[round + 1];
-		abe = bce ^ ((!bci) & bco);
-		abi = bci ^ ((!bco) & bcu);
-		abo = bco ^ ((!bcu) & bca);
-		abu = bcu ^ ((!bca) & bce);
-
-		ebo ^= d_o;
-		bca = rol(ebo, 28);
-		egu ^= du;
-		bce = rol(egu, 20);
-		eka ^= da;
-		bci = rol(eka, 3);
-		eme ^= de;
-		bco = rol(eme, 45);
-		esi ^= di;
-		bcu = rol(esi, 61);
-		aga = bca ^ ((!bce) & bci);
-		age = bce ^ ((!bci) & bco);
-		agi = bci ^ ((!bco) & bcu);
-		ago = bco ^ ((!bcu) & bca);
-		agu = bcu ^ ((!bca) & bce);
-
-		ebe ^= de;
-		bca = rol(ebe, 1);
-		egi ^= di;
-		bce = rol(egi, 6);
-		eko ^= d_o;
-		bci = rol(eko, 25);
-		emu ^= du;
-		bco = rol(emu, 8);
-		esa ^= da;
-		bcu = rol(esa, 18);
-		aka = bca ^ ((!bce) & bci);
-		ake = bce ^ ((!bci) & bco);
-		aki = bci ^ ((!bco) & bcu);
-		ako = bco ^ ((!bcu) & bca);
-		aku = bcu ^ ((!bca) & bce);
-
-		ebu ^= du;
-		bca = rol(ebu, 27);
-		ega ^= da;
-		bce = rol(ega, 36);
-		eke ^= de;
-		bci = rol(eke, 10);
-		emi ^= di;
-		bco = rol(emi, 15);
-		eso ^= d_o;
-		bcu = rol(eso, 56);
-		ama = bca ^ ((!bce) & bci);
-		ame = bce ^ ((!bci) & bco);
-		ami = bci ^ ((!bco) & bcu);
-		amo = bco ^ ((!bcu) & bca);
-		amu = bcu ^ ((!bca) & bce);
-
-		ebi ^= di;
-		bca = rol(ebi, 62);
-		ego ^= d_o;
-		bce = rol(ego, 55);
-		eku ^= du;
-		bci = rol(eku, 39);
-		ema ^= da;
-		bco = rol(ema, 41);
-		ese ^= de;
-		bcu = rol(ese, 2);
-		asa = bca ^ ((!bce) & bci);
-		ase = bce ^ ((!bci) & bco);
-		asi = bci ^ ((!bco) & bcu);
-		aso = bco ^ ((!bcu) & bca);
-		asu = bcu ^ ((!bca) & bce);
+	let mut a = *state;
+	// One round per iteration: two inlined rounds spill more lanes to stack slots nothing wipes
+	// and double the code size.
+	for &round_constant in KECCAKF_ROUNDCONSTANTS.iter() {
+		a = keccakf1600_round(a, round_constant);
 	}
-
-	state[0] = aba;
-	state[1] = abe;
-	state[2] = abi;
-	state[3] = abo;
-	state[4] = abu;
-	state[5] = aga;
-	state[6] = age;
-	state[7] = agi;
-	state[8] = ago;
-	state[9] = agu;
-	state[10] = aka;
-	state[11] = ake;
-	state[12] = aki;
-	state[13] = ako;
-	state[14] = aku;
-	state[15] = ama;
-	state[16] = ame;
-	state[17] = ami;
-	state[18] = amo;
-	state[19] = amu;
-	state[20] = asa;
-	state[21] = ase;
-	state[22] = asi;
-	state[23] = aso;
-	state[24] = asu;
+	*state = a;
 }
 
 /// Absorb step of Keccak; incremental. The rate comes from the state's type,
 /// so `pos` can never be interpreted against the wrong block size.
+#[inline(never)]
 fn keccak_absorb<const R: usize>(state: &mut KeccakState<R>, input: &[u8]) {
 	debug_assert!(!state.squeezing, "fips202: absorb called on a finalized (squeezing) state");
-	let mut inlen = input.len();
-	let mut idx = 0;
-	let mut pos = state.pos;
-	while pos + inlen >= R {
-		for i in pos..R {
-			state.s[i / 8] ^= (input[idx] as u64) << 8 * (i % 8);
-			idx += 1;
+	for &byte in input {
+		state.s[state.pos / 8] ^= (byte as u64) << (8 * (state.pos % 8));
+		state.pos += 1;
+		if state.pos >= R {
+			keccakf1600_statepermute(&mut state.s);
+			state.pos = 0;
 		}
-		inlen -= R - pos;
-		keccakf1600_statepermute(&mut state.s);
-		pos = 0;
 	}
-	let mut i = pos;
-	while i < pos + inlen {
-		state.s[i / 8] ^= (input[idx] as u64) << 8 * (i % 8);
-		idx += 1;
-		i += 1
-	}
-	state.pos = i;
 }
 
 /// Finalize absorb step: apply domain-separation/padding and transition the
@@ -430,29 +265,18 @@ fn keccak_finalize<const R: usize>(state: &mut KeccakState<R>, p: u8) {
 /// incremental.
 fn keccak_squeeze<const R: usize>(out: &mut [u8], state: &mut KeccakState<R>) {
 	debug_assert!(state.squeezing, "fips202: squeeze called before finalize");
-	let mut pos = state.pos;
-	let mut outlen = out.len();
-	let mut out_idx = 0;
-	while outlen != 0 {
+	for byte in out.iter_mut() {
 		// `>=` (rather than `==`) is a defensive guard: a well-formed state always
 		// has `pos <= R`, but if an out-of-range `pos` ever reaches here we must
 		// still permute and reset so the loop makes progress. Without this, a
 		// `pos > R` would emit zero bytes per iteration and spin forever.
-		if pos >= R {
+		if state.pos >= R {
 			keccakf1600_statepermute(&mut state.s);
-			pos = 0;
+			state.pos = 0;
 		}
-		let mut i = pos;
-		while i < R && i < pos + outlen {
-			out[out_idx] = (state.s[i / 8] >> 8 * (i % 8)) as u8;
-			out_idx += 1;
-			i += 1;
-		}
-		outlen -= i - pos;
-		pos = i;
+		*byte = (state.s[state.pos / 8] >> (8 * (state.pos % 8))) as u8;
+		state.pos += 1;
 	}
-
-	state.pos = pos;
 }
 
 /// Absorb step of Keccak; non-incremental, starts by zeroeing the state.
@@ -575,6 +399,14 @@ pub fn shake256(output: &mut [u8], input: &[u8]) {
 	shake256_squeeze(output, &mut state);
 }
 
+/// Resets `state`, absorbs `seed` followed by the little-endian `nonce`, and finalizes it.
+fn stream_init<const R: usize>(state: &mut KeccakState<R>, seed: &[u8], nonce: u16) {
+	state.init();
+	keccak_absorb(state, seed);
+	keccak_absorb(state, &nonce.to_le_bytes());
+	keccak_finalize(state, 0x1F);
+}
+
 /// Initialize SHAKE128 stream with a fixed-size seed and nonce, leaving the
 /// state finalized (ready to squeeze).
 pub fn shake128_stream_init(
@@ -582,11 +414,7 @@ pub fn shake128_stream_init(
 	seed: &[u8; crate::params::SEEDBYTES],
 	nonce: u16,
 ) {
-	let t = [nonce as u8, (nonce >> 8) as u8];
-	state.init();
-	shake128_absorb(state, seed);
-	shake128_absorb(state, &t);
-	shake128_finalize(state);
+	stream_init(state, seed, nonce);
 }
 
 /// Initialize SHAKE256 stream with a fixed-size seed and nonce, leaving the
@@ -596,11 +424,7 @@ pub fn shake256_stream_init(
 	seed: &[u8; crate::params::CRHBYTES],
 	nonce: u16,
 ) {
-	let t = [nonce as u8, (nonce >> 8) as u8];
-	state.init();
-	shake256_absorb(state, seed);
-	shake256_absorb(state, &t);
-	shake256_finalize(state);
+	stream_init(state, seed, nonce);
 }
 
 #[cfg(test)]

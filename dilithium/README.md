@@ -173,4 +173,4 @@ cargo run --example stack_usage_demo -p qp-rusty-crystals-dilithium
 
 ## License
 
-GPL-3.0 - See [LICENSE](LICENSE) for details.
+Apache-2.0 - See [LICENSE](LICENSE) for details. The ML-DSA arithmetic, packing and Keccak code is a Rust port of the [pq-crystals](https://github.com/pq-crystals/dilithium) reference implementation, which its authors release as public domain (CC0) or under Apache-2.0. Versions up to and including 4.1.1 are GPL-3.0-only.

@@ -17,7 +17,7 @@
 //! behavior under scrutiny is per-monomorphization, so that one test runs
 //! key generation for every enabled ML-DSA variant back to back.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::alloc::{GlobalAlloc, Layout, System};
 
 use qp_rusty_crystals_dilithium::SensitiveBytes32;
@@ -28,6 +28,9 @@ const SEED_PATTERN: [u8; 32] = *b"zeroize-regression-seed-pattern!";
 
 static SCANNING: AtomicBool = AtomicBool::new(false);
 static SEED_FREED_UNCLEARED: AtomicBool = AtomicBool::new(false);
+/// Size of the heap block that must be all zeros when it is freed (0: none).
+static WIPED_BLOCK_SIZE: AtomicUsize = AtomicUsize::new(0);
+static KEY_FREED_UNCLEARED: AtomicBool = AtomicBool::new(false);
 
 struct SeedScanningAllocator;
 
@@ -41,6 +44,12 @@ unsafe impl GlobalAlloc for SeedScanningAllocator {
 			let block = unsafe { core::slice::from_raw_parts(ptr, layout.size()) };
 			if block.windows(SEED_PATTERN.len()).any(|w| w == SEED_PATTERN) {
 				SEED_FREED_UNCLEARED.store(true, Ordering::SeqCst);
+			}
+		}
+		if layout.size() == WIPED_BLOCK_SIZE.load(Ordering::SeqCst) {
+			let block = unsafe { core::slice::from_raw_parts(ptr, layout.size()) };
+			if block.iter().any(|&byte| byte != 0) {
+				KEY_FREED_UNCLEARED.store(true, Ordering::SeqCst);
 			}
 		}
 		unsafe { System.dealloc(ptr, layout) }
@@ -79,6 +88,21 @@ macro_rules! check_variant {
 		let message = b"zeroization regression";
 		let signature = keypair.sign(message, None, None).expect("signing succeeds");
 		assert!(keypair.public().verify(message, &signature, None));
+
+		// The packed secret key lives in a heap block of its own (so that moving
+		// a keypair copies no secret bytes); dropping the keypair must wipe that
+		// block before it is freed.
+		WIPED_BLOCK_SIZE
+			.store(qp_rusty_crystals_dilithium::$mod_name::SECRETKEYBYTES, Ordering::SeqCst);
+		drop(keypair);
+		WIPED_BLOCK_SIZE.store(0, Ordering::SeqCst);
+		assert!(
+			!KEY_FREED_UNCLEARED.load(Ordering::SeqCst),
+			concat!(
+				stringify!($mod_name),
+				": a dropped keypair freed its secret-key heap block without wiping it"
+			)
+		);
 	}};
 }
 

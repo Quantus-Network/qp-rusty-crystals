@@ -35,7 +35,7 @@
 //! which no source-level fix can wipe.
 #![cfg(not(debug_assertions))]
 
-use qp_rusty_crystals_test_utils::probe_stack_for;
+use qp_rusty_crystals_test_utils::{probe_stack_for, probe_stack_for_named};
 
 // 4 MiB: comfortably above the keygen/signing frames (matrix expansion,
 // NTT chains, rejection-sampling loops).
@@ -53,8 +53,8 @@ macro_rules! sign_stack_zeroization_tests {
 	($mod_name:ident, $feature:literal) => {
 		#[cfg(feature = $feature)]
 		mod $mod_name {
-			use super::{probe_stack_for, sk_window};
-			use qp_rusty_crystals_dilithium::$mod_name::Keypair;
+			use super::{probe_stack_for, probe_stack_for_named, sk_window};
+			use qp_rusty_crystals_dilithium::{$mod_name::Keypair, SensitiveBytes32};
 			use zeroize::Zeroize;
 
 			/// Distinctive seed; a repeated single byte could false-positive
@@ -158,6 +158,59 @@ macro_rules! sign_stack_zeroization_tests {
 					!keygen_leaked_seed,
 					"key generation left the raw input seed in stack memory"
 				);
+			}
+
+			/// Security review: handing a keypair on must not copy its secret key.
+			/// A Rust move is a bytewise copy whose source is never dropped, so
+			/// with the packed key stored inline in the struct each of these
+			/// shapes left the full key in the moved-from stack slot, beyond the
+			/// reach of `ZeroizeOnDrop`. The key lives in a heap block of its own
+			/// instead, and a move copies only the pointer to it.
+			#[test]
+			fn moving_a_keypair_leaves_no_secret_copies_on_the_stack() {
+				#[inline(never)]
+				fn boxed(entropy: &mut SensitiveBytes32) -> Box<Keypair> {
+					Box::new(Keypair::generate(entropy))
+				}
+				#[inline(never)]
+				fn filled_then_returned(entropy: &mut SensitiveBytes32) -> Keypair {
+					let mut keypair = Keypair::zeroed();
+					Keypair::generate_into(entropy, &mut keypair);
+					keypair
+				}
+				#[inline(never)]
+				fn filled_then_wrapped(entropy: &mut SensitiveBytes32) -> Option<Keypair> {
+					Some(filled_then_returned(entropy))
+				}
+
+				let mut seed = SEED;
+				let keypair = Keypair::generate(&mut (&mut seed).into());
+				let sk_bytes = keypair.secret().to_bytes();
+				let k_pattern = sk_window(sk_bytes.as_slice(), 32);
+				let s1_pattern = sk_window(sk_bytes.as_slice(), 128);
+				let patterns = [("K", &k_pattern[..]), ("packed s1", &s1_pattern[..])];
+
+				let shapes: [(&str, fn(&mut SensitiveBytes32)); 3] = [
+					("boxed", |entropy| {
+						core::hint::black_box(&boxed(entropy));
+					}),
+					("filled in place, then returned", |entropy| {
+						core::hint::black_box(&filled_then_returned(entropy));
+					}),
+					("filled in place, then wrapped", |entropy| {
+						core::hint::black_box(&filled_then_wrapped(entropy));
+					}),
+				];
+				for (shape, run) in shapes {
+					let mut seed = SEED;
+					let mut entropy = (&mut seed).into();
+					let leaked =
+						probe_stack_for_named(super::STACK_BYTES, &patterns, || run(&mut entropy));
+					assert!(
+						leaked.is_empty(),
+						"a keypair that was {shape} left {leaked:?} in stack memory"
+					);
+				}
 			}
 		}
 	};
