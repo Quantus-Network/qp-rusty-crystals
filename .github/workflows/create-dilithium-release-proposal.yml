@@ -132,6 +132,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.ADMIN_PAT }}
           SOURCE_BRANCH: ${{ needs.calculate-next-version.outputs.source_branch }}
           TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
+          IS_DRAFT: ${{ github.event.inputs.is_draft }}
+          VERSION_TYPE: ${{ github.event.inputs.version_type }}
         run: |
           set -ex
           # Extract version without dilithium- prefix
@@ -165,13 +167,13 @@ jobs:
 
           # Prepare labels
           PR_LABELS="automated,dilithium-release-proposal"
-          if [[ "${{ github.event.inputs.is_draft }}" == "true" ]]; then
+          if [[ "$IS_DRAFT" == "true" ]]; then
             PR_LABELS="$PR_LABELS,draft-release"
           fi
 
           gh pr create \
             --title "$PR_TITLE" \
-            --body "$(printf "Automated dilithium version bump for release %s.\\n\\n%s\\n\\nTriggered by workflow run: %s\\n\\nType: %s" "$NEW_VERSION" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" "${{ github.event.inputs.version_type }}")" \
+            --body "$(printf "Automated dilithium version bump for release %s.\\n\\n%s\\n\\nTriggered by workflow run: %s\\n\\nType: %s" "$NEW_VERSION" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" "$VERSION_TYPE")" \
             --base "$TARGET_BRANCH" \
             --head "$branch_name" \
             --label "$PR_LABELS"

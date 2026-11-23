@@ -156,6 +156,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.ADMIN_PAT }}
           SOURCE_BRANCH: ${{ needs.calculate-next-version.outputs.source_branch }}
           TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
+          IS_DRAFT: ${{ github.event.inputs.is_draft }}
+          VERSION_TYPE: ${{ github.event.inputs.version_type }}
           UPDATE_DILITHIUM: ${{ github.event.inputs.update_dilithium_dependency }}
         run: |
           set -ex
@@ -199,7 +201,7 @@ jobs:
 
           # Prepare labels
           PR_LABELS="automated,hdwallet-release-proposal"
-          if [[ "${{ github.event.inputs.is_draft }}" == "true" ]]; then
+          if [[ "$IS_DRAFT" == "true" ]]; then
             PR_LABELS="$PR_LABELS,draft-release"
           fi
 
@@ -208,7 +210,7 @@ jobs:
           if [[ "$UPDATE_DILITHIUM" == "true" && -n "$LATEST_DILITHIUM_VERSION" ]]; then
             PR_BODY="$PR_BODY\n\nAlso updates dilithium dependency to version $LATEST_DILITHIUM_VERSION."
           fi
-          PR_BODY="$PR_BODY\n\nTriggered by workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\nType: ${{ github.event.inputs.version_type }}"
+          PR_BODY="$PR_BODY\n\nTriggered by workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\nType: $VERSION_TYPE"
 
           gh pr create \
             --title "$PR_TITLE" \
