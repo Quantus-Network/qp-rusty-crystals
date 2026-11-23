@@ -151,7 +151,6 @@ This repository has 100% code coverage for all critical logic and functionality.
 |-------|---------|
 | `qp-rusty-crystals-dilithium` | [Apache-2.0](LICENSE) |
 | `qp-rusty-crystals-hdwallet` | [Apache-2.0](LICENSE) |
-| `qp-rusty-crystals-threshold` | [Apache-2.0](LICENSE) |
 | `qp-rusty-crystals-lattice-attack` | [Apache-2.0](LICENSE) |
 
 Versions of `qp-rusty-crystals-hdwallet` up to and including 4.1.1 are GPL-3.0-only: their `hderive` module was derived from tiny-hderive, which is licensed under GPL-3.0. That code has since been replaced by a re-implementation written from a specification.

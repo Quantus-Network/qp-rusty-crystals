@@ -2,8 +2,8 @@
 //!
 //! Run an operation on a sentinel-painted stack buffer via `psm::on_stack`,
 //! then scan the buffer for secret patterns. Used by the
-//! `*_stack_zeroization` integration tests across dilithium, hdwallet, and
-//! threshold. Unit-test probes that cannot take a `dev-dependency` keep a
+//! `*_stack_zeroization` integration tests across dilithium and hdwallet.
+//! Unit-test probes that cannot take a `dev-dependency` keep a
 //! local copy.
 
 use std::{

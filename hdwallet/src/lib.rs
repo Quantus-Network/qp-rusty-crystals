@@ -6,8 +6,8 @@
 //! ## Parameter sets
 //!
 //! ML-DSA parameter sets are selected with additive cargo features
-//! (`ml-dsa-44`, `ml-dsa-65`, `ml-dsa-87`; default: `ml-dsa-87`). Unlike the
-//! threshold crate, the features are not mutually prioritized: enabling
+//! (`ml-dsa-44`, `ml-dsa-65`, `ml-dsa-87`; default: `ml-dsa-87`). The
+//! features are not mutually prioritized: enabling
 //! several exposes one key-derivation module per variant ([`ml_dsa_44`],
 //! [`ml_dsa_65`], [`ml_dsa_87`]) so a wallet can hold keys at multiple
 //! security levels. The top-level [`derive_key_from_seed`] /
