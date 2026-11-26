@@ -2,7 +2,6 @@
 members = [
 	"dilithium",
 	"hdwallet",
-	"lattice-attack",
 	"test-utils",
 	"tests",
 ]
