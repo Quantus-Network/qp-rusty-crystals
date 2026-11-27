@@ -9,11 +9,6 @@ use alloc::string::ToString;
 pub(crate) const MNEMONIC: &str =
 	"rocket primary way job input cactus submit menu zoo burger rent impose";
 const PATH: &str = "m/44'/189189'/0'/0'/0'";
-const OTHER_PATH: &str = "m/44'/189189'/1'/0'/0'";
-#[cfg(feature = "slh-dsa")]
-pub(crate) const SLH_DSA_PATH: &str = "m/44'/189189'/0'/0'/2'";
-#[cfg(feature = "slh-dsa")]
-const OTHER_SLH_DSA_PATH: &str = "m/44'/189189'/1'/0'/2'";
 
 /// Test helper: stretch [`MNEMONIC`] into a fresh seed.
 pub(crate) fn test_seed() -> crate::SensitiveBytes64 {
@@ -25,11 +20,14 @@ pub(crate) fn test_seed() -> crate::SensitiveBytes64 {
 /// Per-variant coverage: derivation is deterministic, mnemonic and seed
 /// entrypoints agree, and the derived keypair signs and verifies.
 macro_rules! variant_tests {
-	($mod_name:ident, $feature:literal, $path:ident, $other_path:ident) => {
+	($mod_name:ident, $feature:literal, $index:literal) => {
 		#[cfg(feature = $feature)]
 		mod $mod_name {
-			use super::{test_seed, $other_path as OTHER_PATH, $path as PATH, MNEMONIC};
+			use super::{test_seed, MNEMONIC};
 			use crate::$mod_name::{derive_key_from_mnemonic, Keypair};
+
+			const PATH: &str = concat!("m/44'/189189'/0'/0'/", $index);
+			const OTHER_PATH: &str = concat!("m/44'/189189'/1'/0'/", $index);
 
 			#[test]
 			fn derivation_is_deterministic_and_matches_seed_entrypoint() {
@@ -75,16 +73,16 @@ macro_rules! variant_tests {
 	};
 }
 
-variant_tests!(ml_dsa_44, "ml-dsa-44", PATH, OTHER_PATH);
-variant_tests!(ml_dsa_65, "ml-dsa-65", PATH, OTHER_PATH);
-variant_tests!(ml_dsa_87, "ml-dsa-87", PATH, OTHER_PATH);
+variant_tests!(ml_dsa_44, "ml-dsa-44", "0'");
+variant_tests!(ml_dsa_65, "ml-dsa-65", "0'");
+variant_tests!(ml_dsa_87, "ml-dsa-87", "0'");
 // The small-signature sets sign too slowly for an unoptimized test build.
-variant_tests!(slh_dsa_sha2_128f, "slh-dsa", SLH_DSA_PATH, OTHER_SLH_DSA_PATH);
-variant_tests!(slh_dsa_shake_128f, "slh-dsa", SLH_DSA_PATH, OTHER_SLH_DSA_PATH);
-variant_tests!(slh_dsa_sha2_192f, "slh-dsa", SLH_DSA_PATH, OTHER_SLH_DSA_PATH);
-variant_tests!(slh_dsa_shake_192f, "slh-dsa", SLH_DSA_PATH, OTHER_SLH_DSA_PATH);
-variant_tests!(slh_dsa_sha2_256f, "slh-dsa", SLH_DSA_PATH, OTHER_SLH_DSA_PATH);
-variant_tests!(slh_dsa_shake_256f, "slh-dsa", SLH_DSA_PATH, OTHER_SLH_DSA_PATH);
+variant_tests!(slh_dsa_sha2_128f, "slh-dsa", "4'");
+variant_tests!(slh_dsa_shake_128f, "slh-dsa", "5'");
+variant_tests!(slh_dsa_sha2_192f, "slh-dsa", "8'");
+variant_tests!(slh_dsa_shake_192f, "slh-dsa", "9'");
+variant_tests!(slh_dsa_sha2_256f, "slh-dsa", "12'");
+variant_tests!(slh_dsa_shake_256f, "slh-dsa", "13'");
 
 /// The same mnemonic and path must yield *independent* keys per parameter set
 /// (FIPS 204 keygen absorbs `(k, ℓ)` into the seed expansion, so this holds by

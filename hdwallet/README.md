@@ -44,18 +44,31 @@ modules. It is off by default.
 use qp_rusty_crystals_hdwallet::slh_dsa_sha2_256s::{derive_key_from_mnemonic, Keypair};
 
 let mut keypair = Keypair::zeroed();
-derive_key_from_mnemonic(&mnemonic, None, "m/44'/189189'/0'/0'/2'", &mut keypair)?;
+derive_key_from_mnemonic(&mnemonic, None, "m/44'/189189'/0'/0'/10'", &mut keypair)?;
 ```
 
-The last path index names the signature scheme. SLH-DSA keys are only derived
-at paths that end in `2'` under the Quantus coin type, so an SLH-DSA key never
-shares a path with an ML-DSA key. Any other path fails with `InvalidSlhDsaPath`.
+The last path index names the signature scheme and parameter set. Each SLH-DSA
+parameter set has its own index, in FIPS 205 order. A key is only derived at
+`m/44'/189189'/account'/change'/index'` with the index of its parameter set.
+Any other path fails with `InvalidSlhDsaPath`. Each module exports its index
+as `ADDRESS_INDEX`.
 
 | Last index | Scheme |
 |------------|--------|
 | `0'` | ML-DSA-87 |
 | `1'` | ML-DSA-65 |
-| `2'` | SLH-DSA |
+| `2'` | SLH-DSA-SHA2-128s |
+| `3'` | SLH-DSA-SHAKE-128s |
+| `4'` | SLH-DSA-SHA2-128f |
+| `5'` | SLH-DSA-SHAKE-128f |
+| `6'` | SLH-DSA-SHA2-192s |
+| `7'` | SLH-DSA-SHAKE-192s |
+| `8'` | SLH-DSA-SHA2-192f |
+| `9'` | SLH-DSA-SHAKE-192f |
+| `10'` | SLH-DSA-SHA2-256s |
+| `11'` | SLH-DSA-SHAKE-256s |
+| `12'` | SLH-DSA-SHA2-256f |
+| `13'` | SLH-DSA-SHAKE-256f |
 
 The ML-DSA rows are a convention of the wallets. This crate does not enforce
 them. Wormhole keys are told apart by their coin type (`189189189'`) instead.
@@ -67,8 +80,8 @@ generation seed `SK.seed || SK.prf || PK.seed`:
 seed = SHAKE256("qp-rusty-crystals-hdwallet/slh-dsa-seed/" || name || entropy)
 ```
 
-`name` is the parameter set name, for example `SLH-DSA-SHA2-256s`, so one path
-yields independent keys per parameter set.
+`name` is the parameter set name, for example `SLH-DSA-SHA2-256s`. It keeps the
+seeds of two parameter sets unrelated even if the index table ever changes.
 
 ## Standard expected derivation path
 We use 44 for purpose, 189189 for coin type (Quantus), and account index for account
@@ -155,7 +168,7 @@ m / purpose' / coin_type' / account' / change' / address_index'
 
 Example paths:
 - `m/44'/189189'/0'/0'/0'` - First address of first account
-- `m/44'/189189'/0'/0'/2'` - SLH-DSA key of first account
+- `m/44'/189189'/0'/0'/10'` - SLH-DSA-SHA2-256s key of first account
 - `m/44'/189189'/1'/0'/0'` - First address of second account
 - `m/44'/189189'/0'/1'/0'` - First change address
 

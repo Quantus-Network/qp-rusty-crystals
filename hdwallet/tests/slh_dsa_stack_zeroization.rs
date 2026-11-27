@@ -8,7 +8,6 @@ use qp_rusty_crystals_test_utils::probe_stack_for_named;
 
 const STACK_BYTES: usize = 1024 * 1024;
 const SEED: [u8; 64] = *b"slh-dsa-probe-seed-first-half-0Aslh-dsa-probe-seed-second-half0B";
-const PATH: &str = "m/44'/189189'/0'/0'/2'";
 const MNEMONIC: &str =
 	"legal winner thank year wave sausage worth useful legal winner thank yellow";
 
@@ -23,8 +22,12 @@ macro_rules! probes {
 		mod $module {
 			use super::*;
 			use qp_rusty_crystals_hdwallet::$module::{
-				derive_key_from_mnemonic, derive_key_from_seed, Keypair,
+				derive_key_from_mnemonic, derive_key_from_seed, Keypair, ADDRESS_INDEX,
 			};
+
+			fn path() -> String {
+				format!("m/44'/189189'/0'/0'/{ADDRESS_INDEX}")
+			}
 
 			fn leaked(secret_key: &[u8], entropy: &[u8], f: impl FnOnce()) -> Vec<String> {
 				let n = secret_key.len() / 4;
@@ -39,10 +42,10 @@ macro_rules! probes {
 			#[test]
 			fn seed_derivation_leaves_no_secret() {
 				let mut reference = Keypair::zeroed();
-				derive_key_from_seed(&seed_holder(), PATH, &mut reference).unwrap();
+				derive_key_from_seed(&seed_holder(), &path(), &mut reference).unwrap();
 				let secret_key = reference.secret().to_bytes();
 				let mut xpriv = ExtendedPrivKey::zeroed();
-				ExtendedPrivKey::derive(&SEED, PATH, &mut xpriv).unwrap();
+				ExtendedPrivKey::derive(&SEED, &path(), &mut xpriv).unwrap();
 				let entropy = *xpriv.secret().as_bytes();
 
 				let planted = leaked(&secret_key[..], &entropy, || {
@@ -54,7 +57,7 @@ macro_rules! probes {
 				let found = leaked(&secret_key[..], &entropy, || {
 					let seed = seed_holder();
 					let mut keypair = Keypair::zeroed();
-					derive_key_from_seed(&seed, PATH, &mut keypair).unwrap();
+					derive_key_from_seed(&seed, &path(), &mut keypair).unwrap();
 					core::hint::black_box(&keypair);
 				});
 				assert!(found.is_empty(), "left on the stack: {found:?}");
@@ -63,12 +66,12 @@ macro_rules! probes {
 			#[test]
 			fn mnemonic_derivation_leaves_no_secret() {
 				let mut reference = Keypair::zeroed();
-				derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut reference).unwrap();
+				derive_key_from_mnemonic(MNEMONIC, None, &path(), &mut reference).unwrap();
 				let secret_key = reference.secret().to_bytes();
 
 				let found = leaked(&secret_key[..], &secret_key[..secret_key.len() / 4], || {
 					let mut keypair = Keypair::zeroed();
-					derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut keypair).unwrap();
+					derive_key_from_mnemonic(MNEMONIC, None, &path(), &mut keypair).unwrap();
 					core::hint::black_box(&keypair);
 				});
 				assert!(found.is_empty(), "left on the stack: {found:?}");
