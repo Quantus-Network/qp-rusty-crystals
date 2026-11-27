@@ -20,6 +20,7 @@ categories = ["cryptography"]
 # Parameter sets are selected through this crate's own ml-dsa-* features
 # (workspace pins dilithium with default-features = false).
 qp-rusty-crystals-dilithium = { workspace = true }
+qp-rusty-crystals-sphincs = { workspace = true, optional = true }
 unicode-normalization.workspace = true
 qp-poseidon-core.workspace = true
 zeroize = { workspace = true, features = ["alloc"] }
@@ -40,6 +41,8 @@ rand.workspace = true
 hmac.workspace = true
 psm.workspace = true
 qp-rusty-crystals-test-utils = { workspace = true }
+# Independent SHAKE256 for the SLH-DSA seed expansion test.
+sha3.workspace = true
 
 [features]
 default = ["ml-dsa-87", "std"]
@@ -50,3 +53,5 @@ std = []
 ml-dsa-44 = ["qp-rusty-crystals-dilithium/ml-dsa-44"]
 ml-dsa-65 = ["qp-rusty-crystals-dilithium/ml-dsa-65"]
 ml-dsa-87 = ["qp-rusty-crystals-dilithium/ml-dsa-87"]
+# SLH-DSA (FIPS 205): one key-derivation module per parameter set.
+slh-dsa = ["dep:qp-rusty-crystals-sphincs"]

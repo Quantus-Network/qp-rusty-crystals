@@ -1,6 +1,6 @@
 # Rusty Crystals
 
-A Rust implementation of the ML-DSA (CRYSTALS-Dilithium) post-quantum digital signature scheme with hierarchical deterministic (HD) wallet support.
+A Rust implementation of the ML-DSA (CRYSTALS-Dilithium) and SLH-DSA (SPHINCS+) post-quantum digital signature schemes with hierarchical deterministic (HD) wallet support.
 
 This workspace provides post-quantum cryptographic primitives and HD wallet functionality compatible with BIP-32, BIP-39, and BIP-44 standards.
 
@@ -30,9 +30,10 @@ This eliminates entire classes of security vulnerabilities related to sensitive 
 
 ## Overview
 
-This workspace contains two independent crates:
+This workspace contains three crates:
 
 - **`qp-rusty-crystals-dilithium`** - ML-DSA digital signature implementation
+- **`qp-rusty-crystals-sphincs`** - SLH-DSA digital signature implementation
 - **`qp-rusty-crystals-hdwallet`** - HD wallet for post-quantum keys
 
 ## Usage
@@ -99,12 +100,20 @@ ML-DSA digital signature implementation:
 - **Pure Rust** - Memory-safe, no unsafe code
 - **High Performance** - Optimized implementation
 
+### qp-rusty-crystals-sphincs
+SLH-DSA (FIPS 205) digital signature implementation. See [sphincs/README.md](sphincs/README.md).
+- **All twelve parameter sets** - SHA2 and SHAKE, categories 1, 3 and 5, small and fast
+- **Pure, pre-hash and internal interfaces**
+- **NIST Compliant** - Passes all NIST ACVP vectors for SLH-DSA
+- **Pure Rust** - `no_std`, no unsafe code
+
 ### qp-rusty-crystals-hdwallet
 Post-quantum HD wallet:
 - **BIP-39 Compatible** - Mnemonic phrase generation/restoration
 - **BIP-32 Derivation** - Hierarchical deterministic keys
 - **BIP-44 Paths** - Standard derivation paths
 - **Hardened Keys Only** - Secure post-quantum derivation
+- **SLH-DSA keys** - With the `slh-dsa` feature, at paths ending in the scheme index `2'`
 
 
 ## Testing
@@ -135,6 +144,14 @@ ML-DSA-44/65/87 via `test_nist_kat_ml_dsa_{44,65,87}` in
 bit-exact against the C reference). See `test_vectors/README_TEST_VECTORS.md`
 for regeneration steps.
 
+ACVP known-answer vectors for all twelve SLH-DSA parameter sets live under
+`sphincs/tests/acvp_vectors/`. The key generation and signing vectors only run
+in release builds:
+
+```bash
+cargo test -p qp-rusty-crystals-sphincs --release
+```
+
 ## Deep Wiki
 
 Use AI to explore this repository interactively!
@@ -151,6 +168,7 @@ This repository has 100% code coverage for all critical logic and functionality.
 |-------|---------|
 | `qp-rusty-crystals-dilithium` | [Apache-2.0](LICENSE) |
 | `qp-rusty-crystals-hdwallet` | [Apache-2.0](LICENSE) |
+| `qp-rusty-crystals-sphincs` | [Apache-2.0](LICENSE) |
 
 Versions of `qp-rusty-crystals-hdwallet` up to and including 4.1.1 are GPL-3.0-only: their `hderive` module was derived from tiny-hderive, which is licensed under GPL-3.0. That code has since been replaced by a re-implementation written from a specification.
 
@@ -159,5 +177,7 @@ Versions of `qp-rusty-crystals-dilithium` up to and including 4.1.1 are GPL-3.0-
 ## Acknowledgements
 
 The ML-DSA arithmetic, packing and Keccak code is a Rust port of the [pq-crystals](https://github.com/pq-crystals/dilithium) reference implementation, which its authors release as public domain (CC0) or under Apache-2.0.
+
+The SLH-DSA code follows [slhdsa-c](https://github.com/pq-code-package/slhdsa-c), which its authors license under Apache-2.0, ISC or MIT.
 
 Up to and including version 4.1.1, the hdwallet `hderive` module was ported from [nam-tiny-hderive](https://github.com/namada-net/tiny-hderive), the Namada fork of [tiny-hderive](https://github.com/maciejhirsz/tiny-hderive). The current module is a re-implementation written from a specification.

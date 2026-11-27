@@ -6,11 +6,17 @@
 
 use alloc::string::ToString;
 
-const MNEMONIC: &str = "rocket primary way job input cactus submit menu zoo burger rent impose";
+pub(crate) const MNEMONIC: &str =
+	"rocket primary way job input cactus submit menu zoo burger rent impose";
 const PATH: &str = "m/44'/189189'/0'/0'/0'";
+const OTHER_PATH: &str = "m/44'/189189'/1'/0'/0'";
+#[cfg(feature = "slh-dsa")]
+pub(crate) const SLH_DSA_PATH: &str = "m/44'/189189'/0'/0'/2'";
+#[cfg(feature = "slh-dsa")]
+const OTHER_SLH_DSA_PATH: &str = "m/44'/189189'/1'/0'/2'";
 
 /// Test helper: stretch [`MNEMONIC`] into a fresh seed.
-fn test_seed() -> crate::SensitiveBytes64 {
+pub(crate) fn test_seed() -> crate::SensitiveBytes64 {
 	let mut seed = crate::SensitiveBytes64::zeroed();
 	crate::mnemonic_to_seed(MNEMONIC.to_string(), None, &mut seed).expect("valid mnemonic");
 	seed
@@ -19,10 +25,10 @@ fn test_seed() -> crate::SensitiveBytes64 {
 /// Per-variant coverage: derivation is deterministic, mnemonic and seed
 /// entrypoints agree, and the derived keypair signs and verifies.
 macro_rules! variant_tests {
-	($mod_name:ident, $feature:literal) => {
+	($mod_name:ident, $feature:literal, $path:ident, $other_path:ident) => {
 		#[cfg(feature = $feature)]
 		mod $mod_name {
-			use super::{test_seed, MNEMONIC, PATH};
+			use super::{test_seed, $other_path as OTHER_PATH, $path as PATH, MNEMONIC};
 			use crate::$mod_name::{derive_key_from_mnemonic, Keypair};
 
 			#[test]
@@ -45,15 +51,14 @@ macro_rules! variant_tests {
 				derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut keypair).unwrap();
 				let message = b"hdwallet multi-variant test message";
 				let signature = keypair.sign(message, None, None).expect("signing");
-				assert!(keypair.verify(message, &signature, None));
-				assert!(!keypair.verify(b"different message", &signature, None));
+				assert!(keypair.verify(message, &signature[..], None));
+				assert!(!keypair.verify(b"different message", &signature[..], None));
 			}
 
 			#[test]
 			fn different_paths_derive_different_keys() {
 				let mut other = Keypair::zeroed();
-				derive_key_from_mnemonic(MNEMONIC, None, "m/44'/189189'/1'/0'/0'", &mut other)
-					.unwrap();
+				derive_key_from_mnemonic(MNEMONIC, None, OTHER_PATH, &mut other).unwrap();
 				let mut base = Keypair::zeroed();
 				derive_key_from_mnemonic(MNEMONIC, None, PATH, &mut base).unwrap();
 				assert_ne!(base.public().bytes.to_vec(), other.public().bytes.to_vec());
@@ -70,9 +75,16 @@ macro_rules! variant_tests {
 	};
 }
 
-variant_tests!(ml_dsa_44, "ml-dsa-44");
-variant_tests!(ml_dsa_65, "ml-dsa-65");
-variant_tests!(ml_dsa_87, "ml-dsa-87");
+variant_tests!(ml_dsa_44, "ml-dsa-44", PATH, OTHER_PATH);
+variant_tests!(ml_dsa_65, "ml-dsa-65", PATH, OTHER_PATH);
+variant_tests!(ml_dsa_87, "ml-dsa-87", PATH, OTHER_PATH);
+// The small-signature sets sign too slowly for an unoptimized test build.
+variant_tests!(slh_dsa_sha2_128f, "slh-dsa", SLH_DSA_PATH, OTHER_SLH_DSA_PATH);
+variant_tests!(slh_dsa_shake_128f, "slh-dsa", SLH_DSA_PATH, OTHER_SLH_DSA_PATH);
+variant_tests!(slh_dsa_sha2_192f, "slh-dsa", SLH_DSA_PATH, OTHER_SLH_DSA_PATH);
+variant_tests!(slh_dsa_shake_192f, "slh-dsa", SLH_DSA_PATH, OTHER_SLH_DSA_PATH);
+variant_tests!(slh_dsa_sha2_256f, "slh-dsa", SLH_DSA_PATH, OTHER_SLH_DSA_PATH);
+variant_tests!(slh_dsa_shake_256f, "slh-dsa", SLH_DSA_PATH, OTHER_SLH_DSA_PATH);
 
 /// The same mnemonic and path must yield *independent* keys per parameter set
 /// (FIPS 204 keygen absorbs `(k, ℓ)` into the seed expansion, so this holds by

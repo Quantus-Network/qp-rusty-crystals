@@ -1,0 +1,29 @@
+[package]
+name = "qp-rusty-crystals-sphincs"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Pure Quantus RUST implementation of the SLH-DSA (SPHINCS+, FIPS 205) digital signature scheme"
+readme = "README.md"
+homepage = "https://www.quantus.com"
+repository = "https://github.com/Quantus-Network/qp-rusty-crystals"
+keywords = [
+	"cryptography",
+	"post-quantum",
+	"quantus-network",
+	"slh-dsa",
+	"sphincs",
+]
+categories = ["cryptography"]
+exclude = ["tests/acvp_vectors"]
+
+[dependencies]
+qp-rusty-crystals-dilithium = { workspace = true }
+sha2 = { workspace = true, features = ["compress"] }
+zeroize = { workspace = true, features = ["alloc"] }
+
+[dev-dependencies]
+hex = { workspace = true }
+qp-rusty-crystals-test-utils = { workspace = true }
+serde_json = { workspace = true }
+sha3 = { workspace = true }

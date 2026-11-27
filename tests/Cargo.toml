@@ -11,7 +11,12 @@ std = []
 
 [dev-dependencies]
 qp-rusty-crystals-dilithium = { workspace = true, features = ["ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
-qp-rusty-crystals-hdwallet = { workspace = true, features = ["ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
+qp-rusty-crystals-hdwallet = { workspace = true, features = [
+	"ml-dsa-44",
+	"ml-dsa-65",
+	"ml-dsa-87",
+	"slh-dsa",
+] }
 rand = { workspace = true, features = ["std", "std_rng"] }
 aes = { workspace = true }
 cipher = { workspace = true }

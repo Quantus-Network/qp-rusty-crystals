@@ -79,6 +79,28 @@ done
 - Add the **external-interface** sigGen/sigVer groups via the public
   `ml_dsa_*` APIs (exercises the domain-separation prefix + context handling).
 
+## ACVP KAT harness for SLH-DSA (FIPS 205)
+
+Implemented in **`sphincs/src/acvp.rs`** against vendored NIST vectors in
+**`sphincs/tests/acvp_vectors/`**. The key generation and signing vectors are
+slow without optimizations, so they only run in release builds:
+
+```bash
+cargo test -p qp-rusty-crystals-sphincs --release --lib acvp
+```
+
+Coverage for each of the twelve parameter sets, all passing:
+
+| Mode | Vectors | What it exercises |
+|------|---------|-------------------|
+| keyGen | 10 | `(SK.seed, SK.prf, PK.seed) -> (pk, sk)` byte-exact |
+| sigGen | 52 | Internal, pure and pre-hash interfaces, deterministic and hedged. The signature is compared by its SHA-256, because full signatures would add about 33 MB of vectors. |
+| sigVer | 42 | Internal, pure and pre-hash interfaces, accept and reject cases |
+
+Unlike the ML-DSA harness, this one covers the external interfaces and
+HashSLH-DSA. The vectors come from ACVP-Server tag `v1.1.0.43`.
+`sphincs/tests/acvp_vectors/update.sh` rebuilds them.
+
 ## Path to an actual FIPS 140-3 certificate (base ML-DSA)
 
 Conformance KATs are necessary but not sufficient. For a real CMVP cert we'd need:
