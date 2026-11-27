@@ -121,6 +121,12 @@ fn rejects_malformed_paths() {
 }
 
 #[test]
+fn does_not_check_the_purpose() {
+	let mut keypair = Keypair::zeroed();
+	assert_eq!(derive_key_from_seed(&test_seed(), "m/0'/189189'/0'/0'/5'", &mut keypair), Ok(()));
+}
+
+#[test]
 fn keeps_generic_path_errors() {
 	let mut keypair = Keypair::zeroed();
 	assert_eq!(

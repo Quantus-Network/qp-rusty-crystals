@@ -27,8 +27,8 @@
 //! parameter set (`slh_dsa_sha2_128s`, ...). The last path index names the
 //! scheme: `0'` is ML-DSA-87, `1'` is ML-DSA-65, and the SLH-DSA sets take
 //! `2'` to `13'` in FIPS 205 order. An SLH-DSA key is only derived at
-//! `m/44'/189189'/account'/change'/index'` with the `ADDRESS_INDEX` of its
-//! module.
+//! `m/purpose'/189189'/account'/change'/index'` with the `ADDRESS_INDEX` of its
+//! module. The purpose is not checked.
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 

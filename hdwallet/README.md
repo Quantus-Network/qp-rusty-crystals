@@ -49,9 +49,10 @@ derive_key_from_mnemonic(&mnemonic, None, "m/44'/189189'/0'/0'/10'", &mut keypai
 
 The last path index names the signature scheme and parameter set. Each SLH-DSA
 parameter set has its own index, in FIPS 205 order. A key is only derived at
-`m/44'/189189'/account'/change'/index'` with the index of its parameter set.
-Any other path fails with `InvalidSlhDsaPath`. Each module exports its index
-as `ADDRESS_INDEX`.
+`m/purpose'/189189'/account'/change'/index'` with the index of its parameter
+set. A path with another coin type, depth or last index fails with
+`InvalidSlhDsaPath`. The purpose is not checked. The wallets use `44'`. Each
+module exports its index as `ADDRESS_INDEX`.
 
 | Last index | Scheme |
 |------------|--------|
