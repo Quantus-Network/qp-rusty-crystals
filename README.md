@@ -113,7 +113,7 @@ Post-quantum HD wallet:
 - **BIP-32 Derivation** - Hierarchical deterministic keys
 - **BIP-44 Paths** - Standard derivation paths
 - **Hardened Keys Only** - Secure post-quantum derivation
-- **SLH-DSA keys** - With the `slh-dsa` feature. Each parameter set has its own last path index, `2'` to `13'`
+- **SLH-DSA keys** - With the `slh-dsa` feature. Each security strength has its own last path index: `2'`, `3'` and `4'`
 
 
 ## Testing

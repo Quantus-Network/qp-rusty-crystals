@@ -11,7 +11,7 @@ use crate::{
 	hderive::{Error, ExtendedPrivKey},
 	slh_dsa_shake_128f::{derive_key_from_mnemonic, derive_key_from_seed, Keypair, ADDRESS_INDEX},
 	tests_variants::{test_seed, MNEMONIC},
-	HDLatticeError, SensitiveBytes32,
+	HDLatticeError,
 };
 
 fn path(index: &str) -> String {
@@ -33,7 +33,7 @@ macro_rules! per_set_tests {
 			)*
 		}
 
-		mod accepts_only_its_own_index {
+		mod accepts_only_the_index_of_its_strength {
 			use super::*;
 			$(
 				#[test]
@@ -52,31 +52,22 @@ macro_rules! per_set_tests {
 				}
 			)*
 		}
-
-		#[test]
-		fn indices_are_2_to_13_in_fips_205_order() {
-			let indices = [$($index),*];
-			for (position, index) in indices.iter().enumerate() {
-				assert_eq!(*index, format!("{}'", position + 2));
-			}
-			assert_eq!(indices.len(), 12);
-		}
 	};
 }
 
 per_set_tests! {
 	slh_dsa_sha2_128s, "2'" => "3c6f07ac0eaa0a6daf3d117268af9f886823437854185f1acb837f6e67f6e38f";
-	slh_dsa_shake_128s, "3'" => "a60c14b940ea2a83d6ee1ced1c6f5695f01435f28855b6f5ef2abc26d856b0f8";
-	slh_dsa_sha2_128f, "4'" => "47f8d6e8c5cccfd7a6818a938d09feb14e6d9c911f5da25a09009274e3bff40c";
-	slh_dsa_shake_128f, "5'" => "e2dd256eb8c9b6e995e3893f4cb97d946db9182d74583044335405c682c013ae";
-	slh_dsa_sha2_192s, "6'" => "3b2811491f0e38ee90ff7bdd0d8a71c073407375077ee45283c02605221a087e61cf1a8735c0679e4deff087121c5d61";
-	slh_dsa_shake_192s, "7'" => "32c715f172c36e3206a5b32ae595cfee9c54d984629458e46263347fe7c22850a1e32703fac76bd6cebdae68a7eaf718";
-	slh_dsa_sha2_192f, "8'" => "5a4327e2a17230c6fae5a588e01a2be5a1f8037dd848eaf1814fd6ac99ce2e117580bb2a14d0d96d88d2cacf4873fe58";
-	slh_dsa_shake_192f, "9'" => "904301f8788cf1446aebf28421341f3ab7fa7173b4f5be6c8ae95a96f8e96a129e6793b791420f0612bc90d512ee01fb";
-	slh_dsa_sha2_256s, "10'" => "2abb3cc15577a0c0e297e1697c6660dd020fe88be96bd2d07de94bc5b165f0c673470ea73d10f0dddc17fc99a9e19d525b8a2512a6be3b04d6c7a7006eccb9a0";
-	slh_dsa_shake_256s, "11'" => "d12528079d6e36e79b356ad03d8fcac48d915401d69bd10c91450e33f994f508b94e929d54b7fc658b7f37e6fa75ee79f3de63d04b17459781a5e03b1e27be2b";
-	slh_dsa_sha2_256f, "12'" => "76804e0055fc19ee6efe4482edf5c08e21467a4fd0039236c8b70d941a74c36eb33b80c2fbe1b766da289e90cebcdf1059496992ce6017435c3049863e0b324e";
-	slh_dsa_shake_256f, "13'" => "de97a09225bd09b89cf6e80a884570794fbc2cbadd90613de0a71234c77a8699bf01d20885f466c6f695bb5b214ebd1d620b9b3829f37946b0533e5e1d651969";
+	slh_dsa_shake_128s, "2'" => "c2fd91c3ee4cd958f356592dc812bf4eb3109bc10956523e272973c31c2811da";
+	slh_dsa_sha2_128f, "2'" => "c5fd08978e0d514d0b2f8952d4be0090942142269d5aec0fb7f6fd38552de9b3";
+	slh_dsa_shake_128f, "2'" => "fdfedcdcac0c3b367e4cbf8fe50b42abb704abf142683cedab36ba4fc8c127c0";
+	slh_dsa_sha2_192s, "3'" => "7ffd2cbbc13d0ec9faa74e0a652a97020a40580015349b89e0cf334e258844c29124bf2ac0c02945e3f5021402b4d47f";
+	slh_dsa_shake_192s, "3'" => "886d06fd4faa56fee6d2d23965c6cc74aa85089150038778c37d56bf153dcaa9db580950d6efe6433d69aad50c9c22c6";
+	slh_dsa_sha2_192f, "3'" => "f9d20846dac677d0e4874989e7eda000d6ae1a724bc60dc7a768afb9ea0e6d000eaad563190d19cb130886d03222b331";
+	slh_dsa_shake_192f, "3'" => "55e76bd67c5529ddbd64a899fd09c2d6eaa64a9687e4f862ace20f6d297cf9a56b8ed9157991751700d10284d444eaea";
+	slh_dsa_sha2_256s, "4'" => "05d516a5a4b5c5d903f8fb51100e31327d8457387643d30475c1eca7fdd7a42069d46f3f82f94913e7af9ab720c2dd2fd6ddfea9f3180172a6bb845c5910d6f9";
+	slh_dsa_shake_256s, "4'" => "f69e49a43cd22ef77b4422b199c60c92af8219c164780a711e9640e00fbbe5be50101d1ec3aa10555cdb1b344bc963bd296edd262141c3a145c7ef428a3a8186";
+	slh_dsa_sha2_256f, "4'" => "0bf6acbb643f7f98b2935adaf00579fdab1de9f6f4ab012737cf0b671efc5b517fef6cbc2d1cd999eafbc248a2fe185a86d91dae5de351ebba1f32d2c592093b";
+	slh_dsa_shake_256f, "4'" => "ae404b53f3f6023b3b2813fa4e2c439f193d6fe8324ee30db3596b1c28b5a68cb1c411b47c75628bcf3795ae82749cda58ed51567c7bc18cd67a233fb6744e79";
 }
 
 /// Rebuilds the key from the documented steps with an independent SHAKE256.
@@ -104,11 +95,11 @@ fn key_matches_the_documented_construction() {
 #[test]
 fn rejects_malformed_paths() {
 	let paths = [
-		"m/44'/189189189'/0'/0'/5'",
-		"m/44'/189189'/5'/0'/0'",
-		"m/44'/189189'/0'/5'",
-		"m/44'/189189'/0'/0'/5'/0'",
-		"m/44'/189189'/0'/0'/0'/5'",
+		"m/44'/189189189'/0'/0'/2'",
+		"m/44'/189189'/2'/0'/0'",
+		"m/44'/189189'/0'/2'",
+		"m/44'/189189'/0'/0'/2'/0'",
+		"m/44'/189189'/0'/0'/0'/2'",
 	];
 	for path in paths {
 		let error = Err(HDLatticeError::InvalidSlhDsaPath(path.to_string()));
@@ -123,26 +114,34 @@ fn rejects_malformed_paths() {
 #[test]
 fn does_not_check_the_purpose() {
 	let mut keypair = Keypair::zeroed();
-	assert_eq!(derive_key_from_seed(&test_seed(), "m/0'/189189'/0'/0'/5'", &mut keypair), Ok(()));
+	assert_eq!(derive_key_from_seed(&test_seed(), "m/0'/189189'/0'/0'/2'", &mut keypair), Ok(()));
 }
 
 #[test]
 fn keeps_generic_path_errors() {
 	let mut keypair = Keypair::zeroed();
 	assert_eq!(
-		derive_key_from_seed(&test_seed(), "m/44'/189189'/0'/0'/5", &mut keypair),
+		derive_key_from_seed(&test_seed(), "m/44'/189189'/0'/0'/2", &mut keypair),
 		Err(HDLatticeError::GenericError(Error::NotHardened))
 	);
 }
 
 #[test]
-fn seed_expansion_separates_parameter_sets() {
-	let entropy = SensitiveBytes32::zeroed();
-	let mut seeds = [[0u8; 48]; 3];
-	for (seed, name) in seeds.iter_mut().zip(["SLH-DSA-SHA2-128f", "SLH-DSA-SHAKE-128f", ""]) {
-		crate::expand_slh_dsa_seed(name, &entropy, seed);
+fn parameter_sets_sharing_a_path_get_independent_keys() {
+	let path = path(ADDRESS_INDEX);
+	let mut shake = Keypair::zeroed();
+	derive_key_from_seed(&test_seed(), &path, &mut shake).unwrap();
+	let mut sha2 = crate::slh_dsa_sha2_128f::Keypair::zeroed();
+	crate::slh_dsa_sha2_128f::derive_key_from_seed(&test_seed(), &path, &mut sha2).unwrap();
+	let mut small = crate::slh_dsa_shake_128s::Keypair::zeroed();
+	crate::slh_dsa_shake_128s::derive_key_from_seed(&test_seed(), &path, &mut small).unwrap();
+
+	let secrets = [shake.secret().to_bytes(), sha2.secret().to_bytes(), small.secret().to_bytes()];
+	for (i, a) in secrets.iter().enumerate() {
+		for b in &secrets[i + 1..] {
+			for part in 0..3 {
+				assert_ne!(a[16 * part..16 * (part + 1)], b[16 * part..16 * (part + 1)]);
+			}
+		}
 	}
-	assert_ne!(seeds[0][..16], seeds[1][..16]);
-	assert_ne!(seeds[0][..16], seeds[2][..16]);
-	assert_ne!(seeds[1][..16], seeds[2][..16]);
 }

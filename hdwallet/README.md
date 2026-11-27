@@ -44,13 +44,13 @@ modules. It is off by default.
 use qp_rusty_crystals_hdwallet::slh_dsa_sha2_256s::{derive_key_from_mnemonic, Keypair};
 
 let mut keypair = Keypair::zeroed();
-derive_key_from_mnemonic(&mnemonic, None, "m/44'/189189'/0'/0'/10'", &mut keypair)?;
+derive_key_from_mnemonic(&mnemonic, None, "m/44'/189189'/0'/0'/4'", &mut keypair)?;
 ```
 
-The last path index names the signature scheme and parameter set. Each SLH-DSA
-parameter set has its own index, in FIPS 205 order. A key is only derived at
-`m/purpose'/189189'/account'/change'/index'` with the index of its parameter
-set. A path with another coin type, depth or last index fails with
+The last path index names the signature scheme and its strength. SLH-DSA has
+one index per security strength. A key is only derived at
+`m/purpose'/189189'/account'/change'/index'` with the index of its strength.
+A path with another coin type, depth or last index fails with
 `InvalidSlhDsaPath`. The purpose is not checked. The wallets use `44'`. Each
 module exports its index as `ADDRESS_INDEX`.
 
@@ -58,18 +58,9 @@ module exports its index as `ADDRESS_INDEX`.
 |------------|--------|
 | `0'` | ML-DSA-87 |
 | `1'` | ML-DSA-65 |
-| `2'` | SLH-DSA-SHA2-128s |
-| `3'` | SLH-DSA-SHAKE-128s |
-| `4'` | SLH-DSA-SHA2-128f |
-| `5'` | SLH-DSA-SHAKE-128f |
-| `6'` | SLH-DSA-SHA2-192s |
-| `7'` | SLH-DSA-SHAKE-192s |
-| `8'` | SLH-DSA-SHA2-192f |
-| `9'` | SLH-DSA-SHAKE-192f |
-| `10'` | SLH-DSA-SHA2-256s |
-| `11'` | SLH-DSA-SHAKE-256s |
-| `12'` | SLH-DSA-SHA2-256f |
-| `13'` | SLH-DSA-SHAKE-256f |
+| `2'` | SLH-DSA, 128-bit sets (`128s`, `128f`) |
+| `3'` | SLH-DSA, 192-bit sets (`192s`, `192f`) |
+| `4'` | SLH-DSA, 256-bit sets (`256s`, `256f`) |
 
 The ML-DSA rows are a convention of the wallets. This crate does not enforce
 them. Wormhole keys are told apart by their coin type (`189189189'`) instead.
@@ -81,8 +72,9 @@ generation seed `SK.seed || SK.prf || PK.seed`:
 seed = SHAKE256("qp-rusty-crystals-hdwallet/slh-dsa-seed/" || name || entropy)
 ```
 
-`name` is the parameter set name, for example `SLH-DSA-SHA2-256s`. It keeps the
-seeds of two parameter sets unrelated even if the index table ever changes.
+`name` is the parameter set name, for example `SLH-DSA-SHA2-256s`. The four
+parameter sets of one strength share a path. The name gives each of them an
+independent key.
 
 ## Standard expected derivation path
 We use 44 for purpose, 189189 for coin type (Quantus), and account index for account
@@ -169,7 +161,7 @@ m / purpose' / coin_type' / account' / change' / address_index'
 
 Example paths:
 - `m/44'/189189'/0'/0'/0'` - First address of first account
-- `m/44'/189189'/0'/0'/10'` - SLH-DSA-SHA2-256s key of first account
+- `m/44'/189189'/0'/0'/4'` - 256-bit SLH-DSA key of first account
 - `m/44'/189189'/1'/0'/0'` - First address of second account
 - `m/44'/189189'/0'/1'/0'` - First change address
 

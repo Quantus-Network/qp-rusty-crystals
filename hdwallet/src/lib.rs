@@ -25,8 +25,8 @@
 //!
 //! The `slh-dsa` feature adds one key-derivation module per FIPS 205
 //! parameter set (`slh_dsa_sha2_128s`, ...). The last path index names the
-//! scheme: `0'` is ML-DSA-87, `1'` is ML-DSA-65, and the SLH-DSA sets take
-//! `2'` to `13'` in FIPS 205 order. An SLH-DSA key is only derived at
+//! scheme: `0'` is ML-DSA-87, `1'` is ML-DSA-65, and SLH-DSA takes `2'`, `3'`
+//! and `4'` for its 128, 192 and 256-bit sets. An SLH-DSA key is only derived at
 //! `m/purpose'/189189'/account'/change'/index'` with the `ADDRESS_INDEX` of its
 //! module. The purpose is not checked.
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -413,7 +413,7 @@ macro_rules! slh_dsa_variant_modules {
 				crate::expand_slh_dsa_seed(ALGORITHM, entropy, &mut seed[..]);
 				Keypair::generate_into(&mut seed, out)
 			},
-			/// Last path index of every key of this parameter set.
+			/// Last path index of every key of this security strength.
 			pub const ADDRESS_INDEX: &str = $index;
 		);
 	)*};
@@ -421,17 +421,17 @@ macro_rules! slh_dsa_variant_modules {
 
 slh_dsa_variant_modules! {
 	slh_dsa_sha2_128s, "SLH-DSA-SHA2-128s", "2'";
-	slh_dsa_shake_128s, "SLH-DSA-SHAKE-128s", "3'";
-	slh_dsa_sha2_128f, "SLH-DSA-SHA2-128f", "4'";
-	slh_dsa_shake_128f, "SLH-DSA-SHAKE-128f", "5'";
-	slh_dsa_sha2_192s, "SLH-DSA-SHA2-192s", "6'";
-	slh_dsa_shake_192s, "SLH-DSA-SHAKE-192s", "7'";
-	slh_dsa_sha2_192f, "SLH-DSA-SHA2-192f", "8'";
-	slh_dsa_shake_192f, "SLH-DSA-SHAKE-192f", "9'";
-	slh_dsa_sha2_256s, "SLH-DSA-SHA2-256s", "10'";
-	slh_dsa_shake_256s, "SLH-DSA-SHAKE-256s", "11'";
-	slh_dsa_sha2_256f, "SLH-DSA-SHA2-256f", "12'";
-	slh_dsa_shake_256f, "SLH-DSA-SHAKE-256f", "13'";
+	slh_dsa_shake_128s, "SLH-DSA-SHAKE-128s", "2'";
+	slh_dsa_sha2_128f, "SLH-DSA-SHA2-128f", "2'";
+	slh_dsa_shake_128f, "SLH-DSA-SHAKE-128f", "2'";
+	slh_dsa_sha2_192s, "SLH-DSA-SHA2-192s", "3'";
+	slh_dsa_shake_192s, "SLH-DSA-SHAKE-192s", "3'";
+	slh_dsa_sha2_192f, "SLH-DSA-SHA2-192f", "3'";
+	slh_dsa_shake_192f, "SLH-DSA-SHAKE-192f", "3'";
+	slh_dsa_sha2_256s, "SLH-DSA-SHA2-256s", "4'";
+	slh_dsa_shake_256s, "SLH-DSA-SHAKE-256s", "4'";
+	slh_dsa_sha2_256f, "SLH-DSA-SHA2-256f", "4'";
+	slh_dsa_shake_256f, "SLH-DSA-SHAKE-256f", "4'";
 }
 
 /// Domain separator of the SLH-DSA seed expansion.
@@ -439,8 +439,8 @@ slh_dsa_variant_modules! {
 const SLH_DSA_SEED_DOMAIN: &[u8] = b"qp-rusty-crystals-hdwallet/slh-dsa-seed/";
 
 /// Expands the path entropy into an SLH-DSA key generation seed with
-/// SHAKE256. The parameter set name is absorbed, so the seeds of two
-/// parameter sets are unrelated whatever their paths.
+/// SHAKE256. The parameter set name is absorbed, so the parameter sets
+/// that share a path get independent keys.
 #[cfg(feature = "slh-dsa")]
 fn expand_slh_dsa_seed(algorithm: &str, entropy: &SensitiveBytes32, seed: &mut [u8]) {
 	use qp_rusty_crystals_dilithium::fips202::{
@@ -579,7 +579,7 @@ fn check_wormhole_path(path: &str) -> Result<(), HDLatticeError> {
 }
 
 /// Validate an SLH-DSA derivation path: generic path checks, the Quantus coin
-/// type and the parameter set's index, `m/purpose'/189189'/account'/change'/index'`.
+/// type and the strength's index, `m/purpose'/189189'/account'/change'/index'`.
 #[cfg(feature = "slh-dsa")]
 fn check_slh_dsa_path(path: &str, index: &str) -> Result<(), HDLatticeError> {
 	check_derivation_path(path)?;

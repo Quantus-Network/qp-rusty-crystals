@@ -77,12 +77,12 @@ variant_tests!(ml_dsa_44, "ml-dsa-44", "0'");
 variant_tests!(ml_dsa_65, "ml-dsa-65", "0'");
 variant_tests!(ml_dsa_87, "ml-dsa-87", "0'");
 // The small-signature sets sign too slowly for an unoptimized test build.
-variant_tests!(slh_dsa_sha2_128f, "slh-dsa", "4'");
-variant_tests!(slh_dsa_shake_128f, "slh-dsa", "5'");
-variant_tests!(slh_dsa_sha2_192f, "slh-dsa", "8'");
-variant_tests!(slh_dsa_shake_192f, "slh-dsa", "9'");
-variant_tests!(slh_dsa_sha2_256f, "slh-dsa", "12'");
-variant_tests!(slh_dsa_shake_256f, "slh-dsa", "13'");
+variant_tests!(slh_dsa_sha2_128f, "slh-dsa", "2'");
+variant_tests!(slh_dsa_shake_128f, "slh-dsa", "2'");
+variant_tests!(slh_dsa_sha2_192f, "slh-dsa", "3'");
+variant_tests!(slh_dsa_shake_192f, "slh-dsa", "3'");
+variant_tests!(slh_dsa_sha2_256f, "slh-dsa", "4'");
+variant_tests!(slh_dsa_shake_256f, "slh-dsa", "4'");
 
 /// The same mnemonic and path must yield *independent* keys per parameter set
 /// (FIPS 204 keygen absorbs `(k, ℓ)` into the seed expansion, so this holds by
