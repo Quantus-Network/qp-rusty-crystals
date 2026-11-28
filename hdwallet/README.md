@@ -1,6 +1,6 @@
 # qp-rusty-crystals-hdwallet
 
-Hierarchical Deterministic (HD) wallet implementation for post-quantum ML-DSA keys, compatible with BIP-32, BIP-39, and BIP-44 standards.
+Hierarchical Deterministic (HD) wallet implementation for post-quantum ML-DSA and SLH-DSA keys, compatible with BIP-32, BIP-39, and BIP-44 standards.
 
 ## Features
 
@@ -32,6 +32,49 @@ Deriving keys for different parameter sets from the same path is safe: FIPS 204
 key generation absorbs the parameter set's `(k, ℓ)` into the seed expansion, so
 the same derived entropy yields independent keys per variant. Mnemonic handling
 and the wormhole module work regardless of which ML-DSA features are enabled.
+
+## SLH-DSA
+
+The `slh-dsa` feature adds one key-derivation module per FIPS 205 parameter set
+(`slh_dsa_sha2_128s`, `slh_dsa_shake_256f`, ...), with the same
+`derive_key_from_seed` / `derive_key_from_mnemonic` functions as the ML-DSA
+modules. It is off by default.
+
+```rust
+use qp_rusty_crystals_hdwallet::slh_dsa_sha2_256s::{derive_key_from_mnemonic, Keypair};
+
+let mut keypair = Keypair::zeroed();
+derive_key_from_mnemonic(&mnemonic, None, "m/44'/189189'/0'/0'/4'", &mut keypair)?;
+```
+
+The last path index names the signature scheme and its strength. SLH-DSA has
+one index per security strength. A key is only derived at
+`m/purpose'/189189'/account'/change'/index'` with the index of its strength.
+A path with another coin type, depth or last index fails with
+`InvalidSlhDsaPath`. The purpose is not checked. The wallets use `44'`. Each
+module exports its index as `ADDRESS_INDEX`.
+
+| Last index | Scheme |
+|------------|--------|
+| `0'` | ML-DSA-87 |
+| `1'` | ML-DSA-65 |
+| `2'` | SLH-DSA, 128-bit sets (`128s`, `128f`) |
+| `3'` | SLH-DSA, 192-bit sets (`192s`, `192f`) |
+| `4'` | SLH-DSA, 256-bit sets (`256s`, `256f`) |
+
+The ML-DSA rows are a convention of the wallets. This crate does not enforce
+them. Wormhole keys are told apart by their coin type (`189189189'`) instead.
+
+The 32 bytes of path entropy are expanded with SHAKE256 into the SLH-DSA key
+generation seed `SK.seed || SK.prf || PK.seed`:
+
+```
+seed = SHAKE256("qp-rusty-crystals-hdwallet/slh-dsa-seed/" || name || entropy)
+```
+
+`name` is the parameter set name, for example `SLH-DSA-SHA2-256s`. The four
+parameter sets of one strength share a path. The name gives each of them an
+independent key.
 
 ## Standard expected derivation path
 We use 44 for purpose, 189189 for coin type (Quantus), and account index for account
@@ -118,6 +161,7 @@ m / purpose' / coin_type' / account' / change' / address_index'
 
 Example paths:
 - `m/44'/189189'/0'/0'/0'` - First address of first account
+- `m/44'/189189'/0'/0'/4'` - 256-bit SLH-DSA key of first account
 - `m/44'/189189'/1'/0'/0'` - First address of second account
 - `m/44'/189189'/0'/1'/0'` - First change address
 

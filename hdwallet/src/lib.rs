@@ -20,6 +20,15 @@
 //!
 //! Mnemonic handling and the wormhole module are parameter-set independent
 //! and available regardless of which (if any) ML-DSA features are enabled.
+//!
+//! ## SLH-DSA
+//!
+//! The `slh-dsa` feature adds one key-derivation module per FIPS 205
+//! parameter set (`slh_dsa_sha2_128s`, ...). The last path index names the
+//! scheme: `0'` is ML-DSA-87, `1'` is ML-DSA-65, and SLH-DSA takes `2'`, `3'`
+//! and `4'` for its 128, 192 and 256-bit sets. An SLH-DSA key is only derived at
+//! `m/purpose'/189189'/account'/change'/index'` with the `ADDRESS_INDEX` of its
+//! module. The purpose is not checked.
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 
@@ -47,6 +56,8 @@ mod test_vectors_44;
 mod test_vectors_65;
 #[cfg(all(test, feature = "ml-dsa-87"))]
 mod tests;
+#[cfg(all(test, feature = "slh-dsa"))]
+mod tests_slh_dsa;
 #[cfg(test)]
 mod tests_variants;
 
@@ -66,6 +77,7 @@ pub enum HDLatticeError {
 	BadEntropyBitCount(usize),
 	MnemonicDerivationFailed(String),
 	InvalidWormholePath(String),
+	InvalidSlhDsaPath(String),
 	InvalidPath(String),
 	PathTooLong(usize),
 	PathTooDeep(usize),
@@ -82,6 +94,7 @@ impl core::fmt::Display for HDLatticeError {
 			Self::BadEntropyBitCount(n) => write!(f, "Bad entropy bit count: {n}"),
 			Self::MnemonicDerivationFailed(e) => write!(f, "Mnemonic derivation failed: {e}"),
 			Self::InvalidWormholePath(p) => write!(f, "Invalid wormhole path: {p}"),
+			Self::InvalidSlhDsaPath(p) => write!(f, "Invalid SLH-DSA path: {p}"),
 			Self::InvalidPath(p) => write!(f, "Invalid BIP44 path: {p}"),
 			Self::PathTooLong(n) => write!(f, "Derivation path too long: {n} bytes"),
 			Self::PathTooDeep(n) => write!(f, "Derivation path too deep: {n} segments"),
@@ -287,16 +300,20 @@ fn derive_entropy_from_seed(
 	Ok(())
 }
 
-/// Stamp a per-variant key-derivation module mirroring the dilithium crate's
+/// Stamp a per-variant key-derivation module mirroring the signature crate's
 /// frontend layout. Each module exposes the variant's `Keypair` plus
 /// `derive_key_from_seed` / `derive_key_from_mnemonic` with the same
-/// contract as the top-level (ML-DSA-87) functions.
-macro_rules! mldsa_variant_module {
-	($mod_name:ident, $feature:literal, $doc_name:literal) => {
+/// contract as the top-level (ML-DSA-87) functions. `$check_path` validates
+/// the path, `$generate` turns the path entropy into the keypair and the
+/// `$item`s are added to the module.
+macro_rules! variant_module {
+	($krate:ident, $mod_name:ident, $feature:literal, $doc_name:literal, $check_path:expr, $generate:expr $(, $item:item)*) => {
 		#[cfg(feature = $feature)]
 		#[doc = concat!("HD key derivation for ", $doc_name, ".")]
 		pub mod $mod_name {
-			pub use qp_rusty_crystals_dilithium::$mod_name::Keypair;
+			pub use $krate::$mod_name::Keypair;
+
+			$($item)*
 
 			use crate::{HDLatticeError, SensitiveBytes32, SensitiveBytes64};
 
@@ -323,11 +340,12 @@ macro_rules! mldsa_variant_module {
 				path: &str,
 				out: &mut Keypair,
 			) -> Result<(), HDLatticeError> {
+				$check_path(path)?;
 				// The entropy is filled in place and lent to `generate_into`,
 				// which wipes it; it never crosses a boundary by value.
 				let mut entropy = SensitiveBytes32::zeroed();
 				crate::derive_entropy_from_seed(seed, path, &mut entropy)?;
-				Keypair::generate_into(&mut entropy, out);
+				$generate(&mut entropy, out);
 				Ok(())
 			}
 
@@ -351,7 +369,7 @@ macro_rules! mldsa_variant_module {
 				path: &str,
 				out: &mut Keypair,
 			) -> Result<(), HDLatticeError> {
-				crate::check_derivation_path(path)?;
+				$check_path(path)?;
 				// The stretched seed is filled in place and lent to
 				// `derive_key_from_seed`; moving it there by value left this
 				// local's stack slot unwiped (pinned by the seed
@@ -364,9 +382,77 @@ macro_rules! mldsa_variant_module {
 	};
 }
 
+macro_rules! mldsa_variant_module {
+	($mod_name:ident, $feature:literal, $doc_name:literal) => {
+		variant_module!(
+			qp_rusty_crystals_dilithium,
+			$mod_name,
+			$feature,
+			$doc_name,
+			crate::check_derivation_path,
+			Keypair::generate_into
+		);
+	};
+}
+
 mldsa_variant_module!(ml_dsa_44, "ml-dsa-44", "ML-DSA-44");
 mldsa_variant_module!(ml_dsa_65, "ml-dsa-65", "ML-DSA-65");
 mldsa_variant_module!(ml_dsa_87, "ml-dsa-87", "ML-DSA-87");
+
+macro_rules! slh_dsa_variant_modules {
+	($($mod_name:ident, $doc_name:literal, $index:literal;)*) => {$(
+		variant_module!(
+			qp_rusty_crystals_sphincs,
+			$mod_name,
+			"slh-dsa",
+			$doc_name,
+			|path: &str| crate::check_slh_dsa_path(path, ADDRESS_INDEX),
+			|entropy: &SensitiveBytes32, out: &mut Keypair| {
+				use qp_rusty_crystals_sphincs::$mod_name::{ALGORITHM, SEEDBYTES};
+				let mut seed = zeroize::Zeroizing::new([0u8; SEEDBYTES]);
+				crate::expand_slh_dsa_seed(ALGORITHM, entropy, &mut seed[..]);
+				Keypair::generate_into(&mut seed, out)
+			},
+			/// Last path index of every key of this security strength.
+			pub const ADDRESS_INDEX: &str = $index;
+		);
+	)*};
+}
+
+slh_dsa_variant_modules! {
+	slh_dsa_sha2_128s, "SLH-DSA-SHA2-128s", "2'";
+	slh_dsa_shake_128s, "SLH-DSA-SHAKE-128s", "2'";
+	slh_dsa_sha2_128f, "SLH-DSA-SHA2-128f", "2'";
+	slh_dsa_shake_128f, "SLH-DSA-SHAKE-128f", "2'";
+	slh_dsa_sha2_192s, "SLH-DSA-SHA2-192s", "3'";
+	slh_dsa_shake_192s, "SLH-DSA-SHAKE-192s", "3'";
+	slh_dsa_sha2_192f, "SLH-DSA-SHA2-192f", "3'";
+	slh_dsa_shake_192f, "SLH-DSA-SHAKE-192f", "3'";
+	slh_dsa_sha2_256s, "SLH-DSA-SHA2-256s", "4'";
+	slh_dsa_shake_256s, "SLH-DSA-SHAKE-256s", "4'";
+	slh_dsa_sha2_256f, "SLH-DSA-SHA2-256f", "4'";
+	slh_dsa_shake_256f, "SLH-DSA-SHAKE-256f", "4'";
+}
+
+/// Domain separator of the SLH-DSA seed expansion.
+#[cfg(feature = "slh-dsa")]
+const SLH_DSA_SEED_DOMAIN: &[u8] = b"qp-rusty-crystals-hdwallet/slh-dsa-seed/";
+
+/// Expands the path entropy into an SLH-DSA key generation seed with
+/// SHAKE256. The parameter set name is absorbed, so the parameter sets
+/// that share a path get independent keys.
+#[cfg(feature = "slh-dsa")]
+fn expand_slh_dsa_seed(algorithm: &str, entropy: &SensitiveBytes32, seed: &mut [u8]) {
+	use qp_rusty_crystals_dilithium::fips202::{
+		shake256_absorb, shake256_finalize, shake256_squeeze, Shake256State,
+	};
+	let mut state = Shake256State::default();
+	shake256_absorb(&mut state, SLH_DSA_SEED_DOMAIN);
+	shake256_absorb(&mut state, algorithm.as_bytes());
+	shake256_absorb(&mut state, entropy.as_bytes());
+	shake256_finalize(&mut state);
+	shake256_squeeze(seed, &mut state);
+}
 
 /// Derive a Dilithium (ML-DSA-87) keypair from a seed at the given BIP44 path
 ///
@@ -488,6 +574,21 @@ fn check_wormhole_path(path: &str) -> Result<(), HDLatticeError> {
 	check_derivation_path(path)?;
 	if path.split("/").nth(2) != Some(QUANTUS_WORMHOLE_CHAIN_ID) {
 		return Err(HDLatticeError::InvalidWormholePath(path.to_string()));
+	}
+	Ok(())
+}
+
+/// Validate an SLH-DSA derivation path: generic path checks, the Quantus coin
+/// type and the strength's index, `m/purpose'/189189'/account'/change'/index'`.
+#[cfg(feature = "slh-dsa")]
+fn check_slh_dsa_path(path: &str, index: &str) -> Result<(), HDLatticeError> {
+	check_derivation_path(path)?;
+	let mut segments = path.split('/');
+	if segments.nth(2) != Some(QUANTUS_DILITHIUM_CHAIN_ID) ||
+		segments.nth(2) != Some(index) ||
+		segments.next().is_some()
+	{
+		return Err(HDLatticeError::InvalidSlhDsaPath(path.to_string()));
 	}
 	Ok(())
 }

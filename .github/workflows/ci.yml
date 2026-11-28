@@ -78,6 +78,18 @@ jobs:
             cargo test --locked -p qp-rusty-crystals-hdwallet --no-default-features --features "std,$variant"
             echo "::endgroup::"
           done
+      - name: Test hdwallet (SLH-DSA only)
+        run: cargo test --locked -p qp-rusty-crystals-hdwallet --no-default-features --features std,slh-dsa
+      # The SLH-DSA keyGen and sigGen vectors are ignored in debug builds.
+      # Fail if any test is still ignored, so they cannot stop running unnoticed.
+      - name: Test sphincs known answers (release)
+        run: |
+          set -o pipefail
+          cargo test --release --locked -p qp-rusty-crystals-sphincs --lib 2>&1 | tee sphincs-kat.log
+          grep -Eq "test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored" sphincs-kat.log || {
+            echo "::error::sphincs known-answer tests did not all run"
+            exit 1
+          }
       # The stack-zeroization guards are gated to optimized builds
       # (#![cfg(not(debug_assertions))]): debug codegen materializes compiler
       # temporaries of the secret key that no source-level fix can wipe, so the
@@ -122,6 +134,8 @@ jobs:
               mnemonic_heap_zeroization mnemonic_word_pointer_zeroization; do
             run_probe -p qp-rusty-crystals-hdwallet --test "$probe"
           done
+          run_probe -p qp-rusty-crystals-hdwallet --features slh-dsa --test slh_dsa_stack_zeroization
+          run_probe -p qp-rusty-crystals-sphincs --test stack_zeroization
 
   no-std-build:
     name: 📦 no_std Build (wasm32v1-none)
@@ -149,7 +163,9 @@ jobs:
       - name: Build dilithium for wasm32v1-none (no_std)
         run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-dilithium --no-default-features --features ml-dsa-44,ml-dsa-65,ml-dsa-87
       - name: Build hdwallet for wasm32v1-none (no_std)
-        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-hdwallet --no-default-features --features ml-dsa-44,ml-dsa-65,ml-dsa-87
+        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-hdwallet --no-default-features --features ml-dsa-44,ml-dsa-65,ml-dsa-87,slh-dsa
+      - name: Build sphincs for wasm32v1-none (no_std)
+        run: cargo build --locked --target wasm32v1-none -p qp-rusty-crystals-sphincs
 
   analysis:
     name: 🤖 Analysis (Clippy & Doc)
