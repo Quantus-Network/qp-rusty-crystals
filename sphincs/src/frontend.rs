@@ -7,7 +7,9 @@ use crate::errors::SignatureError;
 /// Hash functions approved for HashSLH-DSA (FIPS 205 section 10.2).
 ///
 /// FIPS 205 requires a pre-hash with at least `8n` bits of collision
-/// strength for a parameter set with security parameter `n`.
+/// strength for a parameter set with security parameter `n`. The caller must
+/// pick one. It is not checked, because NIST's ACVP vectors use every hash
+/// with every parameter set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreHash {
 	Sha2_224,
